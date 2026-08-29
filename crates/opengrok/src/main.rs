@@ -105,11 +105,30 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    // Seals connector credentials. Absent is a legitimate deployment — one with no connectors —
+    // and must read as "connectors unavailable" rather than as a crash at boot.
+    let vault = match std::env::var("OG_CREDENTIAL_KEK") {
+        Ok(kek) if !kek.is_empty() => Some(Arc::new(
+            opengrok_store::Vault::from_base64_key(&kek)
+                .map_err(|error| anyhow::anyhow!("{error}"))?,
+        )),
+        _ => {
+            tracing::info!("no OG_CREDENTIAL_KEK — connectors are unavailable on this server");
+            None
+        }
+    };
+
+    let connectors = load_connectors()?;
+    let plugins = load_plugins();
+
     let state = AgUiState {
         auth,
         door,
         model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
         computer,
+        vault,
+        connectors,
+        plugins: Arc::new(plugins),
     };
 
     // Pick up whatever the last process abandoned. Started before the listener, because the most
@@ -127,6 +146,84 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("server stopped unexpectedly")?;
     Ok(())
+}
+
+/// Provider configuration, read from the JSON file named by `OG_CONNECTORS`.
+///
+/// A FILE RATHER THAN ENVIRONMENT VARIABLES, because a provider needs five fields and several
+/// providers need five each; `OG_GMAIL_CLIENT_ID`-style names multiply until nobody can list them.
+/// The file holds client secrets, so its permissions are the guard — the same bargain the gateway's
+/// `config.yaml` makes.
+fn load_connectors() -> anyhow::Result<opengrok_server::connections::routes::Connectors> {
+    use opengrok_server::connections::oauth::ProviderConfig;
+
+    let redirect_uri = std::env::var("OG_OAUTH_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://127.0.0.1:1337/connections/callback".to_string());
+
+    let Ok(path) = std::env::var("OG_CONNECTORS") else {
+        return Ok(opengrok_server::connections::routes::Connectors {
+            providers: Arc::new(std::collections::BTreeMap::new()),
+            redirect_uri,
+        });
+    };
+
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("could not read OG_CONNECTORS at {path}"))?;
+    let configs: Vec<ProviderConfig> = serde_json::from_str(&text)
+        .with_context(|| format!("{path} is not a list of provider configurations"))?;
+
+    let providers = configs
+        .into_iter()
+        .map(|config| (config.connector.clone(), config))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    tracing::info!(
+        connectors = ?providers.keys().collect::<Vec<_>>(),
+        "connector providers configured"
+    );
+
+    Ok(opengrok_server::connections::routes::Connectors {
+        providers: Arc::new(providers),
+        redirect_uri,
+    })
+}
+
+/// Plugins installed on this server, from the directory named by `OG_PLUGINS_DIR`.
+///
+/// A plugin that will not load is SKIPPED with a warning rather than failing the boot: one bad
+/// folder must not take a server down, and the others are still useful.
+fn load_plugins() -> std::collections::BTreeMap<String, opengrok_plugins::Plugin> {
+    let Ok(dir) = std::env::var("OG_PLUGINS_DIR") else {
+        return std::collections::BTreeMap::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        tracing::warn!(dir, "OG_PLUGINS_DIR could not be read; no plugins loaded");
+        return std::collections::BTreeMap::new();
+    };
+
+    let mut plugins = std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match opengrok_plugins::Plugin::load(&path) {
+            Ok(plugin) => {
+                tracing::info!(
+                    plugin = plugin.manifest.name,
+                    skills = plugin.skills.len(),
+                    servers = plugin.mcp.servers.len(),
+                    trust = ?plugin.trust,
+                    "loaded a plugin"
+                );
+                plugins.insert(plugin.manifest.name.clone(), plugin);
+            }
+            Err(error) => {
+                tracing::warn!(path = ?path, %error, "skipping a plugin that would not load");
+            }
+        }
+    }
+    plugins
 }
 
 /// A connection string without its password, for an error a person may paste into a chat.

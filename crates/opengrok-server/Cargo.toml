@@ -16,6 +16,7 @@ workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
 opengrok-tools = { path = "../opengrok-tools" }
+opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-wire = { path = "../opengrok-wire" }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-store = { path = "../opengrok-store" }

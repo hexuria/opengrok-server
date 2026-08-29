@@ -851,6 +851,28 @@ impl PgStore {
         Ok(views)
     }
 
+    /// Store a sealed secret on its own, outside a connection's transaction.
+    ///
+    /// Used for the refresh token, which lives in its own row: it outlives the access token, and
+    /// keeping them apart means rotating one does not disturb the other.
+    pub async fn put_secret(&self, id: &str, sealed: &Sealed, at_ms: i64) -> StoreResult<()> {
+        sqlx::query(
+            "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (id) do update set
+               nonce = excluded.nonce,
+               ciphertext = excluded.ciphertext,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(id)
+        .bind(&sealed.nonce)
+        .bind(&sealed.ciphertext)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Open a connection's credential. The one place a token is ever in plaintext.
     pub async fn open_credential(&self, vault: &Vault, id: &str) -> StoreResult<Option<String>> {
         let row = sqlx::query("select nonce, ciphertext from secret_store where id = $1")

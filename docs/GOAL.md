@@ -182,9 +182,11 @@ and a run whose process dies is picked up rather than left hanging.
      policy check (so a connector is governed exactly like `shell`), and identity keys are stripped
      before arguments reach a remote server. Hiring sets the ceiling to built-ins only, so granting
      a plugin to a coworker stays a second, separate decision.
-   - **Still to do:** the endpoints that tie it together — `POST /connections/{c}/authorize`, the
-     callback, and building `tools_for` from a coworker's installed plugins. Every piece exists and
-     is tested; nothing calls them in sequence yet.
+   - ✅ *Wired end to end — done 30 Aug 2026.* `/connections/{c}/authorize` → provider → `/callback`
+     (state verified, token sealed) → `/connections/{id}/lend` → the coworker's next turn is offered
+     that connector's tools. Provider config from `OG_CONNECTORS`, plugins from `OG_PLUGINS_DIR`.
+   - **Still to do:** a `slice10-connector-smoke.sh` proving it against the stand-in provider and a
+     stand-in MCP server, and refreshing an expiring token before use.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.

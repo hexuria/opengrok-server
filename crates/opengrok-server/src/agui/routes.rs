@@ -25,6 +25,7 @@ use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// What the endpoint needs: a way to reach a model, and which route to ask for.
@@ -40,6 +41,14 @@ pub struct AgUiState {
     /// a server-wide `ToolRunner` would carry one identity for everybody, which is precisely the
     /// confusion the identity rule exists to prevent.
     pub computer: Option<Arc<dyn opengrok_box::Computer>>,
+    /// Seals connector credentials. `None` means no connector can be stored, which is a legitimate
+    /// deployment — and must read as "connectors unavailable" rather than as a crash.
+    pub vault: Option<Arc<opengrok_store::Vault>>,
+    /// Provider configuration and the callback URL.
+    pub connectors: crate::connections::routes::Connectors,
+    /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
+    /// still needs it in their ceiling before its tools run.
+    pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
 }
 
 /// Which coworker a run belongs to, and therefore whose computer its tools use.
@@ -79,10 +88,115 @@ async fn tools_for(
         .await
         .ok()?;
 
+    // The plugins this coworker may use, connected with its own credentials.
+    let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
+
     Some(ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer.clone(), policy),
+        opengrok_tools::Executor::with_policy(computer.clone(), policy)
+            .with_plugin_tools(sessions, tools),
         opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
     ))
+}
+
+/// Open a session with every plugin server this coworker can both reach and be permitted to use.
+///
+/// TWO GATES, AND BOTH MATTER. A plugin must be in the coworker's ceiling — installing one on the
+/// server is not the same as letting a coworker use it — and its credential must resolve, because
+/// a connected tool without a token is a tool that fails at the moment of use rather than at the
+/// moment of offer.
+///
+/// A server that will not connect is skipped with a warning rather than failing the run: the other
+/// tools still work, and a turn that dies because one connector is down is worse than a turn that
+/// proceeds without it.
+async fn connect_plugins(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    policy: &opengrok_policy::Context,
+) -> (
+    BTreeMap<String, Arc<opengrok_tools::mcp::Session>>,
+    Vec<opengrok_tools::mcp::McpTool>,
+) {
+    let mut sessions = BTreeMap::new();
+    let mut tools = Vec::new();
+
+    if state.plugins.is_empty() {
+        return (sessions, tools);
+    }
+
+    // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
+    // `GMAIL_TOKEN` for the `gmail` connector.
+    let candidates = state
+        .auth
+        .store
+        .connections_for(account_id, coworker_id)
+        .await
+        .unwrap_or_default();
+
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(vault) = state.vault.as_ref() {
+        for connector in candidates
+            .iter()
+            .map(|candidate| candidate.connector.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            // The domain decides which of several connections wins — bot's own, then lent, then
+            // global. That rule is pure and tested; this only asks it.
+            let Some(chosen) =
+                opengrok_core::connection::resolve(&candidates, &connector, coworker_id)
+            else {
+                continue;
+            };
+            if let Ok(Some(token)) = state.auth.store.open_credential(vault, &chosen.id).await {
+                values.insert(format!("{}_TOKEN", connector.to_uppercase()), token);
+            }
+        }
+    }
+
+    for plugin in state.plugins.values() {
+        let (endpoints, problems) = opengrok_tools::mcp::endpoints_for(plugin, &values);
+        for problem in problems {
+            tracing::debug!(%problem, plugin = plugin.manifest.name, "a plugin server is unavailable");
+        }
+
+        for endpoint in endpoints {
+            let key = format!("{}.{}", endpoint.plugin, endpoint.server);
+
+            let session = match opengrok_tools::mcp::Session::connect(endpoint).await {
+                Ok(session) => Arc::new(session),
+                Err(error) => {
+                    tracing::warn!(%error, server = key, "could not reach a plugin server");
+                    continue;
+                }
+            };
+
+            match session.tools().await {
+                Ok(offered) => {
+                    // The ceiling gate. A tool the coworker may not run is not offered at all —
+                    // being told about a tool that always refuses is a dead end a model retries.
+                    for tool in offered {
+                        let decision = opengrok_policy::decide(
+                            account_id,
+                            coworker_id,
+                            opengrok_policy::Action::RunTool(&tool.qualified_name),
+                            policy,
+                        );
+                        if decision.is_allowed() || decision.needs_approval() {
+                            tools.push(tool);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, server = key, "a plugin server would not list its tools");
+                    continue;
+                }
+            }
+
+            sessions.insert(key, session);
+        }
+    }
+
+    (sessions, tools)
 }
 
 pub fn router(state: AgUiState) -> Router {
@@ -330,7 +444,7 @@ pub async fn list_coworkers(
 }
 
 /// Whose account this is, from the bearer token. Never from the body.
-fn account_from_bearer(
+pub(crate) fn account_from_bearer(
     state: &AgUiState,
     headers: &axum::http::HeaderMap,
 ) -> Option<opengrok_core::id::AccountId> {
@@ -342,7 +456,7 @@ fn account_from_bearer(
     Some(opengrok_core::id::AccountId::from_stored(claims.sub))
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
