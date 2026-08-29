@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 opengrok-server = { path = "../opengrok-server" }
 opengrok-harness = { path = "../opengrok-harness" }
+opengrok-box = { path = "../opengrok-box" }
 opengrok-store = { path = "../opengrok-store" }
 opengrok-core = { path = "../opengrok-core" }
 tokio.workspace = true

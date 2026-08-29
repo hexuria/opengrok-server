@@ -70,14 +70,24 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Tools need a coworker with a computer, resolved from the session. Until that resolution
-    // exists, no tools are offered — which is the honest state: a tool the model is told about but
-    // that cannot run is a dead end it will keep trying.
+    // The computer provider. Without a box key there are no computers, and therefore no tools —
+    // the honest state, since a tool the model is told about but that cannot run is a dead end it
+    // keeps trying.
+    let computer: Option<Arc<dyn opengrok_box::Computer>> = match std::env::var("OG_BOX_API_KEY") {
+        Ok(key) if !key.is_empty() => Some(Arc::new(opengrok_box::AsciiBoxes::new(key))),
+        _ => {
+            tracing::warn!(
+                "OG_BOX_API_KEY is unset — coworkers will have no computer and no tools"
+            );
+            None
+        }
+    };
+
     let state = AgUiState {
         auth,
         door,
         model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
-        tools: None,
+        computer,
     };
 
     let app = opengrok_server::router(state);

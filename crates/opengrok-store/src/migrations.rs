@@ -40,6 +40,20 @@ create table if not exists session_view (
 
 create index if not exists session_view_session_idx on session_view (session_id);
 
+-- The roster. `box_id` lives here rather than in a request, because the computer a run uses is
+-- read from the coworker's own row and never from a payload (CLAUDE.md #7).
+create table if not exists coworker_view (
+    id            text        primary key,
+    account_id    text        not null,
+    name          text        not null,
+    model         text        not null,
+    box_id        text,
+    retired       boolean     not null default false,
+    updated_at_ms bigint      not null
+);
+
+create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
+
 -- What a client asking "what happened in this run" is answered from. `status = running` with no
 -- process behind it is the shape a restart leaves behind, and the reason this column exists: a
 -- lost run must be findable, not merely absent.

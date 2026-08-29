@@ -10,7 +10,8 @@
 //! neither commits.
 
 use opengrok_core::account::{Account, AccountEvent, AccountView, Plan};
-use opengrok_core::id::{AccountId, RunId};
+use opengrok_core::coworker::{Coworker, CoworkerEvent, CoworkerView};
+use opengrok_core::id::{AccountId, BoxId, CoworkerId, RunId};
 use opengrok_core::run::{Run, RunEvent, RunStatus, RunView};
 use sqlx::{PgPool, Row};
 
@@ -280,6 +281,109 @@ impl PgStore {
         .await?;
         rows.into_iter()
             .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
+            .collect()
+    }
+}
+
+/// Coworkers: who works here, and which computer is theirs.
+impl PgStore {
+    pub async fn load_coworker(&self, id: &CoworkerId) -> StoreResult<(Coworker, i64)> {
+        let rows = sqlx::query(
+            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
+        )
+        .bind(crate::coworker_stream(id))
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut seq = 0_i64;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            seq = row.try_get::<i64, _>("stream_seq")?;
+            let payload: serde_json::Value = row.try_get("payload")?;
+            let event: CoworkerEvent = serde_json::from_value(payload)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            events.push(event);
+        }
+        Ok((Coworker::replay(&events), seq))
+    }
+
+    pub async fn append_coworker(
+        &self,
+        id: &CoworkerId,
+        account_id: &AccountId,
+        expected_seq: i64,
+        events: &[CoworkerEvent],
+        view: &CoworkerView,
+    ) -> StoreResult<i64> {
+        let mut tx = self.pool.begin().await?;
+        let stream = crate::coworker_stream(id);
+        let mut seq = expected_seq;
+
+        for event in events {
+            seq += 1;
+            let payload = serde_json::to_value(event)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            sqlx::query(
+                "insert into events (stream_id, stream_seq, event_type, payload)
+                 values ($1, $2, $3, $4)",
+            )
+            .bind(&stream)
+            .bind(seq)
+            .bind(event.event_type())
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            "insert into coworker_view (id, account_id, name, model, box_id, retired, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)
+             on conflict (id) do update set
+               name = excluded.name,
+               model = excluded.model,
+               box_id = excluded.box_id,
+               retired = excluded.retired,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(view.id.as_str())
+        .bind(account_id.as_str())
+        .bind(&view.name)
+        .bind(&view.model)
+        .bind(view.box_id.as_ref().map(|id| id.as_str()))
+        .bind(view.retired)
+        .bind(view.updated_at_ms)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(seq)
+    }
+
+    /// The roster, newest first — the order the client sorts by.
+    pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
+        let rows = sqlx::query(
+            "select id, name, model, box_id, retired, updated_at_ms
+             from coworker_view
+             where account_id = $1 and retired = false
+             order by updated_at_ms desc",
+        )
+        .bind(account_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(CoworkerView {
+                    id: CoworkerId::from_stored(row.try_get::<String, _>("id")?),
+                    name: row.try_get("name")?,
+                    model: row.try_get("model")?,
+                    box_id: row
+                        .try_get::<Option<String>, _>("box_id")?
+                        .map(BoxId::from_stored),
+                    retired: row.try_get("retired")?,
+                    updated_at_ms: row.try_get("updated_at_ms")?,
+                })
+            })
             .collect()
     }
 }

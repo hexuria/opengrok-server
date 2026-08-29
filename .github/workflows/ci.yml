@@ -49,6 +49,8 @@ jobs:
           done
           scripts/slice3-harness-smoke.sh
           scripts/slice2-agui-smoke.sh
+          scripts/slice1-auth-smoke.sh
+          scripts/slice5-roster-smoke.sh
       # The founding promise, checked: kill the server mid-run and the work is still there.
       # This one starts and kills its own servers, so it must not run against the one above.
       - name: prove a run survives the process

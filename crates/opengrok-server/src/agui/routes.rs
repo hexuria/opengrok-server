@@ -19,9 +19,12 @@ use futures::stream::{self, Stream};
 use opengrok_wire::agui::{Event, RunAgentInput};
 
 use crate::auth::AuthState;
-use opengrok_core::id::RunId;
+use opengrok_core::coworker::{BoxMode, CoworkerCommand, CoworkerView};
+use opengrok_core::id::BoxId;
+use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// What the endpoint needs: a way to reach a model, and which route to ask for.
@@ -33,16 +36,184 @@ pub struct AgUiState {
     pub auth: AuthState,
     pub door: Arc<dyn ModelDoor>,
     pub model: String,
-    /// The tools this server offers, already bound to whose computer they run on. `None` until a
-    /// coworker with a box is resolved from the session — see `docs/GOAL.md`.
-    pub tools: Option<Arc<ToolRunner>>,
+    /// The computer provider. Tools are bound to a coworker's own box **per request**, not here:
+    /// a server-wide `ToolRunner` would carry one identity for everybody, which is precisely the
+    /// confusion the identity rule exists to prevent.
+    pub computer: Option<Arc<dyn opengrok_box::Computer>>,
+}
+
+/// Which coworker a run belongs to, and therefore whose computer its tools use.
+///
+/// AG-UI has no field for this, so the client passes it in `forwardedProps` — and it is a
+/// *request*, not an authorisation: the id names a coworker, and the box comes from that
+/// coworker's own row. A client naming a coworker it does not own is the next thing policy must
+/// check (slice 5); today the row simply has to exist.
+fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
+    input
+        .forwarded_props
+        .get("coworkerId")
+        .and_then(|value| value.as_str())
+        .map(|id| CoworkerId::from_stored(id.to_string()))
+}
+
+/// Build the tools for this run, bound to this coworker's own computer.
+async fn tools_for(state: &AgUiState, input: &RunAgentInput) -> Option<ToolRunner> {
+    let computer = state.computer.as_ref()?;
+    let coworker_id = coworker_id_from(input)?;
+    let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
+    // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
+    // model is told about but that always refuses is a dead end it keeps trying.
+    coworker.computer()?;
+    Some(ToolRunner::new(
+        opengrok_tools::Executor::new(computer.clone()),
+        opengrok_tools::ToolContext::from_coworker(coworker_id, &coworker),
+    ))
 }
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
+        .route("/coworkers", post(hire).get(list_coworkers))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HireRequest {
+    pub name: String,
+    /// A route through the gateway, never a key.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Give this coworker a computer of its own. Costs money, so it is asked for rather than
+    /// assumed.
+    #[serde(default)]
+    pub with_computer: bool,
+    #[serde(default)]
+    pub shared_box_id: Option<String>,
+}
+
+/// Hire a coworker, and optionally give it a computer.
+///
+/// The account comes from the bearer token, never from the body: a client that could name an
+/// account could hire into somebody else's roster.
+pub async fn hire(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<HireRequest>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+
+    let coworker_id = CoworkerId::new();
+    let at_ms = now_ms();
+    let model = request.model.unwrap_or_else(|| state.model.clone());
+
+    let mut coworker = opengrok_core::coworker::Coworker::default();
+    let mut events = match coworker.decide(CoworkerCommand::Hire {
+        name: request.name.clone(),
+        model: model.clone(),
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    for event in &events {
+        coworker.apply(event);
+    }
+
+    // A computer, if asked for and if we can make one. A failure here leaves a hired coworker
+    // without a box rather than failing the hire: the person still has their coworker, and the
+    // reason is in the reply.
+    let mut computer_error = None;
+    if request.with_computer || request.shared_box_id.is_some() {
+        let assignment = match (&request.shared_box_id, state.computer.as_ref()) {
+            // A shared box is named, not created: creating one per coworker is what "shared" is not.
+            (Some(box_id), _) => Ok((BoxId::from_stored(box_id.clone()), BoxMode::Shared)),
+            (None, Some(computer)) => computer
+                .create(None)
+                .await
+                .map(|id| (BoxId::from_stored(id), BoxMode::Dedicated))
+                .map_err(|error| error.to_string()),
+            (None, None) => Err("this server has no computer provider configured".to_string()),
+        };
+
+        match assignment {
+            Ok((box_id, mode)) => match coworker.decide(CoworkerCommand::AssignComputer {
+                box_id,
+                mode,
+                at_ms,
+            }) {
+                Ok(assigned) => {
+                    for event in &assigned {
+                        coworker.apply(event);
+                    }
+                    events.extend(assigned);
+                }
+                Err(error) => computer_error = Some(error.to_string()),
+            },
+            Err(error) => computer_error = Some(error),
+        }
+    }
+
+    let view = CoworkerView {
+        id: coworker_id.clone(),
+        name: coworker.name.clone(),
+        model: coworker.model.clone(),
+        box_id: coworker.computer().cloned(),
+        retired: coworker.retired,
+        updated_at_ms: at_ms,
+    };
+
+    if let Err(error) = state
+        .auth
+        .store
+        .append_coworker(&coworker_id, &account_id, 0, &events, &view)
+        .await
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": coworker_id.as_str(),
+            "name": view.name,
+            "model": view.model,
+            "boxId": view.box_id.as_ref().map(|id| id.as_str()),
+            "computerError": computer_error,
+        })),
+    )
+        .into_response()
+}
+
+/// The roster, newest first — the order the client sorts by.
+pub async fn list_coworkers(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    match state.auth.store.coworkers_for(&account_id).await {
+        // An ARRAY, always. An empty roster is a valid answer and must not become null or an
+        // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
+        Ok(coworkers) => Json(coworkers).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+/// Whose account this is, from the bearer token. Never from the body.
+fn account_from_bearer(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+) -> Option<opengrok_core::id::AccountId> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))?;
+    let claims = state.auth.minter.verify_access(token).ok()?;
+    Some(opengrok_core::id::AccountId::from_stored(claims.sub))
 }
 
 fn now_ms() -> i64 {
@@ -65,9 +236,11 @@ pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput
         thread_id: input.thread_id.clone(),
     };
 
+    let tools = tools_for(&state, &input).await;
+
     let events = run_conversation(
         state.door.as_ref(),
-        state.tools.as_deref(),
+        tools.as_ref(),
         &journal,
         request,
         &input.thread_id,

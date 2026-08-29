@@ -114,9 +114,13 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      each round's events reaching the journal **before** the next model call. `RunJournal` carries
      that ordering as a seam; the test asserting it was verified by breaking the rule and watching
      it fail. `MAX_ROUNDS` bounds a model that never stops, ending the run as a readable error.
-   - **Still to do:** resolving a coworker (and therefore its box and tools) from the session, so
-     `AgUiState::tools` is populated. Until then the endpoint offers no tools — the honest state,
-     since a tool the model is told about but that cannot run is a dead end it keeps trying.
+   - ✅ *The roster — done 29 Aug 2026.* `POST /coworkers` hires (optionally with a computer),
+     `GET /coworkers` returns the roster as an array scoped to the bearer's account, and tools are
+     built **per request** from the coworker named in AG-UI's `forwardedProps`.
+     `scripts/slice5-roster-smoke.sh` includes the first tenancy check: a coworker does not appear
+     on another account's roster.
+   - **Still to do:** policy (slice 5 proper) — whether the caller may *use* the coworker they
+     named. Today the row must merely exist.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

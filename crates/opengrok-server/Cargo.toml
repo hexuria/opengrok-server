@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 opengrok-core = { path = "../opengrok-core" }
+opengrok-box = { path = "../opengrok-box" }
+opengrok-tools = { path = "../opengrok-tools" }
 opengrok-wire = { path = "../opengrok-wire" }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-store = { path = "../opengrok-store" }
