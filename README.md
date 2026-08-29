@@ -4,7 +4,19 @@ The server the AI coworkers live on.
 
 One Rust service that owns the agent harness, the tools, the computers and the policy — shipped
 together with [open-ai-gateway](https://github.com/hexuria/open-ai-gateway) as a single AI
-infrastructure. Clients are windows onto it: the Grok Bot desktop app first, then web and CLI.
+infrastructure. Clients are windows onto it.
+
+**The client is [openbot](https://github.com/hexuria/openbot)** — MIT, public, AG-UI-native, with a
+computer per agent and a policy gateway of its own. It accepts any AG-UI endpoint as a "Bot", and
+OpenGrok is that endpoint: openbot governs and renders, OpenGrok owns the agents, the boxes, the
+harness and the models.
+
+```
+openbot  ──AG-UI──▶  OpenGrok  ──▶  open-ai-gateway  ──▶  models
+                        └──▶  box.ascii.dev (a computer per agent)
+```
+
+A Grok Bot compatibility mode is a second, optional client — see [`docs/GOAL.md`](docs/GOAL.md).
 
 A coworker keeps working when you close the tab, because the work was never in the tab.
 
@@ -19,16 +31,17 @@ A coworker keeps working when you close the tab, because the work was never in t
 | **Why this exists** | [`docs/WHY.md`](docs/WHY.md) — what we built before, what it couldn't do, and why that forced a rebuild |
 | **The plan** | [`docs/PLAN.md`](docs/PLAN.md) — seams, phases, open questions |
 | **How to run it** | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — standing P1 up, and the acceptance script that proves it |
+| **The goal** | [`docs/GOAL.md`](docs/GOAL.md) — the mission, the stack, the slice order |
+| **The client** | [`hexuria/openbot`](https://github.com/hexuria/openbot) — AG-UI, MIT, ours to change |
 | **The invariants** | [`CLAUDE.md`](CLAUDE.md) — ten rules that are not up for negotiation |
 | **The rights line** | [`docs/LEGAL.md`](docs/LEGAL.md) — read before touching the client contract |
 | **Reference docs** | [`docs/research/`](docs/research/) — the client, the gateway, the sandbox, connectors, and what the previous product taught us |
 
 ## Status
 
-**P0 — foundations.** Nine crates, workspace lints, `cargo check` clean, `opengrok-wire`'s casing and
-round-trip invariants under test. Nothing serves yet.
-See [`docs/PLAN.md`](docs/PLAN.md) §5 for what P1 is, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for
-how to stand it up.
+**Slice 1 done: sign-in works.** Accounts are event-sourced in Postgres, tokens are our own JWTs,
+and `scripts/slice1-auth-smoke.sh` proves it end to end. Next is the AG-UI endpoint, which is what
+openbot connects to. [`docs/GOAL.md`](docs/GOAL.md) has the slice order.
 
 ```sh
 cargo check --workspace

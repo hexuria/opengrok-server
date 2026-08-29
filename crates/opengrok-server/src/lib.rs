@@ -6,6 +6,7 @@
 use axum::Router;
 use axum::routing::get;
 
+pub mod agui;
 pub mod auth;
 
 pub use auth::{AuthState, TokenMinter};
@@ -14,7 +15,8 @@ pub use auth::{AuthState, TokenMinter};
 pub fn router(state: AuthState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .merge(auth::router(state))
+        .merge(auth::router(state.clone()))
+        .merge(agui::router(state))
 }
 
 /// The client's supervisor polls this with a 1500 ms deadline and discards the connection if it
