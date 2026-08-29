@@ -97,7 +97,11 @@ async fn main() -> anyhow::Result<()> {
 fn redact(database_url: &str) -> String {
     match (database_url.find("://"), database_url.find('@')) {
         (Some(scheme), Some(at)) if at > scheme => {
-            format!("{}://<redacted>{}", &database_url[..scheme], &database_url[at..])
+            format!(
+                "{}://<redacted>{}",
+                &database_url[..scheme],
+                &database_url[at..]
+            )
         }
         _ => database_url.to_string(),
     }
