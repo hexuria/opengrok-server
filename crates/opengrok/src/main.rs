@@ -33,11 +33,15 @@ async fn main() -> anyhow::Result<()> {
     let token_secret = std::env::var("OG_TOKEN_SECRET")
         .context("OG_TOKEN_SECRET is required; generate one with `openssl rand -hex 32`")?;
 
+    // A bounded wait, because the unbounded one is worse than a failure: with Postgres unreachable
+    // the process sits alive, silent, and never binds — no log line, no port, nothing to debug.
+    // Ten seconds is longer than a healthy connect and shorter than a person's patience.
     let pool = PgPoolOptions::new()
         .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(10))
         .connect(&database_url)
         .await
-        .context("could not connect to Postgres")?;
+        .with_context(|| format!("could not connect to Postgres at {}", redact(&database_url)))?;
 
     opengrok_store::migrations::run(&pool)
         .await
@@ -66,10 +70,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Tools need a coworker with a computer, resolved from the session. Until that resolution
+    // exists, no tools are offered — which is the honest state: a tool the model is told about but
+    // that cannot run is a dead end it will keep trying.
     let state = AgUiState {
         auth,
         door,
         model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
+        tools: None,
     };
 
     let app = opengrok_server::router(state);
@@ -83,6 +91,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("server stopped unexpectedly")?;
     Ok(())
+}
+
+/// A connection string without its password, for an error a person may paste into a chat.
+fn redact(database_url: &str) -> String {
+    match (database_url.find("://"), database_url.find('@')) {
+        (Some(scheme), Some(at)) if at > scheme => {
+            format!("{}://<redacted>{}", &database_url[..scheme], &database_url[at..])
+        }
+        _ => database_url.to_string(),
+    }
 }
 
 async fn shutdown_signal() {

@@ -21,7 +21,7 @@ use opengrok_wire::agui::{Event, RunAgentInput};
 use crate::auth::AuthState;
 use opengrok_core::id::RunId;
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
-use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, run_turn};
+use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
 use std::sync::Arc;
 
 /// What the endpoint needs: a way to reach a model, and which route to ask for.
@@ -33,6 +33,9 @@ pub struct AgUiState {
     pub auth: AuthState,
     pub door: Arc<dyn ModelDoor>,
     pub model: String,
+    /// The tools this server offers, already bound to whose computer they run on. `None` until a
+    /// coworker with a box is resolved from the session — see `docs/GOAL.md`.
+    pub tools: Option<Arc<ToolRunner>>,
 }
 
 pub fn router(state: AgUiState) -> Router {
@@ -54,8 +57,18 @@ pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput
         messages: to_chat_messages(&input),
     };
 
-    let events = run_turn(
+    // The journal writes each round to Postgres before the next model call. A run that cannot be
+    // recorded fails inside the loop rather than being streamed — better a client told the run
+    // failed than one shown work that will not be there when it looks again (CLAUDE.md #5).
+    let journal = StoreJournal {
+        state: state.clone(),
+        thread_id: input.thread_id.clone(),
+    };
+
+    let events = run_conversation(
         state.door.as_ref(),
+        state.tools.as_deref(),
+        &journal,
         request,
         &input.thread_id,
         &input.run_id,
@@ -63,91 +76,97 @@ pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput
     )
     .await;
 
-    // STORE BEFORE SENDING. A frame the client received but we never wrote is work a reconnect
-    // cannot reproduce — which is the failure this whole project exists to prevent (CLAUDE.md #5).
-    // A run that cannot be recorded is therefore refused rather than streamed: better a client that
-    // is told the run failed than one shown work that will not be there when it looks again.
-    if let Err(error) = persist_run(&state, &input, &events).await {
-        tracing::error!(run_id = %input.run_id, %error, "refusing to stream a run we cannot record");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the run could not be recorded, so it was not started",
-        )
-            .into_response();
-    }
-
     sse(stream::iter(
         events.into_iter().map(Ok::<_, std::io::Error>),
     ))
 }
 
-/// Append a whole run to the log, in the order the client will see it.
-async fn persist_run(
+/// The event store, as the harness's journal.
+///
+/// The harness owns *when* to write (before the next model call); this owns *where*. Keeping them
+/// apart is what lets the ordering rule be tested without a database and still be enforced against
+/// one.
+pub struct StoreJournal {
+    pub state: AgUiState,
+    pub thread_id: String,
+}
+
+#[async_trait::async_trait]
+impl opengrok_harness::RunJournal for StoreJournal {
+    async fn record(
+        &self,
+        run_id: &str,
+        events: &[Event],
+    ) -> Result<(), opengrok_harness::JournalError> {
+        append_events(&self.state, run_id, &self.thread_id, events)
+            .await
+            .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
+    }
+}
+
+/// Append a batch of a run's events to the log, starting the run if this is its first batch.
+async fn append_events(
     state: &AgUiState,
-    input: &RunAgentInput,
+    run_id: &str,
+    thread_id: &str,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
-    let run_id = RunId::from_stored(input.run_id.clone());
+    if events.is_empty() {
+        return Ok(());
+    }
+    let run_id = RunId::from_stored(run_id.to_string());
     let at_ms = now_ms();
 
-    let (run, seq) = state.auth.store.load_run(&run_id).await?;
-    let mut state_machine = run;
+    let (mut run, seq) = state.auth.store.load_run(&run_id).await?;
     let mut to_append = Vec::new();
 
-    if !state_machine.started {
-        let started = state_machine
+    if !run.started {
+        let started = run
             .decide(RunCommand::Start {
-                thread_id: input.thread_id.clone(),
+                thread_id: thread_id.to_string(),
                 coworker_id: None,
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
         for event in &started {
-            state_machine.apply(event);
+            run.apply(event);
         }
         to_append.extend(started);
     }
 
-    let mut ended = false;
     for event in events {
         let payload = serde_json::to_value(event)
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
-        // The aggregate refuses a frame after an ending; that is a real rule, not a hiccup, so the
-        // remaining frames are dropped rather than forced in.
-        let Ok(decided) = state_machine.decide(RunCommand::Emit { payload, at_ms }) else {
+        // The aggregate refuses a frame after an ending; that is a rule, not a hiccup.
+        let Ok(decided) = run.decide(RunCommand::Emit { payload, at_ms }) else {
             break;
         };
         for decided_event in &decided {
-            state_machine.apply(decided_event);
+            run.apply(decided_event);
         }
         to_append.extend(decided);
 
-        if matches!(
-            event.event_type,
-            opengrok_wire::agui::EventType::RunFinished | opengrok_wire::agui::EventType::RunError
-        ) {
-            ended = true;
-        }
-    }
-
-    if ended {
-        let closing = match events.last().map(|event| event.event_type) {
-            Some(opengrok_wire::agui::EventType::RunError) => {
-                state_machine.decide(RunCommand::Fail {
-                    reason: events
-                        .last()
-                        .and_then(|event| event.extra.get("message"))
+        // The run's own ending, recorded once, from the event that carries it.
+        let closing = match event.event_type {
+            opengrok_wire::agui::EventType::RunFinished => {
+                Some(run.decide(RunCommand::Finish { at_ms }))
+            }
+            opengrok_wire::agui::EventType::RunError => Some(
+                run.decide(RunCommand::Fail {
+                    reason: event
+                        .extra
+                        .get("message")
                         .and_then(|message| message.as_str())
                         .unwrap_or("the run failed")
                         .to_string(),
                     at_ms,
-                })
-            }
-            _ => state_machine.decide(RunCommand::Finish { at_ms }),
+                }),
+            ),
+            _ => None,
         };
-        if let Ok(closing) = closing {
-            for event in &closing {
-                state_machine.apply(event);
+        if let Some(Ok(closing)) = closing {
+            for closing_event in &closing {
+                run.apply(closing_event);
             }
             to_append.extend(closing);
         }
@@ -155,12 +174,11 @@ async fn persist_run(
 
     let view = RunView {
         id: run_id.clone(),
-        thread_id: input.thread_id.clone(),
-        status: state_machine.status,
-        event_count: state_machine.emitted.len() as i64,
+        thread_id: thread_id.to_string(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-
     state
         .auth
         .store
@@ -316,8 +334,10 @@ mod tests {
     #[tokio::test]
     async fn a_run_through_the_mock_door_is_well_formed() {
         let door = MockDoor::echoing();
-        let events = run_turn(
+        let events = opengrok_harness::run_conversation(
             &door,
+            None,
+            &opengrok_harness::MemoryJournal::new(),
             ModelRequest {
                 model: "mock".to_string(),
                 system: None,

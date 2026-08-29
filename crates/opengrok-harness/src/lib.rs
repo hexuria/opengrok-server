@@ -10,12 +10,14 @@
 //! without a provider.
 
 pub mod gateway;
+pub mod journal;
 pub mod mock;
 pub mod model;
 pub mod projection;
 pub mod tools;
 
 pub use gateway::GatewayDoor;
+pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 pub use projection::Projection;
@@ -40,13 +42,15 @@ pub async fn run_turn(
     run_turn_with_tools(door, None, request, thread_id, run_id, at_ms).await
 }
 
-/// Run a turn, and run any tools the model asked for.
+/// How many model calls one conversation may make.
 ///
-/// ONE ROUND OF TOOLS, NOT A LOOP, AND THE LIMIT IS DELIBERATE. Feeding results back for another
-/// model call is the obvious next step and it is where the durability question gets hard: a
-/// multi-round loop must be resumable *between* rounds, which means each round's results have to
-/// reach the log before the next call is made. Doing that properly is the next slice; pretending
-/// to do it with an in-memory `while` would build exactly the thing this project exists to avoid.
+/// A model that answers every tool result with another tool call would otherwise run until it ran
+/// out of money. The bound is generous enough for real work and finite, and hitting it ends the
+/// run as a *result* the client can see rather than a silent stop.
+pub const MAX_ROUNDS: usize = 8;
+
+/// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
+/// durable multi-round loop.
 pub async fn run_turn_with_tools(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -90,11 +94,159 @@ pub async fn run_turn_with_tools(
     events
 }
 
+/// The durable loop: model, tools, model again, until the model stops asking.
+///
+/// THE ORDERING IS THE POINT. Each round's events reach the journal *before* the next model call
+/// is made, so a crash between rounds leaves a log that says exactly how far the run got. Reversing
+/// those two lines would still pass every test about what a client sees and would quietly destroy
+/// the property the whole project is built on.
+///
+/// The conversation grows as it goes: the model's own reply and the tool results are appended to
+/// the messages, so the next call sees what happened rather than being asked the same question
+/// again.
+pub async fn run_conversation(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    mut request: ModelRequest,
+    thread_id: &str,
+    run_id: &str,
+    at_ms: i64,
+) -> Vec<Event> {
+    let mut projection = Projection::new(thread_id, run_id, at_ms);
+    let mut all = Vec::new();
+
+    let mut opening = projection.start();
+    if let Err(error) = journal.record(run_id, &opening).await {
+        // A run we cannot record must not proceed: it would produce work that a reconnect can
+        // never reproduce, which is the failure this design exists to prevent.
+        let mut failed = projection.fail(format!("the run could not be recorded: {error}"));
+        all.append(&mut opening);
+        all.append(&mut failed);
+        return all;
+    }
+    all.append(&mut opening);
+
+    for round in 0..MAX_ROUNDS {
+        let mut round_events = Vec::new();
+
+        let stream = match door.stream(request.clone()).await {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                round_events.extend(projection.fail(error.to_string()));
+                None
+            }
+        };
+
+        let mut said = String::new();
+        if let Some(mut stream) = stream {
+            let mut broke = false;
+            while let Some(delta) = stream.next().await {
+                match delta {
+                    Ok(delta) => {
+                        if let ModelDelta::Text(text) = &delta {
+                            said.push_str(text);
+                        }
+                        round_events.extend(projection.push(delta));
+                    }
+                    Err(error) => {
+                        round_events.extend(projection.fail(error.to_string()));
+                        broke = true;
+                        break;
+                    }
+                }
+            }
+            if !broke {
+                // Tools for this round, run on the coworker's own computer.
+                let calls = collect_tool_calls(&round_events);
+                if let (Some(runner), false) = (tools, calls.is_empty()) {
+                    for result in runner.run_all(&calls).await {
+                        round_events.extend(projection.push_tool_result(&result));
+                        // The model needs to see what its tool said, in its own transcript.
+                        request.messages.push(ChatMessage {
+                            role: "user".to_string(),
+                            content: format!("[tool {} result] {}", result.call_id, result.content),
+                        });
+                    }
+                    if !said.is_empty() {
+                        request.messages.push(ChatMessage {
+                            role: "assistant".to_string(),
+                            content: said,
+                        });
+                    }
+
+                    // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
+                    // dependency chain, so a crash after this point can be picked up.
+                    if let Err(error) = journal.record(run_id, &round_events).await {
+                        round_events.extend(
+                            projection.fail(format!("the run could not be recorded: {error}")),
+                        );
+                        all.append(&mut round_events);
+                        return all;
+                    }
+                    all.append(&mut round_events);
+
+                    if round + 1 == MAX_ROUNDS {
+                        // Ending as a result, not a silent stop: the client is told why.
+                        let mut ending = projection.fail(format!(
+                            "this run reached its limit of {MAX_ROUNDS} model calls"
+                        ));
+                        let _ = journal.record(run_id, &ending).await;
+                        all.append(&mut ending);
+                        return all;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        // No tools were asked for, or the run failed: this is the last round either way.
+        let mut ending = projection.finish();
+        round_events.append(&mut ending);
+        let _ = journal.record(run_id, &round_events).await;
+        all.append(&mut round_events);
+        return all;
+    }
+
+    all
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use opengrok_wire::agui::EventType;
+
+    fn tool_runner() -> ToolRunner {
+        use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
+        use opengrok_core::id::{BoxId, CoworkerId};
+        use opengrok_tools::{Executor, ToolContext};
+        use std::sync::Arc;
+
+        let mut coworker = Coworker::default();
+        for command in [
+            CoworkerCommand::Hire {
+                name: "Ada".to_string(),
+                model: "m".to_string(),
+                at_ms: 1,
+            },
+            CoworkerCommand::AssignComputer {
+                box_id: BoxId::from_stored("box_ada"),
+                mode: BoxMode::Dedicated,
+                at_ms: 2,
+            },
+        ] {
+            for event in coworker.decide(command).unwrap() {
+                coworker.apply(&event);
+            }
+        }
+        ToolRunner::new(
+            Executor::new(Arc::new(
+                crate::tools::tests_support::RecordingComputer::default(),
+            )),
+            ToolContext::from_coworker(CoworkerId::from_stored("cw_ada"), &coworker),
+        )
+    }
 
     fn request(text: &str) -> ModelRequest {
         ModelRequest {
@@ -224,6 +376,205 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == EventType::ToolCallResult)
         );
+    }
+
+    /// THE ORDERING RULE, ASSERTED. A journal that records when the model was called proves the
+    /// tool results were durable BEFORE the next call — the property a crash between rounds
+    /// depends on, and one that no test about client-visible events would ever notice breaking.
+    #[tokio::test]
+    async fn each_rounds_results_are_recorded_before_the_next_model_call() {
+        use std::sync::{Arc, Mutex};
+
+        /// Records journal writes and model calls on one timeline.
+        #[derive(Default)]
+        struct Timeline {
+            entries: Mutex<Vec<String>>,
+        }
+        impl Timeline {
+            fn note(&self, what: &str) {
+                if let Ok(mut entries) = self.entries.lock() {
+                    entries.push(what.to_string());
+                }
+            }
+            fn entries(&self) -> Vec<String> {
+                self.entries.lock().map(|e| e.clone()).unwrap_or_default()
+            }
+        }
+
+        struct WatchingJournal(Arc<Timeline>);
+        #[async_trait::async_trait]
+        impl RunJournal for WatchingJournal {
+            async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+                self.0.note(&format!("journal({})", events.len()));
+                Ok(())
+            }
+        }
+
+        /// Asks for a tool on the first call and simply answers on the second.
+        struct TwoRoundDoor(Arc<Timeline>, Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for TwoRoundDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut calls = self.1.lock().map_err(|_| {
+                        ModelError::Stream("the door's lock was poisoned".to_string())
+                    })?;
+                    *calls += 1;
+                    *calls
+                };
+                self.0.note(&format!("model call {round}"));
+                let script = if round == 1 {
+                    vec![
+                        ModelDelta::ToolCallStart {
+                            id: "c1".to_string(),
+                            name: "shell".to_string(),
+                        },
+                        ModelDelta::ToolCallArgs {
+                            id: "c1".to_string(),
+                            delta: r#"{"command":"ls"}"#.to_string(),
+                        },
+                        ModelDelta::ToolCallEnd {
+                            id: "c1".to_string(),
+                        },
+                    ]
+                } else {
+                    vec![ModelDelta::Text("all done".to_string())]
+                };
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let timeline = Arc::new(Timeline::default());
+        let door = TwoRoundDoor(timeline.clone(), Mutex::new(0));
+        let journal = WatchingJournal(timeline.clone());
+        let runner = tool_runner();
+
+        let events =
+            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+        let entries = timeline.entries();
+        let second_call = entries
+            .iter()
+            .position(|entry| entry == "model call 2")
+            .expect("the model should have been called a second time");
+        // At least one journal write must sit between the two calls: that is the tool results
+        // reaching durable storage before the call that depends on them.
+        let journals_before_second = entries[..second_call]
+            .iter()
+            .filter(|entry| entry.starts_with("journal("))
+            .count();
+        assert!(
+            journals_before_second >= 2,
+            "results must be durable before the next call; timeline was {entries:?}"
+        );
+
+        assert_eq!(
+            events.last().unwrap().event_type,
+            opengrok_wire::agui::EventType::RunFinished
+        );
+    }
+
+    /// A model that never stops asking would otherwise run until the money ran out. The bound ends
+    /// the run as a result the client can see, not a silent stop.
+    #[tokio::test]
+    async fn a_model_that_never_stops_is_bounded_and_told_why() {
+        struct AlwaysToolDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for AlwaysToolDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let script = vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"again"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let journal = MemoryJournal::new();
+        let runner = tool_runner();
+        let events = run_conversation(
+            &AlwaysToolDoor,
+            Some(&runner),
+            &journal,
+            request("go"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, opengrok_wire::agui::EventType::RunError);
+        assert!(
+            last.extra
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .contains("limit"),
+            "{last:?}"
+        );
+    }
+
+    /// A run that cannot be recorded must not proceed: it would produce work a reconnect can never
+    /// reproduce, which is the failure this design exists to prevent.
+    #[tokio::test]
+    async fn a_run_that_cannot_be_recorded_does_not_run() {
+        struct BrokenJournal;
+        #[async_trait::async_trait]
+        impl RunJournal for BrokenJournal {
+            async fn record(&self, _run_id: &str, _events: &[Event]) -> Result<(), JournalError> {
+                Err(JournalError::Unwritable("the disk is gone".to_string()))
+            }
+        }
+
+        let events = run_conversation(
+            &MockDoor::echoing(),
+            None,
+            &BrokenJournal,
+            request("go"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        assert_eq!(
+            events.last().unwrap().event_type,
+            opengrok_wire::agui::EventType::RunError
+        );
+        // Nothing was said: the model was never called.
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type
+                    == opengrok_wire::agui::EventType::TextMessageContent)
+        );
+    }
+
+    /// Everything a client saw is in the journal — that is what makes a replay complete.
+    #[tokio::test]
+    async fn every_event_a_client_saw_reached_the_journal() {
+        let journal = MemoryJournal::new();
+        let events = run_conversation(
+            &MockDoor::echoing(),
+            None,
+            &journal,
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(journal.event_count(), events.len());
     }
 
     /// Exactly one ending, however the run went — two would double-render in a consumer.

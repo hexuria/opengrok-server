@@ -110,10 +110,13 @@ Done means: implemented, tested, exercised against the Next.js client, and green
    - ✅ *The chain joins — done 29 Aug 2026.* `run_turn_with_tools` reassembles tool calls from the
      stream, runs them on the coworker's own box, and emits `TOOL_CALL_RESULT`. The end-to-end test
      has a model ask for another coworker's box and get its own.
-   - **Still to do:** a **multi-round** tool loop. One round runs today; feeding results back for
-     another model call must be resumable *between* rounds, which means each round reaching the log
-     before the next call. That is the next slice, and doing it with an in-memory `while` would
-     build the exact thing this project exists to avoid.
+   - ✅ *The durable loop — done 29 Aug 2026.* `run_conversation` runs model → tools → model, with
+     each round's events reaching the journal **before** the next model call. `RunJournal` carries
+     that ordering as a seam; the test asserting it was verified by breaking the rule and watching
+     it fail. `MAX_ROUNDS` bounds a model that never stops, ending the run as a readable error.
+   - **Still to do:** resolving a coworker (and therefore its box and tools) from the session, so
+     `AgUiState::tools` is populated. Until then the endpoint offers no tools — the honest state,
+     since a tool the model is told about but that cannot run is a dead end it keeps trying.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

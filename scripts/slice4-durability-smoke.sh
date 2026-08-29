@@ -8,7 +8,10 @@
 # Usage:  scripts/slice4-durability-smoke.sh
 set -euo pipefail
 
-BASE="${OG_BASE:-http://127.0.0.1:1337}"
+# The port is configurable because 1337 is also grok-bot's local-docker box port: with that
+# container running, a hardcoded 1337 fails to bind and the failure looks like a broken server.
+PORT="${OG_PORT:-1337}"
+BASE="${OG_BASE:-http://127.0.0.1:$PORT}"
 BIN="${OG_BIN:-./target/debug/opengrok}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
@@ -17,7 +20,7 @@ command -v jq >/dev/null || fail "jq is required"
 : "${OG_DATABASE_URL:?OG_DATABASE_URL is required}"
 
 start_server() {
-  OG_BIND=127.0.0.1:1337 \
+  OG_BIND=127.0.0.1:$PORT \
   OG_DATABASE_URL="$OG_DATABASE_URL" \
   OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
   OG_MODEL_DOOR=mock \
