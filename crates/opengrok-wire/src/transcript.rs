@@ -150,6 +150,11 @@ pub enum KnownKind {
 /// a raw `Value` is what actually honours "an entry kind we do not recognise is preserved and
 /// re-emitted" — the invariant exists because dropping an entry deletes somebody's message from
 /// their own history, and a client newer than this file must never be able to cause that.
+// clippy asks us to box `Known` because it dwarfs `Unknown`. Not taken: `Known` is the
+// overwhelmingly common variant — nearly every entry in a transcript is one — so boxing would add
+// an allocation to the hot path to save bytes on the rare one, and every match site would grow a
+// deref for it.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EntryKind {

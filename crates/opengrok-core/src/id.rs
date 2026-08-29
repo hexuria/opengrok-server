@@ -14,6 +14,12 @@ macro_rules! id {
 
         impl $name {
             /// Mint a fresh id, prefixed so a value seen in a log says what it identifies.
+            ///
+            /// Deliberately NOT `Default`. clippy asks for one, and it would be a trap: with a
+            /// `Default` impl, `Struct { ..Default::default() }` silently mints a brand-new random
+            /// id instead of failing to compile, and the bug shows up later as two rows that
+            /// should have been one.
+            #[allow(clippy::new_without_default)]
             pub fn new() -> Self {
                 Self(format!("{}_{}", $prefix, uuid::Uuid::now_v7()))
             }

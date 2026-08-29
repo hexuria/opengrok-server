@@ -21,6 +21,10 @@ pub const DEFAULT_BASE_URL: &str = "https://ascii.dev/api/box/v1";
 ///
 /// The key is read from the environment and never from a coworker's row: a computer is not a
 /// credential a client may set, which is the same rule the gateway applies to model keys.
+// Scaffold: the `Computer` impl that consumes these lands in slice 4 (docs/GOAL.md). Kept rather
+// than deleted because the auth shape is verified against the real API docs and re-deriving it
+// would repeat that work.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AsciiBoxes {
     pub base_url: String,
@@ -35,6 +39,7 @@ impl AsciiBoxes {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn bearer(&self) -> String {
         format!("Bearer {}", self.api_key)
     }

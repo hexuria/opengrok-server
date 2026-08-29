@@ -10,6 +10,7 @@
 //!     `cursor-auth.ts:315-316` reads `body.accessToken` and `body.refreshToken`.
 //!   - `POST /oauth/token`             → `{ access_token, refresh_token }` (snake_case)
 //!     `parseOAuthTokenBody` (`:160-166`) rejects the body outright unless those keys are strings.
+//!
 //! Normalising either one to match the other is the tidying that breaks a client we do not compile.
 //!
 //! On `refreshToken` being optional in the dev reply (`:316` falls back to the access token): we

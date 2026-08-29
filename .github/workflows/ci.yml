@@ -36,6 +36,10 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      # Next 16 generates the global route types (LayoutProps, PageProps) that the app's own files
+      # reference. Without this, tsc fails in CI on types that exist locally only because a dev
+      # server happened to have written them.
+      - run: npx next typegen
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm run build

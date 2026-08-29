@@ -78,10 +78,13 @@ pub trait EventStore: Send + Sync {
     ) -> StoreResult<i64>;
 }
 
+/// One row as the in-memory store keeps it: sequence, event type, payload.
+type MemoryRow = (i64, String, serde_json::Value);
+
 /// For tests and for `cargo test` with no database in sight.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryEventStore {
-    streams: Arc<Mutex<HashMap<String, Vec<(i64, String, serde_json::Value)>>>>,
+    streams: Arc<Mutex<HashMap<String, Vec<MemoryRow>>>>,
 }
 
 impl MemoryEventStore {

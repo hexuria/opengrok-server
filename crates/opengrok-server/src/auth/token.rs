@@ -6,6 +6,7 @@
 //!   - `sub`  → `authId`, which keys the client's profile cache and its avatar lookup;
 //!   - `email` → shown in the account menu;
 //!   - `exp`  → `expiresAt`, in SECONDS; the client multiplies by 1000 itself.
+//!
 //! An opaque token would parse to `null` and the client would treat a successful login as
 //! logged-out, with no error anywhere to explain it.
 //!
