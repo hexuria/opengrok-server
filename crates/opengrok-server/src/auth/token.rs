@@ -87,6 +87,27 @@ impl TokenMinter {
             .map_err(|error| TokenError::Mint(error.to_string()))
     }
 
+    /// Sign arbitrary claims with the same key.
+    ///
+    /// Used for the OAuth `state`, which needs a signature and an expiry but is not an access
+    /// token. Callers MUST include a claim saying what the token is for — otherwise an access token
+    /// verifies here too, and a stolen one becomes usable wherever this is checked.
+    pub fn mint_claims<T: Serialize>(&self, claims: &T) -> Result<String, TokenError> {
+        encode(&Header::new(Algorithm::HS256), claims, &self.encoding)
+            .map_err(|error| TokenError::Mint(error.to_string()))
+    }
+
+    /// Read arbitrary claims back, checking the signature and `exp`.
+    pub fn verify_claims<T: for<'de> Deserialize<'de>>(
+        &self,
+        token: &str,
+    ) -> Result<T, TokenError> {
+        let validation = Validation::new(Algorithm::HS256);
+        decode::<T>(token, &self.decoding, &validation)
+            .map(|data| data.claims)
+            .map_err(|error| TokenError::Invalid(error.to_string()))
+    }
+
     /// Verify and read the claims back. Used by everything downstream that needs to know who is
     /// calling — the gateway commands in the next slice included.
     pub fn verify_access(&self, token: &str) -> Result<AccessClaims, TokenError> {
