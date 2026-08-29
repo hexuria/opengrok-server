@@ -387,3 +387,121 @@ impl PgStore {
             .collect()
     }
 }
+
+/// Policy: who may make which coworker do what.
+impl PgStore {
+    /// Everything the policy engine needs for one principal and one coworker.
+    ///
+    /// A row that is missing comes back as `None` inside the context, and every `None` denies —
+    /// so a lookup that finds nothing is a refusal, never a default-allow.
+    pub async fn policy_for(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<opengrok_policy::Context> {
+        let grant = sqlx::query(
+            "select profile, revoked from grant_view
+             where principal_id = $1 and coworker_id = $2",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| {
+            let profile: serde_json::Value = row.try_get("profile")?;
+            Ok::<_, StoreError>(opengrok_policy::Grant {
+                principal: principal.clone(),
+                coworker: coworker.clone(),
+                // An unreadable profile becomes `None` — the narrowest reading, per the rule that
+                // a typo may only ever narrow access.
+                profile: serde_json::from_value(profile).unwrap_or(opengrok_policy::ToolSet::None),
+                revoked: row.try_get("revoked")?,
+            })
+        })
+        .transpose()?;
+
+        let ceiling = sqlx::query("select tools from ceiling_view where coworker_id = $1")
+            .bind(coworker.as_str())
+            .fetch_optional(&self.pool)
+            .await?
+            .map(|row| {
+                let tools: serde_json::Value = row.try_get("tools")?;
+                Ok::<_, StoreError>(opengrok_policy::Ceiling {
+                    coworker: coworker.clone(),
+                    tools: serde_json::from_value(tools).unwrap_or(opengrok_policy::ToolSet::None),
+                })
+            })
+            .transpose()?;
+
+        Ok(opengrok_policy::Context { grant, ceiling })
+    }
+
+    /// Record a grant and a ceiling together.
+    ///
+    /// Together because a grant without a ceiling can run nothing, and writing them separately
+    /// leaves a window where a coworker exists that its own owner cannot use.
+    pub async fn grant_access(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+        profile: &opengrok_policy::ToolSet,
+        ceiling: &opengrok_policy::ToolSet,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        let profile_json = serde_json::to_value(profile)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let ceiling_json = serde_json::to_value(ceiling)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "insert into grant_view (principal_id, coworker_id, profile, revoked, updated_at_ms)
+             values ($1, $2, $3, false, $4)
+             on conflict (principal_id, coworker_id) do update set
+               profile = excluded.profile,
+               revoked = false,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .bind(profile_json)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "insert into ceiling_view (coworker_id, tools, updated_at_ms)
+             values ($1, $2, $3)
+             on conflict (coworker_id) do update set
+               tools = excluded.tools,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(coworker.as_str())
+        .bind(ceiling_json)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.
+    pub async fn revoke_access(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update grant_view set revoked = true, updated_at_ms = $3
+             where principal_id = $1 and coworker_id = $2",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}

@@ -52,6 +52,7 @@ jobs:
           scripts/slice1-auth-smoke.sh
           scripts/slice5-roster-smoke.sh
           scripts/slice6-computer-smoke.sh
+          scripts/slice7-policy-smoke.sh
       # The founding promise, checked: kill the server mid-run and the work is still there.
       # This one starts and kills its own servers, so it must not run against the one above.
       - name: prove a run survives the process

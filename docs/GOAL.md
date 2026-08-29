@@ -123,8 +123,12 @@ Done means: implemented, tested, exercised against the Next.js client, and green
    - ✅ *A computer with no signup — done 29 Aug 2026.* `DockerComputer` makes a local container a
      `Computer`, chosen automatically without a box key, so the headline works on a laptop today.
      Three tests drive a real daemon; `scripts/slice6-computer-smoke.sh` is the goal in one script.
-   - **Still to do:** policy (slice 5 proper) — whether the caller may *use* the coworker they
-     named. Today the row must merely exist.
+   - ✅ *Policy — done 29 Aug 2026.* `opengrok-policy` answers PLAN §4.5's layers 1–3: a grant per
+     principal-and-coworker, a ceiling per coworker, combined by **intersection, never union**.
+     Checked on every turn and before every tool call, never once at sign-in. Every unknown denies.
+     `scripts/slice7-policy-smoke.sh` is the attack itself: one account naming another's coworker.
+   - **Still to do:** PLAN §4.5 layers 4 and 5 — record-level scoping inside a tool (bind + RLS),
+     and an `approve` effect that suspends a run for a human yes.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

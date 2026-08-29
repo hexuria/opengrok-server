@@ -242,11 +242,27 @@ mod tests {
                 coworker.apply(&event);
             }
         }
+        // A permissive policy: these tests are about the loop, not about policy, and an executor
+        // built without one now refuses everything by design.
+        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
+        let policy = opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: account.clone(),
+                coworker: CoworkerId::from_stored("cw_ada"),
+                profile: opengrok_policy::ToolSet::All,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_ada"),
+                tools: opengrok_policy::ToolSet::All,
+            }),
+        };
         ToolRunner::new(
-            Executor::new(Arc::new(
-                crate::tools::tests_support::RecordingComputer::default(),
-            )),
-            ToolContext::from_coworker(CoworkerId::from_stored("cw_ada"), &coworker),
+            Executor::with_policy(
+                Arc::new(crate::tools::tests_support::RecordingComputer::default()),
+                policy,
+            ),
+            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
         )
     }
 
@@ -323,9 +339,22 @@ mod tests {
         }
 
         let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
+        let policy = opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: account.clone(),
+                coworker: CoworkerId::from_stored("cw_ada"),
+                profile: opengrok_policy::ToolSet::All,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_ada"),
+                tools: opengrok_policy::ToolSet::All,
+            }),
+        };
         let runner = ToolRunner::new(
-            Executor::new(computer.clone()),
-            ToolContext::from_coworker(CoworkerId::from_stored("cw_ada"), &coworker),
+            Executor::with_policy(computer.clone(), policy),
+            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
         );
 
         // A model that asks to run a command — on somebody else's box, for good measure.

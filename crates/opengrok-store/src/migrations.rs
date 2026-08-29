@@ -54,6 +54,26 @@ create table if not exists coworker_view (
 
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
+-- Who may make which coworker do what. A row here is permission; its absence is refusal, which is
+-- why nothing in the schema grants by default and why `policy_for` returns an empty context rather
+-- than a permissive one when it finds nothing.
+create table if not exists grant_view (
+    principal_id text    not null,
+    coworker_id  text    not null,
+    profile      jsonb   not null,
+    revoked      boolean not null default false,
+    updated_at_ms bigint not null,
+    primary key (principal_id, coworker_id)
+);
+
+-- What a coworker may EVER do, whoever asks. Separate from the grant on purpose: the two combine
+-- by intersection, and a single table would invite someone to write a union.
+create table if not exists ceiling_view (
+    coworker_id  text   primary key,
+    tools        jsonb  not null,
+    updated_at_ms bigint not null
+);
+
 -- What a client asking "what happened in this run" is answered from. `status = running` with no
 -- process behind it is the shape a restart leaves behind, and the reason this column exists: a
 -- lost run must be findable, not merely absent.

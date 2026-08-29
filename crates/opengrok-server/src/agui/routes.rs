@@ -56,17 +56,32 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
         .map(|id| CoworkerId::from_stored(id.to_string()))
 }
 
-/// Build the tools for this run, bound to this coworker's own computer.
-async fn tools_for(state: &AgUiState, input: &RunAgentInput) -> Option<ToolRunner> {
+/// Build the tools for this run, bound to this coworker's own computer and this principal's grant.
+///
+/// THE GRANT IS READ HERE, ON THIS TURN. Not cached from sign-in and not carried in the request:
+/// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
+async fn tools_for(
+    state: &AgUiState,
+    input: &RunAgentInput,
+    account_id: &opengrok_core::id::AccountId,
+) -> Option<ToolRunner> {
     let computer = state.computer.as_ref()?;
     let coworker_id = coworker_id_from(input)?;
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
     // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
     // model is told about but that always refuses is a dead end it keeps trying.
     coworker.computer()?;
+
+    let policy = state
+        .auth
+        .store
+        .policy_for(account_id, &coworker_id)
+        .await
+        .ok()?;
+
     Some(ToolRunner::new(
-        opengrok_tools::Executor::new(computer.clone()),
-        opengrok_tools::ToolContext::from_coworker(coworker_id, &coworker),
+        opengrok_tools::Executor::with_policy(computer.clone(), policy),
+        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
     ))
 }
 
@@ -174,6 +189,29 @@ pub async fn hire(
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
+    // Hiring grants the hirer access to what they hired. Written explicitly rather than implied by
+    // ownership: "the owner may do anything" is the rule that has no seam to narrow later, and
+    // coworker-to-coworker delegation will need one.
+    //
+    // The ceiling starts at the tools this server actually implements, not `All`: a coworker's
+    // limits should be a list somebody can read, and `All` would silently include whatever is
+    // added next.
+    let tools = opengrok_policy::ToolSet::only(opengrok_tools::Executor::tool_names().to_vec());
+    if let Err(error) = state
+        .auth
+        .store
+        .grant_access(&account_id, &coworker_id, &tools, &tools, at_ms)
+        .await
+    {
+        // A coworker nobody may use is worse than no coworker: fail the hire rather than leave one
+        // that silently refuses everything.
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the coworker was created but could not be granted: {error}"),
+        )
+            .into_response();
+    }
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -221,7 +259,11 @@ fn now_ms() -> i64 {
 }
 
 /// Start a run and stream its events.
-pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput>) -> Response {
+pub async fn run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<RunAgentInput>,
+) -> Response {
     let request = ModelRequest {
         model: state.model.clone(),
         system: None,
@@ -236,7 +278,34 @@ pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput
         thread_id: input.thread_id.clone(),
     };
 
-    let tools = tools_for(&state, &input).await;
+    // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
+    // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
+    // no coworker just talks to a model.
+    let account_id = account_from_bearer(&state, &headers);
+    if let (Some(account_id), Some(coworker_id)) = (&account_id, coworker_id_from(&input)) {
+        let policy = state
+            .auth
+            .store
+            .policy_for(account_id, &coworker_id)
+            .await
+            .unwrap_or_default();
+        let decision = opengrok_policy::decide(
+            account_id,
+            &coworker_id,
+            opengrok_policy::Action::UseCoworker,
+            &policy,
+        );
+        if let Some(reason) = decision.reason() {
+            // A refusal the client can read, not a dead socket.
+            return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+        }
+    }
+
+    let tools = match &account_id {
+        Some(account_id) => tools_for(&state, &input, account_id).await,
+        // No bearer, no identity, and therefore no tools: tools always run as somebody.
+        None => None,
+    };
 
     let events = run_conversation(
         state.door.as_ref(),

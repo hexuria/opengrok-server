@@ -19,13 +19,16 @@ use std::sync::Arc;
 
 use opengrok_box::{BoxError, Computer};
 use opengrok_core::coworker::Coworker;
-use opengrok_core::id::{BoxId, CoworkerId};
+use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Who is running a tool. Assembled by the server from the session, never from a payload.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
+    /// Whose session this is. Policy is about the principal, not the coworker, so it has to be
+    /// carried here rather than inferred from the coworker's row.
+    pub account_id: AccountId,
     pub coworker_id: CoworkerId,
     /// The coworker's own machine. `None` means one has not been assigned yet.
     pub box_id: Option<BoxId>,
@@ -34,8 +37,9 @@ pub struct ToolContext {
 impl ToolContext {
     /// Build the context from the coworker's own row. The only supported way to make one, so a
     /// caller cannot assemble a context out of request fields by accident.
-    pub fn from_coworker(id: CoworkerId, coworker: &Coworker) -> Self {
+    pub fn from_coworker(account_id: AccountId, id: CoworkerId, coworker: &Coworker) -> Self {
         Self {
+            account_id,
             coworker_id: id,
             box_id: coworker.computer().cloned(),
         }
@@ -102,14 +106,28 @@ pub struct WriteFileArgs {
     pub content: String,
 }
 
-/// Runs tool calls on the caller's own computer.
+/// Runs tool calls on the caller's own computer, if policy allows.
 pub struct Executor {
     computer: Arc<dyn Computer>,
+    /// What this principal may make this coworker do. Consulted before EVERY call, never once at
+    /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
+    /// (CLAUDE.md #6).
+    policy: opengrok_policy::Context,
 }
 
 impl Executor {
+    /// An executor that allows nothing. The default is deliberately useless: an executor built
+    /// without policy should refuse everything rather than quietly permit it.
     pub fn new(computer: Arc<dyn Computer>) -> Self {
-        Self { computer }
+        Self {
+            computer,
+            policy: opengrok_policy::Context::default(),
+        }
+    }
+
+    /// The executor a real request builds: a computer, and what this principal may do with it.
+    pub fn with_policy(computer: Arc<dyn Computer>, policy: opengrok_policy::Context) -> Self {
+        Self { computer, policy }
     }
 
     /// The tools a model is offered. Kept here so the offered set and the executed set cannot
@@ -125,6 +143,19 @@ impl Executor {
         // The identity rule, applied once, before anything reads an argument. Whatever the model
         // wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
+
+        // POLICY BEFORE ANYTHING RUNS, AND BEFORE ANYTHING IS EVEN LOOKED UP. A refusal reaches
+        // the model as a result it can reason about rather than an exception that kills the run
+        // (CLAUDE.md #8), and it names the rule so a person can fix it.
+        let decision = opengrok_policy::decide(
+            &context.account_id,
+            &context.coworker_id,
+            opengrok_policy::Action::RunTool(&call.name),
+            &self.policy,
+        );
+        if let Some(reason) = decision.reason() {
+            return ToolResult::refused(&call.id, reason);
+        }
 
         let Some(box_id) = context.box_id.as_ref() else {
             return ToolResult::refused(
@@ -321,6 +352,26 @@ mod tests {
         }
     }
 
+    /// A policy that allows everything, for tests about something other than policy.
+    fn permissive() -> opengrok_policy::Context {
+        opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: AccountId::from_stored("acct_1"),
+                coworker: CoworkerId::from_stored("cw_1"),
+                profile: opengrok_policy::ToolSet::All,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_1"),
+                tools: opengrok_policy::ToolSet::All,
+            }),
+        }
+    }
+
+    fn allowing(computer: Arc<dyn Computer>) -> Executor {
+        Executor::with_policy(computer, permissive())
+    }
+
     fn context_with_box(box_id: &str) -> ToolContext {
         let mut coworker = opengrok_core::coworker::Coworker::default();
         for event in coworker
@@ -343,7 +394,11 @@ mod tests {
         {
             coworker.apply(&event);
         }
-        ToolContext::from_coworker(CoworkerId::from_stored("cw_1"), &coworker)
+        ToolContext::from_coworker(
+            AccountId::from_stored("acct_1"),
+            CoworkerId::from_stored("cw_1"),
+            &coworker,
+        )
     }
 
     fn call(name: &str, arguments: Value) -> ToolCall {
@@ -358,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn a_model_cannot_run_a_command_on_another_box() {
         let spy = Arc::new(SpyComputer::default());
-        let executor = Executor::new(spy.clone());
+        let executor = allowing(spy.clone());
         let context = context_with_box("box_mine");
 
         let result = executor
@@ -383,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn the_file_tools_are_pinned_to_the_session_box_too() {
         let spy = Arc::new(SpyComputer::default());
-        let executor = Executor::new(spy.clone());
+        let executor = allowing(spy.clone());
         let context = context_with_box("box_mine");
 
         for tool in ["read_file", "write_file"] {
@@ -427,6 +482,7 @@ mod tests {
     #[test]
     fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         let context = ToolContext {
+            account_id: AccountId::from_stored("acct_1"),
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
         };
@@ -439,8 +495,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_coworker_without_a_computer_is_refused_not_crashed() {
-        let executor = Executor::new(Arc::new(SpyComputer::default()));
+        let executor = allowing(Arc::new(SpyComputer::default()));
         let context = ToolContext {
+            account_id: AccountId::from_stored("acct_1"),
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
         };
@@ -454,7 +511,7 @@ mod tests {
     /// A refusal is a result the model can reason about, never a thrown error that kills the run.
     #[tokio::test]
     async fn an_unknown_tool_is_a_result_not_an_error() {
-        let executor = Executor::new(Arc::new(SpyComputer::default()));
+        let executor = allowing(Arc::new(SpyComputer::default()));
         let result = executor
             .execute(
                 &context_with_box("box_mine"),
@@ -468,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn bad_arguments_are_refused_with_a_reason_the_model_can_fix() {
-        let executor = Executor::new(Arc::new(SpyComputer::default()));
+        let executor = allowing(Arc::new(SpyComputer::default()));
         let result = executor
             .execute(&context_with_box("box_mine"), &call("shell", json!({})))
             .await;
@@ -483,7 +540,7 @@ mod tests {
             ran_on: Mutex::new(Vec::new()),
             fail_with: Some(BoxError::NoSuchBox),
         });
-        let executor = Executor::new(spy);
+        let executor = allowing(spy);
         let result = executor
             .execute(
                 &context_with_box("box_mine"),
@@ -494,11 +551,70 @@ mod tests {
         assert!(result.content.contains("no longer exists"), "{result:?}");
     }
 
+    /// An executor built without policy refuses everything. The default being useless is the
+    /// point: a missing policy must never read as permission.
+    #[tokio::test]
+    async fn an_executor_without_a_policy_allows_nothing() {
+        let executor = Executor::new(Arc::new(SpyComputer::default()));
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("shell", json!({"command": "ls"})),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("no grant"), "{result:?}");
+    }
+
+    /// Policy is consulted before the tool runs, and its reason reaches the model.
+    #[tokio::test]
+    async fn a_tool_outside_the_ceiling_is_refused_with_the_rule() {
+        let mut policy = permissive();
+        if let Some(ceiling) = policy.ceiling.as_mut() {
+            ceiling.tools = opengrok_policy::ToolSet::only(["read_file"]);
+        }
+        let spy = Arc::new(SpyComputer::default());
+        let executor = Executor::with_policy(spy.clone(), policy);
+
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("shell", json!({"command": "ls"})),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("may never run shell"), "{result:?}");
+        // Refused BEFORE the computer was touched: a denied tool must not run and then be undone.
+        assert_eq!(
+            spy.last_box(),
+            None,
+            "the command must never have reached a box"
+        );
+    }
+
+    /// A revoked grant stops the next tool call, not the next session.
+    #[tokio::test]
+    async fn a_revoked_grant_stops_tools_immediately() {
+        let mut policy = permissive();
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.revoked = true;
+        }
+        let executor = Executor::with_policy(Arc::new(SpyComputer::default()), policy);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("shell", json!({"command": "ls"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result.content.contains("revoked"), "{result:?}");
+    }
+
     /// Every offered tool must be executable — one that is offered but unknown is a dead end the
     /// model will keep trying.
     #[tokio::test]
     async fn every_offered_tool_is_actually_implemented() {
-        let executor = Executor::new(Arc::new(SpyComputer::default()));
+        let executor = allowing(Arc::new(SpyComputer::default()));
         let context = context_with_box("box_mine");
         for name in Executor::tool_names() {
             let result = executor
