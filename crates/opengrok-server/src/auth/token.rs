@@ -1,7 +1,7 @@
 //! Minting the tokens the desktop client will hold.
 //!
 //! THE ACCESS TOKEN MUST BE A REAL JWT, AND THE CLIENT READS IT WITHOUT ASKING US.
-//! `grok-bot/source/shared/node/cursor-token.ts:9-22` base64url-decodes the payload segment
+//! `opengrok/source/shared/node/cursor-token.ts:9-22` base64url-decodes the payload segment
 //! itself, and `cursor-auth.ts:67-73` builds the whole `logged-in` status from three claims:
 //!   - `sub`  → `authId`, which keys the client's profile cache and its avatar lookup;
 //!   - `email` → shown in the account menu;

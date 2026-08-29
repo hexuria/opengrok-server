@@ -1,6 +1,6 @@
 //! The live stream: what a coworker is doing right now.
 //!
-//! Provenance: `grok-bot/source/host/sand-activity.ts:3,6,7,8` and
+//! Provenance: `opengrok/source/host/sand-activity.ts:3,6,7,8` and
 //! `docs/research/client-grok-bot.md` §4.1.
 //!
 //! NOT THE TRANSCRIPT. Nothing here is durable, and a client that missed an update must be able to

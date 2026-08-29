@@ -2,7 +2,7 @@
 //!
 //! The desktop client talks to a second backend (`GrokBotService`, `DashboardService`,
 //! `InferenceService`) over **ConnectRPC on HTTP/1.1**, not classic gRPC:
-//! `grok-bot/source/shared/node/cursor-backend/cursor-inference.ts:157` builds
+//! `opengrok/source/shared/node/cursor-backend/cursor-inference.ts:157` builds
 //! `createConnectTransport({ httpVersion: "1.1" })`. A bare tonic server speaks gRPC
 //! (HTTP/2 + trailers) and that client would never reach it — so the Connect routes are served
 //! from our existing Axum listener (Connect unary is POST + JSON/binary over plain HTTP), with

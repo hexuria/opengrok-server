@@ -46,7 +46,7 @@ operator, not by drift in a commit.
 | open-connector as a **Node sidecar** in v1 | `PLAN.md` §4.4 | its executors' routing is implicit in TypeScript; extraction is a follow-up, per provider |
 | Local Docker `Computer` lands **after** P3 | `PLAN.md` §7 | additive by construction |
 | One Postgres instance, OpenGrok's own database, in-process migrations under an advisory lock | `RUNBOOK.md` §2 | one database server for a developer; matches the gateway's pattern |
-| Repo stays **private** until a rights review | `LEGAL.md` | `grok-bot/NOTICE.md` requires it; nothing in the plan depends on publishing |
+| Repo stays **private** until a rights review | `LEGAL.md` | `opengrok/NOTICE.md` requires it; nothing in the plan depends on publishing |
 
 ## What is genuinely open — needs the operator, not you
 
@@ -119,7 +119,7 @@ Order of work:
 
 Neighbouring repositories, all local, all read-only from here:
 
-- `/Volumes/goldcoders/OSS/grok-bot` — the client we serve
+- `/Volumes/goldcoders/OSS/opengrok` — the client we serve
 - `/Volumes/goldcoders/OSS/open-ai-gateway` — the model door, at `fa87b6a`, serving on `:29080`
 - `/Volumes/goldcoders/projects/opensesame/opensesame` — the prior product
 

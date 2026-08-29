@@ -5,7 +5,7 @@
 //! that Postgres or Axum exist. `decide` is pure and total, which is what makes the behaviour
 //! testable without a database and replayable from the log.
 //!
-//! Provenance for the vocabulary: `grok-bot/source/electron-main/account/cursor-auth.ts:76-85`
+//! Provenance for the vocabulary: `opengrok/source/electron-main/account/cursor-auth.ts:76-85`
 //! (`resolveDevLoginPlan` — the five plan strings and which of them are trials) and
 //! `source/shared/cursor-session-policy.ts:cursorSessionPresent` (a session exists when BOTH an
 //! access and a refresh token are held; that pair is what the client calls `logged-in`).

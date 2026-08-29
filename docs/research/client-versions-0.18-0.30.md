@@ -10,11 +10,11 @@ Every provenance comment in this document uses one of these refs. Resolve the re
 
 | ref | resolves to |
 |---|---|
-| `A18` | `/Volumes/goldcoders/OSS/grok-bot/.cache/runtime/Grok Bot.app/Contents/Resources/app.asar`, extracted with `npx --yes @electron/asar extract` |
+| `A18` | `/Volumes/goldcoders/OSS/opengrok/.cache/runtime/Grok Bot.app/Contents/Resources/app.asar`, extracted with `npx --yes @electron/asar extract` |
 | `E29` | `/private/tmp/claude-501/-Volumes-goldcoders-OSS-grok-bot/a4e01314-1252-4715-a4f0-b7f41e357999/scratchpad/app-0.29-extracted` |
 | `E30` | `/private/tmp/claude-501/-Volumes-goldcoders-OSS-grok-bot/a4e01314-1252-4715-a4f0-b7f41e357999/scratchpad/app-0.30-extracted` |
-| `F27` | `/Volumes/goldcoders/OSS/grok-bot/manifests/reconstruction/evidence/` |
-| `OURS` | `/Volumes/goldcoders/OSS/grok-bot/source/` (the client reimplementation this backend must serve) |
+| `F27` | `/Volumes/goldcoders/OSS/opengrok/manifests/reconstruction/evidence/` |
+| `OURS` | `/Volumes/goldcoders/OSS/opengrok/source/` (the client reimplementation this backend must serve) |
 
 Two independent extractions of `A18` into different directories were compared with `diff -rq` and are byte-for-byte identical, so the 0.18 evidence is reproducible from the asar alone.
 

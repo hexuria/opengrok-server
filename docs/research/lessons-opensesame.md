@@ -526,7 +526,7 @@ Opinionated. Argue with it, but argue explicitly.
   the guard against vacuous passes: it checks `git ls-files` exited 0 and returned >100
   files, because outside a repo every assertion would hold and the check would go green
   precisely when it can see least. **OpenGrok has an active legal line
-  (`grok-bot/NOTICE.md`, "inventory only") and needs this test on day one.**
+  (`opengrok/NOTICE.md`, "inventory only") and needs this test on day one.**
 - **A stub for the external dependency in-tree** (`scripts/oag-stub.ts`) so a fresh clone
   reaches a working turn with no credentials. It serves `/v1/responses` too, "which is not
   optional: 5.6-tier models use it." Ship `og-gateway-stub` equivalently.

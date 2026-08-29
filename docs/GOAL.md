@@ -4,7 +4,7 @@ Stated by the operator, 29 Aug 2026. This supersedes the phase framing in `PLAN.
 disagree; `PLAN.md`'s seams and decisions otherwise stand.
 
 **Rebuild Grok Bot's server from scratch** — every service the desktop client uses, derived from
-the client's own manifest at `/Volumes/goldcoders/OSS/grok-bot` — so that each agent gets its own
+the client's own manifest at `/Volumes/goldcoders/OSS/opengrok` — so that each agent gets its own
 remote computer and keeps working when the person's laptop is off. Clients are windows; the server
 is the product.
 
@@ -216,12 +216,12 @@ What is already decided by the shape of the rest:
 
 ## Provenance for slice 1 (read before implementing)
 
-- `grok-bot/source/electron-main/account/cursor-auth.ts` — the whole client-side flow: login URL
+- `opengrok/source/electron-main/account/cursor-auth.ts` — the whole client-side flow: login URL
   construction (:115-118), poll (:121-130), dev session token (:311-314), refresh (:340-347),
   token body shape (:160-166).
-- `grok-bot/source/shared/node/cursor-token.ts` — backend resolution (:39), client id / dev
+- `opengrok/source/shared/node/cursor-token.ts` — backend resolution (:39), client id / dev
   detection (:42-50).
-- `grok-bot/source/shared/cursor-session-policy.ts` — what "signed in" means, and that Cursor
+- `opengrok/source/shared/cursor-session-policy.ts` — what "signed in" means, and that Cursor
   sessions survive provider switches.
-- `grok-bot/source/electron-main/account/cursor-profile.ts` — the profile endpoint the slice must
+- `opengrok/source/electron-main/account/cursor-profile.ts` — the profile endpoint the slice must
   also serve.

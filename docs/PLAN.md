@@ -36,7 +36,7 @@ particular bug: [`research/lessons-opensesame.md`](research/lessons-opensesame.m
 
 ## 2. The client
 
-`/Volumes/goldcoders/OSS/grok-bot` is a reconstruction of a shipped Electron app whose brain lived on
+`/Volumes/goldcoders/OSS/opengrok` is a reconstruction of a shipped Electron app whose brain lived on
 someone else's servers. Three layers: **renderer** (the UI), **host** (Electron main, editable
 TypeScript), and the **box** (the agent's computer).
 

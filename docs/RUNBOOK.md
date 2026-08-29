@@ -12,10 +12,10 @@ like a bug in your code and is not.
 
 grok-bot's shipped renderer is **git-ignored**. It is hydrated by `npm run bootstrap` from a
 checksum-verified Grok Bot 0.18.0 DMG that the operator must already possess
-(`grok-bot/PROVENANCE.md`; reference §1.2).
+(`opengrok/PROVENANCE.md`; reference §1.2).
 
 ```sh
-cd /Volumes/goldcoders/OSS/grok-bot && ls frontend/dist 2>/dev/null || echo "renderer not hydrated"
+cd /Volumes/goldcoders/OSS/opengrok && ls frontend/dist 2>/dev/null || echo "renderer not hydrated"
 ```
 
 **If you cannot hydrate the renderer, stop and ask the operator.** Do not improvise a client. There
@@ -54,7 +54,7 @@ The renderer refuses to call `listAgents` at all unless the account state is `lo
 grok-bot ships a mock for exactly this:
 
 ```sh
-cd /Volumes/goldcoders/OSS/grok-bot && npm run mock   # serves seam B on :8787 — check package.json for the exact script name
+cd /Volumes/goldcoders/OSS/opengrok && npm run mock   # serves seam B on :8787 — check package.json for the exact script name
 ```
 
 ---

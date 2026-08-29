@@ -1,6 +1,6 @@
 //! Durable transcript entries, in the client's own vocabulary.
 //!
-//! Provenance: `grok-bot/source/shared/transcript.ts:21-22` (the threadable kinds),
+//! Provenance: `opengrok/source/shared/transcript.ts:21-22` (the threadable kinds),
 //! `source/host/extensions/transcript/send-message-shaping.ts:77-160` (the constructors), and
 //! `docs/research/client-grok-bot.md` §3.1 (the field tables). Field names are the client's own —
 //! see the note on casing below, which is why this file looks inconsistent.

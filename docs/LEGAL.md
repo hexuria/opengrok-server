@@ -6,18 +6,18 @@ Read this before writing code that touches the client contract. It is short on p
 
 ## The situation
 
-`/Volumes/goldcoders/OSS/grok-bot` is an **evidence-based reconstruction of a shipped binary** — the
+`/Volumes/goldcoders/OSS/opengrok` is an **evidence-based reconstruction of a shipped binary** — the
 Grok Bot desktop app, originally distributed by Anysphere (bundle id `com.anysphere.sand`, DMG from
 `downloads.cursor.com`). Its own files say so plainly:
 
-- **`grok-bot/NOTICE.md`** — "an unofficial reconstruction derived from a publicly distributed
+- **`opengrok/NOTICE.md`** — "an unofficial reconstruction derived from a publicly distributed
   binary application… No upstream source-code license is asserted or granted here… Anyone
   publishing or distributing this repository should independently review copyright, trademark,
   third-party dependency, and service-terms obligations."
-- **`grok-bot/PROVENANCE.md`** — the readable `frontend/` tree is a *partial* reconstruction; the
+- **`opengrok/PROVENANCE.md`** — the readable `frontend/` tree is a *partial* reconstruction; the
   shipped renderer was optimised production bundles, not authored source. Reconstructed builds get a
   different bundle id and only ad-hoc signing.
-- **`grok-bot/docs/grok-0.27-disparity-proto.md`** — header reads: **"inventory only. Do not
+- **`opengrok/docs/grok-0.27-disparity-proto.md`** — header reads: **"inventory only. Do not
   implement from this file."**
 
 The tree also contains **157** generated protobuf modules (`*_pb.ts` / `*_connect.ts`) under

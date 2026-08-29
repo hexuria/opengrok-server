@@ -3,7 +3,7 @@
 **Audience:** an engineer/agent who has never opened either repository and must implement
 the OpenGrok backend so the shipped Grok Bot desktop app boots against it.
 
-**Client repository under study:** `/Volumes/goldcoders/OSS/grok-bot`
+**Client repository under study:** `/Volumes/goldcoders/OSS/opengrok`
 (an evidence-based reconstruction of the shipped Grok Bot 0.18.0 macOS app,
 `com.anysphere.sand`, Electron 42.1.0 — see `PROVENANCE.md`).
 All paths below are relative to that repository unless prefixed with `opengrok/`.

@@ -1,6 +1,6 @@
 //! The host's JSON commands.
 //!
-//! Provenance: `grok-bot/source/host/gateway-protocol.ts:5-127` declares **123** commands;
+//! Provenance: `opengrok/source/host/gateway-protocol.ts:5-127` declares **123** commands;
 //! `source/shared/rpc/coordinator.ts:92-183` exposes **90** of them to the renderer, leaving 33
 //! reachable only from the host. Full inventory and per-command shapes:
 //! `docs/research/client-grok-bot.md` §2.

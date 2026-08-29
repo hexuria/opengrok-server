@@ -15,7 +15,7 @@
 //!      that module's note on why its rules differ from the three above.
 //!
 //! Provenance: shapes derived from the client's own recovered surface in
-//! `grok-bot/source/host/gateway-protocol.ts`, `source/shared/transcript.ts` and
+//! `opengrok/source/host/gateway-protocol.ts`, `source/shared/transcript.ts` and
 //! `docs/grok-0.27-disparity-proto.md`. Interop only: none of Cursor's server code is used.
 
 pub mod activity;
