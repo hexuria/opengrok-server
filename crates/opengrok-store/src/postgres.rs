@@ -427,7 +427,7 @@ impl PgStore {
         coworker: &CoworkerId,
     ) -> StoreResult<opengrok_policy::Context> {
         let grant = sqlx::query(
-            "select profile, revoked from grant_view
+            "select profile, needs_approval, revoked from grant_view
              where principal_id = $1 and coworker_id = $2",
         )
         .bind(principal.as_str())
@@ -436,12 +436,18 @@ impl PgStore {
         .await?
         .map(|row| {
             let profile: serde_json::Value = row.try_get("profile")?;
+            let needs_approval: serde_json::Value = row.try_get("needs_approval")?;
             Ok::<_, StoreError>(opengrok_policy::Grant {
                 principal: principal.clone(),
                 coworker: coworker.clone(),
                 // An unreadable profile becomes `None` — the narrowest reading, per the rule that
                 // a typo may only ever narrow access.
                 profile: serde_json::from_value(profile).unwrap_or(opengrok_policy::ToolSet::None),
+                // An unreadable approval list becomes `All`, which is the NARROW reading here:
+                // every tool then needs a human yes. The direction flips because this field
+                // restricts rather than grants, and a typo must still only ever narrow.
+                needs_approval: serde_json::from_value(needs_approval)
+                    .unwrap_or(opengrok_policy::ToolSet::All),
                 revoked: row.try_get("revoked")?,
             })
         })
@@ -473,25 +479,31 @@ impl PgStore {
         coworker: &CoworkerId,
         profile: &opengrok_policy::ToolSet,
         ceiling: &opengrok_policy::ToolSet,
+        needs_approval: &opengrok_policy::ToolSet,
         at_ms: i64,
     ) -> StoreResult<()> {
         let profile_json = serde_json::to_value(profile)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let approval_json = serde_json::to_value(needs_approval)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         let ceiling_json = serde_json::to_value(ceiling)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
 
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "insert into grant_view (principal_id, coworker_id, profile, revoked, updated_at_ms)
-             values ($1, $2, $3, false, $4)
+            "insert into grant_view
+               (principal_id, coworker_id, profile, needs_approval, revoked, updated_at_ms)
+             values ($1, $2, $3, $4, false, $5)
              on conflict (principal_id, coworker_id) do update set
                profile = excluded.profile,
+               needs_approval = excluded.needs_approval,
                revoked = false,
                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(principal.as_str())
         .bind(coworker.as_str())
         .bind(profile_json)
+        .bind(approval_json)
         .bind(at_ms)
         .execute(&mut *tx)
         .await?;

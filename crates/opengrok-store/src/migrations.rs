@@ -61,10 +61,16 @@ create table if not exists grant_view (
     principal_id text    not null,
     coworker_id  text    not null,
     profile      jsonb   not null,
+    -- Tools that need a human yes — layer 5. Defaults to "none need approval"; the NARROW default
+    -- for this column is the opposite of `profile`'s, because this one restricts rather than grants.
+    needs_approval jsonb not null default '"none"'::jsonb,
     revoked      boolean not null default false,
     updated_at_ms bigint not null,
     primary key (principal_id, coworker_id)
 );
+
+-- See the note on run_view.account_id: `create table if not exists` does not evolve a table.
+alter table grant_view add column if not exists needs_approval jsonb not null default '"none"'::jsonb;
 
 -- What a coworker may EVER do, whoever asks. Separate from the grant on purpose: the two combine
 -- by intersection, and a single table would invite someone to write a union.

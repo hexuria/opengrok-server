@@ -64,9 +64,38 @@ for _ in $(seq 1 30); do
 done
 curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 || fail "the server did not come up"
 
-for script in slice1-auth slice2-agui slice3-harness slice5-roster slice6-computer slice7-policy; do
+for script in slice1-auth slice2-agui slice3-harness slice5-roster slice7-policy; do
   step "scripts/$script-smoke.sh"
   OG_BASE="$BASE" OG_PORT="$PORT" "scripts/$script-smoke.sh" >/dev/null || fail "$script"
+  echo "  passed"
+done
+
+# The tool path needs a door that actually reaches for a tool; the echoing one never does, so these
+# two run against their own server. Without this they would exercise talking and never doing.
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+for _ in $(seq 1 20); do
+  curl -fsS --max-time 1 "$BASE/health" >/dev/null 2>&1 || break
+  sleep 1
+done
+
+step "starting a server with the tool-asking door"
+OG_BIND="127.0.0.1:$PORT" \
+OG_DATABASE_URL="$OG_DATABASE_URL" \
+OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
+OG_MODEL_DOOR=mock-tools \
+RUST_LOG=warn \
+./target/debug/opengrok >/dev/null 2>&1 &
+SERVER_PID=$!
+for _ in $(seq 1 30); do
+  curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 && break
+  sleep 1
+done
+
+for script in slice6-computer slice8-approval; do
+  step "scripts/$script-smoke.sh (tool door)"
+  OG_BASE="$BASE" OG_PORT="$PORT" OG_MODEL_DOOR=mock-tools "scripts/$script-smoke.sh" >/dev/null \
+    || fail "$script"
   echo "  passed"
 done
 

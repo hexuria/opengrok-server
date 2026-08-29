@@ -17,6 +17,7 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 |---|---|
 | Language / web | Rust, Axum 0.8 |
 | RPC | **tonic + prost** for service/message definitions (operator reaffirmed with the Connect finding known). The desktop client speaks ConnectRPC over HTTP/1.1 (`cursor-inference.ts:157`), which a bare tonic server cannot answer — so Connect-compatible routes are served at the Axum edge, reusing the same prost types. tonic is the internal/service backbone. |
+| Approvals | A tool may need a human yes (PLAN §4.5 layer 5). The run suspends; it does not fail. |
 | Design | DDD + CQRS + ES: append-only event store in Postgres, projections for reads. No ES framework — a transcript is already an event log. |
 | DB / cache | PostgreSQL; Redis added **when a measured hot query needs it**, not before |
 | Model door | Every model call exits through open-ai-gateway (`oag_live_` key, OpenAI-compatible routes). **Two doors, both behind `ModelDoor`:** direct (default) and `OG_MODEL_DOOR=rig` through `rig-core`. Rig abstracts one provider today, so the direct door stays default; Rig earns its keep when a coworker is pinned somewhere the gateway does not route, and brings MCP via rmcp. |
@@ -130,9 +131,13 @@ Done means: implemented, tested, exercised against the Next.js client, and green
    - ✅ *Layer 4 — done 29 Aug 2026.* A run carries its owner and only they may replay it; both
      "no such run" and "not yours" answer 404 so an id reveals nothing. This closed a real hole:
      `GET /ag-ui/runs/{id}` had returned any conversation to anyone who named the id.
-   - **Still to do:** PLAN §4.5 **layer 5** — an `approve` effect that suspends a run for a human
-     yes and resumes it exactly once under retry. The durable loop and the journal are the pieces
-     it needs; they exist.
+   - ✅ *Layer 5 — done 29 Aug 2026.* A tool can need a human yes; the run suspends rather than
+     ending, stays `running` in the log, and `POST /coworkers/{id}/approvals` sets the list.
+     `scripts/slice8-approval-smoke.sh` proves it suspends, that waiting does not read as success,
+     and that withdrawing the requirement lets the same tool run.
+   - **Still to do:** *resuming* a suspended run when the yes arrives. Today the person withdraws
+     the requirement and the next turn proceeds; picking up the exact suspended run — exactly once
+     under retry — is the remaining half, and `interrupted_runs` is where it starts.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

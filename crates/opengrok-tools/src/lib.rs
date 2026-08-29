@@ -61,6 +61,10 @@ pub struct ToolResult {
     pub call_id: String,
     pub ok: bool,
     pub content: String,
+    /// Set when the call is waiting on a person. The run SUSPENDS on this rather than continuing:
+    /// a refusal ends a turn, an approval pauses one that can still be finished tomorrow.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_approval: bool,
 }
 
 impl ToolResult {
@@ -69,6 +73,18 @@ impl ToolResult {
             call_id: call_id.to_string(),
             ok: true,
             content: content.into(),
+            awaiting_approval: false,
+        }
+    }
+
+    /// Waiting on a person. `ok` is false because nothing ran — treating a pending approval as
+    /// success is how a model concludes its command already worked.
+    pub fn awaiting(call_id: &str, why: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.to_string(),
+            ok: false,
+            content: format!("waiting for approval: {}", why.into()),
+            awaiting_approval: true,
         }
     }
 
@@ -78,6 +94,7 @@ impl ToolResult {
             call_id: call_id.to_string(),
             ok: false,
             content: format!("refused: {}", why.into()),
+            awaiting_approval: false,
         }
     }
 }
@@ -153,6 +170,10 @@ impl Executor {
             opengrok_policy::Action::RunTool(&call.name),
             &self.policy,
         );
+        // Waiting is not permission and not refusal: the run suspends, and a person decides.
+        if decision.needs_approval() {
+            return ToolResult::awaiting(&call.id, decision.reason().unwrap_or("a human yes"));
+        }
         if let Some(reason) = decision.reason() {
             return ToolResult::refused(&call.id, reason);
         }
@@ -359,6 +380,7 @@ mod tests {
                 principal: AccountId::from_stored("acct_1"),
                 coworker: CoworkerId::from_stored("cw_1"),
                 profile: opengrok_policy::ToolSet::All,
+                needs_approval: opengrok_policy::ToolSet::None,
                 revoked: false,
             }),
             ceiling: Some(opengrok_policy::Ceiling {
@@ -549,6 +571,29 @@ mod tests {
             .await;
         assert!(!result.ok);
         assert!(result.content.contains("no longer exists"), "{result:?}");
+    }
+
+    /// A tool needing approval suspends instead of running, and does not read as success.
+    #[tokio::test]
+    async fn a_tool_needing_approval_does_not_run() {
+        let mut policy = permissive();
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.needs_approval = opengrok_policy::ToolSet::only(["shell"]);
+        }
+        let spy = Arc::new(SpyComputer::default());
+        let executor = Executor::with_policy(spy.clone(), policy);
+
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("shell", json!({"command": "rm -rf /"})),
+            )
+            .await;
+
+        assert!(result.awaiting_approval, "{result:?}");
+        assert!(!result.ok, "a pending approval must not read as success");
+        // And nothing reached the computer: approval gates the action, not its undo.
+        assert_eq!(spy.last_box(), None);
     }
 
     /// An executor built without policy refuses everything. The default being useless is the

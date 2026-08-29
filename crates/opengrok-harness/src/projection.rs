@@ -204,6 +204,28 @@ impl Projection {
         events
     }
 
+    /// Pause: a tool is waiting on a person.
+    ///
+    /// NOT `finish` AND NOT `fail`. A finished run tells the client there is nothing more coming;
+    /// a failed one tells it to give up. This says "stop watching, come back" — the run stays
+    /// `running` in the log so it can be picked up when the answer arrives.
+    pub fn awaiting_approval(&mut self) -> Vec<Event> {
+        let mut events = self.start();
+        if self.finished {
+            return Vec::new();
+        }
+        events.extend(self.close_open());
+        // Deliberately NOT setting `finished`: the run has not ended, and a later resume must be
+        // able to add to it.
+        events.push(
+            self.event(EventType::Custom)
+                .with("name", "run-awaiting-approval")
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone()),
+        );
+        events
+    }
+
     /// End the run cleanly.
     pub fn finish(&mut self) -> Vec<Event> {
         let mut events = self.start();
@@ -427,6 +449,30 @@ mod tests {
         let mut projection = Projection::new("t1", "r1", 100);
         projection.finish();
         assert!(projection.fail("too late").is_empty());
+    }
+
+    /// A suspended run is neither finished nor failed, and must still be addable to.
+    #[test]
+    fn awaiting_approval_leaves_the_run_open() {
+        let mut projection = Projection::new("t1", "r1", 100);
+        projection.push(ModelDelta::Text("about to run something".to_string()));
+        let waiting = projection.awaiting_approval();
+
+        // The open message is closed, so nothing streams forever.
+        assert!(types(&waiting).contains(&EventType::TextMessageEnd));
+        assert_eq!(waiting.last().unwrap().event_type, EventType::Custom);
+        assert_eq!(
+            waiting.last().unwrap().extra.get("name").unwrap(),
+            "run-awaiting-approval"
+        );
+
+        // And the run can still be finished later, when the answer arrives.
+        let finished = projection.finish();
+        assert_eq!(
+            finished.last().unwrap().event_type,
+            EventType::RunFinished,
+            "a suspended run must still be finishable"
+        );
     }
 
     /// A stray end for a call that is not open must not close whatever is.

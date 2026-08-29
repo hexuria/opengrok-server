@@ -162,13 +162,30 @@ pub async fn run_conversation(
                 // Tools for this round, run on the coworker's own computer.
                 let calls = collect_tool_calls(&round_events);
                 if let (Some(runner), false) = (tools, calls.is_empty()) {
-                    for result in runner.run_all(&calls).await {
-                        round_events.extend(projection.push_tool_result(&result));
+                    let results = runner.run_all(&calls).await;
+                    // A pending approval SUSPENDS the run rather than failing it: the person can
+                    // still say yes tomorrow, and the log already holds everything up to here.
+                    let suspended = results.iter().any(|result| result.awaiting_approval);
+
+                    for result in &results {
+                        round_events.extend(projection.push_tool_result(result));
                         // The model needs to see what its tool said, in its own transcript.
                         request.messages.push(ChatMessage {
                             role: "user".to_string(),
                             content: format!("[tool {} result] {}", result.call_id, result.content),
                         });
+                    }
+
+                    if suspended {
+                        // Ended as a readable state, not a silent stop and not a failure. The run
+                        // stays `running` in the log, which is exactly what `interrupted_runs`
+                        // looks for — resumption and approval share the same machinery.
+                        let mut waiting = projection.awaiting_approval();
+                        let _ = journal.record(run_id, &round_events).await;
+                        let _ = journal.record(run_id, &waiting).await;
+                        all.append(&mut round_events);
+                        all.append(&mut waiting);
+                        return all;
                     }
                     if !said.is_empty() {
                         request.messages.push(ChatMessage {
@@ -250,6 +267,7 @@ mod tests {
                 principal: account.clone(),
                 coworker: CoworkerId::from_stored("cw_ada"),
                 profile: opengrok_policy::ToolSet::All,
+                needs_approval: opengrok_policy::ToolSet::None,
                 revoked: false,
             }),
             ceiling: Some(opengrok_policy::Ceiling {
@@ -345,6 +363,7 @@ mod tests {
                 principal: account.clone(),
                 coworker: CoworkerId::from_stored("cw_ada"),
                 profile: opengrok_policy::ToolSet::All,
+                needs_approval: opengrok_policy::ToolSet::None,
                 revoked: false,
             }),
             ceiling: Some(opengrok_policy::Ceiling {

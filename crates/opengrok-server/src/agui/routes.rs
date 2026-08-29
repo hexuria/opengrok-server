@@ -90,6 +90,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/coworkers", post(hire).get(list_coworkers))
+        .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
         .with_state(state)
 }
 
@@ -200,7 +201,17 @@ pub async fn hire(
     if let Err(error) = state
         .auth
         .store
-        .grant_access(&account_id, &coworker_id, &tools, &tools, at_ms)
+        // Nothing needs approval by default. A person who wants a second pair of eyes on `shell`
+        // sets it deliberately; defaulting to "approve everything" would make the prompt noise and
+        // teach people to click yes.
+        .grant_access(
+            &account_id,
+            &coworker_id,
+            &tools,
+            &tools,
+            &opengrok_policy::ToolSet::None,
+            at_ms,
+        )
         .await
     {
         // A coworker nobody may use is worse than no coworker: fail the hire rather than leave one
@@ -223,6 +234,77 @@ pub async fn hire(
         })),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalsRequest {
+    /// Tools this coworker may only run with a human yes. An empty list means none.
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+/// Say which of a coworker's tools need a person to approve them — PLAN §4.5 layer 5.
+///
+/// Set by the person who holds the grant, on their own grant: approval is about what *they* may
+/// have done without asking, so it is a property of the grant and not of the coworker.
+pub async fn set_approvals(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    Json(request): Json<ApprovalsRequest>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+
+    // Only somebody who already holds a grant may change its approval list — otherwise this would
+    // be a way to create a grant, which is a different permission entirely.
+    let policy = match state.auth.store.policy_for(&account_id, &coworker_id).await {
+        Ok(policy) => policy,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    let decision = opengrok_policy::decide(
+        &account_id,
+        &coworker_id,
+        opengrok_policy::Action::UseCoworker,
+        &policy,
+    );
+    if let Some(reason) = decision.reason() {
+        return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+    }
+
+    let (Some(grant), Some(ceiling)) = (policy.grant, policy.ceiling) else {
+        return (StatusCode::FORBIDDEN, "no grant to change").into_response();
+    };
+
+    let needs_approval = if request.tools.is_empty() {
+        opengrok_policy::ToolSet::None
+    } else {
+        opengrok_policy::ToolSet::only(request.tools.clone())
+    };
+
+    if let Err(error) = state
+        .auth
+        .store
+        .grant_access(
+            &account_id,
+            &coworker_id,
+            &grant.profile,
+            &ceiling.tools,
+            &needs_approval,
+            now_ms(),
+        )
+        .await
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+
+    Json(serde_json::json!({
+        "coworkerId": coworker_id.as_str(),
+        "needsApproval": request.tools,
+    }))
+    .into_response()
 }
 
 /// The roster, newest first — the order the client sorts by.

@@ -39,6 +39,11 @@ pub enum ToolSet {
 }
 
 impl ToolSet {
+    /// Named so `serde(default = ...)` can reach it.
+    pub fn none() -> Self {
+        Self::None
+    }
+
     pub fn only<I, S>(names: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -79,6 +84,14 @@ pub struct Grant {
     pub principal: AccountId,
     pub coworker: CoworkerId,
     pub profile: ToolSet,
+    /// Tools this principal may use only with a human yes — layer 5.
+    ///
+    /// Checked INSIDE the profile, never beside it: a tool that is not in the profile at all is
+    /// denied outright, and listing it here must not become a back door into running it. Asking
+    /// for approval for something that was never permitted would train people to approve things
+    /// nobody may do.
+    #[serde(default = "ToolSet::none")]
+    pub needs_approval: ToolSet,
     /// Set when the grant has been withdrawn. Kept rather than deleted, so the log still says a
     /// grant existed and when it stopped.
     #[serde(default)]
@@ -106,6 +119,10 @@ pub enum Action<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
+    /// LAYER 5: allowed in principle, but a person has to say yes first. Distinct from `Deny`
+    /// because the run **suspends** rather than fails — a refusal ends a turn, an approval pauses
+    /// one that can still be finished tomorrow.
+    NeedsApproval(String),
     Deny(String),
 }
 
@@ -114,10 +131,16 @@ impl Decision {
         matches!(self, Self::Allow)
     }
 
+    /// Waiting is not permission. Anything that treats `NeedsApproval` as allowed is a bug, so the
+    /// only way to act on it is to ask for it by name.
+    pub fn needs_approval(&self) -> bool {
+        matches!(self, Self::NeedsApproval(_))
+    }
+
     pub fn reason(&self) -> Option<&str> {
         match self {
             Self::Allow => None,
-            Self::Deny(reason) => Some(reason),
+            Self::NeedsApproval(reason) | Self::Deny(reason) => Some(reason),
         }
     }
 }
@@ -183,6 +206,13 @@ pub fn decide(
 
             // Layers 2 ∩ 3.
             if ceiling.tools.intersect(&grant.profile).allows(tool) {
+                // Permitted — but does a person have to say yes first? Checked only after the tool
+                // is known to be allowed, so approval can never widen access.
+                if grant.needs_approval.allows(tool) {
+                    return Decision::NeedsApproval(format!(
+                        "running {tool} on coworker {coworker} needs a human yes"
+                    ));
+                }
                 Decision::Allow
             } else if !ceiling.tools.allows(tool) {
                 // Which layer refused matters to whoever has to fix it: one is the coworker's
@@ -216,6 +246,7 @@ mod tests {
                 principal: principal(),
                 coworker: coworker(),
                 profile,
+                needs_approval: ToolSet::None,
                 revoked: false,
             }),
             ceiling: Some(Ceiling {
@@ -431,6 +462,82 @@ mod tests {
         }
     }
 
+    /// Layer 5: a tool inside the profile but marked for approval suspends rather than runs.
+    #[test]
+    fn a_tool_marked_for_approval_is_neither_allowed_nor_denied() {
+        let mut context = granted(ToolSet::All, ToolSet::All);
+        if let Some(grant) = context.grant.as_mut() {
+            grant.needs_approval = ToolSet::only(["shell"]);
+        }
+        let decision = decide(
+            &principal(),
+            &coworker(),
+            Action::RunTool("shell"),
+            &context,
+        );
+        assert!(decision.needs_approval(), "{decision:?}");
+        // Waiting is not permission.
+        assert!(
+            !decision.is_allowed(),
+            "approval pending must not read as allowed"
+        );
+        assert!(decision.reason().unwrap().contains("human yes"));
+    }
+
+    /// Other tools are unaffected: marking one for approval must not gate the rest.
+    #[test]
+    fn tools_not_marked_for_approval_still_run() {
+        let mut context = granted(ToolSet::All, ToolSet::All);
+        if let Some(grant) = context.grant.as_mut() {
+            grant.needs_approval = ToolSet::only(["shell"]);
+        }
+        assert!(
+            decide(
+                &principal(),
+                &coworker(),
+                Action::RunTool("read_file"),
+                &context
+            )
+            .is_allowed()
+        );
+    }
+
+    /// APPROVAL MUST NOT BE A BACK DOOR. A tool outside the profile stays denied even when it is
+    /// listed for approval — asking a person to approve something nobody may do would train them
+    /// to approve anything.
+    #[test]
+    fn approval_cannot_widen_a_profile_that_never_allowed_the_tool() {
+        let mut context = granted(ToolSet::only(["read_file"]), ToolSet::All);
+        if let Some(grant) = context.grant.as_mut() {
+            grant.needs_approval = ToolSet::only(["shell"]);
+        }
+        let decision = decide(
+            &principal(),
+            &coworker(),
+            Action::RunTool("shell"),
+            &context,
+        );
+        assert!(!decision.needs_approval(), "{decision:?}");
+        assert!(!decision.is_allowed());
+    }
+
+    /// Nor past a ceiling: the coworker's own limits still win.
+    #[test]
+    fn approval_cannot_widen_past_the_ceiling() {
+        let mut context = granted(ToolSet::All, ToolSet::only(["read_file"]));
+        if let Some(grant) = context.grant.as_mut() {
+            grant.needs_approval = ToolSet::only(["shell"]);
+        }
+        let decision = decide(
+            &principal(),
+            &coworker(),
+            Action::RunTool("shell"),
+            &context,
+        );
+        assert!(!decision.needs_approval());
+        assert!(decision.reason().unwrap().contains("may never run"));
+    }
+
     /// The invariant as a property: no action on an EMPTY context is ever allowed. If a future
     /// edit adds a default-allow path anywhere, this is what fails.
     #[test]
@@ -443,8 +550,19 @@ mod tests {
         ];
         for action in actions {
             assert!(
-                !decide(&principal(), &coworker(), action, &Context::default()).is_allowed(),
+                !decide(
+                    &principal(),
+                    &coworker(),
+                    action.clone(),
+                    &Context::default()
+                )
+                .is_allowed(),
                 "an empty context must never allow anything"
+            );
+            // Nor may it ever ask for approval: approval is for things already permitted.
+            assert!(
+                !decide(&principal(), &coworker(), action, &Context::default()).needs_approval(),
+                "an empty context must never ask for approval either"
             );
         }
     }

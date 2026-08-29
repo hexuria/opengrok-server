@@ -59,6 +59,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
             Arc::new(MockDoor::echoing())
         }
+        // The tool path, without a model: the echoing door never reaches for a tool, so a suite
+        // built only on it exercises talking and never doing.
+        Ok("mock-tools") => {
+            tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
+            Arc::new(MockDoor::asking_for_a_tool())
+        }
         door => {
             let url = std::env::var("OG_GATEWAY_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:29080".to_string());

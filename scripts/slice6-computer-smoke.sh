@@ -58,15 +58,21 @@ last=$(echo "$events" | tail -1 | jq -r '.type')
 [ "$last" = "RUN_FINISHED" ] || fail "the run ended as $last"
 ok "the run completed"
 
-echo "4. proof the work happened inside the coworker's own computer"
-# Written by the run if the tool executed there; if the tool never ran, the file is absent and this
-# fails — which is the difference between "the run finished" and "the work happened".
-marker="/tmp/opengrok-was-here-$run_id"
-docker exec "$BOX_ID" sh -c "echo proof > $marker" >/dev/null 2>&1 \
-  || fail "could not reach the coworker's computer"
-seen=$(docker exec "$BOX_ID" cat "$marker" 2>/dev/null | tr -d '\n')
-[ "$seen" = "proof" ] || fail "the computer did not keep the file"
-ok "the coworker's computer is reachable and keeps its files"
+echo "4. proof the work happened INSIDE the coworker's own computer"
+# The file is written by the model's own tool call, not by this script. That is the difference
+# between "the run finished" and "the work happened" — and the earlier version of this step wrote
+# the marker itself, which proved only that the box was reachable.
+if [ "${OG_MODEL_DOOR:-}" = "mock-tools" ] || echo "$events" | grep -q TOOL_CALL_RESULT; then
+  seen=$(docker exec "$BOX_ID" cat /tmp/opengrok-tool-ran 2>/dev/null | tr -d '\n')
+  [ "$seen" = "opengrok-tool-ran" ] \
+    || fail "the tool did not run on the coworker's box (marker: '$seen')"
+  ok "a file written by the model's tool call is on the coworker's box"
+else
+  # The echoing door never reaches for a tool; assert what is actually true instead of pretending.
+  docker exec "$BOX_ID" sh -c 'echo reachable > /tmp/reachable' >/dev/null 2>&1 \
+    || fail "could not reach the coworker's computer"
+  ok "no tool was called by this door; the box is reachable and keeps files"
+fi
 
 echo "5. the run replays from the log after the fact"
 # A run is readable only by whoever started it, so the owner's token is required here.
