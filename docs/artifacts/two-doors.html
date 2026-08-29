@@ -1,0 +1,264 @@
+<title>Two Doors to the Server</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{
+    --ground:#16130F; --surface:#1F1A14; --ink:#EDE6DA; --muted:#A79E8F;
+    --line:#3D362C; --gold:#E5B565; --gold-soft:#2E2415;
+    --dead:#E07B6B; --dead-soft:#2C1714; --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --ground:#F2EFE9; --surface:#FBFAF7; --ink:#221C14; --muted:#6E675C;
+      --line:#D8D2C6; --gold:#9C6A0B; --gold-soft:#F1E5CE; --dead:#A03A2E; --dead-soft:#F6E3E0;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#F2EFE9; --surface:#FBFAF7; --ink:#221C14; --muted:#6E675C;
+    --line:#D8D2C6; --gold:#9C6A0B; --gold-soft:#F1E5CE; --dead:#A03A2E; --dead-soft:#F6E3E0;
+  }
+  body{
+    margin:0;background:var(--ground);color:var(--ink);
+    font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;
+    font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{width:min(100% - 2.5rem, 58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.1rem,5.6vw,3.4rem);line-height:1.05}
+  h2{font-size:clamp(1.45rem,3.4vw,2rem);line-height:1.14}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4rem 0 2.6rem}
+  .plate{padding:2.6rem 0;border-top:1px solid var(--line)}
+  .closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .fill{fill:var(--surface)}
+  .soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accf{fill:var(--gold)}.accT{fill:var(--gold)}.goldwash{fill:var(--gold-soft)}
+  .bad{stroke:var(--dead)}.badf{fill:var(--dead)}.badT{fill:var(--dead)}.badwash{fill:var(--dead-soft)}
+  svg text{fill:currentColor;font-family:"Public Sans",sans-serif;font-size:13px}
+  .sm{font-size:11.5px;font-weight:600;letter-spacing:.08em}
+  .tiny{font-size:11.5px}.micro{font-size:10.5px;fill:var(--muted)}
+  .code{font-family:var(--mono);font-size:11px}
+  .big{font-family:Fraunces,Georgia,serif;font-weight:600;font-size:clamp(1.4rem,3.4vw,2rem);line-height:1.25;margin:0;text-wrap:balance}
+  .big em{color:var(--gold);font-style:normal}
+  .note{margin:1.4rem 0 0;color:var(--muted);font-size:.95rem;max-width:52ch}
+  code{font-family:var(--mono);font-size:.85em;background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:.05em .35em}
+  a{color:var(--gold);text-underline-offset:3px}
+  .stamp{display:inline-block;font-size:.62rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;padding:.2rem .5rem;border-radius:4px;border:1px solid}
+  .stamp.no{color:var(--dead);border-color:var(--dead);background:var(--dead-soft)}
+  .stamp.go{color:var(--gold);border-color:var(--gold);background:var(--gold-soft)}
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Reusing the Grok Bot client — the workflow, honestly</p>
+    <h1>Two doors to the same server.</h1>
+    <p class="lede">You want to keep the polished desktop app and build the brain behind it. There are two ways in. One is walled off — by your own notes. Six pictures.</p>
+  </div>
+</header>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">What the client is</p>
+    <h2>The app is a puppet with its strings cut.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 210" role="img" aria-label="The Grok Bot desktop app is a shell that used to be driven by Cursor's servers; those strings are cut, so it sits waiting for a backend to talk to.">
+          <defs><marker id="p1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="badf"/></marker></defs>
+          <!-- desktop shell -->
+          <rect class="ln fill" x="40" y="40" width="220" height="140" rx="8"/>
+          <line class="ln soft" x1="40" y1="60" x2="260" y2="60"/>
+          <circle class="ln" cx="54" cy="50" r="3"/><circle class="ln" cx="66" cy="50" r="3"/>
+          <circle class="ln fill" cx="96" cy="104" r="12"/><path class="ln" d="M80 132 q16 -20 32 0"/>
+          <rect class="ln" x="132" y="90" width="104" height="16" rx="3"/>
+          <rect class="ln" x="132" y="114" width="80" height="12" rx="3"/>
+          <text x="150" y="200" text-anchor="middle" class="sm">GROK BOT — THE SHELL</text>
+          <text x="150" y="30" text-anchor="middle" class="micro">Electron window · the UI you like</text>
+          <!-- cut strings to a ghost server -->
+          <path class="bad dash" d="M262 96 L360 66"/>
+          <path class="bad" d="M300 82 l10 6 m0 -6 l-10 6"/>
+          <rect class="ln soft dash" x="372" y="40" width="150" height="80" rx="6"/>
+          <text x="447" y="86" text-anchor="middle" class="micro">Cursor's servers</text>
+          <text x="447" y="102" text-anchor="middle" class="micro">(gone — not yours)</text>
+          <text x="447" y="150" text-anchor="middle" class="tiny badT">the string is cut</text>
+        </svg>
+      </div>
+      <figcaption>The desktop app is a reconstruction of Cursor's "Grok Bot." Its brain always lived on Cursor's servers. You have the body; the strings to the old brain are cut. Something has to pull them.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">What it says on the wire</p>
+    <h2>It speaks in sealed envelopes.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 196" role="img" aria-label="When the shell wants work done it sends binary protobuf messages like Exec and sendPrompt over ConnectRPC; they are Cursor's own message shapes.">
+          <defs><marker id="q1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+          <rect class="ln fill" x="30" y="66" width="120" height="64" rx="6"/>
+          <text x="90" y="94" text-anchor="middle" class="tiny">the shell</text>
+          <text x="90" y="112" text-anchor="middle" class="micro">wants a turn run</text>
+          <!-- envelopes -->
+          <line class="ln" x1="156" y1="98" x2="212" y2="98" marker-end="url(#q1)"/>
+          <g transform="translate(224,50)">
+            <rect class="ln fill" x="0" y="0" width="150" height="30" rx="3"/>
+            <path class="ln" d="M0 0 l75 20 l75 -20"/>
+            <text x="12" y="20" class="code">agent.v1.Exec</text>
+          </g>
+          <g transform="translate(224,88)">
+            <rect class="ln fill" x="0" y="0" width="150" height="30" rx="3"/>
+            <path class="ln" d="M0 0 l75 20 l75 -20"/>
+            <text x="12" y="20" class="code">aiserver.v1.sendPrompt</text>
+          </g>
+          <g transform="translate(224,126)">
+            <rect class="ln fill" x="0" y="0" width="150" height="30" rx="3"/>
+            <path class="ln" d="M0 0 l75 20 l75 -20"/>
+            <text x="12" y="20" class="code">…139 more shapes</text>
+          </g>
+          <text x="299" y="176" text-anchor="middle" class="sm">CONNECTRPC · BINARY PROTOBUF</text>
+          <line class="ln" x1="380" y1="98" x2="436" y2="98" marker-end="url(#q1)"/>
+          <rect class="ln soft dash" x="448" y="66" width="90" height="64" rx="6"/>
+          <text x="493" y="102" text-anchor="middle" class="micro">a server that<tspan x="493" dy="14">understands them</tspan></text>
+        </svg>
+      </div>
+      <figcaption>The shell doesn't send plain text — it sends binary protobuf envelopes (<code>Exec</code>, <code>sendPrompt</code>, 141 message shapes across <code>agent.v1</code> and <code>aiserver.v1</code>). To answer, a server must speak that exact language.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">The fork in the road</p>
+    <h2>So: teach a server Cursor's language — or teach the shell a new one?</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 300" role="img" aria-label="Two paths from the shell to a server. Door A: implement Cursor's proprietary proto — marked blocked in red by your own notes. Door B: give the shell a thin adapter that speaks your own AG-UI wire — marked go in gold, already built in barok-works.">
+          <defs>
+            <marker id="rA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="badf"/></marker>
+            <marker id="rB" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="accf"/></marker>
+          </defs>
+          <!-- shell -->
+          <rect class="ln fill" x="24" y="118" width="96" height="64" rx="6"/>
+          <text x="72" y="154" text-anchor="middle" class="tiny">the shell</text>
+
+          <!-- DOOR A (top, red) -->
+          <line class="bad" x1="126" y1="132" x2="196" y2="70" marker-end="url(#rA)"/>
+          <rect class="bad badwash" x="206" y="30" width="220" height="86" rx="6"/>
+          <text x="220" y="54" class="sm badT">DOOR A</text>
+          <text x="220" y="74" class="tiny">Rebuild Cursor's server</text>
+          <text x="220" y="92" class="tiny">from the extracted proto</text>
+          <text x="220" y="108" class="micro code">agent.v1 · aiserver.v1</text>
+          <g transform="translate(444,44)"><rect class="bad badwash" x="0" y="0" width="96" height="58" rx="5"/>
+            <path class="bad" d="M20 24 l14 14 m0 -14 l-14 14"/>
+            <text x="58" y="28" class="micro badT">walled off</text>
+            <text x="58" y="42" class="micro badT">by your notes</text>
+          </g>
+          <text x="316" y="132" text-anchor="middle" class="micro badT">"no Cursor proto" · "do not implement" · "rights review first"</text>
+
+          <!-- DOOR B (bottom, gold) -->
+          <line class="acc" x1="126" y1="168" x2="196" y2="222" marker-end="url(#rB)"/>
+          <rect class="ln acc goldwash" x="206" y="192" width="150" height="76" rx="6"/>
+          <text x="220" y="216" class="sm accT">DOOR B</text>
+          <text x="220" y="236" class="tiny">A thin adapter in</text>
+          <text x="220" y="252" class="tiny">the shell speaks…</text>
+          <line class="acc" x1="358" y1="230" x2="404" y2="230" marker-end="url(#rB)"/>
+          <rect class="ln acc goldwash" x="416" y="196" width="124" height="68" rx="6"/>
+          <text x="478" y="222" text-anchor="middle" class="sm accT">YOUR WIRE</text>
+          <text x="478" y="240" text-anchor="middle" class="micro">AG-UI · plain, open</text>
+          <text x="478" y="256" text-anchor="middle" class="micro">you already speak it</text>
+          <text x="300" y="288" text-anchor="middle" class="micro accT">barok-works/grok-runtime already does exactly this</text>
+        </svg>
+      </div>
+      <figcaption>Door A copies Anysphere's private protocol — the boundary your brief and grok-bot's own <code>NOTICE.md</code> both forbid. Door B keeps the shell but gives it a small translator that talks your own open wire. Same client, defensible ground.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Why Door B is real, not hopeful</p>
+    <h2>Someone in your workspace already walked through it.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 190" role="img" aria-label="grok-runtime wraps the Grok box and re-emits AG-UI over SSE; it already translates sendPrompt into an open wire.">
+          <defs><marker id="s1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="accf"/></marker></defs>
+          <rect class="ln fill" x="24" y="70" width="96" height="56" rx="6"/>
+          <text x="72" y="102" text-anchor="middle" class="tiny">the shell</text>
+          <line class="acc" x1="126" y1="98" x2="176" y2="98" marker-end="url(#s1)"/>
+          <text x="151" y="86" text-anchor="middle" class="micro code">sendPrompt</text>
+          <!-- grok-runtime translator -->
+          <rect class="ln acc goldwash" x="188" y="60" width="150" height="76" rx="6"/>
+          <text x="263" y="88" text-anchor="middle" class="sm accT">grok-runtime</text>
+          <text x="263" y="106" text-anchor="middle" class="micro">wraps the box,</text>
+          <text x="263" y="121" text-anchor="middle" class="micro">re-emits open events</text>
+          <line class="acc" x1="344" y1="98" x2="394" y2="98" marker-end="url(#s1)"/>
+          <text x="369" y="86" text-anchor="middle" class="micro code">POST /ag-ui</text>
+          <!-- open server -->
+          <rect class="ln acc fill" x="406" y="60" width="130" height="76" rx="6"/>
+          <text x="471" y="92" text-anchor="middle" class="tiny">your server</text>
+          <text x="471" y="110" text-anchor="middle" class="micro">+ the gateway</text>
+          <text x="280" y="176" text-anchor="middle" class="micro">already in /Volumes/goldcoders/OSS/barok-works</text>
+        </svg>
+      </div>
+      <figcaption><code>barok-works/grok-runtime</code> already takes the shell's <code>sendPrompt</code>, wraps the Grok box, and streams it back as AG-UI over SSE — the clean translation, working, today. Door B is a path you've already cut once.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Where it all lands</p>
+    <h2>One server, many windows, many models.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 250" role="img" aria-label="The desktop shell, web, and CLI all speak AG-UI to one server, whose gateway fans out to Grok, Claude, GPT and OpenRouter.">
+          <defs><marker id="t1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+          <marker id="t2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="accf"/></marker></defs>
+          <!-- clients -->
+          <rect class="ln fill" x="24" y="30" width="86" height="50" rx="6"/><text x="67" y="60" text-anchor="middle" class="tiny">desktop</text>
+          <rect class="ln fill" x="24" y="100" width="86" height="50" rx="6"/><text x="67" y="130" text-anchor="middle" class="tiny">web</text>
+          <rect class="ln fill" x="24" y="170" width="86" height="50" rx="6"/><text x="67" y="200" text-anchor="middle" class="tiny code">&gt;_ cli</text>
+          <line class="ln" x1="116" y1="55" x2="200" y2="112" marker-end="url(#t1)"/>
+          <line class="ln" x1="116" y1="125" x2="200" y2="125" marker-end="url(#t1)"/>
+          <line class="ln" x1="116" y1="195" x2="200" y2="138" marker-end="url(#t1)"/>
+          <text x="150" y="96" text-anchor="middle" class="micro accT">AG-UI</text>
+          <!-- server -->
+          <rect class="ln acc fill" x="212" y="70" width="150" height="120" rx="6"/>
+          <text x="287" y="62" text-anchor="middle" class="sm">THE SERVER</text>
+          <text x="287" y="112" text-anchor="middle" class="tiny">coworkers live here</text>
+          <text x="287" y="132" text-anchor="middle" class="micro">harness · tools · policy</text>
+          <!-- gateway door -->
+          <rect class="ln acc goldwash" x="300" y="140" width="52" height="42" rx="4"/>
+          <text x="326" y="166" text-anchor="middle" class="micro accT">gateway</text>
+          <!-- models -->
+          <line class="acc" x1="364" y1="150" x2="418" y2="96" marker-end="url(#t2)"/>
+          <line class="acc" x1="364" y1="158" x2="418" y2="132" marker-end="url(#t2)"/>
+          <line class="acc" x1="364" y1="166" x2="418" y2="168" marker-end="url(#t2)"/>
+          <line class="acc" x1="364" y1="174" x2="418" y2="204" marker-end="url(#t2)"/>
+          <rect class="ln fill" x="430" y="80" width="100" height="30" rx="4"/><text x="480" y="100" text-anchor="middle" class="tiny">Grok</text>
+          <rect class="ln fill" x="430" y="118" width="100" height="30" rx="4"/><text x="480" y="138" text-anchor="middle" class="tiny">Claude</text>
+          <rect class="ln fill" x="430" y="156" width="100" height="30" rx="4"/><text x="480" y="176" text-anchor="middle" class="tiny">GPT</text>
+          <rect class="ln fill" x="430" y="194" width="100" height="30" rx="4"/><text x="480" y="214" text-anchor="middle" class="tiny">OpenRouter</text>
+        </svg>
+      </div>
+      <figcaption>The desktop shell you like, plus web and CLI, all speak one open wire to one server where the coworkers live. The gateway — already built, in Rust — routes each turn to Grok, Claude, GPT, or OpenRouter. All three of your goals, none of the landmine.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="closer">
+  <div class="wrap">
+    <p class="big">Keep the <em>body</em> you like.<br>Don't copy the brain you're not allowed to.<br>Give it a <em>new</em> brain that's yours.</p>
+    <p class="note"><span class="stamp no">Door A</span> Rebuild Cursor's gRPC from the extracted proto — blocked by the brief's "no Cursor proto", grok-bot's <code>NOTICE.md</code>, and the disparity doc's "do not implement from this file." A rights review would have to clear it first.</p>
+    <p class="note"><span class="stamp go">Door B</span> Reuse the desktop shell, add a thin AG-UI adapter, point it at your Rust server + gateway. Proven once already in <code>barok-works/grok-runtime</code>. This is the one I'd build.</p>
+    <p class="note">Companion pieces: <a href="https://claude.ai/code/artifact/1c526721-d19b-406c-b4f9-feef43a507dd">why the coworkers move to the server</a> and the <a href="https://claude.ai/code/artifact/71c9828e-4713-4b06-9625-7125404ddf4a">original build plan</a>.</p>
+  </div>
+</section>

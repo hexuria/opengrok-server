@@ -1,0 +1,417 @@
+<title>The Coworkers Move Out</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+
+  /* Dark-first: the product this explains is a dark room with one gold lamp. */
+  :root{
+    --ground:#16130F;
+    --surface:#1F1A14;
+    --ink:#EDE6DA;
+    --muted:#A79E8F;
+    --line:#3D362C;
+    --gold:#E5B565;
+    --gold-soft:#2E2415;
+    --dead:#E07B6B;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --ground:#F2EFE9;
+      --surface:#FBFAF7;
+      --ink:#221C14;
+      --muted:#6E675C;
+      --line:#D8D2C6;
+      --gold:#9C6A0B;
+      --gold-soft:#F1E5CE;
+      --dead:#A03A2E;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#F2EFE9;
+    --surface:#FBFAF7;
+    --ink:#221C14;
+    --muted:#6E675C;
+    --line:#D8D2C6;
+    --gold:#9C6A0B;
+    --gold-soft:#F1E5CE;
+    --dead:#A03A2E;
+  }
+
+  body{
+    margin:0;
+    background:var(--ground);
+    color:var(--ink);
+    font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;
+    font-size:17px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{width:min(100% - 2.5rem, 56rem);margin-inline:auto}
+
+  .eyebrow{
+    font-size:.68rem;font-weight:600;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--gold);margin:0 0 .8rem;
+  }
+  h1,h2{
+    font-family:Fraunces,Georgia,serif;font-weight:900;
+    letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem;
+  }
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:44ch}
+
+  .hero{padding:4.5rem 0 3rem}
+  .plate{padding:2.6rem 0;border-top:1px solid var(--line)}
+  .closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+
+  figure{margin:0}
+  .figbox{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:1.4rem 1.2rem;
+    overflow-x:auto;
+  }
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:52ch}
+
+  /* SVG vocabulary */
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .fill{fill:var(--surface)}
+  .soft{opacity:.45}
+  .dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}
+  .accf{fill:var(--gold)}
+  .accT{fill:var(--gold)}
+  .bad{stroke:var(--dead)}
+  .badf{fill:var(--dead)}
+  .badT{fill:var(--dead)}
+  .goldwash{fill:var(--gold-soft)}
+  svg text{fill:currentColor;font-family:"Public Sans",sans-serif;font-size:13px}
+  .sm{font-size:11.5px;font-weight:600;letter-spacing:.09em}
+  .tiny{font-size:11.5px}
+  .micro{font-size:10.5px;fill:var(--muted)}
+
+  .big{
+    font-family:Fraunces,Georgia,serif;font-weight:600;
+    font-size:clamp(1.4rem,3.4vw,2rem);line-height:1.25;margin:0;
+    text-wrap:balance;
+  }
+  .big em{color:var(--gold);font-style:normal}
+  .note{margin:1.6rem 0 0;color:var(--muted);font-size:.95rem;max-width:48ch}
+  a{color:var(--gold);text-underline-offset:3px}
+</style>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">The OpenSesame pivot, in pictures</p>
+    <h1>The coworkers move out.</h1>
+    <p class="lede">They've been living in your browser tab. Seven pictures on why they need a building of their own.</p>
+  </div>
+</header>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Today</p>
+    <h2>Right now, the brain lives in your tab.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 210" role="img" aria-label="A laptop whose browser tab contains the working cog, the message queue, and the waiting — everything happens inside the page.">
+          <defs><marker id="a1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+          <!-- laptop -->
+          <rect class="ln fill" x="60" y="26" width="300" height="140" rx="8"/>
+          <line class="ln" x1="40" y1="180" x2="380" y2="180"/>
+          <!-- browser tab inside -->
+          <rect class="ln" x="80" y="44" width="260" height="104" rx="4"/>
+          <line class="ln soft" x1="80" y1="62" x2="340" y2="62"/>
+          <circle class="ln" cx="92" cy="53" r="3"/><circle class="ln" cx="104" cy="53" r="3"/>
+          <!-- cog inside the tab -->
+          <g transform="translate(130,104)">
+            <circle class="ln acc" r="12"/><circle class="ln acc" r="4.5"/>
+            <line class="ln acc" x1="12" y1="0" x2="18" y2="0"/><line class="ln acc" x1="-12" y1="0" x2="-18" y2="0"/>
+            <line class="ln acc" x1="0" y1="12" x2="0" y2="18"/><line class="ln acc" x1="0" y1="-12" x2="0" y2="-18"/>
+            <line class="ln acc" x1="8.5" y1="8.5" x2="12.7" y2="12.7"/><line class="ln acc" x1="-8.5" y1="-8.5" x2="-12.7" y2="-12.7"/>
+            <line class="ln acc" x1="8.5" y1="-8.5" x2="12.7" y2="-12.7"/><line class="ln acc" x1="-8.5" y1="8.5" x2="-12.7" y2="12.7"/>
+          </g>
+          <text x="130" y="140" text-anchor="middle" class="micro">the work</text>
+          <!-- queue inside the tab -->
+          <rect class="ln" x="176" y="88" width="20" height="20" rx="3"/>
+          <rect class="ln" x="202" y="88" width="20" height="20" rx="3"/>
+          <rect class="ln" x="228" y="88" width="20" height="20" rx="3"/>
+          <text x="212" y="140" text-anchor="middle" class="micro">the queue</text>
+          <!-- clock -->
+          <circle class="ln" cx="296" cy="98" r="14"/>
+          <line class="ln" x1="296" y1="98" x2="296" y2="88"/>
+          <line class="ln" x1="296" y1="98" x2="304" y2="102"/>
+          <text x="296" y="140" text-anchor="middle" class="micro">the waiting</text>
+          <text x="210" y="205" text-anchor="middle" class="sm">ALL INSIDE ONE PAGE</text>
+          <!-- coworkers to the right, fed by the tab -->
+          <line class="ln" x1="360" y1="96" x2="420" y2="96" marker-end="url(#a1)"/>
+          <circle class="ln fill" cx="448" cy="66" r="11"/><path class="ln" d="M432 96 q16 -20 32 0"/>
+          <circle class="ln fill" cx="496" cy="66" r="11"/><path class="ln" d="M480 96 q16 -20 32 0"/>
+          <circle class="ln fill" cx="472" cy="126" r="11"/><path class="ln" d="M456 156 q16 -20 32 0"/>
+          <text x="472" y="186" text-anchor="middle" class="sm">COWORKERS</text>
+        </svg>
+      </div>
+      <figcaption>The walk from coworker to coworker, the queue of who's next, the waiting for replies — all of it runs inside the page you're looking at.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">The bug you found</p>
+    <h2>Close the tab, kill the work.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 200" role="img" aria-label="The tab closes; the cog stops; of five coworkers asked, only the first ever answered.">
+          <defs><marker id="b1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+          <!-- closed laptop -->
+          <path class="ln soft dash" d="M52 96 A 54 54 0 0 1 156 96"/>
+          <rect class="ln fill" x="50" y="94" width="108" height="13" rx="4"/>
+          <line class="ln" x1="44" y1="114" x2="164" y2="114"/>
+          <text x="104" y="140" text-anchor="middle" class="tiny">refresh, or lid shut</text>
+          <!-- broken cog -->
+          <g transform="translate(238,84)">
+            <circle class="ln bad" r="12"/>
+            <line class="ln bad" x1="-7" y1="-7" x2="7" y2="7"/>
+            <line class="ln bad" x1="7" y1="-7" x2="-7" y2="7"/>
+          </g>
+          <text x="238" y="126" text-anchor="middle" class="tiny badT">walk dies here</text>
+          <!-- five coworkers, one answered -->
+          <line class="ln" x1="278" y1="84" x2="330" y2="84" marker-end="url(#b1)"/>
+          <g transform="translate(352,42)">
+            <circle class="ln acc fill" r="10"/><text x="22" y="4" class="tiny accT">answered</text>
+          </g>
+          <g transform="translate(352,78)"><circle class="ln soft fill" r="10"/><text x="22" y="4" class="tiny micro">silence</text></g>
+          <g transform="translate(352,114)"><circle class="ln soft fill" r="10"/><text x="22" y="4" class="tiny micro">silence</text></g>
+          <g transform="translate(352,150)"><circle class="ln soft fill" r="10"/><text x="22" y="4" class="tiny micro">silence</text></g>
+          <g transform="translate(466,96)"><circle class="ln soft fill" r="10"/><text x="0" y="34" text-anchor="middle" class="tiny micro">silence</text></g>
+        </svg>
+      </div>
+      <figcaption>Your @All asked five coworkers. The page died after the first reply — so four never even heard the question. Not an accident: the messenger lived in the page.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">The fix</p>
+    <h2>One building. Everything lives there.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 260" role="img" aria-label="One building labeled the server holds the harness, the tools, the computers and the workflows; the gateway is its front door, built into the same wall.">
+          <!-- building -->
+          <rect class="ln fill" x="120" y="46" width="330" height="180" rx="6"/>
+          <path class="ln" d="M108 46 L285 14 L462 46"/>
+          <text x="285" y="40" text-anchor="middle" class="sm">THE SERVER · RUST</text>
+          <!-- rooms -->
+          <rect class="ln" x="146" y="70" width="128" height="62" rx="4"/>
+          <g transform="translate(178,100)">
+            <circle class="ln" r="10"/><circle class="ln" r="3.5"/>
+            <line class="ln" x1="10" y1="0" x2="15" y2="0"/><line class="ln" x1="-10" y1="0" x2="-15" y2="0"/>
+            <line class="ln" x1="0" y1="10" x2="0" y2="15"/><line class="ln" x1="0" y1="-10" x2="0" y2="-15"/>
+          </g>
+          <text x="238" y="105" text-anchor="middle" class="tiny">harness</text>
+          <rect class="ln" x="296" y="70" width="128" height="62" rx="4"/>
+          <path class="ln" d="M322 112 l14 -14 m-14 0 l14 14"/>
+          <path class="ln" d="M348 96 a7 7 0 1 1 -6 12 l-8 8"/>
+          <text x="392" y="105" text-anchor="middle" class="tiny">tools</text>
+          <rect class="ln" x="146" y="146" width="128" height="60" rx="4"/>
+          <rect class="ln" x="164" y="160" width="28" height="20" rx="2"/><line class="ln" x1="170" y1="186" x2="186" y2="186"/>
+          <text x="238" y="180" text-anchor="middle" class="tiny">computers</text>
+          <rect class="ln" x="296" y="146" width="128" height="60" rx="4"/>
+          <circle class="ln" cx="326" cy="176" r="5"/><line class="ln" x1="331" y1="176" x2="352" y2="176"/><circle class="ln" cx="357" cy="176" r="5"/>
+          <text x="396" y="180" text-anchor="middle" class="tiny">workflows</text>
+          <!-- the gateway door, in the same wall -->
+          <rect class="ln acc goldwash" x="60" y="150" width="60" height="76" rx="4"/>
+          <circle class="accf" cx="108" cy="190" r="2.6"/>
+          <text x="90" y="248" text-anchor="middle" class="sm accT">THE GATEWAY</text>
+          <text x="90" y="140" text-anchor="middle" class="micro">the door, already built</text>
+        </svg>
+      </div>
+      <figcaption>Harness, tools, computers, workflows — rooms in one building. The gateway you already built in Rust isn't next to the building; it's the front door in its wall. Shipped as one.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Clients</p>
+    <h2>Your screen becomes a window.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 220" role="img" aria-label="Web, phone and terminal are windows looking into the same building; one window is dark and the cog inside keeps turning.">
+          <defs><marker id="c1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker></defs>
+          <!-- three windows -->
+          <rect class="ln fill" x="30" y="30" width="96" height="64" rx="6"/>
+          <line class="ln soft" x1="30" y1="46" x2="126" y2="46"/>
+          <text x="78" y="112" text-anchor="middle" class="tiny">web</text>
+          <rect class="ln fill" x="46" y="132" width="52" height="76" rx="8"/>
+          <line class="ln soft" x1="62" y1="200" x2="82" y2="200"/>
+          <text x="130" y="176" class="tiny">phone</text>
+          <rect class="ln fill" x="30" y="232" width="0" height="0"/>
+          <rect class="ln fill" x="150" y="140" width="96" height="56" rx="4"/>
+          <text x="162" y="162" class="tiny" style="font-family:ui-monospace,monospace">&gt;_</text>
+          <text x="198" y="216" text-anchor="middle" class="tiny">cli</text>
+          <!-- arrows: look in -->
+          <line class="ln" x1="132" y1="62" x2="304" y2="86" marker-end="url(#c1)"/>
+          <line class="ln" x1="104" y1="160" x2="304" y2="118" marker-end="url(#c1)"/>
+          <line class="ln" x1="252" y1="160" x2="304" y2="132" marker-end="url(#c1)"/>
+          <text x="240" y="66" class="micro">look in · ask</text>
+          <!-- building -->
+          <rect class="ln acc fill" x="314" y="52" width="216" height="130" rx="6"/>
+          <text x="422" y="44" text-anchor="middle" class="sm">THE BUILDING</text>
+          <g transform="translate(376,116)">
+            <circle class="ln acc" r="13"/><circle class="ln acc" r="5"/>
+            <line class="ln acc" x1="13" y1="0" x2="19" y2="0"/><line class="ln acc" x1="-13" y1="0" x2="-19" y2="0"/>
+            <line class="ln acc" x1="0" y1="13" x2="0" y2="19"/><line class="ln acc" x1="0" y1="-13" x2="0" y2="-19"/>
+            <line class="ln acc" x1="9.2" y1="9.2" x2="13.4" y2="13.4"/><line class="ln acc" x1="-9.2" y1="-9.2" x2="-13.4" y2="-13.4"/>
+            <line class="ln acc" x1="9.2" y1="-9.2" x2="13.4" y2="-13.4"/><line class="ln acc" x1="-9.2" y1="9.2" x2="-13.4" y2="13.4"/>
+          </g>
+          <rect class="ln fill" x="432" y="90" width="66" height="52" rx="3"/>
+          <line class="ln" x1="444" y1="106" x2="486" y2="106"/>
+          <line class="ln" x1="444" y1="118" x2="486" y2="118"/>
+          <line class="ln" x1="444" y1="130" x2="472" y2="130"/>
+          <text x="422" y="204" text-anchor="middle" class="tiny">still going, whoever's watching</text>
+        </svg>
+      </div>
+      <figcaption>Web, mobile, CLI — anything can be a window, because a window only looks in and asks. Close any of them; the building doesn't notice.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Coworkers</p>
+    <h2>Each coworker gets an office, not a corner of your laptop.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 190" role="img" aria-label="Inside the building, each coworker has its own office with a computer, tools and files.">
+          <rect class="ln fill" x="24" y="24" width="512" height="140" rx="6"/>
+          <!-- office 1 -->
+          <rect class="ln" x="48" y="46" width="140" height="96" rx="4"/>
+          <circle class="ln acc fill" cx="82" cy="76" r="11"/><path class="ln acc" d="M66 104 q16 -20 32 0"/>
+          <rect class="ln" x="118" y="66" width="30" height="22" rx="2"/>
+          <path class="ln" d="M124 108 l10 -10 m-10 0 l10 10"/>
+          <rect class="ln" x="146" y="98" width="22" height="16" rx="2"/>
+          <text x="118" y="160" text-anchor="middle" class="tiny">its computer · its tools</text>
+          <!-- office 2 -->
+          <rect class="ln" x="210" y="46" width="140" height="96" rx="4"/>
+          <circle class="ln acc fill" cx="244" cy="76" r="11"/><path class="ln acc" d="M228 104 q16 -20 32 0"/>
+          <rect class="ln" x="280" y="66" width="30" height="22" rx="2"/>
+          <path class="ln" d="M286 108 l10 -10 m-10 0 l10 10"/>
+          <rect class="ln" x="308" y="98" width="22" height="16" rx="2"/>
+          <!-- office 3 -->
+          <rect class="ln" x="372" y="46" width="140" height="96" rx="4"/>
+          <circle class="ln acc fill" cx="406" cy="76" r="11"/><path class="ln acc" d="M390 104 q16 -20 32 0"/>
+          <rect class="ln" x="442" y="66" width="30" height="22" rx="2"/>
+          <path class="ln" d="M448 108 l10 -10 m-10 0 l10 10"/>
+          <rect class="ln" x="470" y="98" width="22" height="16" rx="2"/>
+        </svg>
+      </div>
+      <figcaption>A coworker's computer, tools and files belong to the building. Every window — yours, your phone's, a teammate's — sees the same coworker doing the same work.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Who decides</p>
+    <h2>You suggest. The guard decides.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 210" role="img" aria-label="A window sends configuration to the building's guard desk; the guard allows some requests into the offices and refuses others, every single time.">
+          <defs>
+            <marker id="d1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+            <marker id="d2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="accf"/></marker>
+          </defs>
+          <!-- window -->
+          <rect class="ln fill" x="28" y="66" width="96" height="64" rx="6"/>
+          <line class="ln soft" x1="28" y1="82" x2="124" y2="82"/>
+          <text x="76" y="150" text-anchor="middle" class="tiny">any window</text>
+          <line class="ln" x1="132" y1="98" x2="196" y2="98" marker-end="url(#d1)"/>
+          <text x="164" y="86" text-anchor="middle" class="micro">"I'd like…"</text>
+          <!-- guard desk -->
+          <rect class="ln acc goldwash" x="206" y="56" width="130" height="86" rx="6"/>
+          <circle class="ln" cx="256" cy="86" r="10"/>
+          <path class="ln" d="M242 112 q14 -18 28 0"/>
+          <rect class="ln" x="288" y="80" width="34" height="42" rx="2"/>
+          <line class="ln" x1="294" y1="90" x2="316" y2="90"/>
+          <line class="ln" x1="294" y1="99" x2="316" y2="99"/>
+          <line class="ln" x1="294" y1="108" x2="310" y2="108"/>
+          <text x="271" y="162" text-anchor="middle" class="sm accT">THE GUARD · POLICY</text>
+          <text x="271" y="180" text-anchor="middle" class="micro">checks every action, every time</text>
+          <!-- allowed path -->
+          <line class="ln acc" x1="344" y1="80" x2="424" y2="60" marker-end="url(#d2)"/>
+          <text x="384" y="54" text-anchor="middle" class="tiny accT">yes ✓</text>
+          <rect class="ln" x="434" y="38" width="96" height="48" rx="4"/>
+          <text x="482" y="66" text-anchor="middle" class="tiny">the offices</text>
+          <!-- denied path -->
+          <line class="ln bad" x1="344" y1="118" x2="424" y2="138" marker-end="url(#d1)"/>
+          <text x="384" y="148" text-anchor="middle" class="tiny badT">no ✗ — and why</text>
+        </svg>
+      </div>
+      <figcaption>Windows configure — who a coworker is, what it may reach. But a window's word is a request. The guard at the door enforces the rules on every single action, so a lying client changes nothing.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="plate">
+  <div class="wrap">
+    <p class="eyebrow">Broadcast, done right</p>
+    <h2>@All becomes: tell the building once.</h2>
+    <figure>
+      <div class="figbox">
+        <svg viewBox="0 0 560 230" role="img" aria-label="One message enters the building, is written in a ledger, and fans out to five offices at the same time; the window closes midway and every answer still arrives.">
+          <defs>
+            <marker id="e1" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="accf"/></marker>
+            <marker id="e2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="currentColor"/></marker>
+          </defs>
+          <!-- one message in -->
+          <rect class="ln fill" x="24" y="88" width="82" height="40" rx="8"/>
+          <line class="ln" x1="38" y1="102" x2="92" y2="102"/>
+          <line class="ln" x1="38" y1="114" x2="76" y2="114"/>
+          <text x="65" y="150" text-anchor="middle" class="tiny">one @All</text>
+          <line class="ln" x1="112" y1="108" x2="164" y2="108" marker-end="url(#e2)"/>
+          <!-- ledger -->
+          <rect class="ln acc goldwash" x="174" y="76" width="92" height="64" rx="4"/>
+          <line class="ln acc" x1="188" y1="94" x2="252" y2="94"/>
+          <line class="ln acc" x1="188" y1="106" x2="252" y2="106"/>
+          <line class="ln acc" x1="188" y1="118" x2="236" y2="118"/>
+          <text x="220" y="160" text-anchor="middle" class="sm accT">THE LEDGER</text>
+          <text x="220" y="178" text-anchor="middle" class="micro">written down before anything runs</text>
+          <!-- parallel fan-out -->
+          <line class="ln acc" x1="272" y1="88" x2="380" y2="36" marker-end="url(#e1)"/>
+          <line class="ln acc" x1="272" y1="98" x2="380" y2="76" marker-end="url(#e1)"/>
+          <line class="ln acc" x1="272" y1="108" x2="380" y2="112" marker-end="url(#e1)"/>
+          <line class="ln acc" x1="272" y1="118" x2="380" y2="148" marker-end="url(#e1)"/>
+          <line class="ln acc" x1="272" y1="128" x2="380" y2="186" marker-end="url(#e1)"/>
+          <text x="330" y="26" text-anchor="middle" class="micro">all at once, not one by one</text>
+          <circle class="ln fill" cx="400" cy="34" r="10"/>
+          <circle class="ln fill" cx="400" cy="75" r="10"/>
+          <circle class="ln fill" cx="400" cy="112" r="10"/>
+          <circle class="ln fill" cx="400" cy="149" r="10"/>
+          <circle class="ln fill" cx="400" cy="187" r="10"/>
+          <text x="452" y="38" class="tiny">answers land</text>
+          <text x="452" y="56" class="tiny">as each finishes</text>
+          <!-- dead window, unbothered -->
+          <rect class="ln soft dash" x="452" y="130" width="84" height="56" rx="6"/>
+          <path class="ln bad" d="M482 148 l20 20 m0 -20 l-20 20"/>
+          <text x="494" y="206" text-anchor="middle" class="micro">your window, closed — nobody cares</text>
+        </svg>
+      </div>
+      <figcaption>One request. The building writes it in a ledger, then asks everyone at the same time. Refresh, close the lid, lose power — the ledger doesn't blink, and every answer is waiting when you look back in.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="closer">
+  <div class="wrap">
+    <p class="big">The tab was a <em>hand</em> doing the building's job.<br>Give the building the job, and every window is just a view.</p>
+    <p class="note">Half the building is standing: the gateway — the door with the keys — is built, in Rust, and serving. The policy guard has a spec, a starter workspace and passing tests. What we've built so far becomes the first window, not wasted work.</p>
+    <p class="note">Companion pieces: the <a href="https://claude.ai/code/artifact/71c9828e-4713-4b06-9625-7125404ddf4a">build plan &amp; specification</a> and <a href="https://claude.ai/code/artifact/9b07e7f0-d235-4534-a7fe-3b19fb73f0e2">the Cowork picture book</a> this future rhymes with.</p>
+  </div>
+</section>

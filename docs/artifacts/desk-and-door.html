@@ -1,0 +1,208 @@
+<title>The Desk and the Door</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,750&family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;600&display=swap">
+<style>
+  :root{
+    --paper:#F3EFE7; --panel:#FDFBF6; --panel-2:#EAE4D6;
+    --ink:#241F19; --ink-2:#5C544A; --ink-3:#8A8072;
+    --rule:#D8D0BF; --rule-2:#C2B8A3;
+    --desk:#8A5A2B; --desk-bg:#EFE0CB;
+    --door:#274D3D; --door-bg:#D9E6DC;
+    --warn:#96263B; --warn-bg:#F3DCDF;
+    --wire:#5C544A;
+    --shadow:0 1px 2px rgba(36,31,25,.07),0 10px 28px rgba(36,31,25,.08);
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#151310; --panel:#1F1C17; --panel-2:#2A251E;
+      --ink:#EFEAE0; --ink-2:#B5AC9E; --ink-3:#847B6C;
+      --rule:#3A342A; --rule-2:#4A4234;
+      --desk:#D6A265; --desk-bg:#33271A;
+      --door:#8FC2A6; --door-bg:#1B2E24;
+      --warn:#EFA0AF; --warn-bg:#3A1B23;
+      --wire:#B5AC9E;
+      --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 30px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#151310; --panel:#1F1C17; --panel-2:#2A251E;
+    --ink:#EFEAE0; --ink-2:#B5AC9E; --ink-3:#847B6C;
+    --rule:#3A342A; --rule-2:#4A4234;
+    --desk:#D6A265; --desk-bg:#33271A;
+    --door:#8FC2A6; --door-bg:#1B2E24;
+    --warn:#EFA0AF; --warn-bg:#3A1B23;
+    --wire:#B5AC9E;
+    --shadow:0 1px 2px rgba(0,0,0,.5),0 12px 30px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Public Sans",system-ui,sans-serif;
+       font-size:17px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:900px;margin:0 auto;padding:56px 22px 96px;display:flex;flex-direction:column;gap:64px}
+  h1,h2{font-family:Fraunces,Georgia,serif;text-wrap:balance;margin:0;line-height:1.06}
+  h1{font-size:clamp(42px,7.5vw,72px);font-weight:750;letter-spacing:-.015em}
+  h2{font-size:clamp(25px,3.6vw,34px);font-weight:600}
+  p{margin:0;max-width:60ch}
+  .lede{font-size:clamp(19px,2.3vw,22px);color:var(--ink-2);max-width:52ch}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+  .mono{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  section{display:flex;flex-direction:column;gap:22px}
+  .head{display:flex;flex-direction:column;gap:8px}
+
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:680px){.duo{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--rule);border-radius:16px;box-shadow:var(--shadow);
+        padding:24px;display:flex;flex-direction:column;gap:12px}
+  .card .tag{align-self:flex-start;font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.09em;
+             text-transform:uppercase;padding:5px 11px;border-radius:99px;font-weight:500}
+  .card.desk .tag{background:var(--desk-bg);color:var(--desk)}
+  .card.door .tag{background:var(--door-bg);color:var(--door)}
+  .card h3{font-family:Fraunces,serif;font-weight:600;font-size:22px;margin:0}
+  .card .addr{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--ink-3);overflow-x:auto;white-space:nowrap}
+  .card ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+  .card li{display:flex;gap:10px;color:var(--ink-2);font-size:15.5px}
+  .card li::before{content:"•";flex:none;font-weight:700}
+  .card.desk li::before{color:var(--desk)}
+  .card.door li::before{color:var(--door)}
+  .card .never{border-top:1px dashed var(--rule-2);padding-top:10px;font-size:15px;color:var(--ink-2)}
+  .card .never b{color:var(--warn)}
+
+  /* the journey */
+  .journey{background:var(--panel);border:1px solid var(--rule);border-radius:16px;box-shadow:var(--shadow);
+           padding:26px 22px;display:flex;flex-direction:column;gap:0;overflow-x:auto}
+  .leg{display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:start;min-width:520px}
+  .leg .stop{font-family:"IBM Plex Mono",monospace;font-size:13px;font-weight:500;padding:8px 12px;border-radius:9px;
+             text-align:center;white-space:nowrap}
+  .leg p{font-size:15.5px;color:var(--ink-2);padding:6px 0 0}
+  .legline{display:grid;grid-template-columns:150px 1fr;min-width:520px}
+  .legline span{justify-self:center;color:var(--wire);font-size:20px;line-height:1;padding:6px 0}
+  .s-you{background:var(--panel-2);color:var(--ink)}
+  .s-desk{background:var(--desk-bg);color:var(--desk)}
+  .s-door{background:var(--door-bg);color:var(--door)}
+  .wirename{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink-3)}
+
+  .qa{display:flex;flex-direction:column}
+  .qa > div{padding:20px 0;border-bottom:1px solid var(--rule);display:flex;flex-direction:column;gap:8px}
+  .qa > div:last-child{border-bottom:0}
+  .qa .q{font-family:Fraunces,serif;font-weight:600;font-size:20px}
+  .qa p{color:var(--ink-2)}
+  .qa b{color:var(--ink)}
+
+  .warnbox{background:var(--warn-bg);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
+           border-radius:16px;padding:24px;display:flex;flex-direction:column;gap:10px}
+  .warnbox h3{font-family:Fraunces,serif;font-size:22px;margin:0;color:var(--warn)}
+  .warnbox p{color:var(--ink-2)}
+  .keys{display:flex;gap:8px;flex-wrap:wrap}
+  .key{font-family:"IBM Plex Mono",monospace;font-size:12px;padding:5px 10px;border-radius:7px;
+       background:var(--panel);border:1px solid var(--rule-2);color:var(--ink-2)}
+  .key.x{text-decoration:line-through;color:var(--ink-3)}
+
+  .proof{background:var(--panel-2);border:1px solid var(--rule);border-radius:12px;padding:14px 18px;
+         font-family:"IBM Plex Mono",monospace;font-size:13.5px;color:var(--ink-2);overflow-x:auto;white-space:pre}
+  footer{border-top:1px solid var(--rule);padding-top:20px;color:var(--ink-3);font-size:14.5px}
+</style>
+
+<div class="wrap">
+
+  <header style="display:flex;flex-direction:column;gap:18px">
+    <div class="eyebrow">OpenSesame · two addresses, two jobs</div>
+    <h1>The Desk and the Door</h1>
+    <p class="lede">They look like rivals because both are URLs your config points at. They are one employee and one switchboard &mdash; and the employee <em>calls through</em> the switchboard.</p>
+  </header>
+
+  <section>
+    <div class="duo">
+      <div class="card desk">
+        <span class="tag">The desk &middot; a coworker&rsquo;s body</span>
+        <h3>localhost:4201/ag-ui</h3>
+        <span class="addr">speaks AG-UI &mdash; the conversation wire</span>
+        <ul>
+          <li>Receives a <b>turn</b>: the messages, the tools it may use, its standing role.</li>
+          <li>Runs the <b>loop</b>: think &rarr; call a tool &rarr; read the result &rarr; answer.</li>
+          <li>Streams the answer back as events your channel renders live.</li>
+          <li>Every tool call goes back through OpenSesame &mdash; grant, policy, audit.</li>
+        </ul>
+        <p class="never">Holds a runtime token so OpenSesame trusts it. <b>Never a model key.</b></p>
+      </div>
+      <div class="card door">
+        <span class="tag">The door &middot; the model switchboard</span>
+        <h3>127.0.0.1:29080</h3>
+        <span class="addr">speaks OpenAI dialect &mdash; the model wire</span>
+        <ul>
+          <li>Holds <b>every credential</b>: your Grok seat, any pooled API keys.</li>
+          <li>Resolves a route &mdash; <span class="mono">xai/grok-4.6@sub</span>, <span class="mono">oag/auto</span> &mdash; to a live credential.</li>
+          <li>Meters spend, enforces budgets and reserves, keeps the ledger.</li>
+          <li>Refuses with a reason when nothing can serve.</li>
+        </ul>
+        <p class="never">Answers one question only: <b>&ldquo;complete this prompt.&rdquo;</b> It has no loop, no tools, no memory.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="head">
+      <div class="eyebrow">One turn, end to end</div>
+      <h2>The desk uses the door</h2>
+    </div>
+    <div class="journey">
+      <div class="leg"><span class="stop s-you">you, in a room</span><p>&ldquo;Who are you?&rdquo; &mdash; OpenSesame picks which coworker answers.</p></div>
+      <div class="legline"><span>&darr;</span><span class="wirename">AG-UI &middot; the turn travels to the desk, pin riding along</span></div>
+      <div class="leg"><span class="stop s-desk">:4201/ag-ui</span><p>The coworker wakes, reads its role and its pin: <span class="mono">xai/grok-4.6@sub</span>.</p></div>
+      <div class="legline"><span>&darr;</span><span class="wirename">OpenAI dialect &middot; &ldquo;complete this, as that route&rdquo;</span></div>
+      <div class="leg"><span class="stop s-door">:29080</span><p>The door finds your Grok seat, spends from it, returns the thought.</p></div>
+      <div class="legline"><span>&darr;</span><span class="wirename">events stream back up the same path</span></div>
+      <div class="leg"><span class="stop s-you">your channel</span><p>&ldquo;I am Wire Tester&hellip;&rdquo; &mdash; typed out live as it arrives.</p></div>
+    </div>
+    <div class="proof">the door&rsquo;s own ledger, from that exact turn:
+21:44:32  xai  grok-4.6  grok-seat  passthrough  200</div>
+  </section>
+
+  <section>
+    <div class="head">
+      <div class="eyebrow">Your questions, straight</div>
+      <h2>Conflicting? Pick one? Merge them?</h2>
+    </div>
+    <div class="qa">
+      <div>
+        <span class="q">Do they conflict?</span>
+        <p>No &mdash; they never answer the same question. The desk answers <b>&ldquo;do this work.&rdquo;</b> The door answers <b>&ldquo;think this thought.&rdquo;</b> Different wires, different jobs, one calls the other.</p>
+      </div>
+      <div>
+        <span class="q">Should we use both?</span>
+        <p>You already do, on every turn. The Grok answer above passed through <b>both addresses</b> &mdash; desk first, door second. Remove either and the turn dies: no desk, nobody works; no door, nobody thinks.</p>
+      </div>
+      <div>
+        <span class="q">Why not just the desk, with the gateway built inside it?</span>
+        <p>Because then <b>every coworker becomes a keyholder</b> &mdash; which is the exact bug this product was rebuilt to escape.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="warnbox">
+      <h3>The merge, played forward</h3>
+      <p>Fold the gateway into the agent and each agent process now carries credentials:</p>
+      <div class="keys">
+        <span class="key">agent #1 &middot; grok seat</span>
+        <span class="key">agent #2 &middot; grok seat</span>
+        <span class="key">agent #3 &middot; grok seat</span>
+        <span class="key x">rotate = touch every one</span>
+      </div>
+      <p>One roof for spend and budgets becomes N copies that disagree. A third-party coworker on someone else&rsquo;s server would need <b>your key shipped to them</b>. And a bug in any agent&rsquo;s loop sits in the same process as the wallet.</p>
+      <p><b>Kept apart:</b> a coworker names a route, never holds a key; rotate once at the door; every token of spend lands in one ledger. The desk can crash, be rewritten, or live on a stranger&rsquo;s machine &mdash; the wallet never moves.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="head">
+      <div class="eyebrow">If it helps</div>
+      <h2>One sentence to keep</h2>
+    </div>
+    <p class="lede" style="font-family:Fraunces,serif">The desk is <em>who works</em>. The door is <em>who pays for thinking</em>. OpenSesame is the office that connects every desk to one door.</p>
+  </section>
+
+  <footer>
+    From your running system, 29 Aug 2026 &mdash; the ledger line is real, from the turn Wire Tester answered on your Grok subscription.
+  </footer>
+
+</div>
