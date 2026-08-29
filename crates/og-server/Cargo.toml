@@ -1,0 +1,27 @@
+[package]
+name = "og-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+og-core = { path = "../og-core" }
+og-wire = { path = "../og-wire" }
+og-harness = { path = "../og-harness" }
+og-store = { path = "../og-store" }
+og-policy = { path = "../og-policy" }
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true

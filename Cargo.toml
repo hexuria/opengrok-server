@@ -1,0 +1,49 @@
+# OpenGrok — the server the coworkers live on.
+#
+# Crate-per-concern, mirroring open-ai-gateway's layout, because the two ship together and a
+# reader who knows one should be able to navigate the other. The dependency direction is a
+# straight line: core knows nothing, everything else knows core.
+[workspace]
+resolver = "3"
+members = [
+  "crates/opengrok",   # the binary: wires the server, embeds the gateway
+  "crates/og-core",    # domain types, ids, errors. No I/O.
+  "crates/og-wire",    # the client contract: gateway commands, transcript entries, activity
+  "crates/og-harness", # the agent loop (Rig): turns, tools, streaming
+  "crates/og-box",     # the coworker's computer
+  "crates/og-tools",   # tool definitions and the executor
+  "crates/og-policy",  # what a principal may make a coworker do
+  "crates/og-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
+  "crates/og-server",  # Axum: the host-facing API and the event stream
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "json", "chrono", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+async-trait = "0.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

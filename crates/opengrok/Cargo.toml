@@ -1,0 +1,22 @@
+[package]
+name = "opengrok"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "opengrok"
+path = "src/main.rs"
+
+[dependencies]
+og-server = { path = "../og-server" }
+og-store = { path = "../og-store" }
+og-core = { path = "../og-core" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
