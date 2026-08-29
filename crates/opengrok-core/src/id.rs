@@ -53,3 +53,13 @@ id!(
     "e",
     "One entry in a transcript, as the client knows it."
 );
+id!(
+    AccountId,
+    "acct",
+    "A person's account with us — what the client's Cursor sign-in resolves to."
+);
+id!(
+    SessionId,
+    "sess",
+    "One signed-in session: an access/refresh token pair the client holds."
+);

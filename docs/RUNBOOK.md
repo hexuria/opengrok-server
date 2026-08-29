@@ -72,7 +72,7 @@ createdb -h 127.0.0.1 -p 5452 -U openbot opengrok   # or psql -c 'create databas
 ```
 
 ```
-OG_DATABASE_URL=postgres://openbot:openbot@127.0.0.1:5452/opengrok
+OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok
 ```
 
 Migrations live in `crates/opengrok-store/migrations/` and run **in-process at startup under a Postgres

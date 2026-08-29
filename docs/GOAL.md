@@ -27,6 +27,17 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 | Sandboxed shell | `vercel-labs/just-bash` is TypeScript — usable only inside a Node sidecar or on the box itself, not in-process. Evaluate when the tool executor needs a no-box shell; do not block on it. |
 | Repo | `hexuria/opengrok`, **private** (LEGAL #4). CI: fmt + clippy + test on every push. |
 
+### Evaluated and deferred
+
+**Crux (`redbadger/crux`)** — proposed for "one backend, many clients". It does not fit *this*
+crate: Crux is explicitly a **client-side** framework, a Rust core that runs inside each app
+(iOS/Android/web) with a platform shell doing I/O. Putting agent logic in a core that ships inside
+the client is the exact shape non-negotiable #5 forbids — the prior product died of it. The goal it
+serves is already met here by the server owning the logic behind one wire contract, and the part
+worth copying is already in place: `opengrok-core` is pure and I/O-free, like a Crux core, which is
+why the domain tests need no database. **Revisit when we build our own clients** (the CLI and a
+native app sharing view logic) — that is a client decision, not a server one.
+
 ## Slices, in order — one at a time, tested, verified
 
 Done means: implemented, tested, exercised against the real client, and green in CI.

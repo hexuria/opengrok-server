@@ -17,6 +17,8 @@ opengrok-server = { path = "../opengrok-server" }
 opengrok-store = { path = "../opengrok-store" }
 opengrok-core = { path = "../opengrok-core" }
 tokio.workspace = true
+axum.workspace = true
+sqlx.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

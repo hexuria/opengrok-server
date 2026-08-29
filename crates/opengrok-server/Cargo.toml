@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+base64.workspace = true
+
 [lints]
 workspace = true
 
@@ -14,6 +17,9 @@ opengrok-wire = { path = "../opengrok-wire" }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-store = { path = "../opengrok-store" }
 opengrok-policy = { path = "../opengrok-policy" }
+jsonwebtoken.workspace = true
+sha2.workspace = true
+rand.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true

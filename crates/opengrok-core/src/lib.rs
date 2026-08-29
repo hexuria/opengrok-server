@@ -3,9 +3,13 @@
 //! This crate performs no I/O. It exists so every other crate agrees on what a coworker, a run
 //! and a principal *are* without depending on a database, an HTTP client, or each other.
 
+pub mod account;
 pub mod id;
 
-pub use id::{BoxId, CoworkerId, PrincipalId, RunId, TranscriptEntryId};
+pub use account::{
+    Account, AccountCommand, AccountError, AccountEvent, AccountView, Plan, Session,
+};
+pub use id::{AccountId, BoxId, CoworkerId, PrincipalId, RunId, SessionId, TranscriptEntryId};
 
 /// What went wrong, in the vocabulary of the domain rather than of a transport.
 #[derive(Debug, thiserror::Error)]

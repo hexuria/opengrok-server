@@ -52,6 +52,14 @@ rmcp = "3"
 # prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
 #   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
 prost = "0.14"
+# Slice 1 (auth): our own JWTs. The client base64url-decodes the payload itself and reads
+#   sub/email/exp, so the access token has to be a real JWT — see opengrok-server/src/auth/token.rs.
+# `rust_crypto` rather than `aws_lc_rs`: jsonwebtoken 11 refuses to pick a provider by itself, and
+#   the pure-Rust one keeps a C toolchain out of the CI image. Exactly one must be enabled.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+sha2 = "0.11"
+rand = "0.10"
+base64 = "0.23"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
