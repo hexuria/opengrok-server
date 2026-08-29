@@ -4,3 +4,9 @@
 .env.*
 !.env.example
 .DS_Store
+
+# Next.js client
+web/node_modules
+web/.next
+web/out
+web/.env*.local

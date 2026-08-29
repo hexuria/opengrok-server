@@ -38,11 +38,27 @@ worth copying is already in place: `opengrok-core` is pure and I/O-free, like a 
 why the domain tests need no database. **Revisit when we build our own clients** (the CLI and a
 native app sharing view logic) — that is a client decision, not a server one.
 
+## One client: the Next.js web app
+
+**Operator decision, 29 Aug 2026.** The verification surface is a Next.js app in `web/`, not the
+Electron desktop client. Reason: the desktop client is a go/no-go gamble — its renderer is
+git-ignored and needs a DMG the operator must possess (`RUNBOOK.md` §0), plus a sudo hosts alias
+and a seam-B mock before it will even call `listAgents`. A web client we own can exercise every
+slice the day it lands.
+
+This does **not** change what we build. The contract is still transcribed from the desktop client's
+source — that is where the shapes come from and the only reason they are trustworthy. The web app
+consumes the same endpoints. When the desktop client is eventually hydrated it should work without
+server changes; if it does not, the difference is a bug in our transcription, and the web client
+will have made that cheap to find.
+
 ## Slices, in order — one at a time, tested, verified
 
-Done means: implemented, tested, exercised against the real client, and green in CI.
+Done means: implemented, tested, exercised against the Next.js client, and green in CI.
 
-1. **Auth — replace Cursor's OAuth.** `SAND_BACKEND_URL` points the client's whole auth backend at
+1. ✅ **Auth — replace Cursor's OAuth.** *Done 29 Aug 2026 (`582521f`).* Two endpoints, our own
+   JWTs, event-sourced accounts, `scripts/slice1-auth-smoke.sh` green against real Postgres.
+   Original scope, kept for reference: `SAND_BACKEND_URL` points the client's whole auth backend at
    us (`cursor-token.ts:39`). A non-default backend makes `isDevAuthBackend` true, which unlocks
    `GET /auth/cursor_dev_session_token?plan=&trial=&email=` — no browser flow needed for the first
    pass. Serve that plus `POST /oauth/token` (refresh grant → `{access_token, refresh_token}`) and
@@ -57,7 +73,7 @@ Done means: implemented, tested, exercised against the real client, and green in
    survives the client disconnecting.
 5. **Seam B beyond auth** — the remaining Connect services the client calls, transcribed into
    `opengrok-proto`, served at the Axum edge.
-6. **AG-UI endpoint** — the web window onto the same server.
+6. **AG-UI endpoint** — the streaming protocol the web client consumes.
 7. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 
 ## Provenance for slice 1 (read before implementing)
