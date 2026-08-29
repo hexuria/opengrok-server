@@ -61,6 +61,9 @@ jsonwebtoken = { version = "11", default-features = false, features = ["rust_cry
 sha2 = "0.11"
 rand = "0.10"
 base64 = "0.23"
+# The credential vault. An AEAD so a tampered ciphertext fails to open rather than decrypting to
+# something else; pure Rust, so no C toolchain enters the build for it.
+chacha20poly1305 = "0.11"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

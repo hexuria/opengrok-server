@@ -54,6 +54,42 @@ create table if not exists coworker_view (
 
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
+-- An authentication that happened. The token is NOT here — it is in `secret_store`, encrypted, and
+-- this row only says who authenticated and what it opens.
+create table if not exists connection_view (
+    id            text   primary key,
+    connector     text   not null,
+    -- 'global' | 'user' | 'bot', with owner_id null for global.
+    scope         text   not null,
+    owner_id      text,
+    -- Shown to a person: you@work.com, an org name. Never a secret.
+    label         text   not null,
+    disconnected  boolean not null default false,
+    updated_at_ms bigint not null
+);
+
+create index if not exists connection_view_owner_idx on connection_view (scope, owner_id, connector);
+
+-- Who a connection has been lent to. Its own table because a loan is a separate decision from the
+-- authentication, which is the whole reason a person need not sign in once per coworker.
+create table if not exists connection_loan (
+    connection_id text not null,
+    coworker_id   text not null,
+    updated_at_ms bigint not null,
+    primary key (connection_id, coworker_id)
+);
+
+create index if not exists connection_loan_coworker_idx on connection_loan (coworker_id);
+
+-- The ciphertext, and nothing that hints at what it opens. Separate from connection_view so a
+-- credential can be shredded without deleting the record that it once existed.
+create table if not exists secret_store (
+    id            text   primary key,
+    nonce         bytea  not null,
+    ciphertext    bytea  not null,
+    updated_at_ms bigint not null
+);
+
 -- Who may make which coworker do what. A row here is permission; its absence is refusal, which is
 -- why nothing in the schema grants by default and why `policy_for` returns an empty context rather
 -- than a permissive one when it finds nothing.

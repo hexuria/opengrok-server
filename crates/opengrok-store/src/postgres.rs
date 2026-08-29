@@ -9,7 +9,9 @@
 //! "signed in" and then read a projection that has never heard of them. They commit together or
 //! neither commits.
 
+use crate::vault::{Sealed, Vault};
 use opengrok_core::account::{Account, AccountEvent, AccountView, Plan};
+use opengrok_core::connection::{Connection, ConnectionEvent, ConnectionView, Owner};
 use opengrok_core::coworker::{Coworker, CoworkerEvent, CoworkerView};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId, RunId};
 use opengrok_core::run::{Run, RunEvent, RunStatus, RunView};
@@ -612,5 +614,257 @@ impl PgStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+/// Connections: an authentication that happened, and who may borrow it.
+impl PgStore {
+    pub async fn load_connection(&self, id: &str) -> StoreResult<(Connection, i64)> {
+        let rows = sqlx::query(
+            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
+        )
+        .bind(format!("connection/{id}"))
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut seq = 0_i64;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            seq = row.try_get::<i64, _>("stream_seq")?;
+            let payload: serde_json::Value = row.try_get("payload")?;
+            let event: ConnectionEvent = serde_json::from_value(payload)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            events.push(event);
+        }
+        Ok((Connection::replay(&events), seq))
+    }
+
+    /// Append connection events, refresh the projections, and seal the credential — all in one
+    /// transaction.
+    ///
+    /// The secret rides along rather than being written separately: a connection whose row exists
+    /// without its credential is one that resolves, is chosen, and then fails at the moment of use.
+    pub async fn append_connection(
+        &self,
+        id: &str,
+        expected_seq: i64,
+        events: &[ConnectionEvent],
+        state: &Connection,
+        secret: Option<&Sealed>,
+        at_ms: i64,
+    ) -> StoreResult<i64> {
+        let mut tx = self.pool.begin().await?;
+        let stream = format!("connection/{id}");
+        let mut seq = expected_seq;
+
+        for event in events {
+            seq += 1;
+            let payload = serde_json::to_value(event)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            sqlx::query(
+                "insert into events (stream_id, stream_seq, event_type, payload)
+                 values ($1, $2, $3, $4)",
+            )
+            .bind(&stream)
+            .bind(seq)
+            .bind(event.event_type())
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let (scope, owner_id) = match &state.owner {
+            Some(Owner::Global) => ("global", None),
+            Some(Owner::User(account)) => ("user", Some(account.as_str().to_string())),
+            Some(Owner::Bot(coworker)) => ("bot", Some(coworker.as_str().to_string())),
+            None => ("global", None),
+        };
+
+        sqlx::query(
+            "insert into connection_view
+               (id, connector, scope, owner_id, label, disconnected, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)
+             on conflict (id) do update set
+               connector = excluded.connector,
+               scope = excluded.scope,
+               owner_id = excluded.owner_id,
+               label = excluded.label,
+               disconnected = excluded.disconnected,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(id)
+        .bind(&state.connector)
+        .bind(scope)
+        .bind(owner_id)
+        .bind(&state.label)
+        .bind(state.disconnected)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+
+        // Loans are rewritten wholesale from the aggregate rather than patched per event: the
+        // aggregate is the truth, and reconstructing beats trying to keep two views in step.
+        sqlx::query("delete from connection_loan where connection_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        for coworker in &state.loans {
+            sqlx::query(
+                "insert into connection_loan (connection_id, coworker_id, updated_at_ms)
+                 values ($1, $2, $3)",
+            )
+            .bind(id)
+            .bind(coworker.as_str())
+            .bind(at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if let Some(sealed) = secret {
+            sqlx::query(
+                "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
+                 values ($1, $2, $3, $4)
+                 on conflict (id) do update set
+                   nonce = excluded.nonce,
+                   ciphertext = excluded.ciphertext,
+                   updated_at_ms = excluded.updated_at_ms",
+            )
+            .bind(id)
+            .bind(&sealed.nonce)
+            .bind(&sealed.ciphertext)
+            .bind(at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // A disconnected connection keeps its record and loses its credential. The row saying it
+        // once existed is worth keeping; the token is not.
+        if state.disconnected {
+            sqlx::query("delete from secret_store where id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
+        Ok(seq)
+    }
+
+    /// Every connection this coworker could possibly use, for `connection::resolve` to choose from.
+    ///
+    /// Deliberately returns candidates rather than picking: the choosing rule is pure, tested, and
+    /// belongs in the domain — not in a SQL `order by` nobody can unit-test.
+    pub async fn connections_for(
+        &self,
+        account: &AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Vec<ConnectionView>> {
+        let rows = sqlx::query(
+            "select v.id, v.connector, v.scope, v.owner_id, v.label, v.updated_at_ms
+               from connection_view v
+              where v.disconnected = false
+                and ( v.scope = 'global'
+                   or (v.scope = 'user' and v.owner_id = $1)
+                   or (v.scope = 'bot'  and v.owner_id = $2) )
+              order by v.updated_at_ms desc",
+        )
+        .bind(account.as_str())
+        .bind(coworker.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut views = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let scope: String = row.try_get("scope")?;
+            let owner_id: Option<String> = row.try_get("owner_id")?;
+            let owner = match (scope.as_str(), owner_id) {
+                ("user", Some(id)) => Owner::User(AccountId::from_stored(id)),
+                ("bot", Some(id)) => Owner::Bot(CoworkerId::from_stored(id)),
+                _ => Owner::Global,
+            };
+
+            let loans =
+                sqlx::query("select coworker_id from connection_loan where connection_id = $1")
+                    .bind(&id)
+                    .fetch_all(&self.pool)
+                    .await?
+                    .into_iter()
+                    .map(|row| {
+                        Ok(CoworkerId::from_stored(
+                            row.try_get::<String, _>("coworker_id")?,
+                        ))
+                    })
+                    .collect::<StoreResult<_>>()?;
+
+            views.push(ConnectionView {
+                id,
+                connector: row.try_get("connector")?,
+                owner,
+                label: row.try_get("label")?,
+                loans,
+                updated_at_ms: row.try_get("updated_at_ms")?,
+            });
+        }
+        Ok(views)
+    }
+
+    /// Every connection this account owns, for showing a person what they have connected.
+    pub async fn connections_owned_by(
+        &self,
+        account: &AccountId,
+    ) -> StoreResult<Vec<ConnectionView>> {
+        let rows = sqlx::query(
+            "select id, connector, label, updated_at_ms from connection_view
+              where scope = 'user' and owner_id = $1 and disconnected = false
+              order by connector",
+        )
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut views = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let loans =
+                sqlx::query("select coworker_id from connection_loan where connection_id = $1")
+                    .bind(&id)
+                    .fetch_all(&self.pool)
+                    .await?
+                    .into_iter()
+                    .map(|row| {
+                        Ok(CoworkerId::from_stored(
+                            row.try_get::<String, _>("coworker_id")?,
+                        ))
+                    })
+                    .collect::<StoreResult<_>>()?;
+
+            views.push(ConnectionView {
+                id,
+                connector: row.try_get("connector")?,
+                owner: Owner::User(account.clone()),
+                label: row.try_get("label")?,
+                loans,
+                updated_at_ms: row.try_get("updated_at_ms")?,
+            });
+        }
+        Ok(views)
+    }
+
+    /// Open a connection's credential. The one place a token is ever in plaintext.
+    pub async fn open_credential(&self, vault: &Vault, id: &str) -> StoreResult<Option<String>> {
+        let row = sqlx::query("select nonce, ciphertext from secret_store where id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(|row| {
+            let sealed = Sealed {
+                nonce: row.try_get("nonce")?,
+                ciphertext: row.try_get("ciphertext")?,
+            };
+            vault.open(id, &sealed)
+        })
+        .transpose()
     }
 }
