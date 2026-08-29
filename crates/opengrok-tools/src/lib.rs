@@ -130,6 +130,12 @@ pub struct Executor {
     /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
     /// (CLAUDE.md #6).
     policy: opengrok_policy::Context,
+    /// Calls a person has already said yes to.
+    ///
+    /// PER CALL, NEVER PER TOOL. Approving `shell` once must not approve every later `shell`: the
+    /// person approved *that command*, and a set of call ids is the only shape that says so. A
+    /// resumed run carries exactly the id that was answered, so nothing else slips through with it.
+    approved_calls: std::collections::BTreeSet<String>,
 }
 
 impl Executor {
@@ -139,12 +145,24 @@ impl Executor {
         Self {
             computer,
             policy: opengrok_policy::Context::default(),
+            approved_calls: std::collections::BTreeSet::new(),
         }
     }
 
     /// The executor a real request builds: a computer, and what this principal may do with it.
     pub fn with_policy(computer: Arc<dyn Computer>, policy: opengrok_policy::Context) -> Self {
-        Self { computer, policy }
+        Self {
+            computer,
+            policy,
+            approved_calls: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Carry the calls a person has already answered yes to.
+    #[must_use]
+    pub fn with_approved(mut self, approved: impl IntoIterator<Item = String>) -> Self {
+        self.approved_calls = approved.into_iter().collect();
+        self
     }
 
     /// The tools a model is offered. Kept here so the offered set and the executed set cannot
@@ -170,12 +188,20 @@ impl Executor {
             opengrok_policy::Action::RunTool(&call.name),
             &self.policy,
         );
-        // Waiting is not permission and not refusal: the run suspends, and a person decides.
-        if decision.needs_approval() {
-            return ToolResult::awaiting(&call.id, decision.reason().unwrap_or("a human yes"));
-        }
-        if let Some(reason) = decision.reason() {
-            return ToolResult::refused(&call.id, reason);
+        // A person may already have said yes — to THIS call, by id. An approval is about one
+        // command, so matching on the tool name here would let the next `shell` ride in on the last
+        // one's yes. Note this releases only `NeedsApproval`: a denial stays a denial, because
+        // approving something policy forbids is not a thing a person can do.
+        let answered_yes = decision.needs_approval() && self.approved_calls.contains(&call.id);
+
+        if !answered_yes {
+            // Waiting is not permission and not refusal: the run suspends, and a person decides.
+            if decision.needs_approval() {
+                return ToolResult::awaiting(&call.id, decision.reason().unwrap_or("a human yes"));
+            }
+            if let Some(reason) = decision.reason() {
+                return ToolResult::refused(&call.id, reason);
+            }
         }
 
         let Some(box_id) = context.box_id.as_ref() else {
@@ -594,6 +620,69 @@ mod tests {
         assert!(!result.ok, "a pending approval must not read as success");
         // And nothing reached the computer: approval gates the action, not its undo.
         assert_eq!(spy.last_box(), None);
+    }
+
+    /// An approved call runs; another call of the same tool still waits.
+    #[tokio::test]
+    async fn approval_releases_one_call_and_not_the_tool() {
+        let mut policy = permissive();
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.needs_approval = opengrok_policy::ToolSet::only(["shell"]);
+        }
+        let spy = Arc::new(SpyComputer::default());
+        let executor =
+            Executor::with_policy(spy.clone(), policy).with_approved(["approved-call".to_string()]);
+        let context = context_with_box("box_mine");
+
+        let allowed = executor
+            .execute(
+                &context,
+                &ToolCall {
+                    id: "approved-call".to_string(),
+                    name: "shell".to_string(),
+                    arguments: json!({"command": "ls"}),
+                },
+            )
+            .await;
+        assert!(allowed.ok, "the approved call should run: {allowed:?}");
+
+        // A DIFFERENT call of the same tool is still waiting. Approving `shell` once must not
+        // approve every later `shell`.
+        let still_waiting = executor
+            .execute(
+                &context,
+                &ToolCall {
+                    id: "some-other-call".to_string(),
+                    name: "shell".to_string(),
+                    arguments: json!({"command": "rm -rf /"}),
+                },
+            )
+            .await;
+        assert!(still_waiting.awaiting_approval, "{still_waiting:?}");
+    }
+
+    /// An approval cannot rescue a tool that policy denies outright — it releases waiting, not
+    /// refusal.
+    #[tokio::test]
+    async fn approval_does_not_override_a_denial() {
+        let mut policy = permissive();
+        if let Some(ceiling) = policy.ceiling.as_mut() {
+            ceiling.tools = opengrok_policy::ToolSet::only(["read_file"]);
+        }
+        let executor = Executor::with_policy(Arc::new(SpyComputer::default()), policy)
+            .with_approved(["c1".to_string()]);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &ToolCall {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    arguments: json!({"command": "ls"}),
+                },
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result.content.contains("may never run"), "{result:?}");
     }
 
     /// An executor built without policy refuses everything. The default being useless is the

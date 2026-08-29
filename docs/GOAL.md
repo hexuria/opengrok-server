@@ -140,9 +140,15 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      covers the concurrent case. A retry reports the settled state rather than failing, because an
      answer unsafe to resend is a decision a flaky network loses. `GET /ag-ui/approvals` lists what
      is waiting, with the arguments, since approving `shell` unseen is approving nothing.
-   - **Still to do:** *continuing* an answered run automatically. The answer is recorded and the
-     next turn proceeds; having the server pick the run back up on its own is the last piece, and
-     `interrupted_runs` plus this answer event are what it needs.
+   - ✅ *Continuing — done 29 Aug 2026.* The server resumes an answered run itself, in the
+     background, and **runs the call that was approved** rather than re-prompting: the person
+     approved that command, and a second prompt could produce a different one. Approval is per
+     call, never per tool. `scripts/slice8-approval-smoke.sh` sends no further request and watches
+     the run finish on its own, then checks the approved command's marker on the box.
+
+**PLAN §4.5 layers 1–5 are all enforced.** What remains is not a layer: resuming a run interrupted
+by a *restart* (as opposed to an approval) — `interrupted_runs` finds them and nothing consumes it
+yet.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

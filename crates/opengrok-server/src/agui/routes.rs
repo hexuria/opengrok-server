@@ -393,6 +393,7 @@ pub async fn run(
         state: state.clone(),
         thread_id: input.thread_id.clone(),
         account_id: account_id.clone(),
+        coworker_id: coworker_id_from(&input),
     };
 
     let events = run_conversation(
@@ -421,6 +422,9 @@ pub struct StoreJournal {
     pub thread_id: String,
     /// Whose run this is, so it can be read back by them and by nobody else.
     pub account_id: Option<opengrok_core::id::AccountId>,
+    /// Which coworker is doing the work. Recorded on the run because a run that is answered days
+    /// later has to know whose tools to continue with, and the request that started it is long gone.
+    pub coworker_id: Option<CoworkerId>,
 }
 
 #[async_trait::async_trait]
@@ -435,6 +439,7 @@ impl opengrok_harness::RunJournal for StoreJournal {
             run_id,
             &self.thread_id,
             self.account_id.as_ref(),
+            self.coworker_id.as_ref(),
             events,
         )
         .await
@@ -448,6 +453,7 @@ async fn append_events(
     run_id: &str,
     thread_id: &str,
     account_id: Option<&opengrok_core::id::AccountId>,
+    coworker_id: Option<&CoworkerId>,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
     if events.is_empty() {
@@ -463,7 +469,7 @@ async fn append_events(
         let started = run
             .decide(RunCommand::Start {
                 thread_id: thread_id.to_string(),
-                coworker_id: None,
+                coworker_id: coworker_id.cloned(),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -655,6 +661,11 @@ pub async fn answer_run(
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
 
+    // Captured BEFORE the answer, because answering clears it — and the continuation needs to know
+    // exactly which command was approved rather than asking the model to propose one again.
+    let pending = run.pending.clone();
+    let resumed_seq = run.emitted.len() as u32;
+
     let at_ms = now_ms();
     let events = match run.decide(RunCommand::Answer {
         call_id: request.call_id.clone(),
@@ -712,13 +723,145 @@ pub async fn answer_run(
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
+    // The answer is durable; now carry the run on. In the background, because a model call can
+    // take minutes and the person clicking "approve" should not hold a socket open for it.
+    if request.approved
+        && let Some(pending) = pending
+    {
+        let state = state.clone();
+        let account_id = account_id.clone();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            continue_run(state, account_id, run_id, pending, resumed_seq).await;
+        });
+    }
+
     Json(serde_json::json!({
         "runId": run_id.as_str(),
         "callId": request.call_id,
         "approved": request.approved,
         "alreadyAnswered": false,
+        "continuing": request.approved,
     }))
     .into_response()
+}
+
+/// Rebuild the conversation from what a run already emitted.
+///
+/// The log is the only record of a run that outlives the request that started it, so a resumed run
+/// has to read its own history rather than being handed one. Text the assistant said and results
+/// its tools returned are what the model needs to carry on; the framing events are not.
+fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+    let mut assistant = String::new();
+
+    for payload in &run.emitted {
+        let Some(kind) = payload.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        match kind {
+            "TEXT_MESSAGE_CONTENT" => {
+                if let Some(delta) = payload.get("delta").and_then(|value| value.as_str()) {
+                    assistant.push_str(delta);
+                }
+            }
+            // An empty message is skipped rather than pushed: a provider that rejects empty
+            // content would fail the whole resumed turn over nothing.
+            "TEXT_MESSAGE_END" if !assistant.is_empty() => {
+                messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: std::mem::take(&mut assistant),
+                });
+            }
+            "TOOL_CALL_RESULT" => {
+                if let Some(content) = payload.get("content").and_then(|value| value.as_str()) {
+                    messages.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: format!("[tool result] {content}"),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    messages
+}
+
+/// Carry an answered run on, without waiting for anybody to ask again.
+///
+/// THE SERVER PICKS IT BACK UP. A run that only continues when the next request happens to arrive
+/// is a run that depends on a client being there — which is the thing this project exists to stop
+/// (CLAUDE.md #5). The answer is already durable when this starts, so a crash here leaves a run
+/// that is answered and unfinished, which `interrupted_runs` can find and this can be told to do
+/// again.
+async fn continue_run(
+    state: AgUiState,
+    account_id: opengrok_core::id::AccountId,
+    run_id: RunId,
+    approved: opengrok_core::run::PendingApproval,
+    resumed_seq: u32,
+) {
+    let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
+        tracing::warn!(run = %run_id, "could not load an answered run to continue it");
+        return;
+    };
+
+    // The coworker whose tools these are. Without it there is nothing to continue *as*.
+    let Some(coworker_id) = run.coworker_id.clone() else {
+        tracing::warn!(run = %run_id, "an answered run has no coworker, so it cannot continue");
+        return;
+    };
+    let Some(computer) = state.computer.clone() else {
+        return;
+    };
+    let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return;
+    };
+    let Ok(policy) = state.auth.store.policy_for(&account_id, &coworker_id).await else {
+        return;
+    };
+
+    // The approved call, and only it: the executor carries the id the person actually answered.
+    let runner = ToolRunner::new(
+        opengrok_tools::Executor::with_policy(computer, policy)
+            .with_approved([approved.call_id.clone()]),
+        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
+    );
+
+    let journal = StoreJournal {
+        state: state.clone(),
+        thread_id: run.thread_id.clone(),
+        account_id: Some(account_id),
+        coworker_id: run.coworker_id.clone(),
+    };
+
+    let request = ModelRequest {
+        model: state.model.clone(),
+        system: None,
+        messages: conversation_from(&run),
+    };
+
+    // The run keeps its id, so everything the resumption emits lands in the same log and a client
+    // replaying later sees one continuous run rather than two halves.
+    let events = opengrok_harness::resume_conversation(
+        state.door.as_ref(),
+        &runner,
+        &journal,
+        request,
+        opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
+        opengrok_harness::Resumption {
+            approved: opengrok_tools::ToolCall {
+                id: approved.call_id,
+                name: approved.tool,
+                arguments: approved.arguments,
+            },
+            message_seq: resumed_seq,
+        },
+    )
+    .await;
+
+    tracing::info!(run = %run_id, events = events.len(), "continued an answered run");
 }
 
 /// Runs waiting on this person.

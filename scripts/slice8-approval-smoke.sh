@@ -102,7 +102,26 @@ for _ in 1 2 3; do
 done
 ok "answered once; three retries reported the settled state instead of answering again"
 
-echo "8. somebody else cannot answer this run"
+echo "8. the server carries the run on by itself"
+# NOBODY ASKS IT TO. No further /ag-ui request is sent below — the run finishes because the server
+# picked it back up after the answer, which is the difference between a suspended run and a lost one.
+finished=""
+for _ in $(seq 1 40); do
+  state=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token" | jq -r '.status')
+  if [ "$state" = "finished" ] || [ "$state" = "failed" ]; then finished="$state"; break; fi
+  sleep 1
+done
+[ "$finished" = "finished" ] || fail "the answered run did not continue on its own (last: $state)"
+ok "the run finished with no further request"
+
+echo "8b. and the approved command actually ran on the coworker's box"
+# The marker is written by the tool the person approved. Its absence would mean the run "continued"
+# without doing the thing that was waiting.
+seen=$(docker exec "$BOX_ID" cat /tmp/opengrok-tool-ran 2>/dev/null | tr -d '\n')
+[ "$seen" = "opengrok-tool-ran" ] || fail "the approved command never ran (marker: '$seen')"
+ok "the approved command ran, after the yes and not before"
+
+echo "9. somebody else cannot answer this run"
 other=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=nosy-$(date +%s)@og.local" | jq -r '.accessToken')
 status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui/runs/$run_id/answer" \
   -H "authorization: Bearer $other" -H 'content-type: application/json' \
@@ -110,7 +129,7 @@ status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui/runs/$run_i
 [ "$status" = "404" ] || fail "another account answered the run: $status"
 ok "another account gets 404 — a run id is not a way in"
 
-echo "9. approval is withdrawn, and the same tool runs"
+echo "10. approval is withdrawn, and the same tool runs"
 curl -fsS -X POST "$BASE/coworkers/$coworker/approvals" -H "authorization: Bearer $token" \
   -H 'content-type: application/json' -d '{"tools":[]}' >/dev/null
 run2="run-appr2-$(date +%s)"

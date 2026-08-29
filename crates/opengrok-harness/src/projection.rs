@@ -41,6 +41,23 @@ pub struct Projection {
 }
 
 impl Projection {
+    /// A projection for a run that has ALREADY started.
+    ///
+    /// A resumed run must not emit `RUN_STARTED` a second time: a consumer would draw a new run,
+    /// and the log would say a run began twice. `message_seq` continues from where the first half
+    /// left off so the two halves cannot collide on a message id.
+    pub fn resumed(
+        thread_id: impl Into<String>,
+        run_id: impl Into<String>,
+        at_ms: i64,
+        message_seq: u32,
+    ) -> Self {
+        let mut projection = Self::new(thread_id, run_id, at_ms);
+        projection.started = true;
+        projection.message_seq = message_seq;
+        projection
+    }
+
     pub fn new(thread_id: impl Into<String>, run_id: impl Into<String>, at_ms: i64) -> Self {
         Self {
             thread_id: thread_id.into(),

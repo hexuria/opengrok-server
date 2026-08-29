@@ -110,12 +110,103 @@ pub async fn run_conversation(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
     journal: &dyn RunJournal,
-    mut request: ModelRequest,
+    request: ModelRequest,
     thread_id: &str,
     run_id: &str,
     at_ms: i64,
 ) -> Vec<Event> {
-    let mut projection = Projection::new(thread_id, run_id, at_ms);
+    let projection = Projection::new(thread_id, run_id, at_ms);
+    converse(door, tools, journal, request, projection, run_id).await
+}
+
+/// Which run this is, and when. Three values that always travel together, so they travel as one.
+#[derive(Debug, Clone)]
+pub struct RunContext {
+    pub thread_id: String,
+    pub run_id: String,
+    pub at_ms: i64,
+}
+
+impl RunContext {
+    pub fn new(thread_id: impl Into<String>, run_id: impl Into<String>, at_ms: i64) -> Self {
+        Self {
+            thread_id: thread_id.into(),
+            run_id: run_id.into(),
+            at_ms,
+        }
+    }
+}
+
+/// What a resumed run already knows: the call to run, and where the first half left off.
+#[derive(Debug, Clone)]
+pub struct Resumption {
+    /// The call the person approved. Run directly, not re-proposed.
+    pub approved: opengrok_tools::ToolCall,
+    /// So the second half cannot collide with the first on a message id.
+    pub message_seq: u32,
+}
+
+/// Carry on a run that a person has just answered.
+///
+/// RUNS THE APPROVED CALL, RATHER THAN ASKING THE MODEL AGAIN. The person approved *that command*;
+/// re-prompting could produce a different one, and running something nobody approved is the exact
+/// failure the approval was for. So the call is executed directly, its result is appended, and only
+/// then does the model get to carry on.
+pub async fn resume_conversation(
+    door: &dyn ModelDoor,
+    tools: &ToolRunner,
+    journal: &dyn RunJournal,
+    mut request: ModelRequest,
+    context: RunContext,
+    resumption: Resumption,
+) -> Vec<Event> {
+    let Resumption {
+        approved,
+        message_seq,
+    } = resumption;
+    let run_id = context.run_id.clone();
+    // Already started: a resumed run must not draw itself twice.
+    let mut projection = Projection::resumed(
+        &context.thread_id,
+        &context.run_id,
+        context.at_ms,
+        message_seq,
+    );
+    let mut all = Vec::new();
+
+    let results = tools.run_all(std::slice::from_ref(&approved)).await;
+    for result in &results {
+        all.extend(projection.push_tool_result(result));
+        request.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: format!("[tool {} result] {}", result.call_id, result.content),
+        });
+    }
+    let _ = journal.record(&run_id, &all).await;
+
+    // If the approved call itself is still waiting, something is wrong with the approval rather
+    // than with the run; stop rather than loop.
+    if results.iter().any(|result| result.awaiting_approval) {
+        let mut waiting = projection.awaiting_approval(&approved);
+        let _ = journal.record(&run_id, &waiting).await;
+        all.append(&mut waiting);
+        return all;
+    }
+
+    let mut rest = converse(door, Some(tools), journal, request, projection, &run_id).await;
+    all.append(&mut rest);
+    all
+}
+
+/// The loop both entry points share.
+async fn converse(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    mut request: ModelRequest,
+    mut projection: Projection,
+    run_id: &str,
+) -> Vec<Event> {
     let mut all = Vec::new();
 
     let mut opening = projection.start();
