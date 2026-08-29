@@ -117,10 +117,41 @@ fn redact(database_url: &str) -> String {
     }
 }
 
+/// Wait for either signal that means "stop".
+///
+/// SIGTERM MATTERS MORE THAN CTRL-C HERE. It is how Docker, systemd and Kubernetes ask a process
+/// to stop; a server that only listens for SIGINT keeps serving until the grace period runs out and
+/// it is SIGKILLed, which drops whatever was in flight. Handling both is the difference between a
+/// deploy that finishes its runs and one that truncates them.
+///
+/// A failure to install a handler must not take the process down: it means shutdown will be abrupt,
+/// which is strictly better than refusing to run.
 async fn shutdown_signal() {
-    // A failure to install the handler must not take the process down; it only means Ctrl-C will
-    // not be graceful, which is strictly better than refusing to run.
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::warn!(%error, "could not listen for shutdown signal");
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "could not listen for Ctrl-C");
+            // Never resolve, so this arm cannot win the select and end the process early.
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => tracing::info!("interrupted; shutting down"),
+        () = terminate => tracing::info!("terminated; shutting down"),
     }
 }
