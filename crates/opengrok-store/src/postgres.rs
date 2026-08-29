@@ -264,6 +264,7 @@ impl PgStore {
         .bind(&view.thread_id)
         .bind(match view.status {
             RunStatus::Running => "running",
+            RunStatus::AwaitingApproval => "awaiting-approval",
             RunStatus::Finished => "finished",
             RunStatus::Failed => "failed",
         })
@@ -295,6 +296,24 @@ impl PgStore {
             }
             None => false,
         })
+    }
+
+    /// Runs stopped waiting on a person, for whoever is being asked.
+    ///
+    /// A suspended run that nobody can find is a run nobody will ever answer, which is the same as
+    /// a lost one — so this is not a convenience, it is what makes suspension safe.
+    pub async fn awaiting_approval(&self, account: &AccountId) -> StoreResult<Vec<RunId>> {
+        let rows = sqlx::query(
+            "select id from run_view
+             where status = 'awaiting-approval' and account_id = $1
+             order by updated_at_ms",
+        )
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
+            .collect()
     }
 
     /// Runs left `running` by a restart. Nothing consumes this yet; it is the query that makes an

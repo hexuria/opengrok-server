@@ -135,9 +135,14 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      ending, stays `running` in the log, and `POST /coworkers/{id}/approvals` sets the list.
      `scripts/slice8-approval-smoke.sh` proves it suspends, that waiting does not read as success,
      and that withdrawing the requirement lets the same tool run.
-   - **Still to do:** *resuming* a suspended run when the yes arrives. Today the person withdraws
-     the requirement and the next turn proceeds; picking up the exact suspended run — exactly once
-     under retry — is the remaining half, and `interrupted_runs` is where it starts.
+   - ✅ *Answering — done 29 Aug 2026.* `POST /ag-ui/runs/{id}/answer` settles a suspended call
+     **exactly once**: the aggregate refuses every later answer and the store's sequence check
+     covers the concurrent case. A retry reports the settled state rather than failing, because an
+     answer unsafe to resend is a decision a flaky network loses. `GET /ag-ui/approvals` lists what
+     is waiting, with the arguments, since approving `shell` unseen is approving nothing.
+   - **Still to do:** *continuing* an answered run automatically. The answer is recorded and the
+     next turn proceeds; having the server pick the run back up on its own is the last piece, and
+     `interrupted_runs` plus this answer event are what it needs.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

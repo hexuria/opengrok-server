@@ -163,9 +163,6 @@ pub async fn run_conversation(
                 let calls = collect_tool_calls(&round_events);
                 if let (Some(runner), false) = (tools, calls.is_empty()) {
                     let results = runner.run_all(&calls).await;
-                    // A pending approval SUSPENDS the run rather than failing it: the person can
-                    // still say yes tomorrow, and the log already holds everything up to here.
-                    let suspended = results.iter().any(|result| result.awaiting_approval);
 
                     for result in &results {
                         round_events.extend(projection.push_tool_result(result));
@@ -176,15 +173,19 @@ pub async fn run_conversation(
                         });
                     }
 
-                    if suspended {
+                    if let Some(waiting) = results
+                        .iter()
+                        .position(|result| result.awaiting_approval)
+                        .and_then(|index| calls.get(index))
+                    {
                         // Ended as a readable state, not a silent stop and not a failure. The run
                         // stays `running` in the log, which is exactly what `interrupted_runs`
                         // looks for — resumption and approval share the same machinery.
-                        let mut waiting = projection.awaiting_approval();
+                        let mut waiting_events = projection.awaiting_approval(waiting);
                         let _ = journal.record(run_id, &round_events).await;
-                        let _ = journal.record(run_id, &waiting).await;
+                        let _ = journal.record(run_id, &waiting_events).await;
                         all.append(&mut round_events);
-                        all.append(&mut waiting);
+                        all.append(&mut waiting_events);
                         return all;
                     }
                     if !said.is_empty() {

@@ -89,6 +89,8 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
+        .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
         .with_state(state)
@@ -483,6 +485,43 @@ async fn append_events(
         }
         to_append.extend(decided);
 
+        // A suspension carries which call is waiting, so a person can answer *that* call later.
+        // Read from the event the projection emitted, because the harness is the only thing that
+        // knows the run stopped.
+        if event.event_type == opengrok_wire::agui::EventType::Custom
+            && event.extra.get("name").and_then(|name| name.as_str())
+                == Some("run-awaiting-approval")
+        {
+            let call_id = event
+                .extra
+                .get("callId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if !call_id.is_empty()
+                && let Ok(suspended) = run.decide(RunCommand::Suspend {
+                    call_id,
+                    tool: event
+                        .extra
+                        .get("tool")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    arguments: event
+                        .extra
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    at_ms,
+                })
+            {
+                for suspended_event in &suspended {
+                    run.apply(suspended_event);
+                }
+                to_append.extend(suspended);
+            }
+        }
+
         // The run's own ending, recorded once, from the event that carries it.
         let closing = match event.event_type {
             opengrok_wire::agui::EventType::RunFinished => {
@@ -566,13 +605,155 @@ pub async fn replay_run(
         "threadId": run.thread_id,
         "status": match run.status {
             RunStatus::Running => "running",
+            RunStatus::AwaitingApproval => "awaiting-approval",
             RunStatus::Finished => "finished",
             RunStatus::Failed => "failed",
         },
         "failure": run.failure,
+        "pending": run.pending,
         "events": run.emitted,
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnswerRequest {
+    /// Which call is being answered. Required: "approve the run" is ambiguous the moment a turn
+    /// asks for two things.
+    pub call_id: String,
+    pub approved: bool,
+}
+
+/// Answer a suspended run — PLAN §4.5 layer 5, the other half.
+///
+/// EXACTLY ONCE, AND THE AGGREGATE IS WHAT GUARANTEES IT. A retried request, a double-clicked
+/// button and two devices answering together all reach here; the aggregate refuses every answer
+/// after the first, and the store's sequence check makes the concurrent case safe — the loser gets
+/// a conflict and re-reads to find the call already answered.
+pub async fn answer_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+    Json(request): Json<AnswerRequest>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let run_id = RunId::from_stored(run_id);
+
+    // Only the run's owner may answer it — the same rule as replay, for the same reason.
+    match state.auth.store.run_owned_by(&run_id, &account_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+
+    let (mut run, seq) = match state.auth.store.load_run(&run_id).await {
+        Ok(loaded) => loaded,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+
+    let at_ms = now_ms();
+    let events = match run.decide(RunCommand::Answer {
+        call_id: request.call_id.clone(),
+        approved: request.approved,
+        by: account_id.to_string(),
+        at_ms,
+    }) {
+        Ok(events) => events,
+        // A second answer is not an error the caller needs to fix; it is the same answer arriving
+        // twice. Reporting the settled state is what makes a retry safe to send.
+        Err(opengrok_core::run::RunError::AlreadyAnswered) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "runId": run_id.as_str(),
+                    "callId": request.call_id,
+                    "alreadyAnswered": true,
+                })),
+            )
+                .into_response();
+        }
+        Err(error) => return (StatusCode::CONFLICT, error.to_string()).into_response(),
+    };
+
+    for event in &events {
+        run.apply(event);
+    }
+
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    if let Err(error) = state
+        .auth
+        .store
+        .append_run(&run_id, seq, &events, &view, Some(&account_id))
+        .await
+    {
+        // A conflict here means somebody answered between our read and our write. The answer that
+        // won is as good as ours, so this is not a failure to report as one.
+        if matches!(error, opengrok_store::StoreError::Conflict) {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "runId": run_id.as_str(),
+                    "callId": request.call_id,
+                    "alreadyAnswered": true,
+                })),
+            )
+                .into_response();
+        }
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+
+    Json(serde_json::json!({
+        "runId": run_id.as_str(),
+        "callId": request.call_id,
+        "approved": request.approved,
+        "alreadyAnswered": false,
+    }))
+    .into_response()
+}
+
+/// Runs waiting on this person.
+///
+/// A suspended run nobody can find is a run nobody will answer, which is the same as a lost one.
+pub async fn list_awaiting(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    match state.auth.store.awaiting_approval(&account_id).await {
+        Ok(runs) => {
+            let mut waiting = Vec::new();
+            for run_id in runs {
+                if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
+                    && let Some(pending) = run.pending
+                {
+                    waiting.push(serde_json::json!({
+                        "runId": run_id.as_str(),
+                        "threadId": run.thread_id,
+                        "callId": pending.call_id,
+                        "tool": pending.tool,
+                        // What is actually being approved. A person asked to approve "shell"
+                        // without seeing the command is being asked to approve nothing.
+                        "arguments": pending.arguments,
+                    }));
+                }
+            }
+            // An ARRAY, always: an empty queue is a valid answer.
+            Json(waiting).into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 /// AG-UI messages to the model's vocabulary.

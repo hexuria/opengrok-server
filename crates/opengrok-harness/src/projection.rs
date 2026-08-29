@@ -209,19 +209,25 @@ impl Projection {
     /// NOT `finish` AND NOT `fail`. A finished run tells the client there is nothing more coming;
     /// a failed one tells it to give up. This says "stop watching, come back" — the run stays
     /// `running` in the log so it can be picked up when the answer arrives.
-    pub fn awaiting_approval(&mut self) -> Vec<Event> {
+    pub fn awaiting_approval(&mut self, waiting: &opengrok_tools::ToolCall) -> Vec<Event> {
         let mut events = self.start();
         if self.finished {
             return Vec::new();
         }
         events.extend(self.close_open());
-        // Deliberately NOT setting `finished`: the run has not ended, and a later resume must be
+        // Deliberately NOT setting `finished`: the run has not ended, and a later answer must be
         // able to add to it.
         events.push(
             self.event(EventType::Custom)
                 .with("name", "run-awaiting-approval")
                 .with("threadId", self.thread_id.clone())
-                .with("runId", self.run_id.clone()),
+                .with("runId", self.run_id.clone())
+                // WHICH call, and with what arguments. A person asked to approve "shell" without
+                // seeing the command is being asked to approve nothing, and an answer that cannot
+                // name its call cannot be exactly-once.
+                .with("callId", waiting.id.clone())
+                .with("tool", waiting.name.clone())
+                .with("arguments", waiting.arguments.clone()),
         );
         events
     }
@@ -456,7 +462,11 @@ mod tests {
     fn awaiting_approval_leaves_the_run_open() {
         let mut projection = Projection::new("t1", "r1", 100);
         projection.push(ModelDelta::Text("about to run something".to_string()));
-        let waiting = projection.awaiting_approval();
+        let waiting = projection.awaiting_approval(&opengrok_tools::ToolCall {
+            id: "c1".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::Value::Null,
+        });
 
         // The open message is closed, so nothing streams forever.
         assert!(types(&waiting).contains(&EventType::TextMessageEnd));

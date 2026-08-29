@@ -64,13 +64,53 @@ echo "$result" | jq -e '.ok == false' >/dev/null || fail "a pending approval mus
 echo "$result" | jq -e '.content | test("waiting for approval")' >/dev/null || fail "$result"
 ok "the model was told it is waiting, not that it succeeded"
 
-echo "5. the run is still open in the log, not finished"
+echo "5. the run is open in the log, and says what it is waiting for"
+# `awaiting-approval` rather than `running`: a suspended run must be distinguishable from one that
+# is still working, or nobody can tell which runs need a person.
 replay=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token")
 status=$(echo "$replay" | jq -r '.status')
-[ "$status" = "running" ] || fail "a suspended run should still be running, got $status"
-ok "the log says running — it can still be picked up"
+[ "$status" = "awaiting-approval" ] || fail "expected awaiting-approval, got $status"
+echo "$replay" | jq -e '.pending.tool == "shell"' >/dev/null || fail "no pending call: $replay"
+ok "the log says awaiting-approval, and names the call"
 
-echo "6. approval is withdrawn, and the same tool runs"
+echo "6. the waiting call is findable, and says what it is asking for"
+# A suspended run nobody can find is a run nobody will answer, which is the same as a lost one.
+queue=$(curl -fsS "$BASE/ag-ui/approvals" -H "authorization: Bearer $token")
+echo "$queue" | jq -e 'type == "array"' >/dev/null || fail "the queue is not an array"
+entry=$(echo "$queue" | jq -c --arg r "$run_id" '.[] | select(.runId == $r)')
+[ -n "$entry" ] || fail "the suspended run is not in the queue: $queue"
+call_id=$(echo "$entry" | jq -r '.callId')
+[ -n "$call_id" ] && [ "$call_id" != "null" ] || fail "no callId: $entry"
+# A person asked to approve "shell" without seeing the command is approving nothing.
+echo "$entry" | jq -e '.arguments.command | test("opengrok-tool-ran")' >/dev/null \
+  || fail "the queue does not show what is being approved: $entry"
+ok "queued: $(echo "$entry" | jq -r '.tool') with its arguments visible"
+
+echo "7. answering twice runs the tool once"
+# THE EXACTLY-ONCE PROPERTY. A retried request, a double-clicked button, two devices — all must
+# converge on one answer.
+first=$(curl -fsS -X POST "$BASE/ag-ui/runs/$run_id/answer" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' -d "{\"call_id\":\"$call_id\",\"approved\":true}")
+echo "$first" | jq -e '.alreadyAnswered == false' >/dev/null || fail "first answer: $first"
+
+for _ in 1 2 3; do
+  again=$(curl -fsS -X POST "$BASE/ag-ui/runs/$run_id/answer" -H "authorization: Bearer $token" \
+    -H 'content-type: application/json' -d "{\"call_id\":\"$call_id\",\"approved\":true}")
+  # A retry is not an error — it is the same answer arriving again, and it must be safe to send.
+  echo "$again" | jq -e '.alreadyAnswered == true' >/dev/null \
+    || fail "a repeated answer should report the settled state: $again"
+done
+ok "answered once; three retries reported the settled state instead of answering again"
+
+echo "8. somebody else cannot answer this run"
+other=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=nosy-$(date +%s)@og.local" | jq -r '.accessToken')
+status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui/runs/$run_id/answer" \
+  -H "authorization: Bearer $other" -H 'content-type: application/json' \
+  -d "{\"call_id\":\"$call_id\",\"approved\":true}")
+[ "$status" = "404" ] || fail "another account answered the run: $status"
+ok "another account gets 404 — a run id is not a way in"
+
+echo "9. approval is withdrawn, and the same tool runs"
 curl -fsS -X POST "$BASE/coworkers/$coworker/approvals" -H "authorization: Bearer $token" \
   -H 'content-type: application/json' -d '{"tools":[]}' >/dev/null
 run2="run-appr2-$(date +%s)"
@@ -86,4 +126,4 @@ last2=$(echo "$events2" | tail -1 | jq -r '.type')
 ok "with approval no longer required, the run completes"
 
 echo
-echo "PASS — slice 8: a call that needs a person suspends the run rather than ending it."
+echo "PASS — slice 8: a call that needs a person suspends the run, and one answer settles it."
