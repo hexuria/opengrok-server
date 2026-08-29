@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
-use opengrok_harness::{GatewayDoor, MockDoor, ModelDoor};
+use opengrok_harness::{GatewayDoor, MockDoor, ModelDoor, RigDoor};
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_store::PgStore;
@@ -59,14 +59,20 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
             Arc::new(MockDoor::echoing())
         }
-        _ => {
+        door => {
             let url = std::env::var("OG_GATEWAY_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:29080".to_string());
             // An oag_live_ key, never a provider key: a coworker's pin is a route (CLAUDE.md #4).
+            // The same key opens either door — Rig is pointed at our gateway, not at a provider.
             let key = std::env::var("OG_GATEWAY_TOKEN").context(
                 "OG_GATEWAY_TOKEN is required unless OG_MODEL_DOOR=mock; see .env.example",
             )?;
-            Arc::new(GatewayDoor::new(url, key))
+            if door == Ok("rig") {
+                tracing::info!("OG_MODEL_DOOR=rig — reaching the gateway through rig-core");
+                Arc::new(RigDoor::new(url, key))
+            } else {
+                Arc::new(GatewayDoor::new(url, key))
+            }
         }
     };
 

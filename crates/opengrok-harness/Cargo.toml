@@ -13,6 +13,7 @@ opengrok-core = { path = "../opengrok-core" }
 opengrok-wire = { path = "../opengrok-wire" }
 opengrok-tools = { path = "../opengrok-tools" }
 opengrok-box = { path = "../opengrok-box" }
+rig-core.workspace = true
 opengrok-policy = { path = "../opengrok-policy" }
 opengrok-store = { path = "../opengrok-store" }
 serde.workspace = true

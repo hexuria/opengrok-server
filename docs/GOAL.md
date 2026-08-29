@@ -19,13 +19,13 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 | RPC | **tonic + prost** for service/message definitions (operator reaffirmed with the Connect finding known). The desktop client speaks ConnectRPC over HTTP/1.1 (`cursor-inference.ts:157`), which a bare tonic server cannot answer — so Connect-compatible routes are served at the Axum edge, reusing the same prost types. tonic is the internal/service backbone. |
 | Design | DDD + CQRS + ES: append-only event store in Postgres, projections for reads. No ES framework — a transcript is already an event log. |
 | DB / cache | PostgreSQL; Redis added **when a measured hot query needs it**, not before |
-| Model door | Every model call exits through open-ai-gateway (`oag_live_` key, OpenAI-compatible routes). Rig (`rig-core`) is the provider abstraction and brings MCP via rmcp — use Rig's integration rather than wiring rmcp separately. |
+| Model door | Every model call exits through open-ai-gateway (`oag_live_` key, OpenAI-compatible routes). **Two doors, both behind `ModelDoor`:** direct (default) and `OG_MODEL_DOOR=rig` through `rig-core`. Rig abstracts one provider today, so the direct door stays default; Rig earns its keep when a coworker is pinned somewhere the gateway does not route, and brings MCP via rmcp. |
 | Harness | Our own durable loop (the suspension is the product). Design it as an explicit graph — nodes as steps, edges as transitions — so runs can be resumed, branched, and inspected. |
 | Computers | One per agent (or shared, by policy) behind the `Computer` trait. **Local Docker is the default** and needs no account; box.ascii.dev when `OG_BOX_API_KEY` is set, for computers that outlive this machine; cua via its MCP server later. |
 | AG-UI | Protocol yes, `ag-ui-rs` crate no (repo vanished, 108 downloads). Transcribe the events into `opengrok-wire`; barok-works' `grok-runtime` is the reference consumer. |
 | Plugins / connectors | [Agent Plugins](https://agent-plugins.org/) format (`plugin.json` + `skills/` + `mcp.json`) for gmail, github, gdrive, mem0/OpenMemory. Connectors are MCP servers we connect to, not code we write. |
 | Sandboxed shell | `vercel-labs/just-bash` is TypeScript — usable only inside a Node sidecar or on the box itself, not in-process. Evaluate when the tool executor needs a no-box shell; do not block on it. |
-| Repo | `hexuria/opengrok`, **private** (LEGAL #4). |
+| Repo | [`hexuria/opengrok-server`](https://github.com/hexuria/opengrok-server), **private** (LEGAL #4). The name distinguishes it from the client, `hexuria/openbot`. |
 | The gate | `scripts/gate.sh` runs everything the workflow runs; `--smoke` adds all five smoke scripts. **GitHub Actions is currently blocked on account billing** ("recent account payments have failed or your spending limit needs to be increased"), so the local gate is the gate until that is settled. Publishing to get free minutes is not an option the rights review has cleared. |
 
 ### Evaluated and deferred

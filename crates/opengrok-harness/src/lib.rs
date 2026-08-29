@@ -14,6 +14,7 @@ pub mod journal;
 pub mod mock;
 pub mod model;
 pub mod projection;
+pub mod rig_door;
 pub mod tools;
 
 pub use gateway::GatewayDoor;
@@ -21,6 +22,7 @@ pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 pub use projection::Projection;
+pub use rig_door::RigDoor;
 pub use tools::{ToolRunner, collect_tool_calls};
 
 use futures::StreamExt;
