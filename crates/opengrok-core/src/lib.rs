@@ -4,11 +4,15 @@
 //! and a principal *are* without depending on a database, an HTTP client, or each other.
 
 pub mod account;
+pub mod coworker;
 pub mod id;
 pub mod run;
 
 pub use account::{
     Account, AccountCommand, AccountError, AccountEvent, AccountView, Plan, Session,
+};
+pub use coworker::{
+    BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,
 };
 pub use id::{AccountId, BoxId, CoworkerId, PrincipalId, RunId, SessionId, TranscriptEntryId};
 pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};

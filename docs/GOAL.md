@@ -104,8 +104,11 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      REST API, with 15 integration tests driving it against a stand-in server (paths, bearer token,
      request bodies, error mapping). **Unverified against the live service** — needs a `box_` key,
      and two shapes the vendor's reference leaves unpinned are marked in `ascii.rs`.
-   - **Still to do:** assigning a box to a coworker (a `coworker` aggregate with a `box_id`), and a
-     tool executor that runs a coworker's commands on its own box.
+   - ✅ *Assignment and tools — done 29 Aug 2026.* The `coworker` aggregate owns the box (assigned,
+     never requested; dedicated or shared), and `opengrok-tools::Executor` runs shell/read/write on
+     the coworker's own box with identity arguments **overwritten, not validated**.
+   - **Still to do:** wiring the executor into the harness loop, so a model's tool call actually
+     runs — the pieces exist and are tested; nothing joins them yet.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
