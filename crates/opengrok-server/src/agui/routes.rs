@@ -9,15 +9,18 @@
 //! promise of that closing event. This slice streams a real, correctly-shaped conversation with a
 //! placeholder body; slice 3 replaces the middle with the harness, and the framing does not change.
 
+use axum::extract::Path;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
 use opengrok_wire::agui::{Event, RunAgentInput};
 
 use crate::auth::AuthState;
+use opengrok_core::id::RunId;
+use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, run_turn};
 use std::sync::Arc;
 
@@ -33,7 +36,10 @@ pub struct AgUiState {
 }
 
 pub fn router(state: AgUiState) -> Router {
-    Router::new().route("/ag-ui", post(run)).with_state(state)
+    Router::new()
+        .route("/ag-ui", post(run))
+        .route("/ag-ui/runs/{run_id}", get(replay_run))
+        .with_state(state)
 }
 
 fn now_ms() -> i64 {
@@ -57,9 +63,141 @@ pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput
     )
     .await;
 
+    // STORE BEFORE SENDING. A frame the client received but we never wrote is work a reconnect
+    // cannot reproduce — which is the failure this whole project exists to prevent (CLAUDE.md #5).
+    // A run that cannot be recorded is therefore refused rather than streamed: better a client that
+    // is told the run failed than one shown work that will not be there when it looks again.
+    if let Err(error) = persist_run(&state, &input, &events).await {
+        tracing::error!(run_id = %input.run_id, %error, "refusing to stream a run we cannot record");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the run could not be recorded, so it was not started",
+        )
+            .into_response();
+    }
+
     sse(stream::iter(
         events.into_iter().map(Ok::<_, std::io::Error>),
     ))
+}
+
+/// Append a whole run to the log, in the order the client will see it.
+async fn persist_run(
+    state: &AgUiState,
+    input: &RunAgentInput,
+    events: &[Event],
+) -> Result<(), opengrok_store::StoreError> {
+    let run_id = RunId::from_stored(input.run_id.clone());
+    let at_ms = now_ms();
+
+    let (run, seq) = state.auth.store.load_run(&run_id).await?;
+    let mut state_machine = run;
+    let mut to_append = Vec::new();
+
+    if !state_machine.started {
+        let started = state_machine
+            .decide(RunCommand::Start {
+                thread_id: input.thread_id.clone(),
+                coworker_id: None,
+                at_ms,
+            })
+            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        for event in &started {
+            state_machine.apply(event);
+        }
+        to_append.extend(started);
+    }
+
+    let mut ended = false;
+    for event in events {
+        let payload = serde_json::to_value(event)
+            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        // The aggregate refuses a frame after an ending; that is a real rule, not a hiccup, so the
+        // remaining frames are dropped rather than forced in.
+        let Ok(decided) = state_machine.decide(RunCommand::Emit { payload, at_ms }) else {
+            break;
+        };
+        for decided_event in &decided {
+            state_machine.apply(decided_event);
+        }
+        to_append.extend(decided);
+
+        if matches!(
+            event.event_type,
+            opengrok_wire::agui::EventType::RunFinished | opengrok_wire::agui::EventType::RunError
+        ) {
+            ended = true;
+        }
+    }
+
+    if ended {
+        let closing = match events.last().map(|event| event.event_type) {
+            Some(opengrok_wire::agui::EventType::RunError) => {
+                state_machine.decide(RunCommand::Fail {
+                    reason: events
+                        .last()
+                        .and_then(|event| event.extra.get("message"))
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("the run failed")
+                        .to_string(),
+                    at_ms,
+                })
+            }
+            _ => state_machine.decide(RunCommand::Finish { at_ms }),
+        };
+        if let Ok(closing) = closing {
+            for event in &closing {
+                state_machine.apply(event);
+            }
+            to_append.extend(closing);
+        }
+    }
+
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: input.thread_id.clone(),
+        status: state_machine.status,
+        event_count: state_machine.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+
+    state
+        .auth
+        .store
+        .append_run(&run_id, seq, &to_append, &view)
+        .await?;
+    Ok(())
+}
+
+/// Replay a run from the log.
+///
+/// THIS IS THE PROMISE, MADE CHECKABLE. Close the tab mid-run, come back, ask here: every event
+/// the run produced is returned, in order, without asking a model anything a second time.
+pub async fn replay_run(State(state): State<AgUiState>, Path(run_id): Path<String>) -> Response {
+    let run_id = RunId::from_stored(run_id);
+    let (run, _) = match state.auth.store.load_run(&run_id).await {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+
+    if !run.started {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    }
+
+    Json(serde_json::json!({
+        "runId": run_id.as_str(),
+        "threadId": run.thread_id,
+        "status": match run.status {
+            RunStatus::Running => "running",
+            RunStatus::Finished => "finished",
+            RunStatus::Failed => "failed",
+        },
+        "failure": run.failure,
+        "events": run.emitted,
+    }))
+    .into_response()
 }
 
 /// AG-UI messages to the model's vocabulary.

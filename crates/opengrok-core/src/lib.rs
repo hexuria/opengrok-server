@@ -5,11 +5,13 @@
 
 pub mod account;
 pub mod id;
+pub mod run;
 
 pub use account::{
     Account, AccountCommand, AccountError, AccountEvent, AccountView, Plan, Session,
 };
 pub use id::{AccountId, BoxId, CoworkerId, PrincipalId, RunId, SessionId, TranscriptEntryId};
+pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};
 
 /// What went wrong, in the vocabulary of the domain rather than of a transport.
 #[derive(Debug, thiserror::Error)]

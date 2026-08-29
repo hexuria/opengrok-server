@@ -94,8 +94,14 @@ Done means: implemented, tested, exercised against the Next.js client, and green
    it belongs with the boxes. Original scope: the harness loop on Rig, out through open-ai-gateway,
    streamed back as AG-UI `TEXT_MESSAGE_*` / `TOOL_CALL_*`; runs and transcripts as events in the
    store. Durable: a run survives the client disconnecting.
-4. **The computer** — box.ascii.dev behind the `Computer` trait; an agent works on its own box and
-   keeps working when the laptop is off. This is the goal's headline.
+4. **Durability, then the computer.** Two halves of the same promise.
+   - ✅ *Durable runs — done 29 Aug 2026.* Every event is appended to the log **before** the client
+     sees it, and `GET /ag-ui/runs/{id}` replays a run without asking a model again.
+     `scripts/slice4-durability-smoke.sh` SIGKILLs the server mid-run and proves the work survived.
+     `PgStore::interrupted_runs` makes a run orphaned by a restart findable rather than merely
+     absent — nothing consumes it yet; resumption starts there.
+   - **The computer** — box.ascii.dev behind the `Computer` trait, so an agent works on its own box
+     and keeps working when the laptop is off.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

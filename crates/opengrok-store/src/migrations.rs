@@ -40,6 +40,20 @@ create table if not exists session_view (
 
 create index if not exists session_view_session_idx on session_view (session_id);
 
+-- What a client asking "what happened in this run" is answered from. `status = running` with no
+-- process behind it is the shape a restart leaves behind, and the reason this column exists: a
+-- lost run must be findable, not merely absent.
+create table if not exists run_view (
+    id            text        primary key,
+    thread_id     text        not null,
+    status        text        not null,
+    event_count   bigint      not null,
+    updated_at_ms bigint      not null
+);
+
+create index if not exists run_view_thread_idx on run_view (thread_id);
+create index if not exists run_view_status_idx on run_view (status);
+
 -- A projection, not a source of truth: every column here is derivable by replaying `events`.
 -- Written in the same transaction as the append that causes it.
 create table if not exists account_view (

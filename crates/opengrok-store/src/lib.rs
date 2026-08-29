@@ -134,6 +134,11 @@ impl EventStore for MemoryEventStore {
     }
 }
 
+/// One stream per run. Runs and accounts share the `events` table and never the same stream.
+pub fn run_stream(id: &opengrok_core::id::RunId) -> String {
+    format!("run/{id}")
+}
+
 /// The account stream's id. One stream per account, keyed by the account id.
 pub fn account_stream(id: &AccountId) -> String {
     format!("account/{id}")
