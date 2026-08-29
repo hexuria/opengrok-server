@@ -38,9 +38,17 @@ pub enum KnownKind {
         content: String,
         #[serde(default, rename = "richText", skip_serializing_if = "Option::is_none")]
         rich_text: Option<Value>,
-        #[serde(default, rename = "isStreaming", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "isStreaming",
+            skip_serializing_if = "Option::is_none"
+        )]
         is_streaming: Option<bool>,
-        #[serde(default, rename = "clientNonce", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "clientNonce",
+            skip_serializing_if = "Option::is_none"
+        )]
         client_nonce: Option<String>,
         #[serde(default, rename = "replyTo", skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
@@ -67,9 +75,17 @@ pub enum KnownKind {
         streaming: Option<bool>,
         #[serde(default, rename = "replyTo", skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,
-        #[serde(default, rename = "respondedValue", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "respondedValue",
+            skip_serializing_if = "Option::is_none"
+        )]
         responded_value: Option<Value>,
-        #[serde(default, rename = "widgetDismissed", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "widgetDismissed",
+            skip_serializing_if = "Option::is_none"
+        )]
         widget_dismissed: Option<bool>,
         #[serde(flatten)]
         extra: Extra,
@@ -86,7 +102,11 @@ pub enum KnownKind {
         height: Option<i64>,
         #[serde(default, rename = "byteSize", skip_serializing_if = "Option::is_none")]
         byte_size: Option<i64>,
-        #[serde(default, rename = "clientNonce", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            rename = "clientNonce",
+            skip_serializing_if = "Option::is_none"
+        )]
         client_nonce: Option<String>,
         #[serde(default, rename = "replyTo", skip_serializing_if = "Option::is_none")]
         reply_to: Option<String>,

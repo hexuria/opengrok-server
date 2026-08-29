@@ -4,7 +4,7 @@
 primary-source; two shapes are explicitly marked unverified and must be pinned against a real box
 before production structs are written.
 
-**Role in OpenGrok:** the first implementation of the `Computer` trait in `crates/og-box`. A
+**Role in OpenGrok:** the first implementation of the `Computer` trait in `crates/opengrok-box`. A
 coworker's computer is a *seam*, not a vendor — a local Docker implementation is expected to follow.
 
 ---
@@ -23,7 +23,7 @@ Rust server must be built by polling `GET /boxes/{boxId}/commands/{processId}`, 
 yourself. There is no Rust SDK and none is needed. Region is EU-only today. Hosted-only — no
 open-source or self-host path found.
 
-**Design consequence, already encoded in `og-box`:** `run` (single result) and `watch` (a poll) are
+**Design consequence, already encoded in `opengrok-box`:** `run` (single result) and `watch` (a poll) are
 separate trait methods. Hiding the poll behind a nice `Stream` would conceal the latency from the
 caller choosing a timeout.
 

@@ -9,8 +9,8 @@ reference. Written 29 Aug 2026, at commit `59b377f`.
 
 ## Where this stands, in one paragraph
 
-The project is **P0 complete and nothing serves yet**. Nine Rust crates exist and compile; `og-wire`
-(the desktop client's contract) and `og-box` (the coworker's computer) have real types with their
+The project is **P0 complete and nothing serves yet**. Nine Rust crates exist and compile; `opengrok-wire`
+(the desktop client's contract) and `opengrok-box` (the coworker's computer) have real types with their
 constraints written into them and seven tests holding the two invariants that matter; every other
 crate is a one-line placeholder. The *thinking* is done and written down — five reference documents
 totalling ~3,300 lines, produced by reading the actual source of the client, the gateway, the prior
@@ -21,7 +21,7 @@ server.** [`RUNBOOK.md`](RUNBOOK.md) is the procedure; it is not optional readin
 
 | | |
 |---|---|
-| `5365080` | the workspace: nine crates, lints, ids, the first `og-wire`/`og-box` shapes |
+| `5365080` | the workspace: nine crates, lints, ids, the first `opengrok-wire`/`opengrok-box` shapes |
 | `798046c` | the documentation set — everything a cold session needs |
 | `039aac6` | `WHY.md` (the founding narrative) and three findings that changed P1 |
 | `59b377f` | an adversarial pass: fixed two scaffold bugs, corrected four counts, wrote the runbook |
@@ -42,7 +42,7 @@ operator, not by drift in a commit.
 | **Rig** for provider abstraction, **our own loop** for durability | `PLAN.md` §4.2 | no Rust framework offers a loop that survives the process, and that suspension *is* the product |
 | The client contract is **transcribed, never invented** | `CLAUDE.md` #1, `LEGAL.md` | a tidier field name breaks a client we do not compile |
 | box.ascii.dev first, behind a `Computer` **trait** | `PLAN.md` §4.3 | hosted-only and EU-only, so the seam must survive replacing it |
-| `run` and `watch` are separate methods | `og-box/src/lib.rs` | the sandbox has no live stdout socket; a `Stream` would hide the latency |
+| `run` and `watch` are separate methods | `opengrok-box/src/lib.rs` | the sandbox has no live stdout socket; a `Stream` would hide the latency |
 | open-connector as a **Node sidecar** in v1 | `PLAN.md` §4.4 | its executors' routing is implicit in TypeScript; extraction is a follow-up, per provider |
 | Local Docker `Computer` lands **after** P3 | `PLAN.md` §7 | additive by construction |
 | One Postgres instance, OpenGrok's own database, in-process migrations under an advisory lock | `RUNBOOK.md` §2 | one database server for a developer; matches the gateway's pattern |
@@ -71,14 +71,14 @@ Order of work:
 1. **Read [`RUNBOOK.md`](RUNBOOK.md) end to end.** §0 is a go/no-go — the client's renderer is
    git-ignored and needs a DMG the operator must possess. If it is not hydrated, say so immediately
    rather than discovering it after building the server.
-2. Stand up Postgres and write the first migrations in `crates/og-store/migrations/`
+2. Stand up Postgres and write the first migrations in `crates/opengrok-store/migrations/`
    (`workspace_id`, `coworkers`, and whatever the roster row needs — the ~30-field summary is at
    `research/client-grok-bot.md` §8.1; note `updatedAt` is the client's sort key).
-3. Implement in `og-server`, in the client's own call order (the table in `RUNBOOK.md` §4):
+3. Implement in `opengrok-server`, in the client's own call order (the table in `RUNBOOK.md` §4):
    `GET /health` → `GET /events` (SSE, `retry: 1000`, `:ping` ≤15 s) → `listAgents` → the resync
    chain's `setHostSettings`/`getHostSettings` → `countAgents` → `getTrays` →
    `isAgentNetworkEnabled` → `isGlobalSearchEnabled` → `getForeverBoxStatus` → `openAgentTail`.
-   The same list is `P1_COMMANDS` in `crates/og-wire/src/command.rs` — keep them in step.
+   The same list is `P1_COMMANDS` in `crates/opengrok-wire/src/command.rs` — keep them in step.
 4. Write `scripts/p1-smoke.sh` (the assertions are drafted in `RUNBOOK.md` §5) and make it pass.
 5. Seed **one** coworker. An empty array is a valid reply that renders as a working app with no
    coworkers, and it will read as your bug.

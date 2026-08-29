@@ -25,7 +25,7 @@ A coworker keeps working when you close the tab, because the work was never in t
 
 ## Status
 
-**P0 — foundations.** Nine crates, workspace lints, `cargo check` clean, `og-wire`'s casing and
+**P0 — foundations.** Nine crates, workspace lints, `cargo check` clean, `opengrok-wire`'s casing and
 round-trip invariants under test. Nothing serves yet.
 See [`docs/PLAN.md`](docs/PLAN.md) §5 for what P1 is, and [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for
 how to stand it up.
@@ -40,15 +40,16 @@ cargo test --workspace
 
 ```
 crates/
-  opengrok    the binary; wires the server, embeds the gateway
-  og-core     ids, errors, domain types. No I/O.
-  og-wire     the client contract: commands, transcript entries, activity
-  og-harness  the agent loop (Rig): turns, tool calls, streaming
-  og-box      the coworker's computer — a trait, not a vendor
-  og-tools    tool definitions and the executor
-  og-policy   what a principal may make a coworker do
-  og-store    Postgres: coworkers, transcripts, runs, the fan-out ledger
-  og-server   Axum: the host-facing API and the event stream
+  opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
+  opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
+  opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
+  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
+  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability; goal/plan/review behaviours
+  opengrok-box      the coworker's computer — a trait; box.ascii.dev first, cua and Docker later
+  opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
+  opengrok-policy   what a principal may make a coworker do
+  opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
+  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint
 docs/
   PLAN.md · LEGAL.md · DIAGRAMS.md · research/ · artifacts/
 ```

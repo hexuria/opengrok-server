@@ -4,7 +4,7 @@
 (*fix(proto): mint unique Responses item ids per response (#46)*), working tree clean apart from an
 untracked `.agent-mail/`.
 
-**Role in OpenGrok:** every model call `crates/og-harness` makes exits through OAG. OAG owns
+**Role in OpenGrok:** every model call `crates/opengrok-harness` makes exits through OAG. OAG owns
 provider credentials, cost routing, failover, prompt-cache affinity, and the usage ledger; OpenGrok
 owns the coworker, the transcript, and the policy over tools. The two are intended to ship as one
 product, and OpenGrok's own `Cargo.toml` already names `crates/opengrok` as *"the binary: wires the
@@ -503,7 +503,7 @@ item on the first `ThinkingDelta`, emitting `output_item.added` then `reasoning_
 stop/fail, emitting `reasoning_summary_text.done`, `reasoning_summary_part.done`,
 `output_item.done`. Ordering is asserted frame-by-frame in `responses.rs:1393-1435`.
 
-**Why it matters to OpenGrok:** if `og-harness` streams through `/v1/responses` (or ships an
+**Why it matters to OpenGrok:** if `opengrok-harness` streams through `/v1/responses` (or ships an
 AI-SDK-based client), reasoning models were unusable before this.
 
 ### `076db83` — fix(models): a subscription seat is not the API catalog (#45)
@@ -591,7 +591,7 @@ pub mod gateway; pub mod admin; pub mod health; pub mod listen; pub mod breakers
 ```
 
 Because both routers return `Router` (i.e. `Router<()>` — `.with_state(state)` is applied inside),
-OpenGrok's `og-server` can do exactly this:
+OpenGrok's `opengrok-server` can do exactly this:
 
 ```rust
 let app = opengrok_router()
@@ -636,7 +636,7 @@ router. Concretely:
    one piece of the binary that is not library-reachable. *Recommendation: upstream `settings::load`
    into `oag-core` or `oag-server` — it is pure and already unit-tested.*
 2. **Migrations.** `Db::migrate()` runs `migrations/0001…0008` under an advisory lock (safe from every
-   replica at once). OpenGrok has its own `og-store` migrations; the two must live in one Postgres
+   replica at once). OpenGrok has its own `opengrok-store` migrations; the two must live in one Postgres
    database with non-colliding table names, or in two databases with two `Db` handles. OAG's tables:
    `principal`, `api_key`, `route`, `account`, `account_route`, `model`, `usage_event`, `service`,
    `subscription_usage`, … (no `og_` prefixes, so a name audit is required).
@@ -771,7 +771,7 @@ Everything below is anchored in verified code: header names from `extract_key`
 `oag_headers` (`mod.rs:839`) and `stream_response` (`mod.rs:1164`), and the `[DONE]` terminator from
 `crates/oag-proto/src/openai.rs:812`.
 
-**Recommended surface for `og-harness`: `POST /v1/chat/completions` with `"stream": true`.** It is the
+**Recommended surface for `opengrok-harness`: `POST /v1/chat/completions` with `"stream": true`.** It is the
 native dialect of five of the nine providers (`Provider::native_dialect`), so OAG takes the
 byte-passthrough path when the upstream is one of them, and its stream framing is the simplest to
 consume. Use `/v1/messages` if the harness is Anthropic-shaped; use `/v1/responses` only if you need
@@ -847,7 +847,7 @@ pub async fn stream_turn(
                 }
                 let v: serde_json::Value = serde_json::from_str(payload)?;
                 if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
-                    // -> og-wire transcript delta
+                    // -> opengrok-wire transcript delta
                     print!("{delta}");
                 }
                 // v["usage"] arrives on the final data frame when the upstream

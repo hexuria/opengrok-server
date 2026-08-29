@@ -201,7 +201,7 @@ times**, each copy introducing its coworker's answer. It read as a stutter.
 >
 > For OpenGrok this is cheaper still: a broadcast should be **one stored user message with
 > N deliveries**, and then there is nothing to collapse. Model the ask and the delivery
-> separately — `og-store`'s "fan-out ledger" in the plan is exactly the right instinct.
+> separately — `opengrok-store`'s "fan-out ledger" in the plan is exactly the right instinct.
 
 ---
 
@@ -517,7 +517,7 @@ Opinionated. Argue with it, but argue explicitly.
 - **Pure core, tested without infrastructure.** `weaveRoom` takes histories + index + live
   messages and returns a list. `app/tests/weave-room.test.ts` proves every ordering rule
   with no room, socket or agent. Rust makes this natural — keep the ordering/collapse logic
-  in `og-core` with zero I/O.
+  in `opengrok-core` with zero I/O.
 - **Tests that assert *limits* on purpose**, so a known gap cannot silently change
   (`channel-roster.integration.test.ts`: "gives each person their own thread in a shared
   room").
@@ -643,7 +643,7 @@ That is the whole surface. It is a **week or two of Postgres**, not a platform:
 - memory → pgvector, which the deployment **already runs** (`README.md`: "PostgreSQL with
   pgvector, 5432"). The embedding call goes out through the gateway like everything else.
 
-`og-store` in `docs/PLAN.md` already lists "coworkers, transcripts, runs, the fan-out
+`opengrok-store` in `docs/PLAN.md` already lists "coworkers, transcripts, runs, the fan-out
 ledger". That is exactly right, and it is the crate that must not be deferred.
 
 > **The rule.** **A dependency you cannot boot without is not a dependency, it is your
@@ -664,7 +664,7 @@ ledger". That is exactly right, and it is the crate that must not be deferred.
 >    constraints have shaped your schema, your UI and your invariants. The swap is cheap; the
 >    workarounds you built around it are not.
 >
-> OpenGrok's version: **own transcripts, run locks and memory in `og-store` before anything
+> OpenGrok's version: **own transcripts, run locks and memory in `opengrok-store` before anything
 > else is built on them.** Rent the model door (that is what open-ai-gateway is *for*, and it
 > is MIT and ships in the same binary). Never rent the record.
 

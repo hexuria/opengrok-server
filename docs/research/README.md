@@ -5,11 +5,11 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 
 | Document | Covers | Read it before |
 |---|---|---|
-| [`client-grok-bot.md`](client-grok-bot.md) | The Grok Bot desktop client: architecture, the 123 `SAND_GATEWAY_COMMANDS`, transcript entry kinds and card types, the live activity stream, the box seam, and the first-boot call order | touching `og-wire` or `og-server` |
-| [`gateway-open-ai-gateway.md`](gateway-open-ai-gateway.md) | open-ai-gateway: crate layout, the two listeners, auth, the model-pin dialect, endpoints, the `/v1/models` diagnostics envelope, and whether it can be embedded | touching `og-harness` or planning the single-binary release |
-| [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `og-store` or `og-harness` |
-| [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, auth and session model, a minimal Rust flow, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `og-box` |
-| [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `og-tools` or planning P6 |
+| [`client-grok-bot.md`](client-grok-bot.md) | The Grok Bot desktop client: architecture, the 123 `SAND_GATEWAY_COMMANDS`, transcript entry kinds and card types, the live activity stream, the box seam, and the first-boot call order | touching `opengrok-wire` or `opengrok-server` |
+| [`gateway-open-ai-gateway.md`](gateway-open-ai-gateway.md) | open-ai-gateway: crate layout, the two listeners, auth, the model-pin dialect, endpoints, the `/v1/models` diagnostics envelope, and whether it can be embedded | touching `opengrok-harness` or planning the single-binary release |
+| [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `opengrok-store` or `opengrok-harness` |
+| [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, auth and session model, a minimal Rust flow, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
+| [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `opengrok-tools` or planning P6 |
 
 ## Headline findings, so they are not buried
 

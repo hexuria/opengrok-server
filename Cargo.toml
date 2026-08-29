@@ -7,14 +7,15 @@
 resolver = "3"
 members = [
   "crates/opengrok",   # the binary: wires the server, embeds the gateway
-  "crates/og-core",    # domain types, ids, errors. No I/O.
-  "crates/og-wire",    # the client contract: gateway commands, transcript entries, activity
-  "crates/og-harness", # the agent loop (Rig): turns, tools, streaming
-  "crates/og-box",     # the coworker's computer
-  "crates/og-tools",   # tool definitions and the executor
-  "crates/og-policy",  # what a principal may make a coworker do
-  "crates/og-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
-  "crates/og-server",  # Axum: the host-facing API and the event stream
+  "crates/opengrok-core",    # domain types, ids, errors. No I/O.
+  "crates/opengrok-wire",    # the client contract: gateway commands, transcript entries, activity
+  "crates/opengrok-proto",   # seam B transcribed: Connect-over-HTTP/1.1 messages (prost), never vendored stubs
+  "crates/opengrok-harness", # the agent loop (Rig): turns, tools, streaming
+  "crates/opengrok-box",     # the coworker's computer
+  "crates/opengrok-tools",   # tool definitions and the executor
+  "crates/opengrok-policy",  # what a principal may make a coworker do
+  "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
+  "crates/opengrok-server",  # Axum: the host-facing API and the event stream
 ]
 
 [workspace.package]
@@ -39,6 +40,18 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 async-trait = "0.1"
+
+# The agent stack, pinned here so the versions are a recorded decision rather than drift.
+# rig-core: provider abstraction only — the durable loop stays ours (docs/PLAN.md §4.2). It reaches
+#   models through open-ai-gateway's OpenAI-compatible routes (/v1/chat/completions) with an
+#   oag_live_ key; provider credentials never appear here (CLAUDE.md #4).
+rig-core = "0.42"
+# rmcp: the official MCP SDK. Client-side first: mem0/OpenMemory and cua integrate as MCP servers
+#   we connect to, not as code we write.
+rmcp = "3"
+# prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
+#   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
+prost = "0.14"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

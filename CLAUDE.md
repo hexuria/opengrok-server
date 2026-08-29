@@ -7,7 +7,8 @@ Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
 **Picking this up cold? Start with [`docs/HANDOVER.md`](docs/HANDOVER.md)** — the state of play,
 what is already decided, and your first task.
 
-**New here? Read in this order:** [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
+**New here? Read in this order:** [`docs/GOAL.md`](docs/GOAL.md) (the mission, the stack, the
+slice order) → [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
 → [`docs/WHY.md`](docs/WHY.md) (what we built before, and why a working app wasn't enough)
 → [`docs/PLAN.md`](docs/PLAN.md) → [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (how to actually stand P1
 up: the env vars, the Postgres, the acceptance script) → [`docs/LEGAL.md`](docs/LEGAL.md) → the
@@ -32,7 +33,7 @@ reference doc for whatever you are about to touch, in `docs/research/`.
 
 ## Non-negotiables
 
-1. **The client contract is transcribed, never invented.** Shapes in `crates/og-wire` exist because
+1. **The client contract is transcribed, never invented.** Shapes in `crates/opengrok-wire` exist because
    the desktop client emits or expects them. A tidier field name breaks a client we do not compile.
    Every shape carries a provenance comment naming the file it was read from.
 2. **Unknown wire shapes round-trip untouched.** An entry kind we do not recognise is preserved and
@@ -62,15 +63,16 @@ reference doc for whatever you are about to touch, in `docs/research/`.
 
 ```
 crates/
-  opengrok    the binary; wires the server, embeds the gateway
-  og-core     ids, errors, domain types. No I/O. Everything depends on it; it depends on nothing.
-  og-wire     the client contract: commands, transcript entries, activity
-  og-harness  the agent loop (Rig): turns, tool calls, streaming, durability
-  og-box      the coworker's computer — a trait; box.ascii.dev first, Docker later
-  og-tools    tool definitions and the executor
-  og-policy   what a principal may make a coworker do
-  og-store    Postgres: coworkers, transcripts, runs, the fan-out ledger
-  og-server   Axum: the host-facing API and the event stream
+  opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
+  opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
+  opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
+  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
+  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability; goal/plan/review behaviours
+  opengrok-box      the coworker's computer — a trait; box.ascii.dev first, cua and Docker later
+  opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
+  opengrok-policy   what a principal may make a coworker do
+  opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
+  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint
 ```
 
 Mirrors open-ai-gateway's crate-per-concern layout on purpose — the two ship together and a reader

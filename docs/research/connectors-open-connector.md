@@ -4,7 +4,7 @@
 endpoint. This report **corrects an earlier audit** that was wrong on its most consequential point.
 
 **Role in OpenGrok:** the source of third-party tools (Slack, GitHub, Gmail, …) behind
-`crates/og-tools`' executor trait. Our own `og-policy` decides who may call what — never theirs.
+`crates/opengrok-tools`' executor trait. Our own `opengrok-policy` decides who may call what — never theirs.
 
 ---
 

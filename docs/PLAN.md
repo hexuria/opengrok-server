@@ -78,14 +78,14 @@ this plan depends on publishing.
 ```
 crates/
   opengrok    the binary; wires the server and embeds the gateway
-  og-core     ids, errors, domain types. No I/O.
-  og-wire     the client contract: commands, transcript entries, activity
-  og-harness  the agent loop (Rig): turns, tool calls, streaming
-  og-box      the coworker's computer (trait; box.ascii.dev first)
-  og-tools    tool definitions and the executor
-  og-policy   what a principal may make a coworker do
-  og-store    Postgres: coworkers, transcripts, runs, the fan-out ledger
-  og-server   Axum: host-facing API and the event stream
+  opengrok-core     ids, errors, domain types. No I/O.
+  opengrok-wire     the client contract: commands, transcript entries, activity
+  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming
+  opengrok-box      the coworker's computer (trait; box.ascii.dev first)
+  opengrok-tools    tool definitions and the executor
+  opengrok-policy   what a principal may make a coworker do
+  opengrok-store    Postgres: coworkers, transcripts, runs, the fan-out ledger
+  opengrok-server   Axum: host-facing API and the event stream
 ```
 
 Mirrors open-ai-gateway's crate-per-concern layout deliberately: the two ship together and a reader
@@ -120,7 +120,7 @@ Full detail: [`research/gateway-open-ai-gateway.md`](research/gateway-open-ai-ga
 
 ## 4. The five seams
 
-### 4.1 The wire — `og-wire`
+### 4.1 The wire — `opengrok-wire`
 
 Transcribed, not designed. Three wires kept apart on purpose:
 
@@ -133,18 +133,18 @@ Transcribed, not designed. Three wires kept apart on purpose:
 Activity is disposable by design: a client that missed an update must be able to catch up from the
 transcript alone. Unknown entry kinds round-trip untouched.
 
-### 4.2 The harness — `og-harness`
+### 4.2 The harness — `opengrok-harness`
 
 **Rig** for provider abstraction; **our own loop** for durability. No Rust framework offers a loop
 that survives the process — the 2026 ecosystem surveys say checkpointing and crash recovery are
 "still on the user to implement" — and that suspension *is* the product. The loop is ~400 lines
 either way; what a framework really sells is integrations, and those are the thinnest part of the
-Rust ecosystem. (That tension is why `og-tools` is its own seam.)
+Rust ecosystem. (That tension is why `opengrok-tools` is its own seam.)
 
 Every model call exits through open-ai-gateway, so a coworker's pin means exactly what it means
 today.
 
-### 4.3 The computer — `og-box`
+### 4.3 The computer — `opengrok-box`
 
 A trait, so a coworker's computer is a **seam and not a vendor**. box.ascii.dev is the first
 implementation: persistent Ubuntu VMs, plain REST, bearer auth — a `reqwest` client is the whole
@@ -163,7 +163,7 @@ stop/resume/fork, destroy. **Gaps designed around rather than discovered later:*
 
 Full report: [`research/sandbox-box-ascii-dev.md`](research/sandbox-box-ascii-dev.md).
 
-### 4.4 Tools — `og-tools`
+### 4.4 Tools — `opengrok-tools`
 
 Native tools (shell, files, ports) execute against the box. Connectors come from **open-connector**
 — Apache-2.0, ~1,450 providers / ~15,000 actions.
@@ -180,7 +180,7 @@ never theirs — decides who may call what.
 
 Full report: [`research/connectors-open-connector.md`](research/connectors-open-connector.md).
 
-### 4.5 Policy — `og-policy`
+### 4.5 Policy — `opengrok-policy`
 
 Configure from the client; the server accepts or denies. Five separate questions, each enforced
 somewhere different — collapsing any two is where the leaks live:
@@ -218,7 +218,7 @@ phases exercise the seams the later ones depend on.
 | **P6** | Connectors | 2–3 wk | two people in one room see their own accounts' data |
 
 **P0 — Foundations** (done). Nine crates; workspace lints (`unsafe_code` forbidden,
-`unwrap`/`expect`/`panic` denied); ids as newtypes; `og-wire` and `og-box` sketched with their
+`unwrap`/`expect`/`panic` denied); ids as newtypes; `opengrok-wire` and `opengrok-box` sketched with their
 constraints written into the types. Remaining: CI, `.sqlx` offline data, the gateway wired in as a
 dependency.
 
@@ -229,22 +229,22 @@ either and `listAgents` is never called. Then `listAgents` (array), the resync c
 `setHostSettings`/`getHostSettings`, `countAgents` (**a number**, or the app shows onboarding),
 `getTrays` (**an array**, or the renderer throws), `isAgentNetworkEnabled`,
 `isGlobalSearchEnabled`, `getForeverBoxStatus` (`null` or a record, or it throws), and
-`openAgentTail`. `og-store` gets its first migrations alongside.
+`openAgentTail`. `opengrok-store` gets its first migrations alongside.
 
 **The full ordered table, the four environment variables, the Postgres setup and the acceptance
 script are in [`RUNBOOK.md`](RUNBOOK.md) — P1 is not startable without it.** The same list is
-mirrored in `crates/og-wire/src/command.rs` as `P1_COMMANDS`, so the plan and the code cannot drift.
+mirrored in `crates/opengrok-wire/src/command.rs` as `P1_COMMANDS`, so the plan and the code cannot drift.
 
 Watch for Trap 2: an *empty success* is the dangerous reply. `listAgents` returning `[]` is valid,
 paints an empty sidebar, and reads as a broken app rather than a protocol mistake — seed one
 coworker.
 
-**P2 — A turn.** `sendPrompt` → `og-harness` runs a turn through Rig → OAG → a real model; text
+**P2 — A turn.** `sendPrompt` → `opengrok-harness` runs a turn through Rig → OAG → a real model; text
 streams back as activity; the transcript persists. The durability test is the point: kill the server
 mid-run and the run resumes.
 
-**P3 — The computer.** `og-box` against a real box.ascii.dev VM; shell and file tools wired through
-`og-tools`; the two unpinned response shapes written down.
+**P3 — The computer.** `opengrok-box` against a real box.ascii.dev VM; shell and file tools wired through
+`opengrok-tools`; the two unpinned response shapes written down.
 
 **P4 — Broadcast, done right.** The fan-out ledger: one request, a durable row, every coworker asked
 **in parallel** (with a small concurrency cap for the subscription's sake), answers landing as each
@@ -275,7 +275,7 @@ Proven designs, not wasted work — and its web app is a candidate second client
   honest model catalogue) — all fixed upstream and verified against real traffic.
 
 **The most load-bearing lesson:** that product could not boot without a proprietary hosted service
-providing threads, memory and run locks. OpenGrok must own those itself. That is `og-store`'s whole
+providing threads, memory and run locks. OpenGrok must own those itself. That is `opengrok-store`'s whole
 reason to exist.
 
 ---

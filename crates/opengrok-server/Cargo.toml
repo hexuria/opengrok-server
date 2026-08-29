@@ -1,5 +1,5 @@
 [package]
-name = "og-server"
+name = "opengrok-server"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-og-core = { path = "../og-core" }
-og-wire = { path = "../og-wire" }
-og-harness = { path = "../og-harness" }
-og-store = { path = "../og-store" }
-og-policy = { path = "../og-policy" }
+opengrok-core = { path = "../opengrok-core" }
+opengrok-wire = { path = "../opengrok-wire" }
+opengrok-harness = { path = "../opengrok-harness" }
+opengrok-store = { path = "../opengrok-store" }
+opengrok-policy = { path = "../opengrok-policy" }
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true

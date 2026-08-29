@@ -1,5 +1,5 @@
 [package]
-name = "og-harness"
+name = "opengrok-harness"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,11 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-og-core = { path = "../og-core" }
-og-wire = { path = "../og-wire" }
-og-tools = { path = "../og-tools" }
-og-policy = { path = "../og-policy" }
-og-store = { path = "../og-store" }
+opengrok-core = { path = "../opengrok-core" }
+opengrok-wire = { path = "../opengrok-wire" }
+opengrok-tools = { path = "../opengrok-tools" }
+opengrok-policy = { path = "../opengrok-policy" }
+opengrok-store = { path = "../opengrok-store" }
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

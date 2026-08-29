@@ -13,9 +13,9 @@ name = "opengrok"
 path = "src/main.rs"
 
 [dependencies]
-og-server = { path = "../og-server" }
-og-store = { path = "../og-store" }
-og-core = { path = "../og-core" }
+opengrok-server = { path = "../opengrok-server" }
+opengrok-store = { path = "../opengrok-store" }
+opengrok-core = { path = "../opengrok-core" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

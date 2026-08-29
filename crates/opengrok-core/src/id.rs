@@ -36,8 +36,20 @@ macro_rules! id {
     };
 }
 
-id!(CoworkerId, "cw", "One coworker: a name, a face, a computer, a model route.");
+id!(
+    CoworkerId,
+    "cw",
+    "One coworker: a name, a face, a computer, a model route."
+);
 id!(RunId, "run", "One turn taken by one coworker.");
 id!(BoxId, "box", "The computer a coworker works on.");
-id!(PrincipalId, "pr", "Whoever is asking: a person, another coworker, or an anonymous visitor.");
-id!(TranscriptEntryId, "e", "One entry in a transcript, as the client knows it.");
+id!(
+    PrincipalId,
+    "pr",
+    "Whoever is asking: a person, another coworker, or an anonymous visitor."
+);
+id!(
+    TranscriptEntryId,
+    "e",
+    "One entry in a transcript, as the client knows it."
+);

@@ -45,7 +45,7 @@ Source: [`artifacts/desk-and-door.html`](artifacts/desk-and-door.html)
 Explains an AG-UI agent endpoint (a *desk* — where a coworker sits and works) versus
 open-ai-gateway (a *door* — where model calls leave the building), why they are not alternatives,
 and why implementing the gateway inside the agent would be a mistake. The layering argument behind
-`og-harness` (the desk) and OAG (the door) being separate crates.
+`opengrok-harness` (the desk) and OAG (the door) being separate crates.
 
 ---
 

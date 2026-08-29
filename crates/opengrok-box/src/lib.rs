@@ -58,7 +58,12 @@ pub trait Computer: Send + Sync {
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String>;
 
     /// Run to completion. For anything that might outlive a request, use `start` + `watch`.
-    async fn run(&self, box_id: &str, command: &str, timeout_seconds: u32) -> BoxResult<CommandOutput>;
+    async fn run(
+        &self,
+        box_id: &str,
+        command: &str,
+        timeout_seconds: u32,
+    ) -> BoxResult<CommandOutput>;
 
     /// Start something long-running and return immediately.
     async fn start(&self, box_id: &str, command: &str) -> BoxResult<StartedCommand>;

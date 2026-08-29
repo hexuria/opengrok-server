@@ -75,7 +75,7 @@ createdb -h 127.0.0.1 -p 5452 -U openbot opengrok   # or psql -c 'create databas
 OG_DATABASE_URL=postgres://openbot:openbot@127.0.0.1:5452/opengrok
 ```
 
-Migrations live in `crates/og-store/migrations/` and run **in-process at startup under a Postgres
+Migrations live in `crates/opengrok-store/migrations/` and run **in-process at startup under a Postgres
 advisory lock**, matching the gateway's pattern — so a second replica starting at the same moment
 waits rather than racing. `.sqlx` offline data is committed, so CI needs no database.
 
@@ -93,7 +93,7 @@ Every knob, so nothing has to be invented. Copy `.env.example` to `.env`.
 | `OG_GATEWAY_URL` | `http://127.0.0.1:29080` | open-ai-gateway's inference listener |
 | `OG_GATEWAY_TOKEN` | — | an `oag_live_…` key. **Never a provider key** |
 | `OG_BOX_API_KEY` | — | box.ascii.dev (`box_…`). P3; unset is fine before then |
-| `RUST_LOG` | `opengrok=debug,og_server=debug` | tracing |
+| `RUST_LOG` | `opengrok=debug,opengrok_server=debug` | tracing |
 
 ---
 
@@ -123,7 +123,7 @@ channel).
 
 > **The reply shape is as load-bearing as the reply.** A number that should be an array throws; an
 > empty array that should have a row renders as a working app with no coworkers. See Trap 2 in the
-> reference, and the comment on `P1_COMMANDS` in `crates/og-wire/src/command.rs`.
+> reference, and the comment on `P1_COMMANDS` in `crates/opengrok-wire/src/command.rs`.
 
 ---
 

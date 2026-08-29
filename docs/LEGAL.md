@@ -38,7 +38,7 @@ here and therefore cannot be and is not copied.
 
 1. **No vendored generated protobuf stubs.** `source/packages/proto/generated/**` is never copied
    into this repository, nor `@connectrpc`/`@bufbuild` runtime dependencies added to serve them.
-   Where a message shape is genuinely needed, it is **transcribed** into `crates/og-wire` in Rust,
+   Where a message shape is genuinely needed, it is **transcribed** into `crates/opengrok-wire` in Rust,
    with a provenance comment naming the file it was read from.
 2. **No reimplementation "from the proto" as a goal in itself.** The target is the *client's
    behaviour*, not the vendor's backend. If a command is not needed for the client to work, we do

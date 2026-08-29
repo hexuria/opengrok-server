@@ -901,6 +901,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1033,12 +1042,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-box"
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "opengrok"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "opengrok-core",
+ "opengrok-server",
+ "opengrok-store",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "opengrok-box"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
- "og-core",
+ "opengrok-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1048,7 +1076,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-core"
+name = "opengrok-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -1059,17 +1087,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-harness"
+name = "opengrok-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "og-core",
- "og-policy",
- "og-store",
- "og-tools",
- "og-wire",
+ "opengrok-core",
+ "opengrok-policy",
+ "opengrok-store",
+ "opengrok-tools",
+ "opengrok-wire",
  "reqwest",
  "serde",
  "serde_json",
@@ -1080,27 +1108,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-policy"
+name = "opengrok-policy"
 version = "0.1.0"
 dependencies = [
- "og-core",
+ "opengrok-core",
  "serde",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "og-server"
+name = "opengrok-proto"
+version = "0.1.0"
+dependencies = [
+ "opengrok-core",
+ "prost",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "opengrok-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
  "futures",
- "og-core",
- "og-harness",
- "og-policy",
- "og-store",
- "og-wire",
+ "opengrok-core",
+ "opengrok-harness",
+ "opengrok-policy",
+ "opengrok-store",
+ "opengrok-wire",
  "serde",
  "serde_json",
  "thiserror",
@@ -1112,12 +1150,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-store"
+name = "opengrok-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "og-core",
- "og-wire",
+ "opengrok-core",
+ "opengrok-wire",
  "serde",
  "serde_json",
  "sqlx",
@@ -1127,12 +1165,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-tools"
+name = "opengrok-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "og-box",
- "og-core",
+ "opengrok-box",
+ "opengrok-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1141,32 +1179,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "og-wire"
+name = "opengrok-wire"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "og-core",
+ "opengrok-core",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "once_cell"
-version = "1.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "opengrok"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "og-core",
- "og-server",
- "og-store",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1241,6 +1260,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prost"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
