@@ -24,7 +24,7 @@ pub mod migrations;
 pub mod postgres;
 pub mod vault;
 
-pub use postgres::PgStore;
+pub use postgres::{CredentialUpdate, PgStore};
 pub use vault::{Sealed, Vault};
 
 #[derive(Debug, thiserror::Error)]

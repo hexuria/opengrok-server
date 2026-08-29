@@ -185,8 +185,17 @@ and a run whose process dies is picked up rather than left hanging.
    - ✅ *Wired end to end — done 30 Aug 2026.* `/connections/{c}/authorize` → provider → `/callback`
      (state verified, token sealed) → `/connections/{id}/lend` → the coworker's next turn is offered
      that connector's tools. Provider config from `OG_CONNECTORS`, plugins from `OG_PLUGINS_DIR`.
-   - **Still to do:** a `slice10-connector-smoke.sh` proving it against the stand-in provider and a
-     stand-in MCP server, and refreshing an expiring token before use.
+   - ✅ *Refresh before use — done 30 Aug 2026.* A connection records its expiry; an expiring token
+     is refreshed **before** the call, with a 60s leeway so it cannot die mid-flight. A token with
+     no expiry is never refreshed, and `invalid_grant` disconnects rather than retrying forever.
+   - ✅ *MCP round trip proven* — `crates/opengrok-tools/tests/against_a_stand_in_mcp_server.rs`
+     drives our client against a **hand-written** MCP server (rmcp-to-rmcp would only prove the two
+     halves share an interpretation). It found a real bug on its first run: `Bearer Bearer …`,
+     because rmcp's `auth_header` wants the bare token.
+
+**Slice 5 is complete.** A person authenticates a provider, lends the connection to a coworker, and
+that coworker's next turn is offered the connector's tools — governed by the same policy, approval
+and identity rules as `shell`.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.

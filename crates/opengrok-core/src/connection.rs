@@ -265,6 +265,27 @@ pub struct ConnectionView {
     pub label: String,
     pub loans: BTreeSet<CoworkerId>,
     pub updated_at_ms: i64,
+    /// When the access token stops working. `None` means it does not expire — GitHub OAuth-app
+    /// tokens are like this — and must NOT be read as "already expired", which would refresh
+    /// forever against a provider that issues no refresh token.
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+}
+
+impl ConnectionView {
+    /// Whether this should be refreshed before it is used.
+    ///
+    /// A LEEWAY, NOT AN EXACT COMPARISON. A token with four seconds left passes an `expires_at >
+    /// now` test and then expires while the request is in flight; the call fails for a reason
+    /// nobody can reproduce. Sixty seconds is longer than any call we make.
+    pub fn is_expiring(&self, now_ms: i64) -> bool {
+        const LEEWAY_MS: i64 = 60_000;
+        match self.expires_at_ms {
+            Some(expires_at) => expires_at - now_ms < LEEWAY_MS,
+            // Never expires; refreshing would be a request to an endpoint that issues nothing.
+            None => false,
+        }
+    }
 }
 
 impl ConnectionView {
@@ -320,6 +341,7 @@ mod tests {
             label: "you@work.com".to_string(),
             loans: loans.iter().cloned().collect(),
             updated_at_ms: at,
+            expires_at_ms: None,
         }
     }
 
@@ -505,6 +527,30 @@ mod tests {
         let mut github = view("gh", Owner::Global, &[], 100);
         github.connector = "github".to_string();
         assert!(resolve(&[github], "gmail", &bot()).is_none());
+    }
+
+    /// A token that expires mid-flight fails for a reason nobody can reproduce.
+    #[test]
+    fn a_token_expiring_within_the_leeway_counts_as_expiring() {
+        let mut view = view("c", Owner::Global, &[], 1);
+        // Expires two minutes from "now", so the leeway is the thing being tested rather than the
+        // arithmetic: 30s left is inside the 60s leeway, 120s left is outside it.
+        view.expires_at_ms = Some(120_000);
+        assert!(
+            view.is_expiring(90_000),
+            "30s left is inside the 60s leeway"
+        );
+        assert!(view.is_expiring(120_001), "already past is expiring");
+        assert!(!view.is_expiring(0), "120s left is comfortably outside it");
+    }
+
+    /// GitHub OAuth-app tokens never expire. Refreshing one would be a request to an endpoint that
+    /// issues nothing, forever.
+    #[test]
+    fn a_token_with_no_expiry_never_needs_refreshing() {
+        let view = view("c", Owner::Global, &[], 1);
+        assert_eq!(view.expires_at_ms, None);
+        assert!(!view.is_expiring(i64::MAX));
     }
 
     #[test]

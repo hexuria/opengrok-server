@@ -98,6 +98,125 @@ async fn tools_for(
     ))
 }
 
+/// The access token for a connection, refreshed first if it is about to expire.
+///
+/// REFRESHED BEFORE USE, NOT AFTER FAILURE. Waiting for a 401 means every expiry costs a person one
+/// visibly failed tool call, and a model that reads that failure may go and do something else. The
+/// leeway lives in `ConnectionView::is_expiring` so a token cannot expire mid-flight.
+///
+/// A refusal that means the person revoked access disconnects rather than retrying: `invalid_grant`
+/// is a decision somebody made, and retrying it forever turns a revoked connection into a permanent
+/// error loop.
+async fn live_token(
+    state: &AgUiState,
+    vault: &opengrok_store::Vault,
+    chosen: &opengrok_core::connection::ConnectionView,
+) -> Option<String> {
+    let stored = state
+        .auth
+        .store
+        .open_credential(vault, &chosen.id)
+        .await
+        .ok()
+        .flatten();
+
+    if !chosen.is_expiring(now_ms()) {
+        return stored;
+    }
+
+    // Expiring. Without a provider or a refresh token there is nothing to do but use what we have
+    // and let the provider say no — which is still better than refusing a call we might complete.
+    let Some(config) = state.connectors.providers.get(&chosen.connector) else {
+        return stored;
+    };
+    let Ok(Some(refresh_token)) = state
+        .auth
+        .store
+        .open_credential(vault, &format!("{}_refresh", chosen.id))
+        .await
+    else {
+        return stored;
+    };
+
+    match crate::connections::flow::refresh(&reqwest::Client::new(), config, &refresh_token).await {
+        Ok(token) => {
+            let at_ms = now_ms();
+            let expires_at = token.expires_at_ms(at_ms);
+
+            // Sealed before it is returned, so a crash between here and the next request does not
+            // leave the old token in the database and the new one only in memory.
+            if let Ok(sealed) = vault.seal(&chosen.id, &token.access_token) {
+                let _ = state
+                    .auth
+                    .store
+                    .put_secret(&chosen.id, &sealed, at_ms)
+                    .await;
+            }
+            // Google omits the refresh token on a refresh, so the stored one is kept.
+            if let Some(rotated) = token.refresh_token_to_store(Some(&refresh_token))
+                && rotated != refresh_token
+                && let Ok(sealed) = vault.seal(&format!("{}_refresh", chosen.id), &rotated)
+            {
+                let _ = state
+                    .auth
+                    .store
+                    .put_secret(&format!("{}_refresh", chosen.id), &sealed, at_ms)
+                    .await;
+            }
+            let _ = state
+                .auth
+                .store
+                .touch_expiry(&chosen.id, expires_at, at_ms)
+                .await;
+
+            tracing::info!(
+                connector = chosen.connector,
+                "refreshed an expiring connection"
+            );
+            Some(token.access_token)
+        }
+        Err(error) => {
+            if error.is_revoked() {
+                tracing::warn!(
+                    connector = chosen.connector,
+                    "a connection was revoked at the provider; disconnecting it"
+                );
+                let _ = disconnect_revoked(state, &chosen.id).await;
+                return None;
+            }
+            tracing::warn!(%error, connector = chosen.connector, "could not refresh; using what we have");
+            stored
+        }
+    }
+}
+
+/// Record that a provider has revoked a connection.
+///
+/// Written down rather than merely logged: a person looking at their connections should see it is
+/// gone, and the next run should not try again.
+async fn disconnect_revoked(state: &AgUiState, id: &str) -> Result<(), opengrok_store::StoreError> {
+    let (mut connection, seq) = state.auth.store.load_connection(id).await?;
+    let at_ms = now_ms();
+    let events = connection
+        .decide(opengrok_core::connection::ConnectionCommand::Disconnect { at_ms })
+        .unwrap_or_default();
+    for event in &events {
+        connection.apply(event);
+    }
+    state
+        .auth
+        .store
+        .append_connection(
+            id,
+            seq,
+            &events,
+            &connection,
+            &opengrok_store::CredentialUpdate::none(at_ms),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Open a session with every plugin server this coworker can both reach and be permitted to use.
 ///
 /// TWO GATES, AND BOTH MATTER. A plugin must be in the coworker's ceiling — installing one on the
@@ -147,7 +266,7 @@ async fn connect_plugins(
             else {
                 continue;
             };
-            if let Ok(Some(token)) = state.auth.store.open_credential(vault, &chosen.id).await {
+            if let Some(token) = live_token(state, vault, chosen).await {
                 values.insert(format!("{}_TOKEN", connector.to_uppercase()), token);
             }
         }

@@ -68,6 +68,10 @@ create table if not exists connection_view (
     updated_at_ms bigint not null
 );
 
+-- When the access token stops working. NULL means it does not expire, which is a real answer and
+-- not "already expired" — see ConnectionView::is_expiring.
+alter table connection_view add column if not exists expires_at_ms bigint;
+
 create index if not exists connection_view_owner_idx on connection_view (scope, owner_id, connector);
 
 -- Who a connection has been lent to. Its own table because a loan is a separate decision from the

@@ -214,11 +214,30 @@ impl Session {
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in &endpoint.headers {
-            // `authorization` has its own slot on the transport; everything else is a custom
-            // header. Both end up on the wire, but the split is what rmcp expects.
+            // `auth_header` WANTS THE BARE TOKEN. rmcp calls `bearer_auth()` on it, which prepends
+            // the scheme — passing the whole header value produces `Bearer Bearer ghp_…`, which a
+            // server rejects with a 401 that says nothing about why.
+            //
+            // A plugin declares the whole value (`Bearer ${TOKEN}`), so the scheme is stripped
+            // here. Any OTHER scheme — Basic, a vendor's own — is sent verbatim as a custom
+            // header instead, because `bearer_auth` would rewrite it into something the server
+            // never agreed to.
             if name.eq_ignore_ascii_case("authorization") {
-                config.auth_header = Some(value.clone());
-                continue;
+                match value
+                    .strip_prefix("Bearer ")
+                    .or_else(|| value.strip_prefix("bearer "))
+                {
+                    Some(token) => {
+                        config.auth_header = Some(token.to_string());
+                        continue;
+                    }
+                    None if !value.contains(' ') => {
+                        // A bare token with no scheme at all.
+                        config.auth_header = Some(value.clone());
+                        continue;
+                    }
+                    None => {}
+                }
             }
             let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(name.as_bytes()),

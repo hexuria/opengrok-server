@@ -274,8 +274,7 @@ pub async fn callback(
             seq,
             &events,
             &connection,
-            Some(&sealed),
-            at_ms,
+            &opengrok_store::CredentialUpdate::sealed(&sealed, token.expires_at_ms(at_ms), at_ms),
         )
         .await
     {
@@ -404,7 +403,15 @@ where
     if let Err(error) = state
         .auth
         .store
-        .append_connection(&id, seq, &events, &connection, None, at_ms)
+        // A lend says nothing about the credential, so the stored token and its expiry are left
+        // exactly as the last exchange recorded them.
+        .append_connection(
+            &id,
+            seq,
+            &events,
+            &connection,
+            &opengrok_store::CredentialUpdate::none(at_ms),
+        )
         .await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();

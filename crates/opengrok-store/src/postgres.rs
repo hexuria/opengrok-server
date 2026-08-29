@@ -617,6 +617,37 @@ impl PgStore {
     }
 }
 
+/// What a connection write says about the credential itself.
+///
+/// Grouped because the three always travel together and always mean one thing: "here is the token
+/// this write learned, and when it dies". `None` for the secret means the write is about the
+/// connection rather than its credential — a lend, a revoke — and must leave the stored one alone.
+#[derive(Debug, Clone, Copy)]
+pub struct CredentialUpdate<'a> {
+    pub secret: Option<&'a Sealed>,
+    pub expires_at_ms: Option<i64>,
+    pub at_ms: i64,
+}
+
+impl<'a> CredentialUpdate<'a> {
+    /// A write that changes nothing about the credential.
+    pub fn none(at_ms: i64) -> Self {
+        Self {
+            secret: None,
+            expires_at_ms: None,
+            at_ms,
+        }
+    }
+
+    pub fn sealed(secret: &'a Sealed, expires_at_ms: Option<i64>, at_ms: i64) -> Self {
+        Self {
+            secret: Some(secret),
+            expires_at_ms,
+            at_ms,
+        }
+    }
+}
+
 /// Connections: an authentication that happened, and who may borrow it.
 impl PgStore {
     pub async fn load_connection(&self, id: &str) -> StoreResult<(Connection, i64)> {
@@ -650,9 +681,13 @@ impl PgStore {
         expected_seq: i64,
         events: &[ConnectionEvent],
         state: &Connection,
-        secret: Option<&Sealed>,
-        at_ms: i64,
+        update: &CredentialUpdate<'_>,
     ) -> StoreResult<i64> {
+        let CredentialUpdate {
+            secret,
+            expires_at_ms,
+            at_ms,
+        } = *update;
         let mut tx = self.pool.begin().await?;
         let stream = format!("connection/{id}");
         let mut seq = expected_seq;
@@ -682,15 +717,18 @@ impl PgStore {
 
         sqlx::query(
             "insert into connection_view
-               (id, connector, scope, owner_id, label, disconnected, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7)
+               (id, connector, scope, owner_id, label, disconnected, updated_at_ms, expires_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
              on conflict (id) do update set
                connector = excluded.connector,
                scope = excluded.scope,
                owner_id = excluded.owner_id,
                label = excluded.label,
                disconnected = excluded.disconnected,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               -- Kept when a caller has nothing newer to say, so a lend does not erase the expiry
+               -- the last token exchange recorded.
+               expires_at_ms = coalesce(excluded.expires_at_ms, connection_view.expires_at_ms)",
         )
         .bind(id)
         .bind(&state.connector)
@@ -699,6 +737,7 @@ impl PgStore {
         .bind(&state.label)
         .bind(state.disconnected)
         .bind(at_ms)
+        .bind(expires_at_ms)
         .execute(&mut *tx)
         .await?;
 
@@ -760,7 +799,8 @@ impl PgStore {
         coworker: &CoworkerId,
     ) -> StoreResult<Vec<ConnectionView>> {
         let rows = sqlx::query(
-            "select v.id, v.connector, v.scope, v.owner_id, v.label, v.updated_at_ms
+            "select v.id, v.connector, v.scope, v.owner_id, v.label, v.updated_at_ms,
+                    v.expires_at_ms
                from connection_view v
               where v.disconnected = false
                 and ( v.scope = 'global'
@@ -804,6 +844,7 @@ impl PgStore {
                 label: row.try_get("label")?,
                 loans,
                 updated_at_ms: row.try_get("updated_at_ms")?,
+                expires_at_ms: row.try_get("expires_at_ms")?,
             });
         }
         Ok(views)
@@ -815,7 +856,7 @@ impl PgStore {
         account: &AccountId,
     ) -> StoreResult<Vec<ConnectionView>> {
         let rows = sqlx::query(
-            "select id, connector, label, updated_at_ms from connection_view
+            "select id, connector, label, updated_at_ms, expires_at_ms from connection_view
               where scope = 'user' and owner_id = $1 and disconnected = false
               order by connector",
         )
@@ -846,6 +887,7 @@ impl PgStore {
                 label: row.try_get("label")?,
                 loans,
                 updated_at_ms: row.try_get("updated_at_ms")?,
+                expires_at_ms: row.try_get("expires_at_ms")?,
             });
         }
         Ok(views)
@@ -867,6 +909,27 @@ impl PgStore {
         .bind(id)
         .bind(&sealed.nonce)
         .bind(&sealed.ciphertext)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record a new expiry after a refresh, without touching the event log.
+    ///
+    /// A refresh is not a domain event: nothing about who owns the connection or who may borrow it
+    /// changed, and writing one per hour would bury the events that matter.
+    pub async fn touch_expiry(
+        &self,
+        id: &str,
+        expires_at_ms: Option<i64>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update connection_view set expires_at_ms = $2, updated_at_ms = $3 where id = $1",
+        )
+        .bind(id)
+        .bind(expires_at_ms)
         .bind(at_ms)
         .execute(&self.pool)
         .await?;
