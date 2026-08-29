@@ -9,6 +9,7 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 | [`gateway-open-ai-gateway.md`](gateway-open-ai-gateway.md) | open-ai-gateway: crate layout, the two listeners, auth, the model-pin dialect, endpoints, the `/v1/models` diagnostics envelope, and whether it can be embedded | touching `opengrok-harness` or planning the single-binary release |
 | [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `opengrok-store` or `opengrok-harness` |
 | [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, auth and session model, a minimal Rust flow, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
+| [`client-versions-0.18-0.30.md`](client-versions-0.18-0.30.md) | Every client protocol surface across 0.18 / 0.27 / 0.29 / 0.30 — per-version counts, provenance paths and exact deltas for gateway commands, internal RPC edges, the transcript/card/SSE contract, local-exec daemon frames, feature gates, and an inventory-only `aiserver.v1` listing | building `og-wire` or `og-server` against a specific client generation |
 | [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `opengrok-tools` or planning P6 |
 
 ## Headline findings, so they are not buried
@@ -25,6 +26,17 @@ Each doc is long because the detail is the point. These four are the ones that c
   fails silently if you forget it (`gateway-open-ai-gateway.md` §8).
 - **open-connector's OAuth is open, not paywalled** — an earlier audit had this backwards, and
   believing it would have bought a hosted tier we do not need (`connectors-open-connector.md`).
+
+- **The client is 0.18-era and the backend surface is 120 gateway commands, not 345 RPCs** — the
+  "332 → 345 methods" everyone quotes are Electron *inter-process* edges that never touch the
+  network; the wire is `POST /api/<method>` + SSE `/events` + Bearer in every version
+  (`client-versions-0.18-0.30.md`).
+- **0.27 cannot be re-derived** — auto-update destroyed the binary before it was archived; three
+  hand-lifted fragments are all that survive. Archive a release the day you study it
+  (`client-versions-0.18-0.30.md` §2.1).
+- **Almost everything 0.29/0.30 added is gated off**, including voice calls and the entire
+  local→server storage migration, and **zero gate defaults flipped between 0.18 and 0.30** — a
+  backend does not have to implement the dark surfaces (`client-versions-0.18-0.30.md` §5).
 
 ## Keeping them honest
 

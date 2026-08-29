@@ -1,0 +1,136 @@
+<title>The 0.30 Gap</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Public+Sans:wght@400;600&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+:root{
+  --bg:#F7F7F4; --panel:#FFFFFF; --ink:#22261F; --muted:#68705F; --line:#DFE2D8;
+  --green:#177245; --green-soft:#E4F0E8; --red:#B3372E; --red-soft:#F6E5E2;
+  --blue:#2456A6; --blue-soft:#E5ECF7; --strip:#EDEEE7; --amber:#8A6314; --amber-soft:#F6EEDC;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15170F; --panel:#1D2016; --ink:#E7E9DF; --muted:#9AA28C; --line:#33382A;
+    --green:#57B884; --green-soft:#1D2E23; --red:#E07A6F; --red-soft:#33201D;
+    --blue:#7FA6E0; --blue-soft:#1B2536; --strip:#262A1E; --amber:#D9B25F; --amber-soft:#2E2716;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15170F; --panel:#1D2016; --ink:#E7E9DF; --muted:#9AA28C; --line:#33382A;
+  --green:#57B884; --green-soft:#1D2E23; --red:#E07A6F; --red-soft:#33201D;
+  --blue:#7FA6E0; --blue-soft:#1B2536; --strip:#262A1E; --amber:#D9B25F; --amber-soft:#2E2716;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:17px/1.62 "Public Sans",system-ui,sans-serif;margin:0}
+main{max-width:53rem;margin:0 auto;padding:3rem 1.4rem 5rem}
+h1{font:700 clamp(2rem,5vw,2.8rem)/1.1 "Sora",sans-serif;margin:.2rem 0 .3rem;text-wrap:balance}
+h2{font:700 1.3rem/1.25 "Sora",sans-serif;margin:2.8rem 0 .5rem;text-wrap:balance}
+h3{font:600 1.02rem/1.3 "Sora",sans-serif;margin:1.4rem 0 .3rem}
+p{max-width:45rem;margin:.45rem 0}
+.lede{font-size:1.1rem;color:var(--muted);max-width:45rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1rem 1.15rem;margin:.9rem 0}
+.card.ok{border-left:4px solid var(--green)}
+.card.warn{border-left:4px solid var(--amber)}
+.card.no{border-left:4px solid var(--red)}
+.mono{font:500 .85rem/1.5 "JetBrains Mono",monospace}
+.rule{font:500 .82rem/1.55 "JetBrains Mono",monospace;background:var(--strip);border-radius:6px;padding:.3rem .6rem;display:inline-block;margin-top:.4rem}
+.chip{display:inline-block;font:600 .68rem/1 "Sora",sans-serif;letter-spacing:.08em;text-transform:uppercase;border-radius:99px;padding:.34rem .66rem;margin-right:.4rem}
+.chip.g{background:var(--green-soft);color:var(--green)}
+.chip.r{background:var(--red-soft);color:var(--red)}
+.chip.b{background:var(--blue-soft);color:var(--blue)}
+.chip.a{background:var(--amber-soft);color:var(--amber)}
+.tbl{width:100%;border-collapse:collapse;font-size:.93rem;margin:.5rem 0}
+.tbl th{font:600 .68rem/1 "Sora",sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);text-align:left;padding:.45rem .6rem;border-bottom:1px solid var(--line)}
+.tbl td{padding:.5rem .6rem;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl td.k{font:500 .84rem/1.45 "JetBrains Mono",monospace;white-space:nowrap}
+.scroll{overflow-x:auto}
+.stats{display:flex;flex-wrap:wrap;gap:.7rem;margin:1rem 0}
+.stat{flex:1 1 9rem;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:.7rem .85rem}
+.stat b{display:block;font:700 1.5rem/1.1 "Sora",sans-serif;font-variant-numeric:tabular-nums}
+.stat span{font-size:.8rem;color:var(--muted)}
+ul{max-width:45rem;padding-left:1.1rem}
+li{margin:.25rem 0}
+footer{margin-top:3.2rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.85rem}
+</style>
+<main>
+<h1>The 0.30 Gap</h1>
+<p class="lede">Official Grok Bot shipped 0.30.0. Here is what actually changed, where OpenGrok stands against it, and the short list worth doing.</p>
+
+<div class="stats">
+  <div class="stat"><b>148</b><span>Chrome build — identical in both. No platform gap.</span></div>
+  <div class="stat"><b>+13</b><span>net RPC methods (332 → 345)</span></div>
+  <div class="stat"><b>+6</b><span>locales (15 → 21), first RTL</span></div>
+  <div class="stat"><b>3</b><span>features they <em>deleted</em></span></div>
+</div>
+
+<h2>What 0.30 actually is</h2>
+<p>Mostly a <b>localization release</b> with <b>one significant new agent capability</b>. Method: both asars extracted and diffed on RPC tables, IPC literals, feature gates, <span class="mono">data-*</span> attributes and native payloads — plus the <em>English</em> message catalog only, because 0.30 added ~2,700 translated strings that drown a naive string diff.</p>
+
+<div class="card ok"><span class="chip g">The headline</span>
+<h3>macOS Messages (iMessage), read and send</h3>
+<p>Local-tool actions gained <span class="mono">read-messages</span> and <span class="mono">send-imessage</span>. Reading snapshots a temp copy of <span class="mono">chat.db</span> via SQLite; sending goes through their existing signed <span class="mono">computer-use-mac</span> helper. Needs macOS Full Disk Access plus Automation, adds 12 daemon frame kinds, and relays cloud→desktop through new <span class="mono">GrokBotUserComputerMessages</span> protos. It reuses the local-tool permission model rather than inventing one.</p>
+</div>
+
+<div class="scroll"><table class="tbl">
+<tr><th>Also new</th><th>Substance</th></tr>
+<tr><td class="k">Localization</td><td>15 → 21 locales (+af, ar, el, he, nl, uk) and the first RTL support. The machinery already existed in 0.29 — this is catalogue growth.</td></tr>
+<tr><td class="k">Bot Marketplace</td><td>Public listings, creator profiles, bot-detail tabs. Gated <span class="mono">sand_marketplace_bots</span>.</td></tr>
+<tr><td class="k">MCP plugin install</td><td>Install/uninstall/update from inside the app, with a bundled ajv validator for tool schemas and team-policy locks.</td></tr>
+<tr><td class="k">Enterprise usage</td><td>Spend dashboard: cumulative spend, limits, cycles, daily charts.</td></tr>
+<tr><td class="k">Virtual card</td><td>Stripe Link approvals — the agent requests a charge, you approve out-of-band.</td></tr>
+<tr><td class="k">Cookie approval</td><td>Interactive origin-approval prompts (0.29 had only silent grant lists).</td></tr>
+<tr><td class="k">Multi-machine exec</td><td>Run tasks on more than one of your computers. Gated.</td></tr>
+<tr><td class="k">Polish</td><td>Slack management UI, onboarding integration picker (45 tools), shared-agent sidebar hiding, plain-language settings copy throughout.</td></tr>
+</table></div>
+
+<h2>Three things they removed</h2>
+<div class="card no">
+<p><b>Org Chart / Bot network</b> (the whole agent-graph UI), <b>Threads tray</b> (“Reply in thread”), and the <b>accent colour</b> preference. Threads matters to us: it was on our backlog from the 0.29 analysis — <b>it is now something they don’t have either</b>, so it comes off the list.</p>
+</div>
+
+<h2>Three things that look new but aren’t</h2>
+<div class="card warn">
+<p><b>Voice calls</b> ship in <em>both</em> 0.29 and 0.30, gated <span class="mono">sand_voice_call</span> and <b>off by default in both</b>. 0.30 only reworked the tray and refactored the code; the new voice-call package contributes no code to any shipped bundle — it’s a test harness.</p>
+<p><b>tree-sitter</b> and <b>cursor-proclist</b> were already in 0.29. tree-sitter parses bash for command-risk analysis (redirects, substitutions); proclist backs process telemetry with names SHA-256 hashed unless they’re the app’s own helpers.</p>
+<p><b>Still no per-message delete or edit</b> — zero occurrences anywhere in 0.30. The only per-message mutation is a reaction. That independently confirms the device-local tombstone approach we shipped was the only available path.</p>
+</div>
+
+<h2>Where we stand</h2>
+
+<div class="card ok"><span class="chip g">Closed since the 0.29 analysis</span>
+<p>Jump-to-newest pill · first-layout reveal gate · math rendering (KaTeX MathML, both bubble kinds) · per-agent composer drafts.</p>
+</div>
+
+<div class="card"><span class="chip b">Open and worth considering</span>
+<div class="scroll"><table class="tbl">
+<tr><th>Gap</th><th>Our read</th></tr>
+<tr><td class="k">Messages tool</td><td><b>The one 0.30 feature worth porting.</b> We don’t need their signed helper — our host already runs local tools, and read (SQLite) + send (AppleScript) are directly implementable, with no Cursor dependency.</td></tr>
+<tr><td class="k">MCP plugin install</td><td>We already carry the MCP transport, catalog and OAuth; the gap is install UX and schema validation, not plumbing.</td></tr>
+<tr><td class="k">Emoji <span class="mono">:shortcode:</span></td><td>Small renderer patch, carried since the 0.29 plan.</td></tr>
+<tr><td class="k">A11y announcers</td><td>Small renderer patch, carried since the 0.29 plan.</td></tr>
+<tr><td class="k">Memories · templates</td><td>Unchanged assessment: local analogs are possible, both are real projects.</td></tr>
+<tr><td class="k">Localization</td><td>Large and <b>not recommended</b>: our pinned 0.18 renderer bakes English in with no i18n layer, so this is infrastructure work, not a string swap.</td></tr>
+</table></div>
+</div>
+
+<div class="card no"><span class="chip r">Out of scope by design</span>
+<p>Marketplace · enterprise usage · virtual card · shared team agents · template export policy · onboarding catalog — all Cursor-service-bound, which is precisely what we bypass.</p>
+</div>
+
+<h2>Where we are ahead of 0.30</h2>
+<div class="card ok">
+<ul>
+<li><b>Per-message delete</b> — they have none at any layer; we ship it (true delete where our host owns the store, device-local tombstones elsewhere).</li>
+<li><b>Multi-select + Collections</b> — share/bookmark sets, dedicated window, self-contained HTML export, JSON import/export.</li>
+<li><b>Shareable message deep links</b> with engine-teleport jump-loading.</li>
+<li><b>Media inspector + layout lint</b> with a persistent findings report.</li>
+<li><b>Transcript stability</b> — exact estimator heights, width-keyed text heights, right-sized variants. Measured <b>0 layout shifts</b>; 0.30 still estimates rows from per-kind constants.</li>
+</ul>
+</div>
+
+<h2>Verdict</h2>
+<div class="card">
+<p>0.30 does not move the goalposts. Two candidates worth queueing, in order: the <b>macOS Messages tool</b>, then the two small renderer patches carried since 0.29 (<b>emoji shortcode completion</b>, <b>a11y announcers</b>). Everything else is service-bound, gated off upstream, or has been deleted by them.</p>
+<span class="rule">full write-up: docs/gap-analysis-0.30.md</span>
+</div>
+
+<footer>OpenGrok vs official Grok Bot 0.30.0 · successor to the 0.29 gap analysis · 2026-08-29</footer>
+</main>
