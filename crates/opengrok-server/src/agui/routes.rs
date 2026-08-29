@@ -199,7 +199,11 @@ pub async fn hire(
     // The ceiling starts at the tools this server actually implements, not `All`: a coworker's
     // limits should be a list somebody can read, and `All` would silently include whatever is
     // added next.
-    let tools = opengrok_policy::ToolSet::only(opengrok_tools::Executor::tool_names().to_vec());
+    // The ceiling starts at the tools this server implements without any plugin. A plugin granted
+    // to this coworker later must widen it — policy correctly refuses a tool nobody permitted, so
+    // "install a plugin" and "let this coworker use it" stay two decisions rather than one.
+    let tools =
+        opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
     if let Err(error) = state
         .auth
         .store

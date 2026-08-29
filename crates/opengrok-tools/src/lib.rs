@@ -19,6 +19,7 @@ pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opengrok_box::{BoxError, Computer};
@@ -140,6 +141,14 @@ pub struct Executor {
     /// person approved *that command*, and a set of call ids is the only shape that says so. A
     /// resumed run carries exactly the id that was answered, so nothing else slips through with it.
     approved_calls: std::collections::BTreeSet<String>,
+    /// Live sessions with the MCP servers this coworker's plugins bring, keyed by
+    /// `<plugin>.<server>`.
+    ///
+    /// Connected once per request rather than per call: a turn that reaches for three tools on one
+    /// server should not hand-shake three times.
+    sessions: BTreeMap<String, Arc<crate::mcp::Session>>,
+    /// Every plugin tool on offer, in the order a model is told about them.
+    plugin_tools: Vec<crate::mcp::McpTool>,
 }
 
 impl Executor {
@@ -150,6 +159,8 @@ impl Executor {
             computer,
             policy: opengrok_policy::Context::default(),
             approved_calls: std::collections::BTreeSet::new(),
+            sessions: BTreeMap::new(),
+            plugin_tools: Vec::new(),
         }
     }
 
@@ -159,6 +170,8 @@ impl Executor {
             computer,
             policy,
             approved_calls: std::collections::BTreeSet::new(),
+            sessions: BTreeMap::new(),
+            plugin_tools: Vec::new(),
         }
     }
 
@@ -169,11 +182,50 @@ impl Executor {
         self
     }
 
-    /// The tools a model is offered. Kept here so the offered set and the executed set cannot
-    /// drift — a tool the model is told about but that `execute` does not know is a dead end it
-    /// will keep trying.
-    pub fn tool_names() -> &'static [&'static str] {
+    /// Attach live MCP sessions and the tools they offer.
+    ///
+    /// Taken together because a tool nobody can reach is worse than a tool nobody was offered: the
+    /// model would call it, wait, and be refused for a reason it cannot fix.
+    #[must_use]
+    pub fn with_plugin_tools(
+        mut self,
+        sessions: BTreeMap<String, Arc<crate::mcp::Session>>,
+        tools: Vec<crate::mcp::McpTool>,
+    ) -> Self {
+        self.sessions = sessions;
+        self.plugin_tools = tools;
+        self
+    }
+
+    /// The tools that need no plugin: always present, always executable.
+    pub fn builtin_tool_names() -> &'static [&'static str] {
         &["shell", "read_file", "write_file"]
+    }
+
+    /// EVERY tool a model is offered on THIS request — built-ins plus whatever this coworker's
+    /// plugins brought.
+    ///
+    /// An instance method now rather than a constant, because the answer depends on which plugins
+    /// this coworker has. The invariant it protects is unchanged and load-bearing: the offered set
+    /// must equal the executed set, or the model is told about a dead end and keeps trying it.
+    pub fn tool_names(&self) -> Vec<String> {
+        Self::builtin_tool_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .chain(
+                self.plugin_tools
+                    .iter()
+                    .map(|tool| tool.qualified_name.clone()),
+            )
+            .collect()
+    }
+
+    /// What the model is told each tool does, so it can choose between them.
+    pub fn tool_descriptions(&self) -> Vec<(String, Option<String>)> {
+        self.plugin_tools
+            .iter()
+            .map(|tool| (tool.qualified_name.clone(), tool.description.clone()))
+            .collect()
     }
 
     /// Run one call. Never returns `Err` for a *tool* failure: the model gets a result either way,
@@ -238,7 +290,42 @@ impl Executor {
                 },
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
             },
-            other => ToolResult::refused(&call.id, format!("there is no tool called {other}")),
+            // A plugin's tool. Reached only AFTER the policy check above, so a connector is
+            // governed exactly like `shell` — the grant, the ceiling and the approval all apply
+            // before a single byte leaves this process.
+            other => self.call_plugin_tool(&call.id, other, arguments).await,
+        }
+    }
+
+    /// Route a qualified name to the session that owns it.
+    async fn call_plugin_tool(
+        &self,
+        call_id: &str,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> ToolResult {
+        let Some((plugin, server, remote)) = crate::mcp::split_qualified(name) else {
+            return ToolResult::refused(call_id, format!("there is no tool called {name}"));
+        };
+
+        let key = format!("{plugin}.{server}");
+        let Some(session) = self.sessions.get(&key) else {
+            // Named precisely: "no such tool" and "that plugin is not connected right now" send a
+            // person to different places.
+            return ToolResult::refused(
+                call_id,
+                format!("{plugin} is not connected on this run, so {name} cannot run"),
+            );
+        };
+
+        // The identity-overwritten arguments go out, minus the keys that are ours rather than the
+        // tool's — a remote server rejecting an unexpected `coworker_id` would fail the call for a
+        // reason the model cannot act on.
+        let arguments = strip_identity(arguments);
+
+        match session.call(&remote, arguments).await {
+            Ok(content) => ToolResult::ok(call_id, content),
+            Err(error) => ToolResult::refused(call_id, error.to_string()),
         }
     }
 
@@ -304,6 +391,22 @@ pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     };
 
     Value::Object(object)
+}
+
+/// Remove the identity keys we added before handing arguments to a remote server.
+///
+/// They exist so a LOCAL tool cannot be aimed elsewhere. A remote MCP server never sees them: it
+/// did not ask for them, its schema does not have them, and a strict server would reject the call
+/// over a field the model never wrote.
+fn strip_identity(arguments: Value) -> Value {
+    match arguments {
+        Value::Object(mut map) => {
+            map.remove("coworker_id");
+            map.remove("box_id");
+            Value::Object(map)
+        }
+        other => other,
+    }
 }
 
 /// A box failure, in words a model can act on.
@@ -626,6 +729,97 @@ mod tests {
         assert_eq!(spy.last_box(), None);
     }
 
+    /// The invariant, now that the set is dynamic: what a model is offered is what it can call.
+    #[tokio::test]
+    async fn plugin_tools_join_the_offered_set() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![crate::mcp::McpTool {
+                qualified_name: "gmail.api.send".to_string(),
+                remote_name: "send".to_string(),
+                description: Some("Send a message".to_string()),
+            }],
+        );
+
+        let offered = executor.tool_names();
+        // The built-ins are still there — a plugin adds, it does not replace.
+        assert!(offered.contains(&"shell".to_string()), "{offered:?}");
+        assert!(
+            offered.contains(&"gmail.api.send".to_string()),
+            "{offered:?}"
+        );
+    }
+
+    /// A plugin whose session is gone must say so, rather than reading as "no such tool" — those
+    /// send a person to different places.
+    #[tokio::test]
+    async fn an_offered_plugin_tool_with_no_session_says_it_is_not_connected() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![crate::mcp::McpTool {
+                qualified_name: "gmail.api.send".to_string(),
+                remote_name: "send".to_string(),
+                description: None,
+            }],
+        );
+
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail.api.send", json!({})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result.content.contains("not connected"), "{result:?}");
+        assert!(
+            !result.content.contains("there is no tool called"),
+            "a connection problem must not read as a missing tool: {result:?}"
+        );
+    }
+
+    /// A plugin tool is governed exactly like `shell`: policy first, and nothing reaches the wire.
+    #[tokio::test]
+    async fn a_plugin_tool_outside_the_ceiling_never_reaches_the_network() {
+        let mut policy = permissive();
+        if let Some(ceiling) = policy.ceiling.as_mut() {
+            // The coworker may use the built-ins and nothing a plugin brought.
+            ceiling.tools = opengrok_policy::ToolSet::only(["shell"]);
+        }
+        let executor = Executor::with_policy(Arc::new(SpyComputer::default()), policy)
+            .with_plugin_tools(
+                BTreeMap::new(),
+                vec![crate::mcp::McpTool {
+                    qualified_name: "gmail.api.send".to_string(),
+                    remote_name: "send".to_string(),
+                    description: None,
+                }],
+            );
+
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail.api.send", json!({})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result.content.contains("may never run"), "{result:?}");
+    }
+
+    /// Our identity keys are for LOCAL tools. A remote server never asked for them, and a strict
+    /// one would reject the call over a field the model never wrote.
+    #[test]
+    fn identity_keys_are_stripped_before_reaching_a_remote_server() {
+        let stripped = strip_identity(json!({
+            "to": "someone@example.com",
+            "coworker_id": "cw_1",
+            "box_id": "box_1"
+        }));
+        assert!(stripped.get("coworker_id").is_none(), "{stripped}");
+        assert!(stripped.get("box_id").is_none(), "{stripped}");
+        // And the tool's own arguments survive untouched.
+        assert_eq!(stripped["to"], "someone@example.com");
+    }
+
     /// An approved call runs; another call of the same tool still waits.
     #[tokio::test]
     async fn approval_releases_one_call_and_not_the_tool() {
@@ -754,12 +948,12 @@ mod tests {
     async fn every_offered_tool_is_actually_implemented() {
         let executor = allowing(Arc::new(SpyComputer::default()));
         let context = context_with_box("box_mine");
-        for name in Executor::tool_names() {
+        for name in executor.tool_names() {
             let result = executor
                 .execute(
                     &context,
                     &call(
-                        name,
+                        &name,
                         json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
                     ),
                 )

@@ -178,8 +178,13 @@ and a run whose process dies is picked up rather than left hanging.
    - ✅ *MCP over HTTP* — `opengrok-tools::mcp`, streamable-http and sse via `rmcp`, credential
      injected into headers at connect time, tools namespaced `<plugin>.<server>.<tool>`. `stdio` is
      refused with a reason and the plugin still loads.
-   - **Still to do:** surfacing installed plugins as tools on the executor — the last piece, and
-     the one that makes `Executor::tool_names()` dynamic.
+   - ✅ *Plugin tools on the executor* — `tool_names()` is dynamic, plugin tools dispatch after the
+     policy check (so a connector is governed exactly like `shell`), and identity keys are stripped
+     before arguments reach a remote server. Hiring sets the ceiling to built-ins only, so granting
+     a plugin to a coworker stays a second, separate decision.
+   - **Still to do:** the endpoints that tie it together — `POST /connections/{c}/authorize`, the
+     callback, and building `tools_for` from a coworker's installed plugins. Every piece exists and
+     is tested; nothing calls them in sequence yet.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.
