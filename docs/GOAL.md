@@ -21,7 +21,7 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 | DB / cache | PostgreSQL; Redis added **when a measured hot query needs it**, not before |
 | Model door | Every model call exits through open-ai-gateway (`oag_live_` key, OpenAI-compatible routes). Rig (`rig-core`) is the provider abstraction and brings MCP via rmcp — use Rig's integration rather than wiring rmcp separately. |
 | Harness | Our own durable loop (the suspension is the product). Design it as an explicit graph — nodes as steps, edges as transitions — so runs can be resumed, branched, and inspected. |
-| Computers | One per agent (or shared, by policy) behind the `Computer` trait. box.ascii.dev first (7-day trial to validate); cua via its MCP server; local Docker later. |
+| Computers | One per agent (or shared, by policy) behind the `Computer` trait. **Local Docker is the default** and needs no account; box.ascii.dev when `OG_BOX_API_KEY` is set, for computers that outlive this machine; cua via its MCP server later. |
 | AG-UI | Protocol yes, `ag-ui-rs` crate no (repo vanished, 108 downloads). Transcribe the events into `opengrok-wire`; barok-works' `grok-runtime` is the reference consumer. |
 | Plugins / connectors | [Agent Plugins](https://agent-plugins.org/) format (`plugin.json` + `skills/` + `mcp.json`) for gmail, github, gdrive, mem0/OpenMemory. Connectors are MCP servers we connect to, not code we write. |
 | Sandboxed shell | `vercel-labs/just-bash` is TypeScript — usable only inside a Node sidecar or on the box itself, not in-process. Evaluate when the tool executor needs a no-box shell; do not block on it. |
@@ -120,6 +120,9 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      built **per request** from the coworker named in AG-UI's `forwardedProps`.
      `scripts/slice5-roster-smoke.sh` includes the first tenancy check: a coworker does not appear
      on another account's roster.
+   - ✅ *A computer with no signup — done 29 Aug 2026.* `DockerComputer` makes a local container a
+     `Computer`, chosen automatically without a box key, so the headline works on a laptop today.
+     Three tests drive a real daemon; `scripts/slice6-computer-smoke.sh` is the goal in one script.
    - **Still to do:** policy (slice 5 proper) — whether the caller may *use* the coworker they
      named. Today the row must merely exist.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.

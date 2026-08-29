@@ -16,8 +16,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod ascii;
+pub mod docker;
 
 pub use ascii::AsciiBoxes;
+pub use docker::DockerComputer;
 
 /// What a command did. `truncated` is carried rather than dropped: a tail is not the output, and a
 /// coworker reasoning over a silently clipped log reaches confident wrong conclusions.

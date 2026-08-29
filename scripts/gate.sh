@@ -64,7 +64,7 @@ for _ in $(seq 1 30); do
 done
 curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 || fail "the server did not come up"
 
-for script in slice1-auth slice2-agui slice3-harness slice5-roster; do
+for script in slice1-auth slice2-agui slice3-harness slice5-roster slice6-computer; do
   step "scripts/$script-smoke.sh"
   OG_BASE="$BASE" OG_PORT="$PORT" "scripts/$script-smoke.sh" >/dev/null || fail "$script"
   echo "  passed"
