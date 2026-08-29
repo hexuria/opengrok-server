@@ -185,6 +185,25 @@ impl Projection {
         events
     }
 
+    /// Emit a tool's result.
+    ///
+    /// `TOOL_CALL_RESULT` carries the tool's own id so a consumer can attach the output to the
+    /// call it already drew, rather than showing it as a loose message from nowhere.
+    pub fn push_tool_result(&mut self, result: &opengrok_tools::ToolResult) -> Vec<Event> {
+        let mut events = self.start();
+        // A result belongs after the call it answers, never inside an open message.
+        events.extend(self.close_open());
+        events.push(
+            self.event(EventType::ToolCallResult)
+                .with("toolCallId", result.call_id.clone())
+                .with("content", result.content.clone())
+                // A refusal is a result the model reads, so whether it succeeded must be legible
+                // rather than inferred from the wording.
+                .with("ok", result.ok),
+        );
+        events
+    }
+
     /// End the run cleanly.
     pub fn finish(&mut self) -> Vec<Event> {
         let mut events = self.start();

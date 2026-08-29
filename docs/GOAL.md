@@ -107,8 +107,13 @@ Done means: implemented, tested, exercised against the Next.js client, and green
    - ✅ *Assignment and tools — done 29 Aug 2026.* The `coworker` aggregate owns the box (assigned,
      never requested; dedicated or shared), and `opengrok-tools::Executor` runs shell/read/write on
      the coworker's own box with identity arguments **overwritten, not validated**.
-   - **Still to do:** wiring the executor into the harness loop, so a model's tool call actually
-     runs — the pieces exist and are tested; nothing joins them yet.
+   - ✅ *The chain joins — done 29 Aug 2026.* `run_turn_with_tools` reassembles tool calls from the
+     stream, runs them on the coworker's own box, and emits `TOOL_CALL_RESULT`. The end-to-end test
+     has a model ask for another coworker's box and get its own.
+   - **Still to do:** a **multi-round** tool loop. One round runs today; feeding results back for
+     another model call must be resumable *between* rounds, which means each round reaching the log
+     before the next call. That is the next slice, and doing it with an in-memory `while` would
+     build the exact thing this project exists to avoid.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

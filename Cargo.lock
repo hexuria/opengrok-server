@@ -1352,6 +1352,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "opengrok-box",
  "opengrok-core",
  "opengrok-policy",
  "opengrok-store",
