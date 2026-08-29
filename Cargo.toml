@@ -29,7 +29,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# 0.13 to match rmcp's, so the binary carries ONE http client and one TLS stack rather than two.
+# Its feature names differ from 0.12: `rustls-tls` became `rustls`, and `form` and `query` are now
+# opt-in rather than always present.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form", "query"] }
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "json", "chrono", "uuid"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -49,7 +52,11 @@ async-trait = "0.1"
 rig-core = "0.42"
 # rmcp: the official MCP SDK. Client-side first: mem0/OpenMemory and cua integrate as MCP servers
 #   we connect to, not as code we write.
-rmcp = "3"
+rmcp = { version = "3", default-features = false, features = [
+  "client",
+  "transport-streamable-http-client",
+  "transport-streamable-http-client-reqwest",
+] }
 # prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
 #   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
 prost = "0.14"

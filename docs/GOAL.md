@@ -167,8 +167,19 @@ and a run whose process dies is picked up rather than left hanging.
      lend: a person authenticates once and lends the connection to as many coworkers as they like,
      rather than each one signing in again. Resolution is most-specific-first, so a bot's own
      account beats one lent to it.
-   - **Still to do:** storing the tokens encrypted (needs `OG_CREDENTIAL_KEK`), connecting to an
-     MCP server with `rmcp`, and surfacing installed plugins as tools on the executor.
+   - ✅ *The credential vault* — `opengrok-store::vault`, ChaCha20-Poly1305 keyed by
+     `OG_CREDENTIAL_KEK`, with the row id as associated data so a blob moved between rows stops
+     opening. Connections persist through the usual aggregate pattern; loans are their own table.
+   - ✅ *OAuth 2.0* — signed `state` (CSRF), authorize/callback/refresh, and the four provider
+     habits written down as tests: Google's once-only refresh token, GitHub's form-encoded reply
+     and absent expiry, and byte-exact `redirect_uri`. Verified against a stand-in provider in
+     `crates/opengrok-server/tests/against_a_stand_in_provider.rs`; **live Google/GitHub needs the
+     operator's app registrations**.
+   - ✅ *MCP over HTTP* — `opengrok-tools::mcp`, streamable-http and sse via `rmcp`, credential
+     injected into headers at connect time, tools namespaced `<plugin>.<server>.<tool>`. `stdio` is
+     refused with a reason and the plugin still loads.
+   - **Still to do:** surfacing installed plugins as tools on the executor — the last piece, and
+     the one that makes `Executor::tool_names()` dynamic.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.

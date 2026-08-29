@@ -15,6 +15,10 @@
 //! in a form it can reason about and recover from — a refusal that killed the run would turn every
 //! policy decision into an outage.
 
+pub mod mcp;
+
+pub use mcp::{Endpoint, McpError, McpTool};
+
 use std::sync::Arc;
 
 use opengrok_box::{BoxError, Computer};
