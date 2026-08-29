@@ -15,6 +15,7 @@ A coworker keeps working when you close the tab, because the work was never in t
 | | |
 |---|---|
 | **The idea, in pictures** | [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) — five minutes |
+| **Why this exists** | [`docs/WHY.md`](docs/WHY.md) — what we built before, what it couldn't do, and why that forced a rebuild |
 | **The plan** | [`docs/PLAN.md`](docs/PLAN.md) — seams, phases, open questions |
 | **The invariants** | [`CLAUDE.md`](CLAUDE.md) — ten rules that are not up for negotiation |
 | **The rights line** | [`docs/LEGAL.md`](docs/LEGAL.md) — read before touching the client contract |

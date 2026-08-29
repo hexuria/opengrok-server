@@ -11,6 +11,21 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 | [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, auth and session model, a minimal Rust flow, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `og-box` |
 | [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `og-tools` or planning P6 |
 
+## Headline findings, so they are not buried
+
+Each doc is long because the detail is the point. These four are the ones that change what you build:
+
+- **The client refuses a loopback gateway host** — serve on a non-loopback hostname or it fails with
+  no useful error (`client-grok-bot.md`).
+- **The Sand gateway is 128 commands plus an 18-channel SSE stream, `/health` and `/avatars`** — not
+  the "~70 JSON commands" a first glance suggests; and `api2.cursor.sh` is a *second* seam that is
+  explicitly not ours (`client-grok-bot.md`).
+- **The gateway embeds cleanly** — `oag_server::public_router()` gives a wired Axum router; the
+  obstacles are process-global singletons, a private settings loader, and a catalogue refresh that
+  fails silently if you forget it (`gateway-open-ai-gateway.md` §8).
+- **open-connector's OAuth is open, not paywalled** — an earlier audit had this backwards, and
+  believing it would have bought a hosted tier we do not need (`connectors-open-connector.md`).
+
 ## Keeping them honest
 
 A reference doc that has drifted is worse than none, because it is trusted. If you find a claim that

@@ -28,7 +28,9 @@ Three consequences follow from moving it, and none of them are features bolted o
   binding per page) is gone;
 - the same coworker is visible from every client at once, doing the same work.
 
-Full post-mortem: [`research/lessons-opensesame.md`](research/lessons-opensesame.md) §4.
+**The fuller story — what we built, why a working app wasn't enough, and what "remote first" means
+— is [`WHY.md`](WHY.md).** Read it before the plan if you weren't there. The mechanism of this
+particular bug: [`research/lessons-opensesame.md`](research/lessons-opensesame.md) §4.
 
 ---
 
@@ -36,15 +38,33 @@ Full post-mortem: [`research/lessons-opensesame.md`](research/lessons-opensesame
 
 `/Volumes/goldcoders/OSS/grok-bot` is a reconstruction of a shipped Electron app whose brain lived on
 someone else's servers. Three layers: **renderer** (the UI), **host** (Electron main, editable
-TypeScript), and the **box** (the agent's computer). The host reaches its backend through one JSON
-command surface — `SAND_GATEWAY_COMMANDS` in `source/host/gateway-protocol.ts`, roughly seventy
-named commands — and renders a durable transcript of typed entries plus a live activity stream.
+TypeScript), and the **box** (the agent's computer).
 
-**We implement that command surface.** The client keeps its UI, its transcript format and its
-activity model; OpenGrok answers where the old backend did.
+**There are two network seams, and only one of them is ours:**
 
-Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the command inventory,
-transcript kinds, activity events, the box seam, and the first-boot call order.
+| Seam | What it is | Ours? |
+|---|---|---|
+| **The Sand gateway** | `POST /api/<cmd>` JSON + SSE `GET /events` + `/health` + `/avatars/<id>`, defined by `SAND_GATEWAY_COMMANDS` (`source/host/gateway-protocol.ts:4-128`) — **128 commands**, 91 of them reachable from the renderer | **yes — this is OpenGrok** |
+| The Cursor ConnectRPC backend | `api2.cursor.sh` | **no** — neutralised via `SAND_BACKEND_URL` and the repo's existing `source/mock/` server |
+
+**We implement the Sand gateway.** The client keeps its UI, its transcript format and its activity
+model; OpenGrok answers where the old backend did. Note the surface is wider than "JSON commands":
+an SSE event stream with 18 channels and an avatar endpoint are part of booting.
+
+**Minimal boot set** (verified): `/health`, `/events`, `listAgents`, `countAgents`, `getTrays`,
+`isAgentNetworkEnabled`, `get/setHostSettings`. Then `sendPrompt` for the first answer.
+
+> ### ⚠ The repoint trap — read before P1
+> `SAND_HOST_GATEWAY_URL` (`source/electron-main/box/box-host-connector.ts:17,156-161`) is the whole
+> repoint. But `createSettingsRoutedHostConnector`
+> (`local-docker-host-connector.ts:437-443`) **throws when the resolved gateway host starts with
+> `127.0.0.1` or `localhost`** — unless `boxRuntime === "local-docker"`, which ignores the env var
+> and spawns its own host on port 1350. **OpenGrok must therefore serve on a non-loopback hostname**
+> (a LAN address, or a hosts-file alias) or the app refuses to connect with no useful error.
+
+Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the full 128-command
+inventory with per-command shapes, transcript kinds, the 12 card types, activity events, the 18 SSE
+channels, the 30-field roster row, the box seam, a 23-step first-boot checklist and 12 traps.
 
 **The rights line is not optional and is written down separately:** [`LEGAL.md`](LEGAL.md). Short
 version — we implement a *client-facing contract for interoperability*, we never vendor the
@@ -76,8 +96,22 @@ so a shared workspace stays possible.
 
 The gateway serves an inference listener and an admin listener from `oag-server`, with `oag-core`
 holding pure domain types and no I/O. OpenGrok takes the same shape, and the release ships both: the
-gateway is the model door **in OpenGrok's own wall**, not a service deployed beside it. Feasibility
-and obstacles: [`research/gateway-open-ai-gateway.md`](research/gateway-open-ai-gateway.md) §8.
+gateway is the model door **in OpenGrok's own wall**, not a service deployed beside it.
+
+**This is verified, not hoped for.** `oag_server::public_router(Arc<AppState>) -> axum::Router`
+returns a fully-wired, state-erased router, so OpenGrok can `merge` or `nest` the entire inference
+surface into its own Axum app — no fork, no vendored handlers. Three genuine obstacles the merged
+binary must own:
+
+1. **process-global singletons** — the Prometheus recorder (`metrics::install()`) and the tracing
+   subscriber can only be installed once; OpenGrok installs them;
+2. **`settings::load`'s `OAG_<SECTION>__<FIELD>` loader is private to the `oag` binary crate** — we
+   either build `AppState` ourselves or upstream a public loader;
+3. **skipping `oag_server::serve()` means spawning the catalogue refresh ourselves** — without it a
+   replica silently serves a stale catalogue *while looking perfectly healthy*, which is the worst
+   failure mode available and belongs in a startup check.
+
+Full detail: [`research/gateway-open-ai-gateway.md`](research/gateway-open-ai-gateway.md) §8.
 
 ---
 

@@ -5,8 +5,19 @@ computers and the policy — shipped together with **open-ai-gateway** as a sing
 Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
 
 **New here? Read in this order:** [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
+→ [`docs/WHY.md`](docs/WHY.md) (what we built before, and why a working app wasn't enough)
 → [`docs/PLAN.md`](docs/PLAN.md) → [`docs/LEGAL.md`](docs/LEGAL.md) → the reference doc for whatever
 you are about to touch, in `docs/research/`.
+
+## Two facts that each cost a day if you learn them the hard way
+
+1. **The client refuses a loopback gateway.** `SAND_HOST_GATEWAY_URL` is the repoint, but the
+   connector **throws if the resolved host starts with `127.0.0.1` or `localhost`** unless the box
+   runtime is `local-docker` (which ignores the variable entirely). Serve on a non-loopback
+   hostname. `docs/research/client-grok-bot.md`, and the callout in `docs/PLAN.md` §2.
+2. **The gateway is embeddable — `oag_server::public_router()` returns a wired Axum router.** But if
+   you skip `oag_server::serve()` you must spawn the catalogue refresh yourself, or a replica
+   serves a **stale catalogue while reporting healthy**. `docs/research/gateway-open-ai-gateway.md` §8.
 
 ---
 
