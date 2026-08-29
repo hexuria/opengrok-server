@@ -20,9 +20,9 @@ Grok Bot desktop app, originally distributed by Anysphere (bundle id `com.anysph
 - **`grok-bot/docs/grok-0.27-disparity-proto.md`** — header reads: **"inventory only. Do not
   implement from this file."**
 
-The tree also contains ~146 **generated** protobuf modules under
-`source/packages/proto/generated/{agent,aiserver,anyrun,internapi}/v1/` — Anysphere's own message
-definitions, recovered from the binary.
+The tree also contains **157** generated protobuf modules (`*_pb.ts` / `*_connect.ts`) under
+`source/packages/proto/generated/{agent,aiserver,anyrun,internapi}/v1/`, plus redacted wrappers over
+the same messages — Anysphere's own message definitions, recovered from the binary.
 
 ---
 
@@ -44,8 +44,14 @@ here and therefore cannot be and is not copied.
    behaviour*, not the vendor's backend. If a command is not needed for the client to work, we do
    not implement it to be faithful to something we cannot see.
 3. **No third-party trademarks in product surfaces.** No "Cursor", "Anysphere", "Grok" or "xAI"
-   marks in UI copy, product naming, or public materials. (`grok-bot` is a local directory name for
-   a research artifact; that is not a product surface.)
+   marks in UI copy, product naming, or public materials.
+
+   > **An honest tension, not an oversight.** This project's working name is *OpenGrok* — chosen by
+   > the operator, inherited from the earlier OpenGrok project — and it contains "Grok". As a local
+   > directory and an internal codename that is consistent with everything above, because neither is
+   > a product surface. **A public-facing product name is a decision for the rights review, not for
+   > a commit**, and this rule is the reason it cannot be settled by drift. If OpenGrok is ever
+   > published under that name, that is a decision somebody made deliberately, with advice.
 4. **No redistribution before review.** `NOTICE.md` requires an independent rights review before
    publishing or distributing. Therefore:
 

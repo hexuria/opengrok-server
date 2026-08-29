@@ -20,6 +20,6 @@ pub mod activity;
 pub mod command;
 pub mod transcript;
 
-pub use activity::{Activity, ActivityUpdate};
-pub use command::{Command, CommandError, CommandResponse};
-pub use transcript::{Entry, EntryKind, Role};
+pub use activity::{ActivityTransition, ActivityUpdate, AgentActivity, StreamFrame};
+pub use command::{Command, CommandError, CommandResponse, P1_COMMANDS, P2_COMMANDS};
+pub use transcript::{Entry, EntryKind, Extra, KnownKind, Role};

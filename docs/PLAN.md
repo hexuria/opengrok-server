@@ -44,7 +44,7 @@ TypeScript), and the **box** (the agent's computer).
 
 | Seam | What it is | Ours? |
 |---|---|---|
-| **The Sand gateway** | `POST /api/<cmd>` JSON + SSE `GET /events` + `/health` + `/avatars/<id>`, defined by `SAND_GATEWAY_COMMANDS` (`source/host/gateway-protocol.ts:4-128`) — **128 commands**, 91 of them reachable from the renderer | **yes — this is OpenGrok** |
+| **The Sand gateway** | `POST /api/<cmd>` JSON + SSE `GET /events` + `/health` + `/avatars/<id>`, defined by `SAND_GATEWAY_COMMANDS` (`source/host/gateway-protocol.ts:4-128`) — **123 commands** (`:5-127`), 90 of them reachable from the renderer (`coordinator.ts:92-183`); the other 33 are host-only | **yes — this is OpenGrok** |
 | The Cursor ConnectRPC backend | `api2.cursor.sh` | **no** — neutralised via `SAND_BACKEND_URL` and the repo's existing `source/mock/` server |
 
 **We implement the Sand gateway.** The client keeps its UI, its transcript format and its activity
@@ -62,7 +62,7 @@ an SSE event stream with 18 channels and an avatar endpoint are part of booting.
 > and spawns its own host on port 1350. **OpenGrok must therefore serve on a non-loopback hostname**
 > (a LAN address, or a hosts-file alias) or the app refuses to connect with no useful error.
 
-Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the full 128-command
+Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the full 123-command
 inventory with per-command shapes, transcript kinds, the 12 card types, activity events, the 18 SSE
 channels, the 30-field roster row, the box seam, a 23-step first-boot checklist and 12 traps.
 
@@ -109,7 +109,10 @@ binary must own:
    either build `AppState` ourselves or upstream a public loader;
 3. **skipping `oag_server::serve()` means spawning the catalogue refresh ourselves** — without it a
    replica silently serves a stale catalogue *while looking perfectly healthy*, which is the worst
-   failure mode available and belongs in a startup check.
+   failure mode available and belongs in a startup check;
+4. **Redis** — the gateway's key resolution uses a moka → Redis → Postgres chain, so a merged binary
+   inherits Redis as a dependency (or a decision to run without it, which the reference ranks as a
+   medium-severity change rather than a flag flip).
 
 Full detail: [`research/gateway-open-ai-gateway.md`](research/gateway-open-ai-gateway.md) §8.
 
@@ -219,10 +222,22 @@ phases exercise the seams the later ones depend on.
 constraints written into the types. Remaining: CI, `.sqlx` offline data, the gateway wired in as a
 dependency.
 
-**P1 — The client says hello.** `og-server` answers `listAgents`, `createAgent`,
-`getAgentTranscriptTail`, `openAgentTail`; `og-store` gets its first migrations. Watch for the trap
-in `research/client-grok-bot.md` — a command answering empty success renders as "you have no
-coworkers", which looks like a data problem and is a protocol one.
+**P1 — The client says hello.** Not four commands: the client's boot is a *sequence*, and three of
+its steps throw or divert the app if their reply has the wrong shape. `GET /health` (within 1500 ms)
+and `GET /events` (SSE, `retry: 1000`, a `:ping` inside 15 s) come before any command at all — miss
+either and `listAgents` is never called. Then `listAgents` (array), the resync chain's
+`setHostSettings`/`getHostSettings`, `countAgents` (**a number**, or the app shows onboarding),
+`getTrays` (**an array**, or the renderer throws), `isAgentNetworkEnabled`,
+`isGlobalSearchEnabled`, `getForeverBoxStatus` (`null` or a record, or it throws), and
+`openAgentTail`. `og-store` gets its first migrations alongside.
+
+**The full ordered table, the four environment variables, the Postgres setup and the acceptance
+script are in [`RUNBOOK.md`](RUNBOOK.md) — P1 is not startable without it.** The same list is
+mirrored in `crates/og-wire/src/command.rs` as `P1_COMMANDS`, so the plan and the code cannot drift.
+
+Watch for Trap 2: an *empty success* is the dangerous reply. `listAgents` returning `[]` is valid,
+paints an empty sidebar, and reads as a broken app rather than a protocol mistake — seed one
+coworker.
 
 **P2 — A turn.** `sendPrompt` → `og-harness` runs a turn through Rig → OAG → a real model; text
 streams back as activity; the transcript persists. The durability test is the point: kill the server
@@ -269,9 +284,19 @@ reason to exist.
 
 These change what gets built and are not for an agent to decide alone:
 
-1. **box.ascii.dev is hosted-only and EU-only.** Fine for v1, or does a local Docker `Computer`
-   implementation need to land inside P3 rather than after it?
-2. **open-connector as a Node sidecar in v1** — acceptable operationally, or hold connectors until a
-   Rust executor exists?
-3. **Single-tenant (one workspace) or multi-tenant from the start?** P5's shape depends on it, and
-   retrofitting tenancy is the expensive mistake the OpenSesame spec called out by name.
+**One is genuinely open. Two are decided and recorded here only so the operator can overturn them
+— they are not blocking anything.**
+
+1. 🔴 **OPEN — single-tenant (one workspace) or multi-tenant?** This is the only question that
+   blocks work, and it blocks *P1*, not P5: the first migrations' shape depends on it, and
+   retrofitting tenancy is the expensive mistake the OpenSesame spec named.
+   **P1 proceeds on this default unless you say otherwise:** every scoped table carries a
+   `workspace_id NOT NULL` referencing a single seeded workspace row. That costs nothing now, keeps
+   the multi-tenant door open, and is *not* the tenancy decision — enforcement (RLS, the fence type,
+   whether `WorkspaceId` gets a private constructor) is still P5's, and still yours.
+2. ✅ *Decided — local Docker `Computer` lands **after** P3.* box.ascii.dev is hosted-only and
+   EU-only; the trait exists so a Docker implementation is additive. Overturn this if EU-only
+   latency or data residency bites sooner than expected.
+3. ✅ *Decided — open-connector runs as a **Node sidecar** in v1* (§4.4), behind our tool trait,
+   with per-provider extraction to a Rust executor as the follow-up. Overturn this if running a
+   Node service alongside is operationally unacceptable.

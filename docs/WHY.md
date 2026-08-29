@@ -15,7 +15,7 @@ You cannot fix that with a patch, because it isn't a bug. It is where the work l
 
 ## 1. What OpenSesame actually is
 
-Not a prototype. Nineteen commits of our own on a vendored substrate, 29 migrations, ~300 source
+Not a prototype. Eighteen commits of our own on a vendored substrate, 29 migrations, ~300 source
 files across the app and server, CI green on every job including the container build, and a test
 suite in the low 2,000s. What works, today, in a browser:
 
