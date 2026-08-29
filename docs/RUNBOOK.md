@@ -156,6 +156,34 @@ a person.
 
 ---
 
+## 5b. The dev Postgres has no volume — a Docker restart wipes it
+
+**Found the hard way, 29 Aug 2026.** `oag-dev-postgres-1` runs with **no volume mount**
+(`docker inspect oag-dev-postgres-1 --format '{{len .Mounts}}'` → `0`), so PGDATA lives in the
+container's writable layer. Restarting Docker Desktop recreates the container and **every database
+on it is gone** — the gateway's and ours.
+
+What that looks like when it happens, so it is recognised rather than debugged:
+
+| Symptom | Actually |
+|---|---|
+| OpenGrok hangs at boot with no log line and no port | Postgres unreachable. Fixed: the pool now times out in 10s and names the host. |
+| `FATAL: database "opengrok" does not exist` | the database was wiped; recreate it (below) |
+| open-ai-gateway serves `/health/live` but **drops** every authenticated request | its `api_key`, `account` and `model_catalog` tables are gone; a long-running process also holds connections from before the restart |
+
+Recovering:
+
+```sh
+docker start oag-dev-postgres-1
+docker exec oag-dev-postgres-1 psql -U oag -d postgres -c 'create database opengrok'
+# OpenGrok re-applies its own schema on boot; nothing else to do on our side.
+# open-ai-gateway needs its migrations re-run AND its provider credentials re-added — those are
+# the operator's, and no amount of restarting brings them back.
+```
+
+**The fix worth making once:** give that container a named volume. Until then, treat everything in
+it as scratch, and never as somewhere a demo's data can live.
+
 ## 6. When the roster mysteriously stops updating
 
 Before suspecting OpenGrok: `source/node-agent-coordinator/main.ts:136` **drops every `agents` and
