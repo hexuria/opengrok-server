@@ -4,6 +4,9 @@ The server the AI coworkers live on. One Rust service that owns the harness, the
 computers and the policy — shipped together with **open-ai-gateway** as a single AI infrastructure.
 Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
 
+**Picking this up cold? Start with [`docs/HANDOVER.md`](docs/HANDOVER.md)** — the state of play,
+what is already decided, and your first task.
+
 **New here? Read in this order:** [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
 → [`docs/WHY.md`](docs/WHY.md) (what we built before, and why a working app wasn't enough)
 → [`docs/PLAN.md`](docs/PLAN.md) → [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (how to actually stand P1

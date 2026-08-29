@@ -14,6 +14,7 @@ A coworker keeps working when you close the tab, because the work was never in t
 
 | | |
 |---|---|
+| **Picking this up?** | [`docs/HANDOVER.md`](docs/HANDOVER.md) — state of play, decisions made, first task |
 | **The idea, in pictures** | [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) — five minutes |
 | **Why this exists** | [`docs/WHY.md`](docs/WHY.md) — what we built before, what it couldn't do, and why that forced a rebuild |
 | **The plan** | [`docs/PLAN.md`](docs/PLAN.md) — seams, phases, open questions |
