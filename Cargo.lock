@@ -1309,6 +1309,7 @@ dependencies = [
  "anyhow",
  "axum",
  "opengrok-core",
+ "opengrok-harness",
  "opengrok-server",
  "opengrok-store",
  "sqlx",

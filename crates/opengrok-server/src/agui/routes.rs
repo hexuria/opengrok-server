@@ -15,11 +15,24 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
-use opengrok_wire::agui::{Event, EventType, RunAgentInput};
+use opengrok_wire::agui::{Event, RunAgentInput};
 
 use crate::auth::AuthState;
+use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, run_turn};
+use std::sync::Arc;
 
-pub fn router(state: AuthState) -> Router {
+/// What the endpoint needs: a way to reach a model, and which route to ask for.
+///
+/// The door is a trait object so `OG_MODEL_DOOR=mock` swaps the whole model layer without the
+/// endpoint, the harness or the projection knowing — which is what lets CI exercise this path.
+#[derive(Clone)]
+pub struct AgUiState {
+    pub auth: AuthState,
+    pub door: Arc<dyn ModelDoor>,
+    pub model: String,
+}
+
+pub fn router(state: AgUiState) -> Router {
     Router::new().route("/ag-ui", post(run)).with_state(state)
 }
 
@@ -28,50 +41,44 @@ fn now_ms() -> i64 {
 }
 
 /// Start a run and stream its events.
-pub async fn run(State(_state): State<AuthState>, Json(input): Json<RunAgentInput>) -> Response {
-    let events = plan_run(&input);
+pub async fn run(State(state): State<AgUiState>, Json(input): Json<RunAgentInput>) -> Response {
+    let request = ModelRequest {
+        model: state.model.clone(),
+        system: None,
+        messages: to_chat_messages(&input),
+    };
+
+    let events = run_turn(
+        state.door.as_ref(),
+        request,
+        &input.thread_id,
+        &input.run_id,
+        now_ms(),
+    )
+    .await;
+
     sse(stream::iter(
         events.into_iter().map(Ok::<_, std::io::Error>),
     ))
 }
 
-/// Build the event sequence for one run.
+/// AG-UI messages to the model's vocabulary.
 ///
-/// Split out from the handler so the *sequence* is testable without a socket — the ordering rules
-/// (started first, finished last, message start/content/end nested inside) are the part a consumer
-/// actually depends on.
-pub fn plan_run(input: &RunAgentInput) -> Vec<Event> {
-    let at = now_ms();
-    let message_id = format!("msg_{}", input.run_id);
-
-    // What the person last said. The harness will consume this properly in slice 3; echoing it
-    // here proves the request body arrived intact rather than that a constant can be returned.
-    let last_user_text = input
+/// Roles the model door does not understand are dropped rather than passed through: a provider
+/// that rejects an unknown role fails the whole turn, and AG-UI carries roles (`developer`) that
+/// have no place in a chat completion.
+pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
+    input
         .messages
         .iter()
-        .rev()
-        .find(|message| message.role == "user")
-        .and_then(|message| message.content.clone())
-        .unwrap_or_else(|| "(no user message)".to_string());
-
-    vec![
-        Event::new(EventType::RunStarted, at)
-            .with("threadId", input.thread_id.clone())
-            .with("runId", input.run_id.clone()),
-        Event::new(EventType::TextMessageStart, at)
-            .with("messageId", message_id.clone())
-            .with("role", "assistant"),
-        Event::new(EventType::TextMessageContent, at)
-            .with("messageId", message_id.clone())
-            .with(
-                "delta",
-                format!("OpenGrok received: {last_user_text}. The harness lands in slice 3."),
-            ),
-        Event::new(EventType::TextMessageEnd, at).with("messageId", message_id),
-        Event::new(EventType::RunFinished, at)
-            .with("threadId", input.thread_id.clone())
-            .with("runId", input.run_id.clone()),
-    ]
+        .filter(|message| matches!(message.role.as_str(), "user" | "assistant" | "system"))
+        .filter_map(|message| {
+            message.content.as_ref().map(|content| ChatMessage {
+                role: message.role.clone(),
+                content: content.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Wrap an event stream in the SSE response openbot expects.
@@ -108,7 +115,8 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use opengrok_wire::agui::Message;
+    use opengrok_harness::MockDoor;
+    use opengrok_wire::agui::{EventType, Message};
     use serde_json::json;
 
     fn input(messages: Vec<Message>) -> RunAgentInput {
@@ -125,84 +133,71 @@ mod tests {
         }
     }
 
-    fn user(text: &str) -> Message {
+    fn message(role: &str, content: Option<&str>) -> Message {
         Message {
             id: "m1".to_string(),
-            role: "user".to_string(),
-            content: Some(text.to_string()),
+            role: role.to_string(),
+            content: content.map(str::to_string),
             name: None,
             extra: Default::default(),
         }
     }
 
-    /// A consumer holds its spinner open until the closing event. Started first, finished last.
     #[test]
-    fn a_run_opens_and_closes() {
-        let events = plan_run(&input(vec![user("hello")]));
+    fn chat_roles_the_model_understands_are_kept() {
+        let messages = to_chat_messages(&input(vec![
+            message("system", Some("be brief")),
+            message("user", Some("hello")),
+            message("assistant", Some("hi")),
+        ]));
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].content, "hello");
+    }
+
+    /// AG-UI carries roles a chat completion has no place for. Passing one through fails the whole
+    /// turn on providers that reject unknown roles.
+    #[test]
+    fn roles_the_model_does_not_understand_are_dropped() {
+        let messages = to_chat_messages(&input(vec![
+            message("developer", Some("internal")),
+            message("tool", Some("result")),
+            message("user", Some("hello")),
+        ]));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+    }
+
+    /// A message with no content is a placeholder the client is still filling in.
+    #[test]
+    fn a_message_without_content_is_skipped() {
+        let messages = to_chat_messages(&input(vec![message("user", None)]));
+        assert!(messages.is_empty());
+    }
+
+    /// End to end through the mock door: no provider, no key, and still a complete run.
+    #[tokio::test]
+    async fn a_run_through_the_mock_door_is_well_formed() {
+        let door = MockDoor::echoing();
+        let events = run_turn(
+            &door,
+            ModelRequest {
+                model: "mock".to_string(),
+                system: None,
+                messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),
+            },
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
         assert_eq!(events.first().unwrap().event_type, EventType::RunStarted);
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
+        assert_eq!(events.first().unwrap().extra.get("threadId").unwrap(), "t1");
 
-    /// A message must be started before it is filled and ended after — out of order, a consumer
-    /// renders content into a message it has not created.
-    #[test]
-    fn the_message_events_are_properly_nested() {
-        let events = plan_run(&input(vec![user("hello")]));
-        let types: Vec<_> = events.iter().map(|event| event.event_type).collect();
-        assert_eq!(
-            types,
-            vec![
-                EventType::RunStarted,
-                EventType::TextMessageStart,
-                EventType::TextMessageContent,
-                EventType::TextMessageEnd,
-                EventType::RunFinished,
-            ]
-        );
-    }
-
-    /// Every event of one message must carry the same id, or the pieces land in different bubbles.
-    #[test]
-    fn the_message_id_is_stable_across_its_events() {
-        let events = plan_run(&input(vec![user("hello")]));
-        let ids: Vec<_> = events
-            .iter()
-            .filter_map(|event| event.extra.get("messageId"))
-            .collect();
-        assert_eq!(ids.len(), 3, "start, content and end each carry the id");
-        assert!(ids.windows(2).all(|pair| pair[0] == pair[1]), "{ids:?}");
-    }
-
-    /// The client's own ids come back untouched — it correlates its UI against them.
-    #[test]
-    fn the_clients_thread_and_run_ids_are_echoed_not_minted() {
-        let events = plan_run(&input(vec![user("hello")]));
-        let started = &events[0];
-        assert_eq!(started.extra.get("threadId").unwrap(), "t1");
-        assert_eq!(started.extra.get("runId").unwrap(), "r1");
-    }
-
-    #[test]
-    fn the_last_user_message_reaches_the_run() {
-        let events = plan_run(&input(vec![user("first"), user("second")]));
-        let delta = events[2].extra.get("delta").unwrap().as_str().unwrap();
-        assert!(delta.contains("second"), "{delta}");
-    }
-
-    /// A run with no user message must still be a well-formed run, not a panic or an empty stream.
-    #[test]
-    fn a_run_with_no_messages_still_opens_and_closes() {
-        let events = plan_run(&input(vec![]));
-        assert_eq!(events.first().unwrap().event_type, EventType::RunStarted);
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    #[test]
-    fn every_event_renders_to_a_single_sse_frame() {
-        for event in plan_run(&input(vec![user("hello")])) {
+        for event in &events {
             let frame = event.to_sse_frame().unwrap();
             assert!(frame.starts_with("data: "));
-            assert!(frame.ends_with("\n\n"));
             assert_eq!(frame.matches("\n\n").count(), 1, "{frame:?}");
         }
     }

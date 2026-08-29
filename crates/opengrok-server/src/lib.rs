@@ -9,13 +9,14 @@ use axum::routing::get;
 pub mod agui;
 pub mod auth;
 
+pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-pub fn router(state: AuthState) -> Router {
+pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .merge(auth::router(state.clone()))
+        .merge(auth::router(state.auth.clone()))
         .merge(agui::router(state))
 }
 

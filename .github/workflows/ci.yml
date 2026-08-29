@@ -12,6 +12,16 @@ env:
 jobs:
   server:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: oag
+          POSTGRES_PASSWORD: oag
+          POSTGRES_DB: opengrok
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +32,23 @@ jobs:
       - run: cargo check --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The streaming path, end to end over a real socket, with no provider and no key. This is
+      # what the mock door is for — without it this path would only ever be tested by hand.
+      - name: smoke the ag-ui endpoint against the mock door
+        env:
+          PGPASSWORD: oag
+        run: |
+          OG_BIND=127.0.0.1:1337 \
+          OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
+          OG_TOKEN_SECRET=$(openssl rand -hex 32) \
+          OG_MODEL_DOOR=mock \
+          cargo run --quiet &
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:1337/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          scripts/slice3-harness-smoke.sh
+          scripts/slice2-agui-smoke.sh
 
   web:
     runs-on: ubuntu-latest

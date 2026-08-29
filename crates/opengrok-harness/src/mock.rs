@@ -1,0 +1,137 @@
+//! A door that answers without spending anything.
+//!
+//! `OG_MODEL_DOOR=mock` runs the whole stack — endpoint, harness, projection, SSE — with no
+//! provider, no key and no subscription. It exists for three reasons, in increasing order of
+//! importance: it is free; it makes CI able to exercise the streaming path at all (a test that
+//! needs a live key is a test that gets deleted); and it can produce what a live call cannot be
+//! asked for — a truncated stream, a tool call split across ten fragments, a provider that fails
+//! halfway.
+//!
+//! It emits `ModelDelta`s, the same vocabulary the real door emits, and gets no private path
+//! through the projection. A bug this hides is therefore a bug in the door, not in anything
+//! downstream of it.
+
+use futures::stream;
+
+use crate::model::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
+
+/// Replays a script.
+#[derive(Debug, Clone, Default)]
+pub struct MockDoor {
+    script: Vec<ModelDelta>,
+    /// Fails after the script, to exercise the error path on demand.
+    fail_with: Option<String>,
+}
+
+impl MockDoor {
+    /// The default script: word-by-word, so a client's streaming is visibly exercised rather than
+    /// arriving as one indivisible blob that would also pass a non-streaming implementation.
+    pub fn echoing() -> Self {
+        Self::default()
+    }
+
+    pub fn with_script(script: Vec<ModelDelta>) -> Self {
+        Self {
+            script,
+            fail_with: None,
+        }
+    }
+
+    pub fn failing_with(message: impl Into<String>) -> Self {
+        Self {
+            script: Vec::new(),
+            fail_with: Some(message.into()),
+        }
+    }
+
+    /// What the default door says back, split so the stream has several frames.
+    fn echo_script(request: &ModelRequest) -> Vec<ModelDelta> {
+        let asked = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_else(|| "nothing".to_string());
+
+        let reply = format!("You said: {asked}. This is the mock door — no model was called.");
+        reply
+            .split_inclusive(' ')
+            .map(|word| ModelDelta::Text(word.to_string()))
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelDoor for MockDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        if let Some(message) = &self.fail_with {
+            let error = ModelError::Stream(message.clone());
+            return Ok(Box::pin(stream::once(async move { Err(error) })));
+        }
+        let script = if self.script.is_empty() {
+            Self::echo_script(&request)
+        } else {
+            self.script.clone()
+        };
+        Ok(Box::pin(stream::iter(script.into_iter().map(Ok))))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn request(text: &str) -> ModelRequest {
+        ModelRequest {
+            model: "mock".to_string(),
+            system: None,
+            messages: vec![crate::model::ChatMessage {
+                role: "user".to_string(),
+                content: text.to_string(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_door_streams_more_than_one_frame() {
+        let door = MockDoor::echoing();
+        let deltas: Vec<_> = door.stream(request("hello")).await.unwrap().collect().await;
+        assert!(deltas.len() > 1, "a single frame would not test streaming");
+        let text: String = deltas
+            .into_iter()
+            .filter_map(|delta| match delta {
+                Ok(ModelDelta::Text(text)) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("hello"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_scripted_door_replays_exactly_what_it_was_given() {
+        let script = vec![
+            ModelDelta::ToolCallStart {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+        ];
+        let door = MockDoor::with_script(script.clone());
+        let deltas: Vec<_> = door.stream(request("x")).await.unwrap().collect().await;
+        let got: Vec<_> = deltas.into_iter().map(|delta| delta.unwrap()).collect();
+        assert_eq!(got, script);
+    }
+
+    #[tokio::test]
+    async fn a_failing_door_yields_an_error_the_harness_must_handle() {
+        let door = MockDoor::failing_with("upstream hung up");
+        let deltas: Vec<_> = door.stream(request("x")).await.unwrap().collect().await;
+        assert_eq!(deltas.len(), 1);
+        assert!(deltas[0].is_err());
+    }
+}

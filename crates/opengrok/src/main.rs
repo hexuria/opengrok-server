@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
+use opengrok_harness::{GatewayDoor, MockDoor, ModelDoor};
+use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_store::PgStore;
 use sqlx::postgres::PgPoolOptions;
@@ -41,9 +43,33 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("migrations failed: {error}"))?;
 
-    let state = AuthState {
+    let auth = AuthState {
         store: PgStore::new(pool),
         minter: Arc::new(TokenMinter::new(token_secret.as_bytes())),
+    };
+
+    // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
+    // what CI uses, so the streaming path is exercised on every push rather than only by hand.
+    let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
+        Ok("mock") => {
+            tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
+            Arc::new(MockDoor::echoing())
+        }
+        _ => {
+            let url = std::env::var("OG_GATEWAY_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:29080".to_string());
+            // An oag_live_ key, never a provider key: a coworker's pin is a route (CLAUDE.md #4).
+            let key = std::env::var("OG_GATEWAY_TOKEN").context(
+                "OG_GATEWAY_TOKEN is required unless OG_MODEL_DOOR=mock; see .env.example",
+            )?;
+            Arc::new(GatewayDoor::new(url, key))
+        }
+    };
+
+    let state = AgUiState {
+        auth,
+        door,
+        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
     };
 
     let app = opengrok_server::router(state);

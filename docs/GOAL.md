@@ -88,7 +88,10 @@ Done means: implemented, tested, exercised against the Next.js client, and green
 2. **AG-UI endpoint** — `POST /ag-ui` streaming the 32 event types of `@ag-ui/core` 0.0.57 over
    SSE, so openbot can add OpenGrok as a Bot and get a reply. This is now the spine: everything
    after it is reached through this endpoint.
-3. **Say something and be answered** — the harness loop on Rig, out through open-ai-gateway,
+3. ✅ **Say something and be answered** — *Done 29 Aug 2026.* The harness, the projection and two
+   doors (gateway + mock); `scripts/slice3-harness-smoke.sh` green. **Not yet durable** — a run is
+   not written to the event log, so it does not survive a restart. That moves into slice 4, where
+   it belongs with the boxes. Original scope: the harness loop on Rig, out through open-ai-gateway,
    streamed back as AG-UI `TEXT_MESSAGE_*` / `TOOL_CALL_*`; runs and transcripts as events in the
    store. Durable: a run survives the client disconnecting.
 4. **The computer** — box.ascii.dev behind the `Computer` trait; an agent works on its own box and
@@ -97,6 +100,47 @@ Done means: implemented, tested, exercised against the Next.js client, and green
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.
+
+## The mock door — test without spending a token
+
+**Operator decision, 29 Aug 2026.** Every model call goes through the `ModelDoor` trait
+(`opengrok-harness/src/model.rs`), and one implementation is a **mock** that replays a scripted
+stream. Selected with `OG_MODEL_DOOR=mock`, it runs the entire stack — endpoint, harness,
+projection, SSE — without reaching a provider or a subscription.
+
+Why it earns its place beyond saving money:
+
+- **CI can exercise the whole path.** A test that needs a live key is a test that gets deleted.
+- **It reproduces what a live call cannot.** A truncated stream, a tool call split across ten
+  fragments, a provider that never closes — all trivial to script, all impossible to request.
+- **It is the answer when a dependency is down.** Proven the day it was written: the dev gateway's
+  inference handler was closing connections without replying, and slice 3 was verified anyway.
+
+The rule that keeps it honest: the mock produces `ModelDelta`s, the same vocabulary the real door
+produces. It never gets its own path through the projection, so a bug the mock hides is a bug in
+the door, not in everything downstream of it.
+
+## Artifacts — remembered on 29 Aug 2026, not yet scheduled
+
+Uploads and generated files — images, videos, documents — need somewhere to live and a URL the app
+can load. Recorded now so it is not rediscovered late; **do not pull it forward**, it lands with or
+after the harness produces files worth storing.
+
+What is already decided by the shape of the rest:
+
+- **Scoped, not global.** An artifact belongs to a workspace and an agent, and its reach is set the
+  way the agent is configured: private to the owner, visible to a shared session, or public. That
+  is a policy decision on every read, not a signed URL handed out once (non-negotiable #6).
+- **A trait, like `Computer`.** Local disk behind the same seam as object storage, so a laptop
+  serves files from a directory and production serves them from R2 or a VPS volume with no code
+  change. Axum handles both; the difference is the domain in front.
+- **The row is the truth, the bytes are not.** An artifact is a row (owner, scope, content type,
+  size, checksum) with bytes attached — so it survives a storage migration, and a lost object is a
+  broken link rather than a lost record. Same rule as everything else here: nothing that matters
+  lives only in one place a client controls.
+- **Provenance for later:** the desktop client already models this — `user-attachment` entries carry
+  `file_path`/`file_name`/`byteSize` (`opengrok-wire/src/transcript.rs`) and it fetches avatars from
+  `/avatars/<id>`. AG-UI carries files as message content. Both consume the same store.
 
 ## Provenance for slice 1 (read before implementing)
 
