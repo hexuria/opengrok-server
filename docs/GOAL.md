@@ -156,7 +156,19 @@ Done means: implemented, tested, exercised against the Next.js client, and green
 sign in → hire → a computer of its own → talk → policy every turn → tools on its own box → a risky
 call waits for a person → one answer settles it → the server resumes itself → durable throughout →
 and a run whose process dies is picked up rather than left hanging.
-5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
+5. **Plugins** — *in progress.*
+   - ✅ *The bundle format* — `opengrok-plugins` reads `plugin.json` + `skills/` + `mcp.json`,
+     transcribed from the published 1.0.0 schemas. A plugin is a **bundle**; MCP is the protocol one
+     of its servers speaks; `rmcp` is a client for that protocol — three layers, not one.
+   - ✅ *Curation, not authorship.* We do not write Gmail or GitHub — we keep a list we have read.
+     `Trust::Unverified` is not a badge: its tools arrive needing a human yes, via slice 4b's
+     approval machinery. `Policy::CuratedOnly` (the default) refuses the rest outright.
+   - ✅ *Connections* — `opengrok-core::connection`. Three scopes (**global / user / bot**) and the
+     lend: a person authenticates once and lends the connection to as many coworkers as they like,
+     rather than each one signing in again. Resolution is most-specific-first, so a bot's own
+     account beats one lent to it.
+   - **Still to do:** storing the tokens encrypted (needs `OG_CREDENTIAL_KEK`), connecting to an
+     MCP server with `rmcp`, and surfacing installed plugins as tools on the executor.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
    publication, not for local work.

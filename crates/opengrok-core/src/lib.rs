@@ -4,12 +4,16 @@
 //! and a principal *are* without depending on a database, an HTTP client, or each other.
 
 pub mod account;
+pub mod connection;
 pub mod coworker;
 pub mod id;
 pub mod run;
 
 pub use account::{
     Account, AccountCommand, AccountError, AccountEvent, AccountView, Plan, Session,
+};
+pub use connection::{
+    Connection, ConnectionCommand, ConnectionError, ConnectionEvent, ConnectionView, Owner,
 };
 pub use coworker::{
     BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,

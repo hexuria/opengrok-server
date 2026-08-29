@@ -12,6 +12,7 @@ members = [
   "crates/opengrok-proto",   # seam B transcribed: Connect-over-HTTP/1.1 messages (prost), never vendored stubs
   "crates/opengrok-harness", # the agent loop (Rig): turns, tools, streaming
   "crates/opengrok-box",     # the coworker's computer
+  "crates/opengrok-plugins",# Agent Plugins: the bundle of skills + MCP servers a coworker is given
   "crates/opengrok-tools",   # tool definitions and the executor
   "crates/opengrok-policy",  # what a principal may make a coworker do
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
