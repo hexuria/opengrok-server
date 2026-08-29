@@ -8,6 +8,7 @@ use axum::routing::get;
 
 pub mod agui;
 pub mod auth;
+pub mod recovery;
 
 pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};

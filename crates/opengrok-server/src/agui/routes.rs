@@ -396,6 +396,14 @@ pub async fn run(
         coworker_id: coworker_id_from(&input),
     };
 
+    // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
+    // an abandoned run. Released when this drops — including when the process dies, which is
+    // exactly the case the lease exists for.
+    let _lease = crate::recovery::Lease::new(crate::recovery::hold(
+        state.clone(),
+        RunId::from_stored(input.run_id.clone()),
+    ));
+
     let events = run_conversation(
         state.door.as_ref(),
         tools.as_ref(),

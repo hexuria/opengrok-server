@@ -100,6 +100,14 @@ create table if not exists run_view (
 -- fails with `column "account_id" does not exist` on any database created before the column was.
 alter table run_view add column if not exists account_id text;
 
+-- A lease, so a run being worked on right now is not mistaken for one abandoned by a restart.
+-- While a process is running a turn it holds the lease; when the process dies the lease simply
+-- expires, which is the only signal that survives a SIGKILL. Without this, one replica would
+-- "recover" runs another replica is actively serving.
+alter table run_view add column if not exists leased_until_ms bigint;
+
+create index if not exists run_view_lease_idx on run_view (status, leased_until_ms);
+
 create index if not exists run_view_account_idx on run_view (account_id);
 
 create index if not exists run_view_thread_idx on run_view (thread_id);

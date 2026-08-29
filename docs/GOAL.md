@@ -146,9 +146,16 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      call, never per tool. `scripts/slice8-approval-smoke.sh` sends no further request and watches
      the run finish on its own, then checks the approved command's marker on the box.
 
-**PLAN §4.5 layers 1–5 are all enforced.** What remains is not a layer: resuming a run interrupted
-by a *restart* (as opposed to an approval) — `interrupted_runs` finds them and nothing consumes it
-yet.
+   - ✅ *Recovery — done 29 Aug 2026.* A sweep claims runs abandoned by a restart and ends them,
+     told apart from live ones by a **lease** the run endpoint holds while serving. Claiming is one
+     `update … returning`, so two replicas cannot take the same run. A run interrupted between a
+     tool call and its result is **not** re-run: the outcome is genuinely unknown, and the failure
+     says so rather than repeating whatever the command did. `scripts/slice9-recovery-smoke.sh`.
+
+**PLAN §4.5 layers 1–5 are all enforced, and every run reaches an ending.** The arc runs unattended:
+sign in → hire → a computer of its own → talk → policy every turn → tools on its own box → a risky
+call waits for a person → one answer settles it → the server resumes itself → durable throughout →
+and a run whose process dies is picked up rather than left hanging.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for

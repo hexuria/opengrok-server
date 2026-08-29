@@ -61,6 +61,8 @@ jobs:
           sleep 1
           OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
           scripts/slice4-durability-smoke.sh
+          OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
+          scripts/slice9-recovery-smoke.sh
 
   web:
     runs-on: ubuntu-latest

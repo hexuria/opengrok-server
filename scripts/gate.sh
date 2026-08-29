@@ -113,5 +113,10 @@ step "scripts/slice4-durability-smoke.sh"
 OG_PORT="$PORT" scripts/slice4-durability-smoke.sh >/dev/null || fail "durability"
 echo "  passed"
 
+# Also starts and kills its own servers, and plants rows directly.
+step "scripts/slice9-recovery-smoke.sh"
+OG_PORT="$PORT" scripts/slice9-recovery-smoke.sh >/dev/null || fail "recovery"
+echo "  passed"
+
 echo
 echo "GATE PASSED (checks, tests and all five smoke scripts)."

@@ -316,8 +316,59 @@ impl PgStore {
             .collect()
     }
 
-    /// Runs left `running` by a restart. Nothing consumes this yet; it is the query that makes an
-    /// interrupted run findable rather than merely absent, and slice 5's resumption starts here.
+    /// Hold the lease on a run while a process is working on it.
+    ///
+    /// Renewed as the run progresses. The lease is what tells a *restart* apart from a run that is
+    /// simply still going: a live process keeps pushing the expiry out, a dead one cannot.
+    pub async fn hold_run(&self, id: &RunId, until_ms: i64) -> StoreResult<()> {
+        sqlx::query("update run_view set leased_until_ms = $2 where id = $1")
+            .bind(id.as_str())
+            .bind(until_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Take ownership of runs abandoned by a restart.
+    ///
+    /// ONE STATEMENT, AND THAT IS THE POINT. `update … returning` claims and reports in the same
+    /// breath, so two replicas booting together cannot both take the same run: the second one's
+    /// `where` no longer matches. Selecting first and updating after would hand both of them the
+    /// same list and run somebody's work twice.
+    ///
+    /// A run with no lease at all is claimable: it predates leases, or its holder died before
+    /// writing one.
+    pub async fn claim_abandoned_runs(
+        &self,
+        now_ms: i64,
+        lease_ms: i64,
+        limit: i64,
+    ) -> StoreResult<Vec<RunId>> {
+        let rows = sqlx::query(
+            "update run_view
+                set leased_until_ms = $1 + $2
+              where id in (
+                    select id from run_view
+                     where status = 'running'
+                       and (leased_until_ms is null or leased_until_ms < $1)
+                     order by updated_at_ms
+                     limit $3
+                     for update skip locked
+              )
+              returning id",
+        )
+        .bind(now_ms)
+        .bind(lease_ms)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
+            .collect()
+    }
+
+    /// Runs left `running`, whether or not their lease has expired. For diagnosis.
     pub async fn interrupted_runs(&self, limit: i64) -> StoreResult<Vec<RunId>> {
         let rows = sqlx::query(
             "select id from run_view where status = 'running' order by updated_at_ms limit $1",

@@ -112,6 +112,10 @@ async fn main() -> anyhow::Result<()> {
         computer,
     };
 
+    // Pick up whatever the last process abandoned. Started before the listener, because the most
+    // likely moment to find an abandoned run is immediately after the restart that abandoned it.
+    tokio::spawn(opengrok_server::recovery::sweep_forever(state.clone()));
+
     let app = opengrok_server::router(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
