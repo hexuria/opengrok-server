@@ -40,10 +40,16 @@ last=$(echo "$events" | tail -1 | jq -r '.type')
 ok "RUN_STARTED … RUN_FINISHED"
 
 echo "3. the message events are properly nested"
+# The SHAPE is the contract, not the frame count: a message opens, is filled by one or more
+# content events, and closes before the run ends. An exact sequence here would encode how many
+# fragments a model happened to emit, and would break the moment streaming got finer-grained —
+# which is exactly what happened when the stub was replaced by the real harness.
 sequence=$(echo "$events" | jq -r '.type' | tr '\n' ' ')
-expected="RUN_STARTED TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT TEXT_MESSAGE_END RUN_FINISHED "
-[ "$sequence" = "$expected" ] || fail "sequence was: $sequence"
-ok "start, content, end — in order"
+case "$sequence" in
+  "RUN_STARTED TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT"*"TEXT_MESSAGE_END RUN_FINISHED ") ;;
+  *) fail "sequence was: $sequence" ;;
+esac
+ok "start, content(s), end — in order"
 
 echo "4. our ids come back, not ids the server invented"
 # openbot correlates its own UI against these; minting our own would orphan the reply.
