@@ -224,6 +224,9 @@ impl PgStore {
         expected_seq: i64,
         events: &[RunEvent],
         view: &RunView,
+        // Whose run this is. `None` means nobody may read it back — an unowned run is not a
+        // public one.
+        account_id: Option<&AccountId>,
     ) -> StoreResult<i64> {
         let mut tx = self.pool.begin().await?;
         let stream = crate::run_stream(id);
@@ -246,13 +249,16 @@ impl PgStore {
         }
 
         sqlx::query(
-            "insert into run_view (id, thread_id, status, event_count, updated_at_ms)
-             values ($1, $2, $3, $4, $5)
+            "insert into run_view (id, thread_id, status, event_count, updated_at_ms, account_id)
+             values ($1, $2, $3, $4, $5, $6)
              on conflict (id) do update set
                thread_id = excluded.thread_id,
                status = excluded.status,
                event_count = excluded.event_count,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               -- The owner is set once and never overwritten with NULL: a later batch that arrives
+               -- without a session must not orphan a run somebody owns.
+               account_id = coalesce(excluded.account_id, run_view.account_id)",
         )
         .bind(view.id.as_str())
         .bind(&view.thread_id)
@@ -263,11 +269,32 @@ impl PgStore {
         })
         .bind(view.event_count)
         .bind(view.updated_at_ms)
+        .bind(account_id.map(|id| id.as_str()))
         .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;
         Ok(seq)
+    }
+
+    /// Is this run readable by this account?
+    ///
+    /// LAYER 4 (`docs/PLAN.md` §4.5): whose records may this call touch. A run holds a whole
+    /// conversation, so "anyone with the id may read it" would make a run id a password — and run
+    /// ids appear in client URLs and logs. An unowned run is readable by nobody: `NULL` here means
+    /// "no session started it", which must not read as "everybody's".
+    pub async fn run_owned_by(&self, id: &RunId, account: &AccountId) -> StoreResult<bool> {
+        let row = sqlx::query("select account_id from run_view where id = $1")
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(row) => {
+                row.try_get::<Option<String>, _>("account_id")?
+                    == Some(account.as_str().to_string())
+            }
+            None => false,
+        })
     }
 
     /// Runs left `running` by a restart. Nothing consumes this yet; it is the query that makes an

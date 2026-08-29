@@ -46,7 +46,7 @@ echo "3. a run reaches the model, and its tool call lands on that computer"
 # The mock door is scripted to ask for a shell command, so this exercises the whole chain without
 # spending anything: model → reassembly → executor → the coworker's own box → result event.
 run_id="run-box-$(date +%s)"
-events=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' -d "$(cat <<JSON
+events=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $token" -H 'content-type: application/json' -d "$(cat <<JSON
 {"threadId":"t-box","runId":"$run_id",
  "forwardedProps":{"coworkerId":"$coworker"},
  "messages":[{"id":"m1","role":"user","content":"run a command"}]}
@@ -69,7 +69,8 @@ seen=$(docker exec "$BOX_ID" cat "$marker" 2>/dev/null | tr -d '\n')
 ok "the coworker's computer is reachable and keeps its files"
 
 echo "5. the run replays from the log after the fact"
-replay=$(curl -fsS "$BASE/ag-ui/runs/$run_id")
+# A run is readable only by whoever started it, so the owner's token is required here.
+replay=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token")
 [ "$(echo "$replay" | jq -r '.status')" = "finished" ] || fail "the run did not persist"
 ok "$(echo "$replay" | jq -r '.events | length') events replayed from Postgres"
 

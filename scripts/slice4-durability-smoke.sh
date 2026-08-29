@@ -19,10 +19,16 @@ ok()   { echo "  ok: $*"; }
 command -v jq >/dev/null || fail "jq is required"
 : "${OG_DATABASE_URL:?OG_DATABASE_URL is required}"
 
+# Fixed for the whole script, and this matters: a server that mints a new signing secret at boot
+# invalidates every session it ever issued. This test restarts the server and then uses a token from
+# before the restart, which is precisely the case a random-per-boot secret breaks — and precisely
+# why OG_TOKEN_SECRET has no default in production either.
+SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}"
+
 start_server() {
   OG_BIND=127.0.0.1:$PORT \
   OG_DATABASE_URL="$OG_DATABASE_URL" \
-  OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
+  OG_TOKEN_SECRET="$SECRET" \
   OG_MODEL_DOOR=mock \
   RUST_LOG=warn \
   "$BIN" >/dev/null 2>&1 &
@@ -42,7 +48,10 @@ THREAD="thread-durable-$(date +%s)"
 
 echo "1. a run happens"
 start_server
-sent=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' \
+# A run belongs to whoever started it, and only they may read it back, so the smoke needs a session.
+TOKEN=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=durable-$(date +%s)@og.local" | jq -r '.accessToken')
+[ -n "$TOKEN" ] || fail "could not sign in"
+sent=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d "{\"threadId\":\"$THREAD\",\"runId\":\"$RUN\",\"messages\":[{\"id\":\"m1\",\"role\":\"user\",\"content\":\"remember this\"}]}" \
   --max-time 30 | sed -n 's/^data: //p' | jq -c '.' | wc -l | tr -d ' ')
 [ "$sent" -gt 3 ] || fail "expected a real run, saw $sent events"
@@ -58,7 +67,8 @@ ok "server killed with SIGKILL"
 
 echo "3. a new process replays the run from the log"
 start_server
-replay=$(curl -fsS --max-time 10 "$BASE/ag-ui/runs/$RUN") || fail "the run could not be replayed"
+replay=$(curl -fsS --max-time 10 "$BASE/ag-ui/runs/$RUN" -H "authorization: Bearer $TOKEN") \
+  || fail "the run could not be replayed"
 status=$(echo "$replay" | jq -r '.status')
 count=$(echo "$replay" | jq -r '.events | length')
 thread=$(echo "$replay" | jq -r '.threadId')
@@ -78,9 +88,20 @@ echo "$text" | grep -q "remember this" || fail "the reply did not survive: $text
 ok "RUN_STARTED … RUN_FINISHED, and the reply is intact"
 
 echo "5. a run that never happened is not invented"
-missing=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ag-ui/runs/run-that-never-was")
+missing=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ag-ui/runs/run-that-never-was" -H "authorization: Bearer $TOKEN")
 [ "$missing" = "404" ] || fail "an unknown run returned $missing, expected 404"
 ok "an unknown run is 404, not an empty success"
+
+echo "6. somebody else cannot read this run, and neither can a stranger"
+# A run holds a whole conversation. Without this, a run id would be a password — and run ids travel
+# in client URLs and logs.
+other=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=nosy-$(date +%s)@og.local" | jq -r '.accessToken')
+theirs=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ag-ui/runs/$RUN" -H "authorization: Bearer $other")
+[ "$theirs" = "404" ] || fail "another account read the run: $theirs"
+anon=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ag-ui/runs/$RUN")
+[ "$anon" = "404" ] || fail "an anonymous caller read the run: $anon"
+# 404 for both, so probing an id reveals nothing about whether the run exists.
+ok "another account and an anonymous caller both get 404"
 
 echo
 echo "PASS — slice 4: the work was never in the tab."

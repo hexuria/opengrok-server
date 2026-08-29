@@ -270,14 +270,9 @@ pub async fn run(
         messages: to_chat_messages(&input),
     };
 
-    // The journal writes each round to Postgres before the next model call. A run that cannot be
-    // recorded fails inside the loop rather than being streamed — better a client told the run
-    // failed than one shown work that will not be there when it looks again (CLAUDE.md #5).
-    let journal = StoreJournal {
-        state: state.clone(),
-        thread_id: input.thread_id.clone(),
-    };
-
+    // Who is asking. Established first, because both the permission check and the run's ownership
+    // depend on it.
+    //
     // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
     // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
     // no coworker just talks to a model.
@@ -307,6 +302,15 @@ pub async fn run(
         None => None,
     };
 
+    // The journal writes each round to Postgres before the next model call, and stamps the run's
+    // owner so only they can read it back. A run that cannot be recorded fails inside the loop
+    // rather than being streamed (CLAUDE.md #5).
+    let journal = StoreJournal {
+        state: state.clone(),
+        thread_id: input.thread_id.clone(),
+        account_id: account_id.clone(),
+    };
+
     let events = run_conversation(
         state.door.as_ref(),
         tools.as_ref(),
@@ -331,6 +335,8 @@ pub async fn run(
 pub struct StoreJournal {
     pub state: AgUiState,
     pub thread_id: String,
+    /// Whose run this is, so it can be read back by them and by nobody else.
+    pub account_id: Option<opengrok_core::id::AccountId>,
 }
 
 #[async_trait::async_trait]
@@ -340,9 +346,15 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         events: &[Event],
     ) -> Result<(), opengrok_harness::JournalError> {
-        append_events(&self.state, run_id, &self.thread_id, events)
-            .await
-            .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
+        append_events(
+            &self.state,
+            run_id,
+            &self.thread_id,
+            self.account_id.as_ref(),
+            events,
+        )
+        .await
+        .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
     }
 }
 
@@ -351,6 +363,7 @@ async fn append_events(
     state: &AgUiState,
     run_id: &str,
     thread_id: &str,
+    account_id: Option<&opengrok_core::id::AccountId>,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
     if events.is_empty() {
@@ -424,7 +437,7 @@ async fn append_events(
     state
         .auth
         .store
-        .append_run(&run_id, seq, &to_append, &view)
+        .append_run(&run_id, seq, &to_append, &view, account_id)
         .await?;
     Ok(())
 }
@@ -433,8 +446,28 @@ async fn append_events(
 ///
 /// THIS IS THE PROMISE, MADE CHECKABLE. Close the tab mid-run, come back, ask here: every event
 /// the run produced is returned, in order, without asking a model anything a second time.
-pub async fn replay_run(State(state): State<AgUiState>, Path(run_id): Path<String>) -> Response {
+pub async fn replay_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
     let run_id = RunId::from_stored(run_id);
+
+    // LAYER 4 (`docs/PLAN.md` §4.5): a run holds a whole conversation, so without this check a run
+    // id is a password — and run ids travel in client URLs and logs. `NOT_FOUND` rather than
+    // `FORBIDDEN` for both "no such run" and "not yours", so probing ids reveals nothing about
+    // which runs exist.
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    match state.auth.store.run_owned_by(&run_id, &account_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+
     let (run, _) = match state.auth.store.load_run(&run_id).await {
         Ok(loaded) => loaded,
         Err(error) => {

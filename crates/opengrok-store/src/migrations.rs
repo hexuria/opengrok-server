@@ -82,8 +82,19 @@ create table if not exists run_view (
     thread_id     text        not null,
     status        text        not null,
     event_count   bigint      not null,
-    updated_at_ms bigint      not null
+    updated_at_ms bigint      not null,
+    -- Whose run this is. Nullable because a run may be started without a session (the endpoint is
+    -- also just a way to talk to a model), and a NULL owner is readable by NOBODY rather than by
+    -- everybody — see `run_owned_by`.
+    account_id    text
 );
+
+-- `create table if not exists` does NOT evolve a table that already exists, so a column added to a
+-- shipped table needs its own explicit ALTER. Learned the hard way: without this the index below
+-- fails with `column "account_id" does not exist` on any database created before the column was.
+alter table run_view add column if not exists account_id text;
+
+create index if not exists run_view_account_idx on run_view (account_id);
 
 create index if not exists run_view_thread_idx on run_view (thread_id);
 create index if not exists run_view_status_idx on run_view (status);

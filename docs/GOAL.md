@@ -127,8 +127,12 @@ Done means: implemented, tested, exercised against the Next.js client, and green
      principal-and-coworker, a ceiling per coworker, combined by **intersection, never union**.
      Checked on every turn and before every tool call, never once at sign-in. Every unknown denies.
      `scripts/slice7-policy-smoke.sh` is the attack itself: one account naming another's coworker.
-   - **Still to do:** PLAN §4.5 layers 4 and 5 — record-level scoping inside a tool (bind + RLS),
-     and an `approve` effect that suspends a run for a human yes.
+   - ✅ *Layer 4 — done 29 Aug 2026.* A run carries its owner and only they may replay it; both
+     "no such run" and "not yours" answer 404 so an id reveals nothing. This closed a real hole:
+     `GET /ag-ui/runs/{id}` had returned any conversation to anyone who named the id.
+   - **Still to do:** PLAN §4.5 **layer 5** — an `approve` effect that suspends a run for a human
+     yes and resumes it exactly once under retry. The durable loop and the journal are the pieces
+     it needs; they exist.
 5. **Plugins** — Agent Plugins loading; mem0 memory; gmail/github/gdrive connectors via MCP.
 6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
    remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
