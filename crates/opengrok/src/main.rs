@@ -69,7 +69,12 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(TokenMinter::new(token_secret.as_bytes())),
         login_email,
     )
-    .with_resend(std::env::var("OG_RESEND_API_KEY").ok(), public_url);
+    .with_resend(
+        std::env::var("OG_RESEND_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("RESEND_API").ok()),
+        public_url,
+    );
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.

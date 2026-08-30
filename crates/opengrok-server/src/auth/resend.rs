@@ -12,8 +12,13 @@ use serde_json::json;
 
 /// Send the verification email. Returns whether Resend accepted it.
 pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
-    let from = std::env::var("OG_RESEND_FROM")
-        .unwrap_or_else(|_| "OpenGrok <onboarding@resend.dev>".to_string());
+    // The sender identity. Its DOMAIN must be verified in the Resend account, or Resend rejects
+    // the send — so this is a real address under a domain the operator controls, not a placeholder.
+    let from_email = std::env::var("RESEND_FROM_EMAIL")
+        .unwrap_or_else(|_| "support@goldcoders.dev".to_string());
+    let from_name = std::env::var("RESEND_FROM_NAME")
+        .unwrap_or_else(|_| "Open Grok Support Team".to_string());
+    let from = format!("{from_name} <{from_email}>");
     let body = json!({
         "from": from,
         "to": [to],
@@ -32,7 +37,18 @@ pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
         .send()
         .await
     {
-        Ok(response) => response.status().is_success(),
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                true
+            } else {
+                // Resend's rejection reason (unverified from-domain, bad key, …) is in the body;
+                // without it a failed send is a silent mystery. Logged, not returned to the client.
+                let detail = response.text().await.unwrap_or_default();
+                tracing::warn!(%status, detail, "Resend rejected the send");
+                false
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "Resend send failed; the account still exists unverified");
             false
