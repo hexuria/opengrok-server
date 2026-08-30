@@ -33,8 +33,14 @@ fn entry_id() -> String {
 
 /// The named agent, or the one the client last opened.
 pub fn agent_or_active(state: &GatewayState, args: &Value) -> Option<String> {
-    args.get("agentId")
-        .and_then(Value::as_str)
+    // The client names the agent under different keys on different verbs: `agentId` on sendPrompt,
+    // but the transcript reads (getAgentTranscriptTail / openAgentTail / getAgentThread) pass it as
+    // `id` or `threadId`. Accept them all before falling back to the last-opened agent — otherwise a
+    // read that DID name its agent was answered "no agent named and none active" and the reply could
+    // never paint.
+    ["agentId", "id", "threadId", "agent_id"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str))
         .map(str::to_string)
         .or_else(|| {
             state
@@ -96,7 +102,7 @@ pub fn input_digest(args: &Value, agent_id: &str) -> String {
 /// Accept, echo, and run — the whole sendPrompt path after auth.
 ///
 /// Returns `(status, body)` so `routes.rs` can wrap it in the wire mechanics.
-pub async fn send_prompt(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(prompt) = args
         .get("prompt")
         .and_then(Value::as_str)
@@ -121,7 +127,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value) -> (u16, Value) {
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
         return (404, json!({ "error": format!("no agent {agent_id}") }));
     };
-    let Ok(Some(account)) = state.agui.auth.store.account_by_email(&state.email).await else {
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -140,7 +146,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value) -> (u16, Value) {
         .agui
         .auth
         .store
-        .accept_nonce(&state.email, &nonce, &digest, &record, now_ms())
+        .accept_nonce(caller, &nonce, &digest, &record, now_ms())
         .await
     {
         Ok(Ok(stored)) => {
@@ -428,20 +434,14 @@ pub async fn full_transcript(state: &GatewayState, args: &Value, activate: bool)
 }
 
 /// `promptAcceptanceStatus` — what the ledger remembers about a nonce.
-pub async fn acceptance_status(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn acceptance_status(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(nonce) = args.get("clientNonce").and_then(Value::as_str) else {
         return (
             400,
             json!({ "error": "promptAcceptanceStatus needs a clientNonce" }),
         );
     };
-    match state
-        .agui
-        .auth
-        .store
-        .nonce_record(&state.email, nonce)
-        .await
-    {
+    match state.agui.auth.store.nonce_record(caller, nonce).await {
         Ok(Some(record)) => (200, json!({ "outcome": "found", "record": record })),
         Ok(None) => (200, json!({ "outcome": "not-found" })),
         Err(error) => {

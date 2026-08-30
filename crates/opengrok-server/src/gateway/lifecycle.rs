@@ -19,26 +19,27 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-async fn account(state: &GatewayState) -> Option<opengrok_core::account::AccountView> {
+async fn account(state: &GatewayState, email: &str) -> Option<opengrok_core::account::AccountView> {
     state
         .agui
         .auth
         .store
-        .account_by_email(&state.email)
+        .account_by_email(email)
         .await
         .ok()
         .flatten()
 }
 
 /// `createAgent` — hiring, in the client's vocabulary. Dedupes by `clientNonce`, because the
-/// client retries creates and two coworkers named the same are not one coworker.
-pub async fn create_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
+/// client retries creates and two coworkers named the same are not one coworker. `caller` is the
+/// account the bot is hired FOR — the signed-in person (per-account pivot), not a fixed host email.
+pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let name = args
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.trim().is_empty())
         .unwrap_or("Grok");
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, caller).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -46,9 +47,10 @@ pub async fn create_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
     };
 
     // The nonce, when present, is the dedupe key. The record remembers which coworker the first
-    // create made, so the retry answers with the SAME agent instead of a twin.
+    // create made, so the retry answers with the SAME agent instead of a twin. Keyed by the caller
+    // so two accounts' nonces never collide.
     if let Some(nonce) = args.get("clientNonce").and_then(Value::as_str) {
-        let slot = format!("createAgent:{}", state.email);
+        let slot = format!("createAgent:{caller}");
         let digest = super::conversation::input_digest(args, name);
         let probe = json!({ "pending": true });
         match state
@@ -225,7 +227,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
     let Some(id) = args.get("id").and_then(Value::as_str) else {
         return (400, json!({ "error": "id is required" }));
     };
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (200, Value::Null);
     };
     let coworker_id = CoworkerId::from_stored(id.to_string());
@@ -307,7 +309,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
 /// `deleteAgents {ids}` (and `deleteAgent {id}`) — retirement, in the client's vocabulary.
 pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value) {
     use opengrok_core::coworker::CoworkerCommand;
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (200, json!({ "deleted": 0 }));
     };
     let mut deleted = 0;
@@ -370,7 +372,7 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value)
         .ok()
         .flatten()
         .unwrap_or_else(|| json!({}));
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -570,7 +572,7 @@ fn automation_json(view: &opengrok_core::schedule::ScheduleView) -> Value {
 }
 
 async fn automations_array(state: &GatewayState, agent: Option<&str>) -> Vec<Value> {
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return Vec::new();
     };
     let schedules = state
@@ -608,7 +610,7 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         .or_else(|| args.get("prompt"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -651,7 +653,7 @@ pub async fn change_automation(state: &GatewayState, args: &Value, action: &str)
     else {
         return (400, json!({ "error": "id is required" }));
     };
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (200, json!([]));
     };
     let schedule_id = ScheduleId::from_stored(id.to_string());
@@ -693,7 +695,7 @@ pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Val
     else {
         return (400, json!({ "error": "id is required" }));
     };
-    let Some(account) = account(state).await else {
+    let Some(account) = account(state, &state.email).await else {
         return (200, Value::Null);
     };
     let schedule_id = ScheduleId::from_stored(id.to_string());

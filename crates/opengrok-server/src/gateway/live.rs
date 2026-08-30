@@ -132,9 +132,20 @@ pub fn emit_transcript(state: &GatewayState, agent_id: &str, kind: &str, entry: 
     emit(state, "transcript", payload);
 }
 
-/// The live roster rows, run-state and all.
+/// The live roster rows for the gateway's default account (`state.email`). Used by the SSE emitters,
+/// which fire outside any request and so have no caller — the desktop is one person per connection.
 pub async fn roster_rows(state: &GatewayState) -> Result<Vec<Value>, opengrok_store::StoreError> {
-    let Some(account) = state.agui.auth.store.account_by_email(&state.email).await? else {
+    roster_rows_for(state, &state.email).await
+}
+
+/// The live roster rows for a specific account email — the per-account pivot's core. Request
+/// handlers pass the CALLER's email (resolved from the account token) so `listAgents` returns the
+/// signed-in person's coworkers, not the fixed `OG_GATEWAY_EMAIL`.
+pub async fn roster_rows_for(
+    state: &GatewayState,
+    email: &str,
+) -> Result<Vec<Value>, opengrok_store::StoreError> {
+    let Some(account) = state.agui.auth.store.account_by_email(email).await? else {
         return Ok(Vec::new());
     };
     let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;

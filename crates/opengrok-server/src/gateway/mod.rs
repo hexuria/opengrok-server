@@ -27,6 +27,42 @@ use subtle::ConstantTimeEq;
 
 use crate::agui::routes::AgUiState;
 
+/// The header carrying the CALLER's account access token on gateway calls — the per-account pivot.
+///
+/// The gateway's `Authorization` header is the shared TRANSPORT bearer (one secret for the whole
+/// host, checked by `refuse`), so it cannot also identify the person. The desktop therefore sends
+/// its signed account access token — the same JWT seam B authenticates with — in this separate
+/// header, and the gateway resolves WHOSE roster/coworkers to serve from it. Signed, so a caller
+/// cannot forge another account; verified exactly like seam B (`minter.verify_access`).
+pub const ACCOUNT_HEADER: &str = "x-opengrok-account";
+
+/// The email of the account this request is FOR: the caller's own account when it presents a valid
+/// account token in `ACCOUNT_HEADER`, else `state.email` (the `OG_GATEWAY_EMAIL` fallback). The
+/// fallback is what keeps a client that has not yet learned to send the header working unchanged —
+/// the pivot is additive, not a flag day.
+pub async fn caller_email(state: &GatewayState, headers: &axum::http::HeaderMap) -> String {
+    if let Some(account_id) = account_from_header(state, headers)
+        && let Ok((account, _)) = state.agui.auth.store.load_account(&account_id).await
+    {
+        return account.email;
+    }
+    state.email.clone()
+}
+
+/// The account id from a valid `ACCOUNT_HEADER` token, or `None`. Accepts the raw JWT or a
+/// `Bearer <jwt>` value, so the client may reuse its Authorization-shaped token verbatim.
+fn account_from_header(
+    state: &GatewayState,
+    headers: &axum::http::HeaderMap,
+) -> Option<opengrok_core::id::AccountId> {
+    let raw = headers
+        .get(ACCOUNT_HEADER)
+        .and_then(|value| value.to_str().ok())?;
+    let token = raw.strip_prefix("Bearer ").unwrap_or(raw).trim();
+    let claims = state.agui.auth.minter.verify_access(token).ok()?;
+    Some(opengrok_core::id::AccountId::from_stored(claims.sub))
+}
+
 /// What the gateway knows beyond the shared server state.
 #[derive(Clone)]
 pub struct GatewayState {

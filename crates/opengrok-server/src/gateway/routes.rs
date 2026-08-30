@@ -216,6 +216,11 @@ async fn command(
         return refusal(code, message);
     }
 
+    // The per-account pivot: whose account this call is FOR. The caller's own account when it sends
+    // a valid account token in `ACCOUNT_HEADER`, else the `OG_GATEWAY_EMAIL` fallback — so a client
+    // that has not yet learned to send the header keeps working. Resolved once, per request.
+    let caller = super::caller_email(&state, &headers).await;
+
     // An empty body is `{}` (`parseCommandArgs`); a malformed one is a command error, not a
     // gateway outage, so it answers < 500.
     let args: Value = if body.trim().is_empty() {
@@ -229,7 +234,7 @@ async fn command(
 
     match method.as_str() {
         // ---- the roster ----
-        "listAgents" => match roster(&state).await {
+        "listAgents" => match roster(&state, &caller).await {
             Ok(mut rows) => {
                 // §2.2, the slim-avatar variant: when the client says slim, the bytes stay home
                 // and the version is the pointer it fetches /avatars/<id> with.
@@ -249,7 +254,7 @@ async fn command(
                 refusal(500, "roster unavailable")
             }
         },
-        "countAgents" => match roster(&state).await {
+        "countAgents" => match roster(&state, &caller).await {
             Ok(rows) => reply(StatusCode::OK, json!(rows.len())),
             Err(error) => {
                 tracing::error!(%error, "countAgents could not read the roster");
@@ -294,14 +299,14 @@ async fn command(
 
         // ---- P4: one conversation (slice 8) ----
         "sendPrompt" => {
-            let (code, body) = super::conversation::send_prompt(&state, &args).await;
+            let (code, body) = super::conversation::send_prompt(&state, &args, &caller).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
             )
         }
         "promptAcceptanceStatus" => {
-            let (code, body) = super::conversation::acceptance_status(&state, &args).await;
+            let (code, body) = super::conversation::acceptance_status(&state, &args, &caller).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -368,7 +373,7 @@ async fn command(
         "getConversationOutline" => reply(StatusCode::OK, json!([])),
 
         // ---- P5: the agent lifecycle (slice 11) ----
-        "createAgent" => wrap(super::lifecycle::create_agent(&state, &args).await),
+        "createAgent" => wrap(super::lifecycle::create_agent(&state, &args, &caller).await),
         "updateAgent" => wrap(super::lifecycle::update_agent(&state, &args).await),
         "deleteAgent" => {
             let ids: Vec<String> = args
@@ -578,6 +583,9 @@ fn settings_snapshot(state: &GatewayState) -> Value {
 
 /// The roster: the gateway account's coworkers as live §8.1 rows. An empty roster is a truthful
 /// answer, not an error — the client shows onboarding.
-async fn roster(state: &GatewayState) -> Result<Vec<Value>, opengrok_store::StoreError> {
-    super::live::roster_rows(state).await
+async fn roster(
+    state: &GatewayState,
+    caller: &str,
+) -> Result<Vec<Value>, opengrok_store::StoreError> {
+    super::live::roster_rows_for(state, caller).await
 }
