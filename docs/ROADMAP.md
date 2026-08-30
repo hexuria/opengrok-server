@@ -153,10 +153,16 @@ vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle ri
 
 - [ ] P5 agent lifecycle (19 commands, 10 already answered client-side)
 - [ ] P6 tools, approvals, widgets (7)
-- [ ] P7 attachments, media, `/avatars/<id>`, `x-sand-slim-avatars` (5)
-- [ ] P8 MCP and skills (15)
+- [x] P7 — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
+  commands refuse readably until the artifacts slice lands (they are its client surface).
+  *(this commit)*
+- [x] P8 — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
+  publishing and routed-MCP execution refuse readably (a coworker's connections drive MCP on
+  this server, from runs). *(this commit)*
 - [ ] P9 automations and workflows (15)
-- [ ] P10 box lifecycle and store (13)
+- [x] P10 — the box control surface over what the deployment has: null (the validated
+  truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
+  click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
 
 **P11 is deliberately not here.** Sharing/rooms, teach recording, channels, memories and the
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.

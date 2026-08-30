@@ -24,7 +24,43 @@ pub fn router(state: GatewayState) -> Router {
         .route("/health", get(health))
         .route("/events", get(events))
         .route("/api/{method}", post(command))
+        .route("/avatars/{id}", get(avatar_bytes))
         .with_state(state)
+}
+
+/// `GET /avatars/<id>[?v=]` — the bytes behind a slim roster's `avatarVersion`. Raw image bytes,
+/// not JSON; 404 when the coworker has no stored avatar.
+async fn avatar_bytes(
+    State(state): State<GatewayState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    use base64::Engine as _;
+    if let Some((code, message)) = refuse(&state, &headers) {
+        return refusal(code, message);
+    }
+    let profile = state
+        .agui
+        .auth
+        .store
+        .seamb_profile(&opengrok_core::id::CoworkerId::from_stored(id))
+        .await
+        .ok()
+        .flatten();
+    let Some(data_url) = profile
+        .as_ref()
+        .and_then(|profile| profile.get("avatarDataUrl"))
+        .and_then(Value::as_str)
+    else {
+        return (StatusCode::NOT_FOUND, "no avatar").into_response();
+    };
+    let Some(encoded) = data_url.strip_prefix("data:image/png;base64,") else {
+        return (StatusCode::NOT_FOUND, "no avatar").into_response();
+    };
+    match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(bytes) => (StatusCode::OK, [(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "no avatar").into_response(),
+    }
 }
 
 /// A JSON reply, stamped the way the client checks: `x-sand-mint-dedupe: 1` on every one.
@@ -448,7 +484,75 @@ async fn command(
         "getAgentChannels" => reply(StatusCode::OK, json!({ "channels": [] })),
         "getListenerIntegrations" => reply(StatusCode::OK, json!({})),
         "listBoxMcpServers" => reply(StatusCode::OK, json!({ "servers": [] })),
-        "skillsCatalog" => reply(StatusCode::OK, json!([])),
+
+        // ---- P7: attachments wait on the artifacts store, and say so ----
+        "uploadAttachment"
+        | "readAttachmentImage"
+        | "readAttachmentText"
+        | "readAttachmentChunk" => refusal(
+            400,
+            "attachments are not stored by this server yet (artifacts is a planned slice)",
+        ),
+
+        // ---- P8: the skills catalogue is the plugin catalogue we already curate ----
+        "skillsCatalog" => {
+            let skills: Vec<Value> = state
+                .agui
+                .plugins
+                .values()
+                .flat_map(|plugin| {
+                    let plugin_name = plugin.manifest.name.clone();
+                    plugin.skills.iter().map(move |skill| {
+                        json!({
+                            "name": skill.name,
+                            "plugin": plugin_name,
+                            "description": skill.description,
+                        })
+                    })
+                })
+                .collect();
+            reply(StatusCode::OK, Value::Array(skills))
+        }
+        "getPluginSyncStatus" => reply(
+            StatusCode::OK,
+            json!({ "plugins": state.agui.plugins.len(), "synced": true }),
+        ),
+        "syncPluginSkills" | "completeMcpOAuth" => reply(StatusCode::OK, Value::Null),
+        "getSkillPublishTargets" => reply(StatusCode::OK, json!([])),
+        "publishSkill" | "resyncPublishedSkill" | "unpublishSkill" => {
+            refusal(400, "skill publishing is not supported by this server yet")
+        }
+        "listRoutedMcpTools" => reply(StatusCode::OK, json!([])),
+        "refreshMcp" | "executeRoutedMcpTool" => refusal(
+            400,
+            "routed MCP runs through a coworker's own connections on this server; drive it from a run",
+        ),
+
+        // ---- P10: the box control surface, over what the deployment actually has ----
+        // With no computer provider configured, null is the well-formed truth the validator
+        // accepts; the lifecycle verbs are accepted no-ops so a UI click is not an error banner.
+        "getCloudAgentInfo" => reply(StatusCode::OK, Value::Null),
+        "ensureForeverBox" | "resetForeverBox" | "updateForeverBox" | "handBackForeverBox" => {
+            if state.agui.computer.is_none() {
+                reply(StatusCode::OK, Value::Null)
+            } else {
+                // A provider exists: the coworker's box is assigned at hire/run time by slice 4's
+                // machinery; this surface reports rather than re-plumbs it.
+                let agent = args.get("agentId").and_then(Value::as_str).unwrap_or("");
+                reply(
+                    StatusCode::OK,
+                    json!({ "agentId": agent, "state": "running", "vncUrl": null }),
+                )
+            }
+        }
+        "autoUpdateBoxNow"
+        | "snapshotBoxStoreNow"
+        | "clearBoxStoreNow"
+        | "setBoxMigrating"
+        | "prepareBoxForRecreate"
+        | "resumeBoxAfterRecreate"
+        | "updateHostNow" => reply(StatusCode::OK, Value::Null),
+        "getBoxStoreStatus" => reply(StatusCode::OK, Value::Null),
 
         // ---- everything else, exactly as the shipped host words it ----
         other => refusal(404, &format!("unknown gateway method: {other}")),

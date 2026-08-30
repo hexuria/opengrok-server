@@ -108,5 +108,28 @@ still=$(api listAgents)
 echo "$still" | jq -e --arg id "$aid" 'any(.[]; .id == $id) | not' >/dev/null || fail "still listed"
 ok "retired and off the roster"
 
+echo "10. /avatars serves the bytes a slim roster points at"
+made2=$(api createAgent '{"name":"Avatarian"}')
+avid=$(echo "$made2" | jq -r '.agent.id')
+api setAgentAvatarBytes "{\"id\":\"$avid\",\"pngBase64\":\"$PNG\"}" >/dev/null
+ctype=$(curl -s -o /dev/null -w '%{content_type}' "$BASE/avatars/$avid")
+case "$ctype" in image/png*) ;; *) fail "avatar content-type was $ctype" ;; esac
+size=$(curl -s "$BASE/avatars/$avid" | wc -c | tr -d ' ')
+[ "$size" -gt 30 ] || fail "avatar bytes too small: $size"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/avatars/cw_nobody")
+[ "$code" = "404" ] || fail "a missing avatar answered $code"
+slim=$(curl -sS --max-time 5 -X POST "$BASE/api/listAgents" -H 'x-sand-slim-avatars: 1')
+echo "$slim" | jq -e --arg id "$avid" '[.[] | select(.id == $id)][0] | .avatarDataUrl == null and .avatarVersion != null' >/dev/null \
+  || fail "slim mode must null the dataUrl and keep the version"
+api deleteAgents "{\"ids\":[\"$avid\"]}" >/dev/null
+
+echo "11. the skills catalogue is the plugin catalogue; attachments refuse readably"
+api skillsCatalog '{}' | jq -e 'type == "array"' >/dev/null || fail "skillsCatalog container"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/uploadAttachment" -H 'content-type: application/json' -d '{}')
+[ "$code" = "400" ] || fail "uploadAttachment answered $code, expected a readable 400"
+box=$(api getBoxStoreStatus '{}')
+[ "$box" = "null" ] || fail "box store status should be null with no store: $box"
+ok "P7/P8/P10 surfaces hold"
+
 echo
 echo "PASS — slice 15 smoke: the lifecycle tier answers, honestly, in the shapes the renderer checks."
