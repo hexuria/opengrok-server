@@ -77,6 +77,9 @@ subtle = "2"
 #   the pure-Rust one keeps a C toolchain out of the CI image. Exactly one must be enabled.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 sha2 = "0.11"
+# Password hashing for credential accounts. Argon2id — a real KDF; ChaCha20/SHA-256 already in the
+#   tree are AEAD/hash, neither is a password hash. `password-hash` gives the PHC string format.
+argon2 = "0.5"
 rand = "0.10"
 base64 = "0.23"
 # The credential vault. An AEAD so a tampered ciphertext fails to open rather than decrypting to

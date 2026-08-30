@@ -147,5 +147,11 @@ step "scripts/slice16-browser-login-smoke.sh"
 OG_PORT="$((PORT + 3))" scripts/slice16-browser-login-smoke.sh >/dev/null || fail "browser-login"
 echo "  passed"
 
+# Own server + fresh DB: bootstraps an org via the CLI, then walks the full signup/login chain.
+step "scripts/slice17-identity-smoke.sh"
+OG_PORT="$((PORT + 4))" OG_DATABASE_URL="${OG_DATABASE_URL%/*}/opengrok_s17_gate" \
+  scripts/slice17-identity-smoke.sh >/dev/null || fail "identity"
+echo "  passed"
+
 echo
 echo "GATE PASSED (checks, tests and every smoke script)."

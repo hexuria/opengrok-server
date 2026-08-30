@@ -131,24 +131,43 @@ impl PgStore {
                         .execute(&mut *tx)
                         .await?;
                 }
-                AccountEvent::Registered { .. } | AccountEvent::PlanChanged { .. } => {}
+                AccountEvent::Registered { .. }
+                | AccountEvent::PlanChanged { .. }
+                | AccountEvent::CredentialsSet { .. }
+                | AccountEvent::EmailVerified { .. }
+                | AccountEvent::Enabled { .. }
+                | AccountEvent::Disabled { .. } => {}
             }
         }
 
         sqlx::query(
-            "insert into account_view (id, email, plan, trial, updated_at_ms)
-             values ($1, $2, $3, $4, $5)
+            "insert into account_view
+               (id, email, plan, trial, updated_at_ms,
+                password_hash, first_name, last_name, org_id, verified, enabled)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              on conflict (id) do update set
                email = excluded.email,
                plan = excluded.plan,
                trial = excluded.trial,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               password_hash = coalesce(excluded.password_hash, account_view.password_hash),
+               first_name = excluded.first_name,
+               last_name = excluded.last_name,
+               org_id = coalesce(excluded.org_id, account_view.org_id),
+               verified = excluded.verified or account_view.verified,
+               enabled = excluded.enabled",
         )
         .bind(view.id.as_str())
         .bind(&view.email)
         .bind(view.plan.as_wire())
         .bind(view.trial)
         .bind(view.updated_at_ms)
+        .bind(&view.password_hash)
+        .bind(&view.first_name)
+        .bind(&view.last_name)
+        .bind(&view.org_id)
+        .bind(view.verified)
+        .bind(view.enabled)
         .execute(&mut *tx)
         .await?;
 
@@ -173,7 +192,7 @@ impl PgStore {
     /// The read side: answered from the projection, never by replaying a log.
     pub async fn account_by_email(&self, email: &str) -> StoreResult<Option<AccountView>> {
         let row = sqlx::query(
-            "select id, email, plan, trial, updated_at_ms from account_view where email = $1",
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,\n                    org_id, verified, enabled\n             from account_view where email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -186,6 +205,12 @@ impl PgStore {
                 plan: Plan::from_wire(&row.try_get::<String, _>("plan")?),
                 trial: row.try_get("trial")?,
                 updated_at_ms: row.try_get("updated_at_ms")?,
+                password_hash: row.try_get("password_hash")?,
+                first_name: row.try_get("first_name")?,
+                last_name: row.try_get("last_name")?,
+                org_id: row.try_get("org_id")?,
+                verified: row.try_get("verified")?,
+                enabled: row.try_get("enabled")?,
             })
         })
         .transpose()

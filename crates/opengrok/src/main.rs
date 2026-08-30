@@ -1,5 +1,7 @@
 //! OpenGrok — the server the coworkers live on.
 
+mod admin;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,6 +14,11 @@ use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `opengrok admin …` runs a CLI command and exits before any listener starts.
+    if let Some(code) = admin::maybe_run().await {
+        std::process::exit(code);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -53,11 +60,16 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .or_else(|| std::env::var("OG_GATEWAY_EMAIL").ok())
         .unwrap_or_else(|| "host@opengrok.local".to_string());
+    let public_url = std::env::var("OG_PUBLIC_GATEWAY_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| format!("http://{bind}"));
     let auth = AuthState::new(
         PgStore::new(pool),
         Arc::new(TokenMinter::new(token_secret.as_bytes())),
         login_email,
-    );
+    )
+    .with_resend(std::env::var("OG_RESEND_API_KEY").ok(), public_url);
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.

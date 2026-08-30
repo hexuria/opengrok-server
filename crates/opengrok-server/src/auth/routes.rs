@@ -38,7 +38,10 @@ use super::token::{ACCESS_TOKEN_TTL_SECONDS, TokenMinter, hash_refresh_token, mi
 #[derive(Clone)]
 struct PendingLogin {
     challenge: String,
-    email: String,
+    /// The authenticated account's email — `None` until credential login succeeds. `/auth/poll`
+    /// releases a token only once this is `Some`, so a registered-but-unauthenticated challenge
+    /// never completes.
+    email: Option<String>,
     at_ms: i64,
 }
 
@@ -50,8 +53,14 @@ const LOGIN_TTL_MS: i64 = 5 * 60 * 1000;
 pub struct AuthState {
     pub store: PgStore,
     pub minter: Arc<TokenMinter>,
-    /// Who a browser login signs in as. A self-hosted OpenGrok is single-user; this is that user.
+    /// Who a browser login signs in as when the server is in single-user host mode (the pre-org
+    /// path). Org signups bind their own account.
     pub login_email: String,
+    /// The Resend API key, if configured. `None` ⇒ no mailer, so signup auto-verifies (Uriah's
+    /// "if we have set resend api ... if not skip it"). The key never leaves the server.
+    pub resend_api_key: Option<String>,
+    /// The base URL a verification link points back at (this server, as the client reaches it).
+    pub public_url: String,
     /// uuid → the challenge waiting to be completed. Guarded, swept on each poll.
     logins: Arc<Mutex<HashMap<String, PendingLogin>>>,
 }
@@ -62,8 +71,16 @@ impl AuthState {
             store,
             minter,
             login_email,
+            resend_api_key: None,
+            public_url: String::new(),
             logins: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_resend(mut self, key: Option<String>, public_url: String) -> Self {
+        self.resend_api_key = key.filter(|k| !k.is_empty());
+        self.public_url = public_url;
+        self
     }
 }
 
@@ -73,8 +90,13 @@ pub fn router(state: AuthState) -> Router {
         .route("/oauth/token", post(oauth_token))
         // The real browser login leg (roadmap 9.1b): a person opens loginDeepControl, and the
         // client polls auth/poll with the PKCE verifier until a token is released.
-        .route("/loginDeepControl", get(login_deep_control))
+        .route(
+            "/loginDeepControl",
+            get(login_deep_control).post(login_submit),
+        )
         .route("/auth/poll", get(auth_poll))
+        .route("/auth/signup", post(super::identity::signup))
+        .route("/auth/verify", get(super::identity::verify_email))
         .with_state(state)
 }
 
@@ -110,6 +132,10 @@ pub async fn login_deep_control(
     if query.challenge.is_empty() || query.uuid.is_empty() {
         return (StatusCode::BAD_REQUEST, "challenge and uuid are required").into_response();
     }
+    // Register the challenge, UNAUTHENTICATED. The form below carries challenge+uuid back on POST,
+    // where real credentials bind the account. Until then this uuid can be polled forever and
+    // completes nothing — the same closed-hole property 9.1b established, now with a login step
+    // instead of "whoever opened the URL is host".
     let at_ms = now_ms();
     if let Ok(mut logins) = state.logins.lock() {
         logins.retain(|_, pending| at_ms - pending.at_ms < LOGIN_TTL_MS);
@@ -117,18 +143,114 @@ pub async fn login_deep_control(
             query.uuid.clone(),
             PendingLogin {
                 challenge: query.challenge.clone(),
-                email: state.login_email.clone(),
+                email: None,
                 at_ms,
             },
         );
     }
+    login_form(&query.challenge, &query.uuid, None).into_response()
+}
+
+/// The credential form (GET) and the error re-render (POST failure) share one renderer.
+fn login_form(challenge: &str, uuid: &str, error: Option<&str>) -> Response {
+    let error_html = error
+        .map(|message| {
+            format!(
+                "<p style=\"color:#c0392b;margin:0 0 12px\">{}</p>",
+                html_escape(message)
+            )
+        })
+        .unwrap_or_default();
+    let body = format!(
+        "<!doctype html><meta charset=utf8><title>Sign in · OpenGrok</title>\
+         <body style=\"font:16px system-ui;max-width:26rem;margin:12vh auto;padding:0 1rem\">\
+         <h1 style=\"font-size:1.4rem\">Sign in to OpenGrok</h1>{error_html}\
+         <form method=post action=\"/loginDeepControl\">\
+         <input type=hidden name=challenge value=\"{challenge}\">\
+         <input type=hidden name=uuid value=\"{uuid}\">\
+         <label style=\"display:block;margin:10px 0 4px\">Email</label>\
+         <input name=email type=email required autofocus style=\"width:100%;padding:8px;font-size:1rem\">\
+         <label style=\"display:block;margin:12px 0 4px\">Password</label>\
+         <input name=password type=password required style=\"width:100%;padding:8px;font-size:1rem\">\
+         <button type=submit style=\"margin-top:16px;padding:9px 16px;font-size:1rem;cursor:pointer\">Sign in</button>\
+         </form></body>",
+        challenge = html_escape(challenge),
+        uuid = html_escape(uuid),
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginForm {
+    pub challenge: String,
+    pub uuid: String,
+    pub email: String,
+    pub password: String,
+}
+
+/// `POST /loginDeepControl` — the credential submit. Authenticates, and only on success binds the
+/// uuid to THAT account so `/auth/poll` will release its token. Every refusal is distinguishable
+/// (not verified / not enabled / wrong credentials) so the page can say which.
+pub async fn login_submit(
+    State(state): State<AuthState>,
+    axum::Form(form): axum::Form<LoginForm>,
+) -> Response {
+    let refuse = |message: &str| login_form(&form.challenge, &form.uuid, Some(message));
+
+    let Ok(Some(view)) = state.store.account_by_email(&form.email).await else {
+        // Same message as a bad password: an attacker must not learn which emails exist.
+        return refuse("Wrong email or password.");
+    };
+    let Ok((account, _)) = state.store.load_account(&view.id).await else {
+        return refuse("Wrong email or password.");
+    };
+    let hash = match account.credential_login_ready() {
+        Ok(hash) => hash.to_string(),
+        Err(opengrok_core::account::AccountError::NotVerified) => {
+            return refuse("Your email is not verified yet. Check your inbox for the link.");
+        }
+        Err(opengrok_core::account::AccountError::NotEnabled) => {
+            return refuse("Your account is awaiting an administrator's approval.");
+        }
+        // NoCredentials (a dev/session-only account) reads as wrong credentials — it has no
+        // password to log in with.
+        Err(_) => return refuse("Wrong email or password."),
+    };
+    if !super::password::verify_password(&form.password, &hash) {
+        return refuse("Wrong email or password.");
+    }
+
+    // Authenticated. Bind the uuid to this account — poll will now complete for the matching
+    // verifier. The challenge was registered on GET; if it has expired, ask them to retry.
+    let at_ms = now_ms();
+    let bound = if let Ok(mut logins) = state.logins.lock() {
+        match logins.get_mut(&form.uuid) {
+            Some(pending) if pending.challenge == form.challenge => {
+                pending.email = Some(view.email.clone());
+                pending.at_ms = at_ms;
+                true
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if !bound {
+        return refuse("This sign-in link expired. Return to the app and try again.");
+    }
+
     let body = format!(
         "<!doctype html><meta charset=utf8><title>OpenGrok</title>\
-         <body style=\"font:16px system-ui;max-width:32rem;margin:14vh auto;text-align:center\">\
+         <body style=\"font:16px system-ui;max-width:28rem;margin:14vh auto;text-align:center\">\
          <h1 style=\"font-size:1.4rem\">✓ Signed in to OpenGrok</h1>\
-         <p style=\"color:#555\">Signed in as {email}. You can return to the app — it will \
-         pick up your session automatically.</p></body>",
-        email = html_escape(&state.login_email),
+         <p style=\"color:#555\">Signed in as {email}. Return to the app — it will pick up your \
+         session automatically.</p></body>",
+        email = html_escape(&view.email),
     );
     (
         StatusCode::OK,
@@ -173,10 +295,13 @@ pub async fn auth_poll(
             // The PKCE check: the verifier the client holds must hash to the challenge the
             // browser registered. A mismatch reads as pending, never as a distinct error, so a
             // uuid-guesser learns nothing and completes nothing.
-            Some(pending) if challenge_for(&query.verifier) == pending.challenge => {
+            Some(pending)
+                if pending.email.is_some()
+                    && challenge_for(&query.verifier) == pending.challenge =>
+            {
                 let email = pending.email.clone();
                 logins.remove(&query.uuid);
-                Some(email)
+                email
             }
             _ => None,
         }
@@ -362,13 +487,13 @@ async fn mint_session(
         })
         .map_err(|error: AccountError| AuthFailure::SessionRejected(error.to_string()))?;
 
-    let view = opengrok_core::account::AccountView {
-        id: account_id.clone(),
-        email: email.to_string(),
+    let view = opengrok_core::account::AccountView::session_only(
+        account_id.clone(),
+        email.to_string(),
         plan,
         trial,
-        updated_at_ms: at_ms,
-    };
+        at_ms,
+    );
     state
         .store
         .append_account(&account_id, seq, &events, &view)
@@ -434,13 +559,13 @@ pub async fn oauth_token(
         .ok_or_else(|| AuthFailure::Unavailable("refresh produced no session".to_string()))?;
 
     let plan = account.plan.unwrap_or(Plan::Ultra);
-    let view = opengrok_core::account::AccountView {
-        id: account_id.clone(),
-        email: account.email.clone(),
+    let view = opengrok_core::account::AccountView::session_only(
+        account_id.clone(),
+        account.email.clone(),
         plan,
-        trial: account.trial,
-        updated_at_ms: at_ms,
-    };
+        account.trial,
+        at_ms,
+    );
     state
         .store
         .append_account(&account_id, seq, &events, &view)

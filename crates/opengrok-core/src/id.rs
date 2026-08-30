@@ -75,6 +75,11 @@ id!(
     "A person's account with us — what the client's Cursor sign-in resolves to."
 );
 id!(
+    OrgId,
+    "org",
+    "An organization: one main admin, one or more verified domains, its members."
+);
+id!(
     SessionId,
     "sess",
     "One signed-in session: an access/refresh token pair the client holds."

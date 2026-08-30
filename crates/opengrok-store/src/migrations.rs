@@ -243,6 +243,34 @@ create table if not exists seamb_profile (
     updated_at_ms bigint not null
 );
 
+-- Identity (orgs + invites + credential accounts). Projections; the events stream is the truth.
+create table if not exists org_view (
+    id            text  primary key,
+    name          text  not null,
+    admin_id      text  not null,
+    domains       jsonb not null,
+    updated_at_ms bigint not null
+);
+
+-- One row per invite code, so signup can find the org a code belongs to and its state without
+-- replaying every org. state: open | redeemed | revoked.
+create table if not exists org_invite (
+    code          text  primary key,
+    org_id        text  not null,
+    state         text  not null,
+    updated_at_ms bigint not null
+);
+create index if not exists org_invite_org_idx on org_invite (org_id);
+
+-- Credential accounts: the login lookup reads password/verified/enabled/name without replaying
+-- the whole account log. account_view stays the identity-agnostic projection; this augments it.
+alter table account_view add column if not exists password_hash text;
+alter table account_view add column if not exists first_name text not null default '';
+alter table account_view add column if not exists last_name text not null default '';
+alter table account_view add column if not exists org_id text;
+alter table account_view add column if not exists verified boolean not null default false;
+alter table account_view add column if not exists enabled boolean not null default false;
+
 create table if not exists gateway_nonce (
     account_slot text   not null,
     nonce        text   not null,

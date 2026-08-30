@@ -51,45 +51,27 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=probe&verifi
 [ "$code" = "404" ] || fail "a blind poll answered $code, expected 404 (pending forever)"
 ok "uuid=probe&verifier=probe → 404, no token"
 
-echo "2. a registered uuid still refuses a WRONG verifier"
+echo "2. loginDeepControl now presents a LOGIN FORM, not an auto-sign-in"
 UUID="u-$(date +%s)-$$"
 VERIFIER="verifier-secret-$(date +%s)"
 CHALLENGE=$(pkce "$VERIFIER")
-page=$(curl -s -w '\n%{http_code}' "$BASE/loginDeepControl?challenge=$CHALLENGE&uuid=$UUID&mode=login&redirectTarget=cli")
-pcode=$(echo "$page" | tail -1)
-[ "$pcode" = "200" ] || fail "loginDeepControl answered $pcode"
-echo "$page" | head -1 | grep -qi "signed in" || fail "the login page did not confirm sign-in"
-wrong=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=$UUID&verifier=not-the-verifier")
-[ "$wrong" = "404" ] || fail "a wrong verifier answered $wrong, expected 404 (pending, learns nothing)"
-ok "challenge registered; wrong verifier still 404"
+page=$(curl -s "$BASE/loginDeepControl?challenge=$CHALLENGE&uuid=$UUID&mode=login&redirectTarget=cli")
+echo "$page" | grep -qi "Sign in to OpenGrok" || fail "loginDeepControl did not render a sign-in form"
+echo "$page" | grep -qi 'name=password' || fail "the form has no password field"
+# It must NOT hand out a session just for opening the URL — that was the old behaviour, now gone.
+echo "$page" | grep -qi "Signed in" && fail "opening the URL alone still signs in (opener-is-host regression)"
+ok "a credential form, no token from merely opening the page"
 
-echo "3. the matching verifier completes exactly once"
-tokens=$(curl -s "$BASE/auth/poll?uuid=$UUID&verifier=$VERIFIER")
-echo "$tokens" | jq -e '.accessToken | length > 0 and (. | contains("."))' >/dev/null || fail "no accessToken: $tokens"
-echo "$tokens" | jq -e '.refreshToken | length > 0' >/dev/null || fail "no refreshToken: $tokens"
-tok=$(echo "$tokens" | jq -r '.accessToken')
-# the token is a real account token — it opens an owner-only endpoint
-who=$(python3 - "$tok" <<'PY'
-import base64, json, sys
-p = sys.argv[1].split('.')[1]; p += '='*(-len(p)%4)
-print(json.loads(base64.urlsafe_b64decode(p))['email'])
-PY
-)
-[ -n "$who" ] || fail "the minted token has no email claim"
-ok "matching verifier → {accessToken, refreshToken} for $who"
+echo "3. a poll before any credential login stays pending"
+# The challenge is registered, but nobody authenticated — poll must be 404, no token.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=$UUID&verifier=$VERIFIER")
+[ "$code" = "404" ] || fail "poll released a token with no credential login ($code)"
+ok "registered but un-authenticated → 404, no token"
 
-echo "4. the challenge is consumed — a replay gets nothing"
-replay=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=$UUID&verifier=$VERIFIER")
-[ "$replay" = "404" ] || fail "a consumed challenge replayed as $replay, expected 404"
-ok "one challenge, one token — replay is 404"
-
-echo "5. that token really is an account token: it opens seam B, and the bearer no longer leaks blindly"
-mint=$(curl -s -X POST "$BASE/aiserver.v1.GrokBotService/EnsureSandBox" -H "authorization: Bearer $tok")
-echo "$mint" | jq -e '.gatewayUrl | length > 0' >/dev/null || fail "EnsureSandBox refused a real token: $mint"
-# and the pre-login hole is gone: no token, no seam B
-anon=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/aiserver.v1.GrokBotService/EnsureSandBox")
-[ "$anon" = "401" ] || fail "EnsureSandBox served an anonymous caller ($anon)"
-ok "a browser-earned token opens the mint; an anonymous one is 401"
+echo "4. a wrong-verifier poll is also just pending (learns nothing)"
+wrong=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=$UUID&verifier=not-it")
+[ "$wrong" = "404" ] || fail "a wrong verifier answered $wrong"
+ok "wrong verifier → 404 (the credential-login chain is proven in slice 17)"
 
 echo "6. the dev token is loopback-only now"
 # This smoke runs on 127.0.0.1, so dev sign-in still works for the OTHER smokes.
