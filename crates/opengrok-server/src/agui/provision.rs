@@ -61,8 +61,17 @@ pub async fn provider_for_account(
     provider_for(state, org_id.as_deref(), kind).await
 }
 
+/// Local VM (server-host Docker) is a SELF-HOST / dev convenience only. A hosted, multi-tenant
+/// deployment (`OG_HOSTED=1`) must never run untrusted bot containers on the API host — a container
+/// escape lands on the machine holding the token secret and the org vault — so it is neither
+/// advertised nor used there; production computers are box.ascii.dev / Windows 365 / (later) cloud.
+pub fn local_docker_allowed() -> bool {
+    std::env::var("OG_HOSTED").as_deref() != Ok("1")
+}
+
 /// The kind a NEW account computer should be, from the org's CURRENT config: a box.ascii.dev box
-/// when the org has configured a key, else a Local VM on the server host.
+/// when the org has configured a key; else a Local VM on the server host when allowed (dev /
+/// self-host); else `"none"` — no provider, and the hire says so readably.
 pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static str {
     if let (Some(vault), Some(org)) = (state.vault.as_ref(), org_id)
         && state
@@ -75,8 +84,10 @@ pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static s
             .is_some()
     {
         "ascii"
-    } else {
+    } else if local_docker_allowed() {
         "local-docker"
+    } else {
+        "none"
     }
 }
 
@@ -116,7 +127,9 @@ pub async fn ensure_account_computer(
             let org_id = account_org(state, account_id).await;
             let kind = kind_for_new(state, org_id.as_deref()).await;
             let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
-                return failed("no computer provider available for this account's org");
+                return failed(
+                    "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard",
+                );
             };
             match provider.create(None).await {
                 Ok(box_id) => {

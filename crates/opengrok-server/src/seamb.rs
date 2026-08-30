@@ -564,31 +564,32 @@ async fn grok_bot(
                 },
                 Err(_) => false,
             };
-            connect_ok(json!({
-                "computers": [
-                    {
-                        "id": "local-docker",
-                        "label": "Local VM (on the server)",
-                        "kind": "local-docker",
-                        "state": "available",
-                        "configured": true,
-                    },
-                    {
-                        "id": "ascii",
-                        "label": "box.ascii.dev",
-                        "kind": "ascii",
-                        "state": if ascii_ready { "available" } else { "not-configured" },
-                        "configured": ascii_ready,
-                    },
-                    {
-                        "id": "windows365",
-                        "label": "Windows 365",
-                        "kind": "windows365",
-                        "state": "not-configured",
-                        "configured": false,
-                    },
-                ]
-            }))
+            let mut computers = Vec::new();
+            // Local VM only where it is allowed (self-host / dev) — a hosted deploy hides it.
+            if crate::agui::provision::local_docker_allowed() {
+                computers.push(json!({
+                    "id": "local-docker",
+                    "label": "Local VM (on the server)",
+                    "kind": "local-docker",
+                    "state": "available",
+                    "configured": true,
+                }));
+            }
+            computers.push(json!({
+                "id": "ascii",
+                "label": "box.ascii.dev",
+                "kind": "ascii",
+                "state": if ascii_ready { "available" } else { "not-configured" },
+                "configured": ascii_ready,
+            }));
+            computers.push(json!({
+                "id": "windows365",
+                "label": "Windows 365",
+                "kind": "windows365",
+                "state": "not-configured",
+                "configured": false,
+            }));
+            connect_ok(json!({ "computers": computers }))
         }
 
         "SetGrokBotAgentClientState" => {
