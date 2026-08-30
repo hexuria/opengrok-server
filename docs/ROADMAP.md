@@ -148,6 +148,25 @@ Access tokens live one hour, so a Bot registered with a static header dies hourl
   finding, now cleaned up), and the retry died under machine load. One quiet-machine send
   closes it.
 
+## Slice 12 — Identity: orgs, invites, credential accounts (`796bf61`)
+
+Uriah's UI review turned the single-user host into a real, multi-tenant identity model.
+
+- [x] **12.1** `org` aggregate — name, admin, domains, invites; `RedeemInvite` enforces BOTH the
+  open-code gate and the domain-match gate atomically, each refusal distinguishable.
+- [x] **12.2** `account` extended — argon2id password, name, org, `verified` (Resend-driven),
+  `enabled` (admin-flipped); credential login checks all three in order.
+- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account create`) — the
+  operator bootstraps the first org from shell; no HTTP admin surface. `account create` mints a
+  ready test identity (the multi-account-under-a-different-name need).
+- [x] **12.4** HTTP — `POST /auth/signup` (both gates), the credential form at `/loginDeepControl`
+  (superseding 9.1b's opener-is-host), `GET /auth/verify`. Resend behind `OG_RESEND_API_KEY`:
+  set ⇒ send + require verification, unset ⇒ auto-verify.
+- [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
+  verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
+- [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
+  password reset via Resend; an in-app admin surface for invites/enable (CLI-only in v1).
+
 ## Slice 11+ — breadth (P5 → P10, in order)
 
 Per-tier, verified against the running client. Most of it adapts work that exists:
