@@ -47,10 +47,17 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("migrations failed: {error}"))?;
 
-    let auth = AuthState {
-        store: PgStore::new(pool),
-        minter: Arc::new(TokenMinter::new(token_secret.as_bytes())),
-    };
+    // Who a browser login signs in as — the single user of a self-hosted OpenGrok. Defaults to
+    // the gateway's own account so the desktop's roster and its sign-in are the same person.
+    let login_email = std::env::var("OG_LOGIN_EMAIL")
+        .ok()
+        .or_else(|| std::env::var("OG_GATEWAY_EMAIL").ok())
+        .unwrap_or_else(|| "host@opengrok.local".to_string());
+    let auth = AuthState::new(
+        PgStore::new(pool),
+        Arc::new(TokenMinter::new(token_secret.as_bytes())),
+        login_email,
+    );
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.

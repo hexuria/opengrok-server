@@ -43,13 +43,15 @@ rpc() { # rpc <service> <method> <token> [json]
     -H "authorization: Bearer $3" -H 'content-type: application/json' -d "$body"
 }
 
-echo "1. the server is up and /auth/poll mints a token pair"
+echo "1. the server is up and dev sign-in mints a token pair (loopback)"
 start_server
-pair=$(curl -fsS "$BASE/auth/poll?email=seamb-$(date +%s)@og.local")
+# /auth/poll is now the real PKCE browser poll (slice 16) and 404s without a registered challenge;
+# what this smoke needs is a plain account token, which loopback dev sign-in provides.
+pair=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=seamb-$(date +%s)@og.local")
 tok=$(echo "$pair" | jq -r '.accessToken')
 [ -n "$tok" ] && [ "$tok" != "null" ] || fail "no accessToken: $pair"
 echo "$pair" | jq -e '.refreshToken | length > 0' >/dev/null || fail "no refreshToken"
-ok "accessToken + refreshToken, the mock's own shape"
+ok "accessToken + refreshToken"
 
 echo "2. no bearer means unauthenticated, in Connect's vocabulary"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/aiserver.v1.DashboardService/GetMe" -d '{}')

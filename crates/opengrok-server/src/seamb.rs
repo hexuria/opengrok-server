@@ -19,7 +19,7 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::post;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
@@ -36,9 +36,6 @@ pub fn router(state: GatewayState) -> Router {
     Router::new()
         .route("/aiserver.v1.DashboardService/{method}", post(dashboard))
         .route("/aiserver.v1.GrokBotService/{method}", post(grok_bot))
-        // The mock's own auth surface (`source/mock/auth-http.ts`): /auth/poll hands the token
-        // pair to a polling login. Our slice-1 endpoints already serve the other two paths.
-        .route("/auth/poll", get(auth_poll))
         .with_state(state)
 }
 
@@ -102,39 +99,6 @@ fn as_ms(value: Option<&Value>) -> Option<i64> {
         Some(Value::Number(number)) => number.as_i64(),
         Some(Value::String(text)) => text.parse().ok(),
         _ => None,
-    }
-}
-
-/// `GET /auth/poll` — the polling half of a browser login, in the mock's shape:
-/// `{accessToken, refreshToken}` (`source/mock/auth-http.ts:63-67`). It rides the same sign-in
-/// the dev endpoint performs; the PKCE browser page lands on top of this later.
-async fn auth_poll(
-    State(state): State<GatewayState>,
-    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let email = query
-        .get("email")
-        .cloned()
-        .unwrap_or_else(|| state.email.clone());
-    let signin = crate::auth::routes::dev_session_token(
-        State(state.agui.auth.clone()),
-        axum::extract::Query(crate::auth::routes::DevSessionQuery {
-            plan: Some("pro".to_string()),
-            trial: None,
-            email: Some(email),
-        }),
-    )
-    .await;
-    match signin {
-        Ok(axum::Json(reply)) => connect_ok(json!({
-            "accessToken": reply.access_token,
-            "refreshToken": reply.refresh_token,
-        })),
-        Err(_) => connect_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "token mint failed",
-        ),
     }
 }
 

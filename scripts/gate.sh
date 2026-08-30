@@ -37,12 +37,17 @@ fi
 : "${OG_DATABASE_URL:?--smoke needs OG_DATABASE_URL, e.g. postgres://oag:oag@127.0.0.1:5452/opengrok}"
 
 # THE GATE OWNS ITS DATABASE. The autonomy sweeps claim work with `for update skip locked`, so a
-# second opengrok on the same database will legitimately RACE the smoke servers for schedule and
+# second opengrok ON THE SAME DATABASE will legitimately RACE the smoke servers for schedule and
 # monitor firings — and fire them with its own model door. Learned when a dev server with the real
 # door won a monitor firing and the smoke read back a 403 instead of the mock's echo.
-if pgrep -f "target/debug/opengrok" >/dev/null 2>&1; then
-  fail "another opengrok is running; it would race the smokes for their own firings"
-fi
+#
+# The guard is DATABASE-SCOPED, not "any opengrok": a server on a different database (e.g. a live
+# verification server, or another checkout) shares no rows and cannot race, so it is left alone.
+for pid in $(pgrep -f "target/debug/opengrok" 2>/dev/null || true); do
+  if ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qxF "OG_DATABASE_URL=$OG_DATABASE_URL"; then
+    fail "another opengrok is running on $OG_DATABASE_URL; it would race the smokes — use a separate database"
+  fi
+done
 # Not 1337: grok-bot's local-docker box binds that port, and a clash here looks like a broken
 # server rather than a taken port.
 PORT="${OG_PORT:-1447}"
@@ -72,7 +77,7 @@ for _ in $(seq 1 30); do
 done
 curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 || fail "the server did not come up"
 
-for script in slice1-auth slice2-agui slice3-harness slice5-roster slice7-policy; do
+for script in slice1-auth slice2-agui slice3-harness slice5-roster slice7-policy slice11-gateway slice12-conversation slice14-botkey slice15-lifecycle; do
   step "scripts/$script-smoke.sh"
   OG_BASE="$BASE" OG_PORT="$PORT" "scripts/$script-smoke.sh" >/dev/null || fail "$script"
   echo "  passed"
@@ -134,6 +139,12 @@ echo "  passed"
 # Starts its own server too: it needs OG_GATEWAY_BEARER and OG_PUBLIC_GATEWAY_URL in its env.
 step "scripts/slice13-seamb-smoke.sh"
 OG_PORT="$PORT" scripts/slice13-seamb-smoke.sh >/dev/null || fail "seamb"
+echo "  passed"
+
+# Also its own server: it configures OG_PUBLIC_GATEWAY_URL + OG_GATEWAY_BEARER internally, and
+# proves the browser login leg AND that the blind LAN token-mint hole is closed.
+step "scripts/slice16-browser-login-smoke.sh"
+OG_PORT="$((PORT + 3))" scripts/slice16-browser-login-smoke.sh >/dev/null || fail "browser-login"
 echo "  passed"
 
 echo

@@ -17,7 +17,8 @@
 //! always send one. Falling back would make the client hold an access token as its refresh token,
 //! and `cursorSessionPresent` would report a session that cannot survive its own first refresh.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -31,17 +32,169 @@ use serde::{Deserialize, Serialize};
 
 use super::token::{ACCESS_TOKEN_TTL_SECONDS, TokenMinter, hash_refresh_token, mint_refresh_token};
 
+/// One in-flight browser login: a challenge registered by `/loginDeepControl`, waiting for the
+/// client to poll with the matching verifier. In memory on purpose — a login that does not
+/// complete within its TTL is meant to be forgotten, and a restart just means signing in again.
+#[derive(Clone)]
+struct PendingLogin {
+    challenge: String,
+    email: String,
+    at_ms: i64,
+}
+
+/// How long a registered challenge is good for. Long enough for a person to finish in the
+/// browser, short enough that an abandoned one does not linger.
+const LOGIN_TTL_MS: i64 = 5 * 60 * 1000;
+
 #[derive(Clone)]
 pub struct AuthState {
     pub store: PgStore,
     pub minter: Arc<TokenMinter>,
+    /// Who a browser login signs in as. A self-hosted OpenGrok is single-user; this is that user.
+    pub login_email: String,
+    /// uuid → the challenge waiting to be completed. Guarded, swept on each poll.
+    logins: Arc<Mutex<HashMap<String, PendingLogin>>>,
+}
+
+impl AuthState {
+    pub fn new(store: PgStore, minter: Arc<TokenMinter>, login_email: String) -> Self {
+        Self {
+            store,
+            minter,
+            login_email,
+            logins: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 pub fn router(state: AuthState) -> Router {
     Router::new()
         .route("/auth/cursor_dev_session_token", get(dev_session_token))
         .route("/oauth/token", post(oauth_token))
+        // The real browser login leg (roadmap 9.1b): a person opens loginDeepControl, and the
+        // client polls auth/poll with the PKCE verifier until a token is released.
+        .route("/loginDeepControl", get(login_deep_control))
+        .route("/auth/poll", get(auth_poll))
         .with_state(state)
+}
+
+/// The PKCE binding the client computes (`login.ts:19`): `challenge == base64url(sha256(verifier))`.
+fn challenge_for(verifier: &str) -> String {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginDeepControlQuery {
+    pub challenge: String,
+    pub uuid: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub redirect_target: Option<String>,
+}
+
+/// `GET /loginDeepControl?challenge=&uuid=&mode=login&redirectTarget=`
+///
+/// THE HUMAN STEP. On a self-hosted single-user server, a person opening this URL in their own
+/// browser IS the authentication — there is no third party to delegate to. It registers the
+/// challenge against the uuid and binds it to the one account; the client's poll then completes
+/// only when it presents the verifier whose hash matches. That binding is what closes the hole
+/// the old blind poll left open: a challenge nobody registered can never be polled into a token.
+pub async fn login_deep_control(
+    State(state): State<AuthState>,
+    Query(query): Query<LoginDeepControlQuery>,
+) -> Response {
+    if query.challenge.is_empty() || query.uuid.is_empty() {
+        return (StatusCode::BAD_REQUEST, "challenge and uuid are required").into_response();
+    }
+    let at_ms = now_ms();
+    if let Ok(mut logins) = state.logins.lock() {
+        logins.retain(|_, pending| at_ms - pending.at_ms < LOGIN_TTL_MS);
+        logins.insert(
+            query.uuid.clone(),
+            PendingLogin {
+                challenge: query.challenge.clone(),
+                email: state.login_email.clone(),
+                at_ms,
+            },
+        );
+    }
+    let body = format!(
+        "<!doctype html><meta charset=utf8><title>OpenGrok</title>\
+         <body style=\"font:16px system-ui;max-width:32rem;margin:14vh auto;text-align:center\">\
+         <h1 style=\"font-size:1.4rem\">✓ Signed in to OpenGrok</h1>\
+         <p style=\"color:#555\">Signed in as {email}. You can return to the app — it will \
+         pick up your session automatically.</p></body>",
+        email = html_escape(&state.login_email),
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthPollQuery {
+    pub uuid: String,
+    pub verifier: String,
+}
+
+/// `GET /auth/poll?uuid=&verifier=` — the client's polling half (`login.ts:36`).
+///
+/// The client reads **404 as "not ready, keep polling"** and only a 200 `{accessToken,
+/// refreshToken}` as done. So an unregistered uuid, an expired one, or a verifier whose hash does
+/// not match the registered challenge all answer **404** — a blind probe (`uuid=x&verifier=y`)
+/// polls forever and is never handed a token. Only the browser that registered the challenge, and
+/// the client that holds the matching verifier, complete. The entry is consumed on success:
+/// one challenge, one token.
+pub async fn auth_poll(
+    State(state): State<AuthState>,
+    Query(query): Query<AuthPollQuery>,
+) -> Response {
+    let matched = {
+        let at_ms = now_ms();
+        let Ok(mut logins) = state.logins.lock() else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "login store unavailable").into_response();
+        };
+        logins.retain(|_, pending| at_ms - pending.at_ms < LOGIN_TTL_MS);
+        match logins.get(&query.uuid) {
+            // The PKCE check: the verifier the client holds must hash to the challenge the
+            // browser registered. A mismatch reads as pending, never as a distinct error, so a
+            // uuid-guesser learns nothing and completes nothing.
+            Some(pending) if challenge_for(&query.verifier) == pending.challenge => {
+                let email = pending.email.clone();
+                logins.remove(&query.uuid);
+                Some(email)
+            }
+            _ => None,
+        }
+    };
+
+    let Some(email) = matched else {
+        // Pending — exactly what the client waits on.
+        return (StatusCode::NOT_FOUND, "pending").into_response();
+    };
+
+    match mint_session(&state, &email, Plan::Ultra, false).await {
+        Ok((access_token, refresh_token)) => Json(DevSessionReply {
+            access_token,
+            refresh_token,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 /// `GET /auth/cursor_dev_session_token?plan=&trial=&email=`
@@ -139,8 +292,18 @@ fn now_ms() -> i64 {
 /// Sign in. Idempotent per email: a second call adds a session, never a second account.
 pub async fn dev_session_token(
     State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<DevSessionQuery>,
 ) -> Result<Json<DevSessionReply>, AuthFailure> {
+    // LOOPBACK ONLY. This mints a real account token with no browser step, which is exactly right
+    // for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the desktop
+    // test binds 0.0.0.0, and an unauthenticated token mint reachable across the network is the
+    // hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
+    if !is_loopback(&headers) {
+        return Err(AuthFailure::SessionRejected(
+            "dev sign-in is loopback-only; use the browser login".to_string(),
+        ));
+    }
     let plan = Plan::from_wire(query.plan.as_deref().unwrap_or_default());
     // The client only ever sends `trial=true`, and only when it means it (`cursor-auth.ts:313`).
     let trial = query.trial.as_deref() == Some("true");
@@ -151,12 +314,37 @@ pub async fn dev_session_token(
         // identifiable across launches instead of minting a new one each time.
         .unwrap_or_else(|| "dev@opengrok.local".to_string());
 
-    // Read side answers "does this person already exist"; the write side replays their log.
-    let account_id = match state.store.account_by_email(&email).await? {
+    let (access_token, refresh_token) = mint_session(&state, &email, plan, trial).await?;
+    Ok(Json(DevSessionReply {
+        access_token,
+        refresh_token,
+    }))
+}
+
+/// Is this request from loopback? Matches the gateway's own posture — the `Host` header names a
+/// loopback address. A missing or non-loopback host is treated as remote.
+fn is_loopback(headers: &axum::http::HeaderMap) -> bool {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    matches!(name, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+}
+
+/// Sign an email in and mint its `{access, refresh}` pair — the shared core of every login path,
+/// browser or dev. Read side answers "does this person exist"; the write side replays their log
+/// and appends a fresh session in one transaction.
+async fn mint_session(
+    state: &AuthState,
+    email: &str,
+    plan: Plan,
+    trial: bool,
+) -> Result<(String, String), AuthFailure> {
+    let account_id = match state.store.account_by_email(email).await? {
         Some(view) => view.id,
         None => AccountId::new(),
     };
-
     let (account, seq) = state.store.load_account(&account_id).await?;
 
     let session_id = SessionId::new();
@@ -165,7 +353,7 @@ pub async fn dev_session_token(
 
     let events = account
         .decide(AccountCommand::SignIn {
-            email: email.clone(),
+            email: email.to_string(),
             plan,
             trial,
             session_id: session_id.clone(),
@@ -176,7 +364,7 @@ pub async fn dev_session_token(
 
     let view = opengrok_core::account::AccountView {
         id: account_id.clone(),
-        email: email.clone(),
+        email: email.to_string(),
         plan,
         trial,
         updated_at_ms: at_ms,
@@ -191,17 +379,14 @@ pub async fn dev_session_token(
         .mint_access(
             account_id.as_str(),
             session_id.as_str(),
-            &email,
+            email,
             plan.as_wire(),
             at_ms / 1_000,
             ACCESS_TOKEN_TTL_SECONDS,
         )
         .map_err(|error| AuthFailure::Unavailable(error.to_string()))?;
 
-    Ok(Json(DevSessionReply {
-        access_token,
-        refresh_token,
-    }))
+    Ok((access_token, refresh_token))
 }
 
 /// Rotate. The client calls this constantly — `shouldRefreshAccessToken` is unconditionally true

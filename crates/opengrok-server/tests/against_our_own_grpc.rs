@@ -38,10 +38,11 @@ async fn state_with(secret: &[u8], database_url: &str) -> GatewayState {
         .await
         .expect("migrations");
     let store = opengrok_store::PgStore::new(pool);
-    let auth = opengrok_server::auth::AuthState {
+    let auth = opengrok_server::auth::AuthState::new(
         store,
-        minter: Arc::new(TokenMinter::new(secret)),
-    };
+        Arc::new(TokenMinter::new(secret)),
+        "grpc@og.local".to_string(),
+    );
     let agui = opengrok_server::agui::AgUiState {
         auth,
         door: Arc::new(opengrok_harness::MockDoor::echoing()),
