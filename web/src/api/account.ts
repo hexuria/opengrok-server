@@ -13,6 +13,8 @@ export interface Account {
   enabled: boolean;
   /** Whether this caller is their org's admin. Only the GET /account (me) response carries it. */
   isAdmin?: boolean;
+  /** This member's computer-sharing override (admin list only); null = follows the org default. */
+  computerMode?: string | null;
 }
 
 export function getAccount(): Promise<Account> {

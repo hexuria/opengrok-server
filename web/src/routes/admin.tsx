@@ -2,15 +2,20 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  clearAccountMode,
   clearBoxKey,
   disableUser,
   enableUser,
+  getOrgMode,
   issueInvite,
   listInvites,
   listOrgComputers,
   listUsers,
+  setAccountMode,
   setBoxKey,
+  setOrgMode,
   testBoxConnection,
+  type SharingMode,
 } from "../api/admin";
 import { ApiError } from "../api/client";
 import type { Account } from "../api/account";
@@ -18,9 +23,15 @@ import { AuthedFrame } from "../components/authed-frame";
 
 function UserRow({ user }: { user: Account }) {
   const queryClient = useQueryClient();
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
   const toggle = useMutation({
     mutationFn: () => (user.enabled ? disableUser(user.id) : enableUser(user.id)),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] }),
+    onSuccess: refresh,
+  });
+  const setMode = useMutation({
+    mutationFn: (mode: SharingMode | "") =>
+      mode === "" ? clearAccountMode(user.id) : setAccountMode(user.id, mode),
+    onSuccess: refresh,
   });
   const name = [user.firstName, user.lastName].filter(Boolean).join(" ") || "—";
   return (
@@ -29,6 +40,20 @@ function UserRow({ user }: { user: Account }) {
       <td>{name}</td>
       <td>
         <span className={`pill ${user.enabled ? "on" : "off"}`}>{user.enabled ? "enabled" : "disabled"}</span>
+      </td>
+      <td>
+        <select
+          aria-label="computer sharing"
+          value={user.computerMode ?? ""}
+          disabled={setMode.isPending}
+          onChange={(e) => setMode.mutate(e.target.value as SharingMode | "")}
+          style={{ width: "auto", padding: "0.3rem 0.5rem", fontSize: "0.82rem" }}
+        >
+          <option value="">Org default</option>
+          <option value="per-org">Per-org</option>
+          <option value="per-account">Per-account</option>
+          <option value="per-bot">Per-bot</option>
+        </select>
       </td>
       <td style={{ textAlign: "right" }}>
         <button className="ghost" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
@@ -63,6 +88,7 @@ function UsersCard() {
               <th>Email</th>
               <th>Name</th>
               <th>State</th>
+              <th>Computer</th>
               <th />
             </tr>
           </thead>
@@ -188,9 +214,31 @@ function ComputersCard() {
   const box = computers.data?.computers.find((c) => c.kind === "ascii");
   const boxConfigured = box?.configured ?? false;
 
+  const orgMode = useQuery({ queryKey: ["admin", "orgmode"], queryFn: getOrgMode, retry: false });
+  const setMode = useMutation({
+    mutationFn: setOrgMode,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "orgmode"] }),
+  });
+
   return (
     <section className="card">
       <h2>Computers</h2>
+      <div style={{ marginBottom: "1.25rem" }}>
+        <label htmlFor="orgmode">Default sharing mode</label>
+        <select
+          id="orgmode"
+          value={orgMode.data?.mode ?? "per-account"}
+          disabled={setMode.isPending || orgMode.isLoading}
+          onChange={(e) => setMode.mutate(e.target.value as SharingMode)}
+        >
+          <option value="per-org">One computer for the whole org (shared filesystem)</option>
+          <option value="per-account">One computer per member (default)</option>
+          <option value="per-bot">A dedicated computer per bot (most isolated)</option>
+        </select>
+        <p className="muted" style={{ fontSize: "0.8rem", margin: "0.3rem 0 0" }}>
+          How members’ bots share computers. Override per member in the Users list above.
+        </p>
+      </div>
       <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
         Where your organization’s bots run. Set a provider key and every member’s computer is
         provisioned from it — the key is sealed on the server and never leaves it.

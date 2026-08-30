@@ -51,3 +51,36 @@ export async function clearBoxKey(): Promise<void> {
 export function testBoxConnection(): Promise<{ ok: boolean; detail: string }> {
   return postJson<{ ok: boolean; detail: string }>("/admin/computers/ascii/test");
 }
+
+// ---- Computer sharing mode (admin) ----
+
+export type SharingMode = "per-org" | "per-account" | "per-bot";
+
+export function getOrgMode(): Promise<{ mode: SharingMode; modes: SharingMode[] }> {
+  return getJson<{ mode: SharingMode; modes: SharingMode[] }>("/admin/computers/mode");
+}
+
+export async function setOrgMode(mode: SharingMode): Promise<void> {
+  const res = await request("/admin/computers/mode", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw new ApiError(res.status, "could not set the mode");
+}
+
+export async function setAccountMode(id: string, mode: SharingMode): Promise<void> {
+  const res = await request(`/admin/computers/mode/account/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw new ApiError(res.status, "could not set the override");
+}
+
+export async function clearAccountMode(id: string): Promise<void> {
+  const res = await request(`/admin/computers/mode/account/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new ApiError(res.status, "could not clear the override");
+}

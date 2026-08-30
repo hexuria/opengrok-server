@@ -328,7 +328,21 @@ async fn list_users(State(state): State<AuthState>, headers: axum::http::HeaderM
     // who happened to redeem an invite (which is all `org.members` records).
     match state.store.accounts_by_org(org_id.as_str()).await {
         Ok(views) => {
-            let users: Vec<Value> = views.iter().map(account_json_from_view).collect();
+            let mut users = Vec::new();
+            for view in &views {
+                let mut json = account_json_from_view(view);
+                // Each member's per-account override (null = follows the org default).
+                let mode = state
+                    .store
+                    .sharing_mode("account", view.id.as_str())
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(object) = json.as_object_mut() {
+                    object.insert("computerMode".to_string(), json!(mode));
+                }
+                users.push(json);
+            }
             Json(json!({ "users": users })).into_response()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not list users").into_response(),
