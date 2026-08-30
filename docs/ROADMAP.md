@@ -54,26 +54,87 @@ POST. This slice makes the server start runs itself.
   guard holds — it watches `run-started`, the sharpest case, since its own run emits that very
   event. *(this commit)*
 
-## Slice 7 — Bot ↔ coworker binding
+## The port ladder — from `docs/PORT-PRIORITY.md` (30 Aug 2026)
+
+The other half of the mission is the real Grok Bot client running against us. The port plan
+measured the client rather than recalling it: **123 gateway commands (JSON+SSE, not protobuf)
+and 18 Seam-B methods** — the client's own checked-in mock (`source/mock/`) implements exactly
+two services and those 18 methods, and the app boots against it. **Port from the mock, never
+from the proto inventory.** And because `SAND_HOST_GATEWAY_URL` repoints the client at any
+gateway with no auth work, the build order inverts the ship order: gateway first, identity
+after — the real, unmodified client is the strongest smoke test we can have.
+
+## Slice 7 — The gateway boots the real client (P2 + P3)
+
+- [ ] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
+  at ≤15 s (a 35 s watchdog aborts otherwise), the **19** SSE channels, one shared bearer
+  compared timing-safe.
+- [ ] **7.2** P3's 12 roster/settings commands — shape discipline over behaviour:
+  `countAgents` a number, `getTrays` an array, `getForeverBoxStatus` null-or-record,
+  `setHostSettings` echoing the full record back.
+- [ ] **7.3** The trap, honoured: serve on a **non-loopback** host — the client refuses
+  `127.0.0.1`/`localhost` gateways unless the runtime is local-docker
+  (`local-docker-host-connector.ts:465`).
+- [ ] **7.v** Launch the shipped app with `SAND_HOST_GATEWAY_URL` pointed at us and see a
+  populated sidebar: no onboarding screen, no malformed-reply throw, transport-connected held
+  for ten minutes.
+
+## Slice 8 — A conversation from the real app (P4)
+
+The milestone that proves the port; everything after it is breadth, not risk.
+
+- [ ] **8.1** P4's 13 conversation commands (`sendPrompt`, the transcript reads, `openAgent`,
+  `setWindowFocused`, …) backed by the harness we already have.
+- [ ] **8.2** The two SSE shapes that carry an answer: `transcript`
+  (`appended`/`updated`) and `agent-upserted`.
+- [ ] **8.v** Send a message from the real, unmodified app and watch the answer stream back.
+
+## Slice 9 — Seam B: identity and the mint (P0 + P1)
+
+Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two services,
+18 methods, transcribed from `source/mock/`** with provenance comments (LEGAL.md stands —
+no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the Axum edge; a bare
+tonic gRPC server cannot answer the client.
+
+- [ ] **9.1** Auth: `/loginDeepControl` (PKCE-shaped challenge), `/auth/poll`, `/oauth/token`
+  with a real `exp` — the client parses the JWT for expiry and loops on refresh without one.
+- [ ] **9.2** `DashboardService` — 6 methods (`getMe`, `getTeams`, both admin-settings
+  variants, `getUserPrivacyMode`, `updateUserName`).
+- [ ] **9.3** `GrokBotService` — the mock's 12, plus `EnsureSandBox` returning
+  `{gatewayUrl, gatewayToken, networkToken, vncUrl, forkVncBaseUrl}` with a **non-loopback**
+  `gatewayUrl`.
+- [ ] **9.4** The same services on a tonic gRPC listener for internal use — the operator
+  decision of 30 Aug, unchanged.
+- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us.
+
+## Slice 10 — Bot ↔ coworker binding (barok-works)
 
 Runs from a client Bot arrive anonymous today: no tools, no policy, the deployment's model.
 Access tokens live one hour, so a Bot registered with a static header dies hourly.
 
-- [ ] **7.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key (signed, names account +
+- [ ] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key (signed, names account +
   coworker; a `key_view` row makes revocation real).
-- [ ] **7.2** `account_from_bearer` accepts it; a bot-key names the coworker for the run.
-- [ ] **7.3** Proven from barok-works: a Bot registered with the key runs as its coworker — tools,
+- [ ] **10.2** `account_from_bearer` accepts it; a bot-key names the coworker for the run.
+- [ ] **10.3** Proven from barok-works: a Bot registered with the key runs as its coworker — tools,
   approvals, and the coworker's own model, from the UI instead of curl.
 
-## Slice 8 — Seam B + tonic
+## Slice 11+ — breadth (P5 → P10, in order)
 
-Operator decision 30 Aug 2026: scheduled, not deferred.
+Per-tier, verified against the running client. Most of it adapts work that exists:
+P6 approvals ride slice 4's exactly-once answers, P8 MCP/skills ride `opengrok-plugins` and the
+vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle rides
+`opengrok-box`.
 
-- [ ] **8.1** Hand-transcribe the P1 command-table messages into `opengrok-proto` — provenance
-  comment per message, **no vendored stubs** (LEGAL.md stands).
-- [ ] **8.2** Connect-style unary (POST + JSON over HTTP/1.1) on the existing Axum listener — the
-  transport the desktop client actually speaks.
-- [ ] **8.3** The same services on a tonic gRPC listener for internal use.
+- [ ] P5 agent lifecycle (19 commands, 10 already answered client-side)
+- [ ] P6 tools, approvals, widgets (7)
+- [ ] P7 attachments, media, `/avatars/<id>`, `x-sand-slim-avatars` (5)
+- [ ] P8 MCP and skills (15)
+- [ ] P9 automations and workflows (15)
+- [ ] P10 box lifecycle and store (13)
+
+**P11 is deliberately not here.** Sharing/rooms, teach recording, channels, memories and the
+other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.
+Listing them as pending would make this tracker lie about how far away done is.
 
 ## Later — unordered, deliberately
 
