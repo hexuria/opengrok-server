@@ -1069,6 +1069,109 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- Computer sharing mode (org default + per-account override) ----
+
+    /// Set a sharing mode for a scope. scope is "org" (the org default) or "account" (an override);
+    /// mode is "per-org" | "per-account" | "per-bot".
+    pub async fn set_sharing_mode(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        mode: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into computer_sharing (scope, scope_id, mode, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (scope, scope_id) do update set
+               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(mode)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn sharing_mode(&self, scope: &str, scope_id: &str) -> StoreResult<Option<String>> {
+        let row =
+            sqlx::query("select mode from computer_sharing where scope = $1 and scope_id = $2")
+                .bind(scope)
+                .bind(scope_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .map(|row| row.try_get::<String, _>("mode"))
+            .transpose()?)
+    }
+
+    pub async fn clear_sharing_mode(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from computer_sharing where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- A computer keyed by the scope that shares it (org / account / bot) ----
+
+    pub async fn scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row = sqlx::query(
+            "select box_id, kind from scoped_computer where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn set_scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        box_id: &str,
+        kind: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into scoped_computer (scope, scope_id, box_id, kind, updated_at_ms)
+             values ($1, $2, $3, $4, $5)
+             on conflict (scope, scope_id) do update set
+               box_id = excluded.box_id, kind = excluded.kind, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(box_id)
+        .bind(kind)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clear_scoped_computer(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from scoped_computer where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ---- The account's last computer-provisioning error ----
 
     pub async fn set_account_computer_error(

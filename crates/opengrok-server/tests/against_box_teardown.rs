@@ -15,9 +15,7 @@ use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
-use opengrok_server::agui::provision::{
-    ensure_account_computer, teardown_account_computer_if_last,
-};
+use opengrok_server::agui::provision::{ensure_computer_for, teardown_computer_for};
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_store::PgStore;
@@ -95,7 +93,7 @@ async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (Cowo
     for event in &events {
         coworker.apply(event);
     }
-    let provisioned = ensure_account_computer(state, account, &mut coworker, 2).await;
+    let provisioned = ensure_computer_for(state, account, &id, &mut coworker, 2).await;
     assert!(
         provisioned.error.is_none(),
         "provision failed: {:?}",
@@ -165,7 +163,7 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
         state
             .auth
             .store
-            .account_computer(account.as_str())
+            .scoped_computer("account", account.as_str())
             .await
             .expect("acct")
             .map(|(b, _)| b),
@@ -181,7 +179,7 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
 
     // Deleting the first agent leaves the box (the second still shares it).
     retire(&state, &account, &agent1).await;
-    teardown_account_computer_if_last(&state, &account).await;
+    teardown_computer_for(&state, &account, &agent1).await;
     assert!(
         container_exists(&box1),
         "the box survives while another agent shares it"
@@ -190,7 +188,7 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
         state
             .auth
             .store
-            .account_computer(account.as_str())
+            .scoped_computer("account", account.as_str())
             .await
             .expect("acct")
             .is_some()
@@ -198,7 +196,7 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
 
     // Deleting the last agent destroys the box and clears the mapping.
     retire(&state, &account, &agent2).await;
-    teardown_account_computer_if_last(&state, &account).await;
+    teardown_computer_for(&state, &account, &agent2).await;
     assert!(
         !container_exists(&box1),
         "the account's box must be destroyed on last-agent delete"
@@ -207,7 +205,7 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
         state
             .auth
             .store
-            .account_computer(account.as_str())
+            .scoped_computer("account", account.as_str())
             .await
             .expect("acct")
             .is_none()
@@ -215,5 +213,49 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
 
     if container_exists(&box1) {
         let _ = Command::new("docker").args(["rm", "-f", &box1]).output();
+    }
+}
+
+#[tokio::test]
+async fn per_bot_mode_gives_each_bot_its_own_box() {
+    let database_url = database_or_skip!();
+    if !docker_available() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let state = test_state(&database_url).await;
+    let account = AccountId::new();
+    // Override this account to per-bot: each bot gets a dedicated box.
+    state
+        .auth
+        .store
+        .set_sharing_mode("account", account.as_str(), "per-bot", 1)
+        .await
+        .expect("set mode");
+
+    let (agent1, box1) = hire_agent(&state, &account, "One").await;
+    let (agent2, box2) = hire_agent(&state, &account, "Two").await;
+    assert_ne!(
+        box1, box2,
+        "per-bot: each bot gets its OWN box, not a shared one"
+    );
+    assert!(container_exists(&box1) && container_exists(&box2));
+
+    // Deleting one bot destroys ITS box; the other's survives.
+    retire(&state, &account, &agent1).await;
+    teardown_computer_for(&state, &account, &agent1).await;
+    assert!(
+        !container_exists(&box1),
+        "per-bot: deleting a bot destroys its box"
+    );
+    assert!(container_exists(&box2), "the other bot's box survives");
+
+    // Cleanup.
+    retire(&state, &account, &agent2).await;
+    teardown_computer_for(&state, &account, &agent2).await;
+    for b in [&box1, &box2] {
+        if container_exists(b) {
+            let _ = Command::new("docker").args(["rm", "-f", b]).output();
+        }
     }
 }

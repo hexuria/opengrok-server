@@ -276,9 +276,10 @@ async fn grok_bot(
             }
 
             // 1 account = 1 computer: first agent creates it, later agents share it.
-            let provisioned = crate::agui::provision::ensure_account_computer(
+            let provisioned = crate::agui::provision::ensure_computer_for(
                 &state.agui,
                 &account_id,
+                &id,
                 &mut coworker,
                 at_ms,
             )
@@ -442,7 +443,7 @@ async fn grok_bot(
                         .await;
                 }
             }
-            crate::agui::provision::teardown_account_computer_if_last(&state.agui, &account_id)
+            crate::agui::provision::teardown_computer_for(&state.agui, &account_id, &coworker_id)
                 .await;
             connect_ok(json!({}))
         }
@@ -597,9 +598,13 @@ async fn grok_bot(
                 .await
                 .ok()
                 .flatten();
+            // The caller's EFFECTIVE sharing mode, so the client knows whether a computer is
+            // pre-provisioned (per-org/per-account) or made per bot, and can render accordingly.
+            let (mode, _) = crate::agui::provision::resolve_mode(&state.agui, &account_id).await;
             connect_ok(json!({
                 "computers": computers,
                 "computerError": crate::agui::provision::error_json(&account_error),
+                "mode": mode,
             }))
         }
 

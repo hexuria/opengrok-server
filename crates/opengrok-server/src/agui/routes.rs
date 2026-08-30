@@ -81,16 +81,24 @@ pub(crate) async fn tools_for_coworker(
     // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
     // model is told about but that always refuses is a dead end it keeps trying.
     coworker.computer()?;
-    // Resolve the provider for THIS account's computer by its recorded kind (a box.ascii.dev box
-    // via the org's key, or a Local VM), so tools run on the same provider that created the box.
+    // Resolve the provider for this coworker's computer by its account's effective sharing mode and
+    // scope (per-org / per-account / per-bot), then that scope's recorded kind — so tools run on the
+    // same provider that created the box.
+    let (mode, org_id) = super::provision::resolve_mode(state, account_id).await;
+    let (scope, scope_id, _) = super::provision::scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id.as_str(),
+    );
     let (_, kind) = state
         .auth
         .store
-        .account_computer(account_id.as_str())
+        .scoped_computer(scope, &scope_id)
         .await
         .ok()
         .flatten()?;
-    let computer = super::provision::provider_for_account(state, account_id, &kind).await?;
+    let computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
 
     let policy = state
         .auth
@@ -389,7 +397,8 @@ pub async fn hire(
     // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
     // 1 account = 1 computer: the account's first agent creates it, later agents share it.
     let provisioned =
-        provision::ensure_account_computer(&state, &account_id, &mut coworker, at_ms).await;
+        provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
+            .await;
     events.extend(provisioned.events);
     let computer_error = provisioned.error;
 

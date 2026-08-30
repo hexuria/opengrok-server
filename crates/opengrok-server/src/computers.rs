@@ -11,7 +11,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -33,6 +33,11 @@ pub fn router(state: AgUiState) -> Router {
         .route("/admin/computers", get(status))
         .route("/admin/computers/{kind}", post(set).delete(clear))
         .route("/admin/computers/{kind}/test", post(test))
+        .route("/admin/computers/mode", get(get_mode).put(set_mode))
+        .route(
+            "/admin/computers/mode/account/{id}",
+            put(set_account_mode).delete(clear_account_mode),
+        )
         .with_state(state)
 }
 
@@ -189,6 +194,102 @@ async fn test(
             "detail": format!("Could not create a box: {error}"),
         }))
         .into_response(),
+    }
+}
+
+const VALID_MODES: &[&str] = &["per-org", "per-account", "per-bot"];
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMode {
+    mode: String,
+}
+
+/// `GET /admin/computers/mode` — the org's default sharing mode (built-in default: per-account).
+async fn get_mode(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let mode = state
+        .auth
+        .store
+        .sharing_mode("org", org_id.as_str())
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "per-account".to_string());
+    Json(json!({ "mode": mode, "modes": VALID_MODES })).into_response()
+}
+
+/// `PUT /admin/computers/mode` — set the org's default sharing mode.
+async fn set_mode(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Json(body): Json<SetMode>,
+) -> Response {
+    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    if !VALID_MODES.contains(&body.mode.as_str()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown sharing mode").into_response();
+    }
+    match state
+        .auth
+        .store
+        .set_sharing_mode("org", org_id.as_str(), &body.mode, now_ms())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not set the mode").into_response(),
+    }
+}
+
+/// `PUT /admin/computers/mode/account/{id}` — override the sharing mode for one member.
+async fn set_account_mode(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SetMode>,
+) -> Response {
+    if let Err(refusal) = admin_org(&state.auth, &headers).await {
+        return refusal;
+    }
+    if !VALID_MODES.contains(&body.mode.as_str()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown sharing mode").into_response();
+    }
+    match state
+        .auth
+        .store
+        .set_sharing_mode("account", &id, &body.mode, now_ms())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not set the override",
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /admin/computers/mode/account/{id}` — clear a member's override (fall back to the org default).
+async fn clear_account_mode(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(refusal) = admin_org(&state.auth, &headers).await {
+        return refusal;
+    }
+    match state.auth.store.clear_sharing_mode("account", &id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not clear the override",
+        )
+            .into_response(),
     }
 }
 

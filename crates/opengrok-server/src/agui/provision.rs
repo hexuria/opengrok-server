@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use opengrok_box::Computer;
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerEvent};
-use opengrok_core::id::{AccountId, BoxId};
+use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 
 use serde_json::{Value, json};
 
@@ -137,19 +137,67 @@ pub fn error_json(error: &Option<(String, String)>) -> Value {
 /// Ensure the account has its one computer and assign it (shared) to `coworker`. The account's
 /// first agent creates the box and records it; every later agent reuses the same box. Applies the
 /// assignment to `coworker`; returns the events to persist, the box id, and any error. Never raises.
-pub async fn ensure_account_computer(
+/// The effective sharing mode for an account and its org: the account's OVERRIDE if set, else the
+/// org DEFAULT, else the built-in default (per-account). Returns (mode, org_id).
+pub async fn resolve_mode(state: &AgUiState, account_id: &AccountId) -> (String, Option<String>) {
+    let org_id = account_org(state, account_id).await;
+    if let Ok(Some(mode)) = state
+        .auth
+        .store
+        .sharing_mode("account", account_id.as_str())
+        .await
+    {
+        return (mode, org_id);
+    }
+    if let Some(org) = &org_id
+        && let Ok(Some(mode)) = state.auth.store.sharing_mode("org", org).await
+    {
+        return (mode, org_id);
+    }
+    ("per-account".to_string(), org_id)
+}
+
+/// The (scope, scope_id, box mode) a mode maps to: per-org shares one org box, per-account one box
+/// per member, per-bot a dedicated box each. An account with no org falls back to account scope.
+pub fn scope_for(
+    mode: &str,
+    account_id: &str,
+    org_id: Option<&str>,
+    coworker_id: &str,
+) -> (&'static str, String, BoxMode) {
+    match mode {
+        "per-org" => match org_id {
+            Some(org) => ("org", org.to_string(), BoxMode::Shared),
+            None => ("account", account_id.to_string(), BoxMode::Shared),
+        },
+        "per-bot" => ("bot", coworker_id.to_string(), BoxMode::Dedicated),
+        _ => ("account", account_id.to_string(), BoxMode::Shared),
+    }
+}
+
+/// Ensure the computer for a coworker under its account's effective sharing mode, and assign it.
+/// per-org: the whole org shares one box; per-account: one box per member; per-bot: a dedicated box.
+/// The box is created on first need for its scope and reused after. Non-fatal — a failure leaves a
+/// boxless coworker carrying the account-level error.
+pub async fn ensure_computer_for(
     state: &AgUiState,
     account_id: &AccountId,
+    coworker_id: &CoworkerId,
     coworker: &mut Coworker,
     at_ms: i64,
 ) -> Provisioned {
     let store = &state.auth.store;
-    // Reuse the account's existing computer, or create it on this — the account's first — agent,
-    // as a box.ascii.dev box when the org has a key, else a Local VM on the server.
-    let box_id = match store.account_computer(account_id.as_str()).await {
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (scope, scope_id, box_mode) = scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id.as_str(),
+    );
+
+    let box_id = match store.scoped_computer(scope, &scope_id).await {
         Ok(Some((box_id, _kind))) => box_id,
         Ok(None) => {
-            let org_id = account_org(state, account_id).await;
             let kind = kind_for_new(state, org_id.as_deref()).await;
             let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
                 let code = if kind == "none" {
@@ -169,7 +217,7 @@ pub async fn ensure_account_computer(
             match provider.create(None).await {
                 Ok(box_id) => {
                     if let Err(error) = store
-                        .set_account_computer(account_id.as_str(), &box_id, kind, at_ms)
+                        .set_scoped_computer(scope, &scope_id, &box_id, kind, at_ms)
                         .await
                     {
                         return record_error(
@@ -183,7 +231,6 @@ pub async fn ensure_account_computer(
                     }
                     box_id
                 }
-                // The box provider named its own failure; map it to a stable code.
                 Err(error) => {
                     return record_error(
                         state,
@@ -201,18 +248,16 @@ pub async fn ensure_account_computer(
         }
     };
 
-    // Every agent shares the account's one box.
     let box_id = BoxId::from_stored(box_id);
     match coworker.decide(CoworkerCommand::AssignComputer {
         box_id: box_id.clone(),
-        mode: BoxMode::Shared,
+        mode: box_mode,
         at_ms,
     }) {
         Ok(events) => {
             for event in &events {
                 coworker.apply(event);
             }
-            // The account has a computer now — clear any stale provisioning error.
             let _ = store
                 .clear_account_computer_error(account_id.as_str())
                 .await;
@@ -226,28 +271,77 @@ pub async fn ensure_account_computer(
     }
 }
 
-/// Tear down the account's computer once its LAST agent is gone: if no non-retired coworkers remain
-/// for the account, destroy the box (best-effort) and clear the mapping. A no-op while any agent
-/// still shares it. Call AFTER the deleted agent's retirement is persisted, so the count is current.
-pub async fn teardown_account_computer_if_last(state: &AgUiState, account_id: &AccountId) {
-    let store = &state.auth.store;
-    match store.coworkers_for(account_id).await {
-        // Still has at least one agent — keep the shared box.
-        Ok(rows) if !rows.is_empty() => return,
-        // Cannot tell (read error) — leave the box rather than destroy on uncertainty.
-        Err(_) => return,
-        Ok(_) => {}
-    }
-    let Ok(Some((box_id, kind))) = store.account_computer(account_id.as_str()).await else {
-        return;
-    };
-    // Destroy on the SAME provider that made it (by its recorded kind). Best-effort: a box that
-    // will not die must not block clearing the mapping, but we log it so a leak is visible.
-    let org_id = account_org(state, account_id).await;
-    if let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await
-        && let Err(error) = provider.destroy(&box_id).await
+/// Destroy a scope's box (best-effort, on the provider that made it) and clear its mapping.
+async fn destroy_and_clear(
+    state: &AgUiState,
+    org_id: Option<&str>,
+    scope: &str,
+    scope_id: &str,
+    box_id: &str,
+    kind: &str,
+) {
+    if let Some(provider) = provider_for(state, org_id, kind).await
+        && let Err(error) = provider.destroy(box_id).await
     {
-        tracing::warn!(%error, box_id, "could not destroy the account's box on last-agent delete; clearing the mapping anyway");
+        tracing::warn!(%error, box_id, "could not destroy a box on teardown; clearing the mapping anyway");
     }
-    let _ = store.clear_account_computer(account_id.as_str()).await;
+    let _ = state
+        .auth
+        .store
+        .clear_scoped_computer(scope, scope_id)
+        .await;
+}
+
+/// Tear down a deleted coworker's computer according to its account's mode. per-bot: destroy the
+/// bot's own box. per-account: destroy the account box once the account's last agent is gone.
+/// per-org: leave the shared org box (idle-stop / an admin manages its lifetime). Call AFTER the
+/// deletion is persisted.
+pub async fn teardown_computer_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) {
+    let store = &state.auth.store;
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    match mode.as_str() {
+        "per-bot" => {
+            if let Ok(Some((box_id, kind))) =
+                store.scoped_computer("bot", coworker_id.as_str()).await
+            {
+                destroy_and_clear(
+                    state,
+                    org_id.as_deref(),
+                    "bot",
+                    coworker_id.as_str(),
+                    &box_id,
+                    &kind,
+                )
+                .await;
+            }
+        }
+        // The org box is shared org-wide; a single member's delete must not pull it out from under
+        // everyone. Its lifetime is idle-stop and admin action, not agent deletion.
+        "per-org" => {}
+        _ => {
+            let empty = store
+                .coworkers_for(account_id)
+                .await
+                .map(|rows| rows.is_empty())
+                .unwrap_or(false);
+            if empty
+                && let Ok(Some((box_id, kind))) =
+                    store.scoped_computer("account", account_id.as_str()).await
+            {
+                destroy_and_clear(
+                    state,
+                    org_id.as_deref(),
+                    "account",
+                    account_id.as_str(),
+                    &box_id,
+                    &kind,
+                )
+                .await;
+            }
+        }
+    }
 }

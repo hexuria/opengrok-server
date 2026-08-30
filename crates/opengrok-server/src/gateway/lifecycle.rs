@@ -133,7 +133,7 @@ async fn hire(
     // 1 account = 1 computer: the account's first agent creates it, later agents share it. Every
     // create path uses the same helper. Non-fatal: a failure leaves a boxless agent and a reason.
     let provisioned =
-        provision::ensure_account_computer(&state.agui, account_id, &mut coworker, at_ms).await;
+        provision::ensure_computer_for(&state.agui, account_id, &id, &mut coworker, at_ms).await;
     events.extend(provisioned.events);
 
     let view = opengrok_core::coworker::CoworkerView {
@@ -342,10 +342,12 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
             {
                 deleted += 1;
             }
+            // Tear down this agent's computer per the account's mode (per-bot destroys its own box;
+            // per-account destroys the account box once its last agent is gone; per-org leaves it).
+            crate::agui::provision::teardown_computer_for(&state.agui, &account.id, &coworker_id)
+                .await;
         }
     }
-    // The account's shared computer is destroyed only when its LAST agent has been deleted.
-    crate::agui::provision::teardown_account_computer_if_last(&state.agui, &account.id).await;
     live::emit_roster(state).await;
     (200, json!({ "deleted": deleted }))
 }
