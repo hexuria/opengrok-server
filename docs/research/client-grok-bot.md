@@ -26,7 +26,10 @@ There are **two** network seams in this application, and only one of them is Ope
 | **B. The Cursor backend** | ConnectRPC over `https://api2.cursor.sh` (`GrokBotService`, `DashboardService`, `InferenceService`) | Electron main | Anysphere's servers | No — but see §6.3, you must neutralise it |
 
 Seam A is the "client-facing contract" the brief refers to. Its command table is
-`SAND_GATEWAY_COMMANDS` in `source/host/gateway-protocol.ts:4-128` (**128 commands**).
+`SAND_GATEWAY_COMMANDS` in `source/host/gateway-protocol.ts` (**123 unique commands** — the
+object literal declares 130 keys, but 7 are duplicates it overwrites: `listAgents`, `createAgent`,
+`createGroup`, `duplicateAgent`, `setGroupMembers`, `setAgentAvatarBytes`, `updateAgent`.
+Corrected 30 Aug 2026; PLAN.md's 123 was right).
 Seam B's only load-bearing role for boot is minting the gateway URL/token
 (`ensureSandBox` → `{gatewayUrl, gatewayToken, networkToken, vncUrl, forkVncBaseUrl}`,
 `source/electron-main/box/box-host-connector.ts:28`), and it can be **completely bypassed**
@@ -35,7 +38,7 @@ with one environment variable (§6.1).
 **The single most important discovery:** `source/electron-main/box/box-host-connector.ts:17,156-161`
 — if `SAND_HOST_GATEWAY_URL` is set, `createRemoteHostConnector` returns
 `EnvDescriptorHostConnector` and never calls the vendor broker at all. That is the
-repoint. **But** `source/electron-main/box/local-docker-host-connector.ts:437-443` then
+repoint. **But** `source/electron-main/box/local-docker-host-connector.ts:465` then
 wraps it and **throws if the resolved gateway host starts with `127.0.0.1` or `localhost`**
 unless the app's `boxRuntime` setting is `"local-docker"`. See §10, Trap 1.
 
@@ -613,6 +616,11 @@ on-your-computer, working, messaging, sending, waiting`.
 
 ### 4.4 SSE channels — the complete list
 
+> **Corrected 30 Aug 2026: there are 21, not 18.** The table below is missing three that the
+> family map carries — `agents-automation`, `agents-workflow`, `mcp-servers-updated`. The
+> `memory` and `mcp-oauth-pending` rows are correct and deliberately outside
+> `gateway-event-families.ts`; do not delete them when reconciling.
+
 `source/node-agent-coordinator/gateway/gateway-event-families.ts:1-19` maps coordinator
 event families to SSE channel names. The channel names OpenGrok may emit:
 
@@ -859,7 +867,13 @@ shipped host's token is only knowable by whoever launched it. OpenGrok should al
 a token via `SAND_GATEWAY_TOKEN` and hand the same value to the client via
 `SAND_HOST_GATEWAY_TOKEN`.
 
-### 6.3 Desktop → Cursor backend (seam B — neutralise, do not implement)
+### 6.3 Desktop → Cursor backend (seam B)
+
+> **Superseded 30 Aug 2026.** This section's "neutralise, do not implement" advice no longer
+> reflects the plan: seam B is scheduled (roadmap slice 8). The minimum is small and known —
+> two services, 18 methods, specified by the client's own `source/mock/`. See
+> [`../PORT-PRIORITY.md`](../PORT-PRIORITY.md) §3. The neutralisation route below remains the
+> right way to *test* the gateway before seam B exists.
 
 `source/shared/node/cursor-token.ts:3,37-39`:
 
@@ -1088,7 +1102,7 @@ Ordered by the actual call sequence. Sources: `SandHostSupervisor.ensureConnecti
 
 ### Trap 1 — the loopback refusal (**the one that will cost you a day**)
 
-`source/electron-main/box/local-docker-host-connector.ts:437-443`:
+`source/electron-main/box/local-docker-host-connector.ts:465`:
 
 ```ts
 const connection = await remote.connect();
@@ -1192,7 +1206,7 @@ messages if you implement the limits.
 
 ### Trap 11 — command *count* vs. renderer *reachable* count
 
-128 commands exist in `SAND_GATEWAY_COMMANDS`; only **91** appear in
+123 unique commands exist in `SAND_GATEWAY_COMMANDS`; only **90** appear in
 `COORDINATOR_METHOD_TABLE` (`source/shared/rpc/coordinator.ts:92-183`). The other 37 —
 `getTranscript`, `getAgentTranscript`, `getAgentTranscriptPage`, `openAgentWindowed`,
 `getAgentMemories`, `deleteAgentMemory`, `clearAgentMemories`, `openAgent`,

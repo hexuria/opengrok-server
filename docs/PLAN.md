@@ -45,11 +45,11 @@ TypeScript), and the **box** (the agent's computer).
 | Seam | What it is | Ours? |
 |---|---|---|
 | **The Sand gateway** | `POST /api/<cmd>` JSON + SSE `GET /events` + `/health` + `/avatars/<id>`, defined by `SAND_GATEWAY_COMMANDS` (`source/host/gateway-protocol.ts:4-128`) — **123 commands** (`:5-127`), 90 of them reachable from the renderer (`coordinator.ts:92-183`); the other 33 are host-only | **yes — this is OpenGrok** |
-| The Cursor ConnectRPC backend | `api2.cursor.sh` | **no** — neutralised via `SAND_BACKEND_URL` and the repo's existing `source/mock/` server |
+| The Cursor ConnectRPC backend | `api2.cursor.sh` | **scheduled** (roadmap slice 8, operator decision 30 Aug 2026) — neutralise via `SAND_BACKEND_URL` and `source/mock/` while building seam A; the implementable minimum is 2 services / 18 methods (`PORT-PRIORITY.md` §3) |
 
 **We implement the Sand gateway.** The client keeps its UI, its transcript format and its activity
 model; OpenGrok answers where the old backend did. Note the surface is wider than "JSON commands":
-an SSE event stream with 18 channels and an avatar endpoint are part of booting.
+an SSE event stream with 21 channels and an avatar endpoint are part of booting.
 
 **Minimal boot set** (verified): `/health`, `/events`, `listAgents`, `countAgents`, `getTrays`,
 `isAgentNetworkEnabled`, `get/setHostSettings`. Then `sendPrompt` for the first answer.
@@ -57,13 +57,13 @@ an SSE event stream with 18 channels and an avatar endpoint are part of booting.
 > ### ⚠ The repoint trap — read before P1
 > `SAND_HOST_GATEWAY_URL` (`source/electron-main/box/box-host-connector.ts:17,156-161`) is the whole
 > repoint. But `createSettingsRoutedHostConnector`
-> (`local-docker-host-connector.ts:437-443`) **throws when the resolved gateway host starts with
+> (`local-docker-host-connector.ts:465`) **throws when the resolved gateway host starts with
 > `127.0.0.1` or `localhost`** — unless `boxRuntime === "local-docker"`, which ignores the env var
 > and spawns its own host on port 1350. **OpenGrok must therefore serve on a non-loopback hostname**
 > (a LAN address, or a hosts-file alias) or the app refuses to connect with no useful error.
 
 Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the full 123-command
-inventory with per-command shapes, transcript kinds, the 12 card types, activity events, the 18 SSE
+inventory with per-command shapes, transcript kinds, the 12 card types, activity events, the 21 SSE
 channels, the 30-field roster row, the box seam, a 23-step first-boot checklist and 12 traps.
 
 **The rights line is not optional and is written down separately:** [`LEGAL.md`](LEGAL.md). Short

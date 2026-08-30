@@ -85,10 +85,13 @@ watchdog aborts and reconnects forever. Auth is a single shared bearer, timing-s
 (`host/gateway-server.ts:21`); the local-exec relay additionally requires
 `x-anyrun-network-token`.
 
-There are **19 SSE channels**, not 18: `agents`, `agent-upserted`, `transcript`, `tray`,
-`outline`, `subagents`, `async-tasks`, `automations`, `agents-automation`, `workflows`,
-`agents-workflow`, `host-settings`, `mcp-servers`, `mcp-servers-updated`, `forever-box`,
-`box-disk-pressure`, `computer-action`, `sharing`, `teach-recording`.
+There are **21 SSE channels**, not 18. Nineteen are in the family map
+(`gateway-event-families.ts`): `agents`, `agent-upserted`, `transcript`, `tray`, `outline`,
+`subagents`, `async-tasks`, `automations`, `agents-automation`, `workflows`, `agents-workflow`,
+`host-settings`, `mcp-servers`, `mcp-servers-updated`, `forever-box`, `box-disk-pressure`,
+`computer-action`, `sharing`, `teach-recording`. Two more are emitted outside it and are easy to
+miss: `memory` (`host/sand-host.ts:939`) and `mcp-oauth-pending` (handled specially at
+`node-agent-coordinator/main.ts:126`).
 
 *Done when:* `transport-connected`, and no reconnect loop for ten minutes.
 
@@ -242,7 +245,7 @@ Measured against the client on 30 Aug 2026. All are small; all would cost someon
 | Claim | Where | Correction |
 |---|---|---|
 | "128 commands" | `research/client-grok-bot.md` §0 | **123 unique.** The literal declares 130 keys; 7 are duplicates (`listAgents`, `createAgent`, `createGroup`, `duplicateAgent`, `setGroupMembers`, `setAgentAvatarBytes`, `updateAgent`). PLAN.md's "123" is right. |
-| "18 SSE channels" | §4.4 | **19.** Full list in P2 above. |
-| local-docker "spawns its own host on port 1350" | PLAN.md trap | Two ports, conflated. `LOCAL_DOCKER_GATEWAY_URL` is `http://127.0.0.1:**1340**`; `DESKTOP_HOST_PORT` is **1350**. |
+| "18 SSE channels" | §4.4 | **21.** The §4.4 table is missing `agents-automation`, `agents-workflow` and `mcp-servers-updated`. Its `memory` and `mcp-oauth-pending` rows are correct — they are emitted outside the family map. |
 | loopback refusal at `local-docker-host-connector.ts:437-443` | PLAN.md trap | Now `:465`. The behaviour is unchanged and still the first thing to trip over. |
+| "only **91** [renderer-reachable]" | §11 | **90.** Measured from `COORDINATOR_METHOD_TABLE`. |
 | "Seam B — neutralise, do not implement" | §0, §6.3 | Superseded by the 30 Aug operator decision (roadmap slice 8). Implement it — the minimum is 18 methods. |
