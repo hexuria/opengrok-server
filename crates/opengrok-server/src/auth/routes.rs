@@ -97,6 +97,10 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/poll", get(auth_poll))
         .route("/auth/signup", post(super::identity::signup))
         .route("/auth/verify", get(super::identity::verify_email))
+        .route(
+            "/signup",
+            get(super::identity::signup_page).post(super::identity::signup_form),
+        )
         .with_state(state)
 }
 
@@ -148,41 +152,7 @@ pub async fn login_deep_control(
             },
         );
     }
-    login_form(&query.challenge, &query.uuid, None).into_response()
-}
-
-/// The credential form (GET) and the error re-render (POST failure) share one renderer.
-fn login_form(challenge: &str, uuid: &str, error: Option<&str>) -> Response {
-    let error_html = error
-        .map(|message| {
-            format!(
-                "<p style=\"color:#c0392b;margin:0 0 12px\">{}</p>",
-                html_escape(message)
-            )
-        })
-        .unwrap_or_default();
-    let body = format!(
-        "<!doctype html><meta charset=utf8><title>Sign in · OpenGrok</title>\
-         <body style=\"font:16px system-ui;max-width:26rem;margin:12vh auto;padding:0 1rem\">\
-         <h1 style=\"font-size:1.4rem\">Sign in to OpenGrok</h1>{error_html}\
-         <form method=post action=\"/loginDeepControl\">\
-         <input type=hidden name=challenge value=\"{challenge}\">\
-         <input type=hidden name=uuid value=\"{uuid}\">\
-         <label style=\"display:block;margin:10px 0 4px\">Email</label>\
-         <input name=email type=email required autofocus style=\"width:100%;padding:8px;font-size:1rem\">\
-         <label style=\"display:block;margin:12px 0 4px\">Password</label>\
-         <input name=password type=password required style=\"width:100%;padding:8px;font-size:1rem\">\
-         <button type=submit style=\"margin-top:16px;padding:9px 16px;font-size:1rem;cursor:pointer\">Sign in</button>\
-         </form></body>",
-        challenge = html_escape(challenge),
-        uuid = html_escape(uuid),
-    );
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response()
+    super::pages::login(&query.challenge, &query.uuid, None)
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,7 +170,7 @@ pub async fn login_submit(
     State(state): State<AuthState>,
     axum::Form(form): axum::Form<LoginForm>,
 ) -> Response {
-    let refuse = |message: &str| login_form(&form.challenge, &form.uuid, Some(message));
+    let refuse = |message: &str| super::pages::login(&form.challenge, &form.uuid, Some(message));
 
     let Ok(Some(view)) = state.store.account_by_email(&form.email).await else {
         // Same message as a bad password: an attacker must not learn which emails exist.
@@ -244,27 +214,14 @@ pub async fn login_submit(
         return refuse("This sign-in link expired. Return to the app and try again.");
     }
 
-    let body = format!(
-        "<!doctype html><meta charset=utf8><title>OpenGrok</title>\
-         <body style=\"font:16px system-ui;max-width:28rem;margin:14vh auto;text-align:center\">\
-         <h1 style=\"font-size:1.4rem\">✓ Signed in to OpenGrok</h1>\
-         <p style=\"color:#555\">Signed in as {email}. Return to the app — it will pick up your \
-         session automatically.</p></body>",
-        email = html_escape(&view.email),
-    );
-    (
+    super::pages::message(
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
+        "Signed in",
+        &format!(
+            "Signed in as {}. Return to the app — it will pick up your session automatically.",
+            view.email
+        ),
     )
-        .into_response()
-}
-
-fn html_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[derive(Debug, Deserialize)]

@@ -58,42 +58,80 @@ struct VerifyClaims {
     exp: i64,
 }
 
+/// `GET /signup?code=` — the styled signup page the admin's invite link points at.
+pub async fn signup_page(
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    super::pages::signup(query.get("code").map(String::as_str), None)
+}
+
+/// `POST /signup` — the styled form's target (form-encoded, distinct from the JSON /auth/signup
+/// the client calls). Runs the same signup, then renders a page instead of JSON.
+pub async fn signup_form(
+    State(state): State<AuthState>,
+    axum::Form(form): axum::Form<SignupRequest>,
+) -> Response {
+    let code = form.code.clone();
+    match do_signup(&state, form).await {
+        Ok(reply) => {
+            let msg = if reply.verified {
+                "Account created. Your administrator will enable it, then you can sign in."
+            } else {
+                "Account created. Check your email for a verification link, then your administrator                  will enable your account."
+            };
+            super::pages::message(StatusCode::OK, "Welcome to Open Grok", msg)
+        }
+        Err((_, message)) => super::pages::signup(Some(&code), Some(&message)),
+    }
+}
+
 /// `POST /auth/signup` — create an account under an org, gated by invite code + domain.
-pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupRequest>) -> Response {
+/// The signup work, shared by the JSON endpoint and the styled form. `Err((status, message))`
+/// carries a client-readable reason both callers render their own way.
+async fn do_signup(
+    state: &AuthState,
+    req: SignupRequest,
+) -> Result<SignupReply, (StatusCode, String)> {
     if req.password.len() < 8 {
-        return refusal(
+        return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "password must be at least 8 characters",
-        );
+            "password must be at least 8 characters".to_string(),
+        ));
     }
     let Some(domain) = email_domain(&req.email) else {
-        return refusal(
+        return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            "that is not an email address",
-        );
+            "that is not an email address".to_string(),
+        ));
     };
 
     // The code names the org; the org checks the code and the domain together.
     let Ok(Some(org_id)) = state.store.org_by_invite(&req.code).await else {
-        return refusal(StatusCode::UNPROCESSABLE_ENTITY, "unknown invite code");
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown invite code".to_string(),
+        ));
     };
     let Ok((org, org_seq)) = state.store.load_org(&org_id).await else {
-        return refusal(StatusCode::INTERNAL_SERVER_ERROR, "org unavailable");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "org unavailable".to_string(),
+        ));
     };
 
     // An email already registered is refused before we spend the invite.
     if let Ok(Some(_)) = state.store.account_by_email(&req.email).await {
-        return refusal(
+        return Err((
             StatusCode::CONFLICT,
-            "an account with that email already exists",
-        );
+            "an account with that email already exists".to_string(),
+        ));
     }
 
     let Ok(password_hash) = super::password::hash_password(&req.password) else {
-        return refusal(
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            "could not secure the password",
-        );
+            "could not secure the password".to_string(),
+        ));
     };
 
     let account_id = AccountId::new();
@@ -106,7 +144,7 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
         at_ms: now_ms(),
     }) {
         Ok(events) => events,
-        Err(reason) => return refusal(StatusCode::FORBIDDEN, &reason.to_string()),
+        Err(reason) => return Err((StatusCode::FORBIDDEN, reason.to_string())),
     };
 
     // No mailer ⇒ verified immediately; a mailer ⇒ pending until the link is clicked.
@@ -126,7 +164,7 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
         at_ms,
     }) {
         Ok(events) => events,
-        Err(reason) => return refusal(StatusCode::INTERNAL_SERVER_ERROR, &reason.to_string()),
+        Err(reason) => return Err((StatusCode::INTERNAL_SERVER_ERROR, reason.to_string())),
     };
     let account = Account::replay(&register);
     let view = AccountView {
@@ -149,10 +187,10 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
         .await
         .is_err()
     {
-        return refusal(
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            "could not create the account",
-        );
+            "could not create the account".to_string(),
+        ));
     }
     // The invite is spent only after the account exists.
     let mut org_state = org;
@@ -169,22 +207,28 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
     // real account behind a mail hiccup.
     let mut sent = false;
     if let Some(key) = &state.resend_api_key {
-        let token = mint_verify_token(&state, account_id.as_str(), at_ms);
+        let token = mint_verify_token(state, account_id.as_str(), at_ms);
         if let Some(token) = token {
             let link = format!("{}/auth/verify?token={token}", state.public_url);
             sent = super::resend::send_verification(key, &req.email, &link).await;
         }
     }
 
-    (
-        StatusCode::CREATED,
-        Json(SignupReply {
-            account_id: account_id.as_str().to_string(),
-            verification_email_sent: sent,
-            verified: account.verified,
-        }),
-    )
-        .into_response()
+    Ok(SignupReply {
+        account_id: account_id.as_str().to_string(),
+        verification_email_sent: sent,
+        verified: account.verified,
+    })
+}
+
+/// `POST /auth/signup` — the JSON endpoint the client calls. Wraps `do_signup`.
+pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupRequest>) -> Response {
+    match do_signup(&state, req).await {
+        Ok(reply) => (StatusCode::CREATED, Json(reply)).into_response(),
+        Err((status, message)) => {
+            (status, Json(serde_json::json!({ "error": message }))).into_response()
+        }
+    }
 }
 
 fn mint_verify_token(state: &AuthState, account_id: &str, at_ms: i64) -> Option<String> {
@@ -209,30 +253,39 @@ pub async fn verify_email(
     axum::extract::Query(query): axum::extract::Query<VerifyQuery>,
 ) -> Response {
     let Ok(claims) = state.minter.verify_claims::<VerifyClaims>(&query.token) else {
-        return html(
+        return super::pages::message(
             StatusCode::BAD_REQUEST,
+            "Verification",
             "This verification link is invalid or expired.",
         );
     };
     if claims.purpose != "email-verify" {
-        return html(
+        return super::pages::message(
             StatusCode::BAD_REQUEST,
+            "Verification",
             "This link cannot be used to verify email.",
         );
     }
     let account_id = AccountId::from_stored(claims.sub);
     let Ok((account, seq)) = state.store.load_account(&account_id).await else {
-        return html(StatusCode::NOT_FOUND, "No such account.");
+        return super::pages::message(StatusCode::NOT_FOUND, "Verification", "No such account.");
     };
     if account.verified {
-        return html(
+        return super::pages::message(
             StatusCode::OK,
+            "Verification",
             "Your email is already verified. You can sign in.",
         );
     }
     let events = match account.decide(AccountCommand::VerifyEmail { at_ms: now_ms() }) {
         Ok(events) => events,
-        Err(reason) => return html(StatusCode::CONFLICT, &reason.to_string()),
+        Err(reason) => {
+            return super::pages::message(
+                StatusCode::CONFLICT,
+                "Verification",
+                &reason.to_string(),
+            );
+        }
     };
     let mut after = account;
     for event in &events {
@@ -258,31 +311,15 @@ pub async fn verify_email(
         .await
         .is_err()
     {
-        return html(
+        return super::pages::message(
             StatusCode::INTERNAL_SERVER_ERROR,
+            "Verification",
             "Could not record verification.",
         );
     }
-    html(
+    super::pages::message(
         StatusCode::OK,
-        "Email verified. Your account is active once an administrator enables it.",
+        "Email verified",
+        "Your email is verified. Your account is active once an administrator enables it.",
     )
-}
-
-fn refusal(status: StatusCode, message: &str) -> Response {
-    (status, Json(serde_json::json!({ "error": message }))).into_response()
-}
-
-fn html(status: StatusCode, message: &str) -> Response {
-    let body = format!(
-        "<!doctype html><meta charset=utf8><title>OpenGrok</title>\
-         <body style=\"font:16px system-ui;max-width:28rem;margin:14vh auto;text-align:center\">\
-         <p>{message}</p></body>"
-    );
-    (
-        status,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response()
 }

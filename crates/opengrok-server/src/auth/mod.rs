@@ -4,6 +4,7 @@
 //! variable, so this module is the entire sign-in story for the desktop app.
 
 pub mod identity;
+pub mod pages;
 pub mod password;
 pub mod resend;
 pub mod routes;
