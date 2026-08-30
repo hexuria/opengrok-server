@@ -35,6 +35,14 @@ if [ "${1:-}" != "--smoke" ]; then
 fi
 
 : "${OG_DATABASE_URL:?--smoke needs OG_DATABASE_URL, e.g. postgres://oag:oag@127.0.0.1:5452/opengrok}"
+
+# THE GATE OWNS ITS DATABASE. The autonomy sweeps claim work with `for update skip locked`, so a
+# second opengrok on the same database will legitimately RACE the smoke servers for schedule and
+# monitor firings — and fire them with its own model door. Learned when a dev server with the real
+# door won a monitor firing and the smoke read back a 403 instead of the mock's echo.
+if pgrep -f "target/debug/opengrok" >/dev/null 2>&1; then
+  fail "another opengrok is running; it would race the smokes for their own firings"
+fi
 # Not 1337: grok-bot's local-docker box binds that port, and a clash here looks like a broken
 # server rather than a taken port.
 PORT="${OG_PORT:-1447}"

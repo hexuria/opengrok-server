@@ -206,6 +206,29 @@ create table if not exists monitor_cursor (
     id            int    primary key,
     last_event_id bigint not null
 );
+
+-- Seam A (the desktop client's gateway), slice 8. The transcript the client renders: one row per
+-- durable entry, sequenced per coworker. The entry itself is stored as the client-shaped JSON —
+-- this is a wire-format projection, not domain truth; the runs journal remains the truth.
+create table if not exists gateway_entry (
+    coworker_id text   not null,
+    seq         bigint not null,
+    entry       jsonb  not null,
+    at_ms       bigint not null,
+    primary key (coworker_id, seq)
+);
+
+-- The prompt-acceptance ledger: (account slot, clientNonce) -> what was accepted. A repeated
+-- nonce with the same digest answers accepted again; a different digest is refused. This is what
+-- makes the client's retry safe instead of a duplicate send.
+create table if not exists gateway_nonce (
+    account_slot text   not null,
+    nonce        text   not null,
+    digest       text   not null,
+    record       jsonb  not null,
+    at_ms        bigint not null,
+    primary key (account_slot, nonce)
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

@@ -76,9 +76,7 @@ async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Respon
 
 #[derive(Debug, serde::Deserialize)]
 struct EventsQuery {
-    /// `?channels=a,b,c` — which channels this subscriber wants. Slice 7 publishes none yet, so
-    /// the filter is parsed and honoured trivially; slice 8's transcript events will consult it.
-    #[allow(dead_code)]
+    /// `?channels=a,b,c` — which channels this subscriber wants; absent means all of them.
     channels: Option<String>,
 }
 
@@ -86,17 +84,57 @@ struct EventsQuery {
 ///
 /// The framing is mandatory, not stylistic: `retry: 1000` first, then a `:ping` comment at
 /// least every 15 s, because the client aborts the stream after 35 s of silence and reconnects
-/// forever. Ten seconds leaves a full heartbeat of margin over a slow write.
+/// forever. Ten seconds leaves a full heartbeat of margin over a slow write. Frames are the
+/// `{channel, payload}` envelope, filtered per-subscriber by the `channels` parameter.
 async fn events(
     State(state): State<GatewayState>,
-    Query(_query): Query<EventsQuery>,
+    Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Some((code, message)) = refuse(&state, &headers) {
         return refusal(code, message);
     }
 
-    let opening = stream::once(async { Ok::<_, Infallible>("retry: 1000\n\n".to_string()) });
+    let wanted: Option<std::collections::HashSet<String>> = query
+        .channels
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| raw.split(',').map(|name| name.trim().to_string()).collect());
+    let subscriber = state.events_tx.subscribe();
+
+    // The opening: the mandatory retry line, then a complete roster snapshot so a reconnecting
+    // client is seeded before its own listAgents lands.
+    let snapshot = {
+        let rows = super::live::roster_rows(&state).await.unwrap_or_default();
+        let payload = json!({
+            "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
+            "agents": rows,
+            "ordered": super::live::ordered(&state, "roster"),
+            "coverage": { "kind": "complete-roster" },
+        });
+        frame("agents", &payload, wanted.as_ref())
+    };
+    let opening =
+        stream::once(async move { Ok::<_, Infallible>(format!("retry: 1000\n\n{snapshot}")) });
+
+    let live = stream::unfold(subscriber, |mut subscriber| async move {
+        loop {
+            match subscriber.recv().await {
+                Ok((channel, payload)) => {
+                    return Some((Ok::<_, Infallible>((channel, payload)), subscriber));
+                }
+                // Lagged: frames were dropped for this slow subscriber. Keep going — the client
+                // resyncs from sequence gaps; that is what the ordered stamps are for.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    });
+    let filter = wanted.clone();
+    let live = live.map(move |result| {
+        result.map(|(channel, payload)| frame(&channel, &payload, filter.as_ref()))
+    });
+
     let pings = stream::unfold((), |()| async {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         Some((Ok::<_, Infallible>(":ping\n\n".to_string()), ()))
@@ -107,9 +145,27 @@ async fn events(
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::body::Body::from_stream(opening.chain(pings)),
+        axum::body::Body::from_stream(opening.chain(futures::stream::select(live, pings))),
     )
         .into_response()
+}
+
+/// One SSE data frame in the `{channel, payload}` envelope — or nothing, when the subscriber
+/// did not ask for the channel.
+fn frame(
+    channel: &str,
+    payload: &Value,
+    wanted: Option<&std::collections::HashSet<String>>,
+) -> String {
+    if let Some(wanted) = wanted
+        && !wanted.contains(channel)
+    {
+        return String::new();
+    }
+    format!(
+        "data: {}\n\n",
+        json!({ "channel": channel, "payload": payload })
+    )
 }
 
 /// `POST /api/{method}` — the command surface.
@@ -186,6 +242,81 @@ async fn command(
                 "capabilities": ["orderedReplicasV1", "sendAcceptanceV1"],
             }),
         ),
+
+        // ---- P4: one conversation (slice 8) ----
+        "sendPrompt" => {
+            let (code, body) = super::conversation::send_prompt(&state, &args).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "promptAcceptanceStatus" => {
+            let (code, body) = super::conversation::acceptance_status(&state, &args).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        // Tails and pages: the same read, dressed four ways. `open*` also marks the agent active.
+        "openAgentTail" => {
+            let (code, body) =
+                super::conversation::transcript_reply(&state, &args, true, false).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "getAgentTranscriptTail" | "getAgentTranscriptPage" => {
+            let (code, body) =
+                super::conversation::transcript_reply(&state, &args, false, false).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "openAgentWindowed" => {
+            let (code, body) =
+                super::conversation::transcript_reply(&state, &args, true, true).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "getAgentTranscriptWindow" => {
+            let (code, body) =
+                super::conversation::transcript_reply(&state, &args, false, true).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "getAgentTranscript" => {
+            let (code, body) = super::conversation::full_transcript(&state, &args, false).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "getTranscript" => {
+            let (code, body) =
+                super::conversation::full_transcript(&state, &json!({}), false).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "openAgent" => {
+            let (code, body) = super::conversation::full_transcript(&state, &args, true).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        // No branching yet: a thread is its root, and the outline is empty. Honest empties in the
+        // container types the renderer validates.
+        "getAgentThread" => reply(StatusCode::OK, json!({ "entries": [] })),
+        "getConversationOutline" => reply(StatusCode::OK, json!([])),
 
         // ---- everything else, exactly as the shipped host words it ----
         other => refusal(404, &format!("unknown gateway method: {other}")),

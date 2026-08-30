@@ -21,6 +21,7 @@ use opengrok_core::id::AccountId;
 use serde::{Serialize, de::DeserializeOwned};
 
 pub mod autonomy;
+pub mod gateway;
 pub mod migrations;
 pub mod postgres;
 pub mod vault;

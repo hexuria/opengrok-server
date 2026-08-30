@@ -15,6 +15,8 @@
 //! served — exactly `gateway-server.ts`'s posture, so a deployment that forgets the token fails
 //! closed instead of open.
 
+pub mod conversation;
+pub mod live;
 pub mod routes;
 pub mod summaries;
 
@@ -39,6 +41,20 @@ pub struct GatewayState {
     pub settings: Arc<Mutex<serde_json::Value>>,
     /// When this process started — `/health`'s `startedAt`.
     pub started_at_ms: i64,
+    /// The live stream: every SSE frame goes through here, and each `/events` subscriber holds
+    /// a receiver. Slow subscribers lag and are dropped by `broadcast`'s own rules — a stalled
+    /// client must not be able to wedge the host.
+    pub events_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+    /// This process's ordering epoch. A client that sees the epoch change treats the replica as
+    /// restarted and resyncs — which is exactly what a restart means.
+    pub epoch: String,
+    /// Monotonic sequence per replica key (`roster`, `transcript:<agentId>`), for the `ordered`
+    /// stamp every roster and transcript event carries.
+    pub seqs: Arc<Mutex<std::collections::HashMap<String, i64>>>,
+    /// Which agent the client last opened. `getTranscript` and `sendPrompt` fall back to it.
+    pub active_agent: Arc<Mutex<Option<String>>>,
+    /// Coworkers with a turn in flight right now — the roster's `isRunning`.
+    pub running: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl GatewayState {
@@ -49,6 +65,11 @@ impl GatewayState {
             email,
             settings: Arc::new(Mutex::new(default_settings())),
             started_at_ms: chrono::Utc::now().timestamp_millis(),
+            events_tx: tokio::sync::broadcast::channel(256).0,
+            epoch: uuid::Uuid::now_v7().to_string(),
+            seqs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_agent: Arc::new(Mutex::new(None)),
+            running: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 }

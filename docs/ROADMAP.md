@@ -85,11 +85,18 @@ after — the real, unmodified client is the strongest smoke test we can have.
 
 The milestone that proves the port; everything after it is breadth, not risk.
 
-- [ ] **8.1** P4's 13 conversation commands (`sendPrompt`, the transcript reads, `openAgent`,
-  `setWindowFocused`, …) backed by the harness we already have.
-- [ ] **8.2** The two SSE shapes that carry an answer: `transcript`
-  (`appended`/`updated`) and `agent-upserted`.
+- [x] **8.1** P4's 13 conversation commands (`sendPrompt` with the Postgres acceptance ledger —
+  idempotent on a repeated nonce, 409 `NONCE_DIGEST_MISMATCH` on a reused one — the four
+  tail/window/page reads, the array forms, `openAgent`, `promptAcceptanceStatus`) backed by the
+  harness we already have; turns run on the coworker's own model and are journaled like every
+  other run. *(this commit)*
+- [x] **8.2** The two SSE shapes that carry an answer: `transcript` `appended`/`updated` (user
+  echo carrying `clientNonce`, streaming placeholder, final update) and `agent-upserted` pulsing
+  `isRunning` — every frame stamped `ordered: {replicaKey, epoch, sequence}`, plus an `agents`
+  snapshot on every `/events` connect. *(this commit)*
 - [ ] **8.v** Send a message from the real, unmodified app and watch the answer stream back.
+  Blocked by the same client bug as 7.v (`docs/port-blockers.md` B1); the choreography is held by
+  `slice12-conversation-smoke.sh` meanwhile.
 
 ## Slice 9 — Seam B: identity and the mint (P0 + P1)
 
