@@ -1,7 +1,17 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { disableUser, enableUser, issueInvite, listInvites, listUsers } from "../api/admin";
+import {
+  clearBoxKey,
+  disableUser,
+  enableUser,
+  issueInvite,
+  listInvites,
+  listOrgComputers,
+  listUsers,
+  setBoxKey,
+  testBoxConnection,
+} from "../api/admin";
 import { ApiError } from "../api/client";
 import type { Account } from "../api/account";
 import { AuthedFrame } from "../components/authed-frame";
@@ -151,12 +161,98 @@ function InvitesCard() {
   );
 }
 
+function ComputersCard() {
+  const queryClient = useQueryClient();
+  const computers = useQuery({ queryKey: ["admin", "computers"], queryFn: listOrgComputers, retry: false });
+  const [key, setKey] = useState("");
+  const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => setBoxKey(key),
+    onSuccess: async () => {
+      setKey("");
+      await queryClient.invalidateQueries({ queryKey: ["admin", "computers"] });
+    },
+  });
+  const clear = useMutation({
+    mutationFn: clearBoxKey,
+    onSuccess: async () => {
+      setTestResult(null);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "computers"] });
+    },
+  });
+  const test = useMutation({ mutationFn: testBoxConnection, onSuccess: setTestResult });
+
+  if (computers.error instanceof ApiError && computers.error.status === 403) return null;
+
+  const box = computers.data?.computers.find((c) => c.kind === "ascii");
+  const boxConfigured = box?.configured ?? false;
+
+  return (
+    <section className="card">
+      <h2>Computers</h2>
+      <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
+        Where your organization’s bots run. Set a provider key and every member’s computer is
+        provisioned from it — the key is sealed on the server and never leaves it.
+      </p>
+
+      <div style={{ marginTop: "1rem" }}>
+        <div className="spread">
+          <strong>box.ascii.dev</strong>
+          <span className={`pill ${boxConfigured ? "on" : "off"}`}>
+            {boxConfigured ? "configured" : "not configured"}
+          </span>
+        </div>
+        <label htmlFor="boxkey">
+          API key{boxConfigured ? " (saved — paste a new one to replace)" : ""}
+        </label>
+        <input
+          id="boxkey"
+          type="password"
+          autoComplete="off"
+          placeholder={boxConfigured ? "Replace saved key" : "box_…"}
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+        />
+        <div className="row" style={{ marginTop: "0.8rem" }}>
+          <button onClick={() => save.mutate()} disabled={save.isPending || key.trim().length === 0}>
+            {save.isPending ? "Saving…" : "Save key"}
+          </button>
+          <button className="ghost" onClick={() => test.mutate()} disabled={test.isPending || !boxConfigured}>
+            {test.isPending ? "Testing…" : "Test connection"}
+          </button>
+          {boxConfigured ? (
+            <button className="danger" onClick={() => clear.mutate()} disabled={clear.isPending}>
+              Remove
+            </button>
+          ) : null}
+        </div>
+        {save.isError ? (
+          <p className="err">{save.error instanceof ApiError ? save.error.message : "Could not save."}</p>
+        ) : null}
+        {testResult ? <p className={testResult.ok ? "note" : "err"}>{testResult.detail}</p> : null}
+      </div>
+
+      <div style={{ marginTop: "1.5rem", opacity: 0.55 }}>
+        <div className="spread">
+          <strong>Windows 365</strong>
+          <span className="pill off">coming soon</span>
+        </div>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0.3rem 0 0" }}>
+          Windows 365 for Agents isn’t configurable yet.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export function AdminPage() {
   return (
     <AuthedFrame requireAdmin>
       {() => (
         <div className="stack">
           <UsersCard />
+          <ComputersCard />
           <InvitesCard />
         </div>
       )}

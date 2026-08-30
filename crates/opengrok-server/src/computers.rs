@@ -18,6 +18,7 @@ use serde_json::json;
 
 use crate::account_api::admin_org;
 use crate::agui::AgUiState;
+use opengrok_box::Computer;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -31,6 +32,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/admin/computers", get(status))
         .route("/admin/computers/{kind}", post(set).delete(clear))
+        .route("/admin/computers/{kind}/test", post(test))
         .with_state(state)
 }
 
@@ -111,6 +113,82 @@ async fn set(
             )
                 .into_response()
         }
+    }
+}
+
+/// `POST /admin/computers/{kind}/test` — prove the org's credential works by provisioning a
+/// throwaway box and destroying it. This is the confidence check when a key is saved, and it
+/// settles box.ascii.dev's wire details by observation: if create+delete round-trips, the guessed
+/// create-reply id field and DELETE header are right.
+async fn test(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(kind): Path<String>,
+) -> Response {
+    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    if kind != "ascii" {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "only box.ascii.dev (ascii) can be tested yet",
+        )
+            .into_response();
+    }
+    let Some(vault) = state.vault.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the credential vault is not configured on this server",
+        )
+            .into_response();
+    };
+    let key = match state
+        .auth
+        .store
+        .org_computer_secret(vault, org_id.as_str(), "ascii")
+        .await
+    {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "save a box.ascii.dev key first, then test it",
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not read the key").into_response();
+        }
+    };
+
+    let boxes = opengrok_box::AsciiBoxes::new(key);
+    match boxes.create(Some(60)).await {
+        Ok(box_id) => {
+            let destroyed = boxes.destroy(&box_id).await;
+            tracing::info!(
+                box_id = %box_id,
+                destroyed = destroyed.is_ok(),
+                "box.ascii.dev test connection round-trip"
+            );
+            match destroyed {
+                Ok(()) => Json(json!({
+                    "ok": true,
+                    "detail": "Created and destroyed a box — box.ascii.dev is reachable and the key works.",
+                }))
+                .into_response(),
+                Err(error) => Json(json!({
+                    "ok": false,
+                    "detail": format!("Created a box ({box_id}) but could not delete it: {error}."),
+                }))
+                .into_response(),
+            }
+        }
+        Err(error) => Json(json!({
+            "ok": false,
+            "detail": format!("Could not create a box: {error}"),
+        }))
+        .into_response(),
     }
 }
 
