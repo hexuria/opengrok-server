@@ -1069,6 +1069,57 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- The account's last computer-provisioning error ----
+
+    pub async fn set_account_computer_error(
+        &self,
+        account_id: &str,
+        code: &str,
+        message: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into account_computer_error (account_id, code, message, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id) do update set
+               code = excluded.code, message = excluded.message, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(code)
+        .bind(message)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's last provisioning error as (code, message), or None when it has none.
+    pub async fn account_computer_error(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row =
+            sqlx::query("select code, message from account_computer_error where account_id = $1")
+                .bind(account_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("code")?,
+                row.try_get::<String, _>("message")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn clear_account_computer_error(&self, account_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from account_computer_error where account_id = $1")
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // ---- The account's one shared computer (1 account = 1 computer) ----
 
     /// The account's computer, if it has one — the box id and its kind.

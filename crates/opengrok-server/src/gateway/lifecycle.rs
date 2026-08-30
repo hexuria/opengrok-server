@@ -197,10 +197,13 @@ async fn hire(
     // Report a failed box the way REST does — without failing the create.
     let (code, mut reply) = agent_reply(state, id.as_str()).await;
     if code == 200
-        && let Some(error) = provisioned.error
+        && provisioned.error.is_some()
         && let Some(object) = reply.as_object_mut()
     {
-        object.insert("computerError".to_string(), json!(error));
+        object.insert(
+            "computerError".to_string(),
+            provision::error_json(&provisioned.error),
+        );
     }
     (code, reply)
 }

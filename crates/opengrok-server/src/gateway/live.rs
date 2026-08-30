@@ -138,9 +138,25 @@ pub async fn roster_rows(state: &GatewayState) -> Result<Vec<Value>, opengrok_st
         return Ok(Vec::new());
     };
     let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;
+    // The account's provisioning error (if any) is stamped on its BOXLESS agents, so the roster can
+    // say why a bot has no computer. An agent that has a box carries null.
+    let account_error = state
+        .agui
+        .auth
+        .store
+        .account_computer_error(account.id.as_str())
+        .await
+        .ok()
+        .flatten();
     let mut rows = Vec::new();
     for view in coworkers.iter().filter(|view| !view.retired) {
-        rows.push(live_summary(state, view).await);
+        let mut row = live_summary(state, view).await;
+        row["computerError"] = if view.box_id.is_none() {
+            crate::agui::provision::error_json(&account_error)
+        } else {
+            Value::Null
+        };
+        rows.push(row);
     }
     Ok(rows)
 }

@@ -15,6 +15,8 @@ use opengrok_box::Computer;
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerEvent};
 use opengrok_core::id::{AccountId, BoxId};
 
+use serde_json::{Value, json};
+
 use crate::agui::AgUiState;
 
 /// The org that owns an account, if any — the key to which computer credentials apply.
@@ -97,15 +99,38 @@ pub struct Provisioned {
     pub events: Vec<CoworkerEvent>,
     /// The account's box id, for the coworker view (`None` when none/failed).
     pub box_id: Option<BoxId>,
-    /// A client-readable reason the box could not be given — never fatal to the hire.
-    pub error: Option<String>,
+    /// Why the box could not be given, as (code, message) — never fatal to the hire. `code` is one
+    /// of the seven stable codes; `message` is the human-readable reason.
+    pub error: Option<(String, String)>,
 }
 
-fn failed(error: impl Into<String>) -> Provisioned {
+/// Record a provisioning failure at the ACCOUNT level (so a boxless account can say why before any
+/// agent exists) and return it. Never fatal — the hire stands, boxless.
+async fn record_error(
+    state: &AgUiState,
+    account_id: &AccountId,
+    code: &str,
+    message: &str,
+    at_ms: i64,
+) -> Provisioned {
+    let _ = state
+        .auth
+        .store
+        .set_account_computer_error(account_id.as_str(), code, message, at_ms)
+        .await;
     Provisioned {
         events: Vec::new(),
         box_id: None,
-        error: Some(error.into()),
+        error: Some((code.to_string(), message.to_string())),
+    }
+}
+
+/// Render a provisioning error as the client contract `{code, message}`, or null when there is
+/// none. The same shape on every surface: create responses, listOpenGrokComputers, and agent rows.
+pub fn error_json(error: &Option<(String, String)>) -> Value {
+    match error {
+        Some((code, message)) => json!({ "code": code, "message": message }),
+        None => Value::Null,
     }
 }
 
@@ -127,9 +152,19 @@ pub async fn ensure_account_computer(
             let org_id = account_org(state, account_id).await;
             let kind = kind_for_new(state, org_id.as_deref()).await;
             let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
-                return failed(
+                let code = if kind == "none" {
+                    "no_org_key"
+                } else {
+                    "not_supported"
+                };
+                return record_error(
+                    state,
+                    account_id,
+                    code,
                     "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard",
-                );
+                    at_ms,
+                )
+                .await;
             };
             match provider.create(None).await {
                 Ok(box_id) => {
@@ -137,14 +172,33 @@ pub async fn ensure_account_computer(
                         .set_account_computer(account_id.as_str(), &box_id, kind, at_ms)
                         .await
                     {
-                        return failed(error.to_string());
+                        return record_error(
+                            state,
+                            account_id,
+                            "unknown",
+                            &error.to_string(),
+                            at_ms,
+                        )
+                        .await;
                     }
                     box_id
                 }
-                Err(error) => return failed(error.to_string()),
+                // The box provider named its own failure; map it to a stable code.
+                Err(error) => {
+                    return record_error(
+                        state,
+                        account_id,
+                        error.code(),
+                        &error.to_string(),
+                        at_ms,
+                    )
+                    .await;
+                }
             }
         }
-        Err(error) => return failed(error.to_string()),
+        Err(error) => {
+            return record_error(state, account_id, "unknown", &error.to_string(), at_ms).await;
+        }
     };
 
     // Every agent shares the account's one box.
@@ -158,13 +212,17 @@ pub async fn ensure_account_computer(
             for event in &events {
                 coworker.apply(event);
             }
+            // The account has a computer now — clear any stale provisioning error.
+            let _ = store
+                .clear_account_computer_error(account_id.as_str())
+                .await;
             Provisioned {
                 events,
                 box_id: Some(box_id),
                 error: None,
             }
         }
-        Err(error) => failed(error.to_string()),
+        Err(error) => record_error(state, account_id, "unknown", &error.to_string(), at_ms).await,
     }
 }
 

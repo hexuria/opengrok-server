@@ -61,6 +61,39 @@ create table if not exists account_computer (
     updated_at_ms bigint not null
 );
 
+-- A computer keyed by the SCOPE that shares it: 'org' (one box for the whole org), 'account' (one
+-- per member, the default), or 'bot' (a dedicated box per bot). Supersedes account_computer, which
+-- is the 'account' scope; kept above for the rows already written under it.
+-- The last provisioning failure for an account's computer, so a boxless account can say WHY —
+-- surfaced on listOpenGrokComputers (top-level) and stamped on the account's boxless agents.
+-- Cleared when a computer is provisioned. {code, message}; code is one of the seven stable codes.
+create table if not exists account_computer_error (
+    account_id    text   primary key,
+    code          text   not null,
+    message       text   not null,
+    updated_at_ms bigint not null
+);
+
+create table if not exists scoped_computer (
+    scope         text   not null,
+    scope_id      text   not null,
+    box_id        text   not null,
+    kind          text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope, scope_id)
+);
+
+-- How an org shares computers, and per-account overrides. scope 'org' with the org id is the org
+-- default; scope 'account' with an account id overrides it for that member. mode is
+-- 'per-org' | 'per-account' | 'per-bot'. Absent ⇒ the built-in default (per-account).
+create table if not exists computer_sharing (
+    scope         text   not null,
+    scope_id      text   not null,
+    mode          text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope, scope_id)
+);
+
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
 -- An authentication that happened. The token is NOT here — it is in `secret_store`, encrypted, and

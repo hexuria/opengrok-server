@@ -336,10 +336,13 @@ async fn grok_bot(
                 "agent": agent_json(&view, Some(&profile)),
                 "harness": "GROK_BOT_AGENT_HARNESS_KIND_BOX",
             });
-            if let Some(error) = provisioned.error
+            if provisioned.error.is_some()
                 && let Some(object) = reply.as_object_mut()
             {
-                object.insert("computerError".to_string(), json!(error));
+                object.insert(
+                    "computerError".to_string(),
+                    crate::agui::provision::error_json(&provisioned.error),
+                );
             }
             connect_ok(reply)
         }
@@ -589,7 +592,15 @@ async fn grok_bot(
                 "state": "not-configured",
                 "configured": false,
             }));
-            connect_ok(json!({ "computers": computers }))
+            let account_error = store
+                .account_computer_error(account_id.as_str())
+                .await
+                .ok()
+                .flatten();
+            connect_ok(json!({
+                "computers": computers,
+                "computerError": crate::agui::provision::error_json(&account_error),
+            }))
         }
 
         "SetGrokBotAgentClientState" => {

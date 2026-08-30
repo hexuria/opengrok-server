@@ -455,7 +455,7 @@ pub async fn hire(
             "name": view.name,
             "model": view.model,
             "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": computer_error,
+            "computerError": provision::error_json(&computer_error),
         })),
     )
         .into_response()

@@ -53,6 +53,22 @@ pub enum BoxError {
     NoSuchBox,
 }
 
+impl BoxError {
+    /// A stable code the client maps to copy, independent of the (rewordable) message. Matches the
+    /// server/client contract: invalid_key | quota_exceeded | provider_unreachable | provider_error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            BoxError::Unreachable(_) => "provider_unreachable",
+            BoxError::Refused { status, .. } if *status == 401 || *status == 403 => "invalid_key",
+            BoxError::Refused { status, .. } if *status == 402 || *status == 429 => {
+                "quota_exceeded"
+            }
+            BoxError::Refused { .. } => "provider_error",
+            BoxError::NoSuchBox => "provider_error",
+        }
+    }
+}
+
 pub type BoxResult<T> = std::result::Result<T, BoxError>;
 
 /// A computer a coworker can work on.
