@@ -3,6 +3,7 @@
 //! `docs/GOAL.md` slice 1. The client's whole auth backend is repointed with one environment
 //! variable, so this module is the entire sign-in story for the desktop app.
 
+pub mod cookies;
 pub mod identity;
 pub mod pages;
 pub mod password;

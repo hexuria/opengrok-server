@@ -95,6 +95,11 @@ pub fn router(state: AuthState) -> Router {
             get(login_deep_control).post(login_submit),
         )
         .route("/auth/poll", get(auth_poll))
+        // The web console's cookie login leg — a browser signs in with credentials and
+        // the session rides in httpOnly cookies, never a header the page can read.
+        .route("/auth/login", post(login_cookie))
+        .route("/auth/logout", post(logout_cookie))
+        .route("/auth/refresh", post(refresh_cookie))
         .route("/auth/signup", post(super::identity::signup))
         .route("/auth/verify", get(super::identity::verify_email))
         .route(
@@ -172,28 +177,10 @@ pub async fn login_submit(
 ) -> Response {
     let refuse = |message: &str| super::pages::login(&form.challenge, &form.uuid, Some(message));
 
-    let Ok(Some(view)) = state.store.account_by_email(&form.email).await else {
-        // Same message as a bad password: an attacker must not learn which emails exist.
-        return refuse("Wrong email or password.");
+    let view = match authenticate(&state, &form.email, &form.password).await {
+        Ok(view) => view,
+        Err((_, message)) => return refuse(&message),
     };
-    let Ok((account, _)) = state.store.load_account(&view.id).await else {
-        return refuse("Wrong email or password.");
-    };
-    let hash = match account.credential_login_ready() {
-        Ok(hash) => hash.to_string(),
-        Err(opengrok_core::account::AccountError::NotVerified) => {
-            return refuse("Your email is not verified yet. Check your inbox for the link.");
-        }
-        Err(opengrok_core::account::AccountError::NotEnabled) => {
-            return refuse("Your account is awaiting an administrator's approval.");
-        }
-        // NoCredentials (a dev/session-only account) reads as wrong credentials — it has no
-        // password to log in with.
-        Err(_) => return refuse("Wrong email or password."),
-    };
-    if !super::password::verify_password(&form.password, &hash) {
-        return refuse("Wrong email or password.");
-    }
 
     // Authenticated. Bind the uuid to this account — poll will now complete for the matching
     // verifier. The challenge was registered on GET; if it has expired, ask them to retry.
@@ -222,6 +209,153 @@ pub async fn login_submit(
             view.email
         ),
     )
+}
+
+/// Check an email + password against a credential account. `Ok(view)` on success; `Err((status,
+/// message))` is a client-readable refusal naming which distinct reason applied — unverified, not
+/// enabled, or wrong credentials — the same distinctions the styled login shows. Shared by the
+/// desktop PKCE form and the browser console's cookie login.
+async fn authenticate(
+    state: &AuthState,
+    email: &str,
+    password: &str,
+) -> Result<opengrok_core::account::AccountView, (StatusCode, String)> {
+    let wrong = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Wrong email or password.".to_string(),
+        )
+    };
+    let Ok(Some(view)) = state.store.account_by_email(email).await else {
+        // Same message as a bad password: an attacker must not learn which emails exist.
+        return Err(wrong());
+    };
+    let Ok((account, _)) = state.store.load_account(&view.id).await else {
+        return Err(wrong());
+    };
+    let hash = match account.credential_login_ready() {
+        Ok(hash) => hash.to_string(),
+        Err(AccountError::NotVerified) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Your email is not verified yet. Check your inbox for the link.".to_string(),
+            ));
+        }
+        Err(AccountError::NotEnabled) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Your account is awaiting an administrator's approval.".to_string(),
+            ));
+        }
+        // NoCredentials (a dev/session-only account) reads as wrong credentials — it has no
+        // password to log in with.
+        Err(_) => return Err(wrong()),
+    };
+    if !super::password::verify_password(password, &hash) {
+        return Err(wrong());
+    }
+    Ok(view)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookieLoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+/// `POST /auth/login` — the web console's direct credential login. Authenticates, mints a session,
+/// and stores it in httpOnly cookies; the body carries only the email, never a token. Distinct
+/// from the desktop client's PKCE `/loginDeepControl`, which is untouched.
+pub async fn login_cookie(
+    State(state): State<AuthState>,
+    Json(req): Json<CookieLoginRequest>,
+) -> Response {
+    let view = match authenticate(&state, &req.email, &req.password).await {
+        Ok(view) => view,
+        Err((status, message)) => {
+            return (status, Json(serde_json::json!({ "error": message }))).into_response();
+        }
+    };
+    match mint_session(&state, &view.email, view.plan, view.trial).await {
+        Ok((access, refresh)) => session_cookie_response(
+            StatusCode::OK,
+            serde_json::json!({ "email": view.email }),
+            &access,
+            &refresh,
+        ),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `POST /auth/logout` — clear the session cookies. The access token expires on its own within the
+/// hour; dropping the cookies is what ends the browser's session now.
+pub async fn logout_cookie() -> Response {
+    use super::cookies::{ACCESS_COOKIE, REFRESH_COOKIE, clear_cookie};
+    let mut response = (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response();
+    append_cookie(&mut response, &clear_cookie(ACCESS_COOKIE));
+    append_cookie(&mut response, &clear_cookie(REFRESH_COOKIE));
+    response
+}
+
+/// `POST /auth/refresh` — the console's rotation. Reads the refresh cookie, rotates the session,
+/// and re-sets both cookies. The SPA calls this once on a 401 and retries the original request.
+pub async fn refresh_cookie(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    use super::cookies::{ACCESS_COOKIE, REFRESH_COOKIE, clear_cookie, read_cookie};
+    let Some(refresh) = read_cookie(&headers, REFRESH_COOKIE) else {
+        return (StatusCode::UNAUTHORIZED, "no session").into_response();
+    };
+    match rotate(&state, refresh).await {
+        Ok((access, new_refresh)) => session_cookie_response(
+            StatusCode::OK,
+            serde_json::json!({ "ok": true }),
+            &access,
+            &new_refresh,
+        ),
+        Err(_) => {
+            // The refresh token is not ours to honour — clear the stale cookies so the SPA stops
+            // retrying and shows the sign-in page.
+            let mut response = (StatusCode::UNAUTHORIZED, "session expired").into_response();
+            append_cookie(&mut response, &clear_cookie(ACCESS_COOKIE));
+            append_cookie(&mut response, &clear_cookie(REFRESH_COOKIE));
+            response
+        }
+    }
+}
+
+/// A JSON response that also sets both session cookies.
+fn session_cookie_response(
+    status: StatusCode,
+    body: serde_json::Value,
+    access: &str,
+    refresh: &str,
+) -> Response {
+    use super::cookies::{
+        ACCESS_COOKIE, REFRESH_COOKIE, REFRESH_COOKIE_MAX_AGE_SECONDS, set_cookie,
+    };
+    let mut response = (status, Json(body)).into_response();
+    append_cookie(
+        &mut response,
+        &set_cookie(ACCESS_COOKIE, access, ACCESS_TOKEN_TTL_SECONDS),
+    );
+    append_cookie(
+        &mut response,
+        &set_cookie(REFRESH_COOKIE, refresh, REFRESH_COOKIE_MAX_AGE_SECONDS),
+    );
+    response
+}
+
+/// Append one `Set-Cookie` header. A value that will not parse as a header is dropped rather than
+/// panicked on — our cookie values are token text, so this only guards against the impossible.
+fn append_cookie(response: &mut Response, value: &str) {
+    if let Ok(header) = axum::http::HeaderValue::from_str(value) {
+        response
+            .headers_mut()
+            .append(axum::http::header::SET_COOKIE, header);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -485,7 +619,19 @@ pub async fn oauth_token(
         )));
     }
 
-    let presented_hash = hash_refresh_token(&request.refresh_token);
+    let (access_token, refresh_token) = rotate(&state, request.refresh_token).await?;
+    Ok(Json(OAuthTokenReply {
+        access_token,
+        refresh_token,
+    }))
+}
+
+/// Rotate a refresh token into a fresh `{access, refresh}` pair. The shared core of both the
+/// desktop client's `/oauth/token` and the browser console's cookie `/auth/refresh`: look the
+/// presented token up by hash, append the rotation to the session's log, and mint a new access
+/// token bound to that session.
+async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, String), AuthFailure> {
+    let presented_hash = hash_refresh_token(&refresh_token);
     let account_id = state
         .store
         .account_by_refresh_hash(&presented_hash)
@@ -540,8 +686,5 @@ pub async fn oauth_token(
         )
         .map_err(|error| AuthFailure::Unavailable(error.to_string()))?;
 
-    Ok(Json(OAuthTokenReply {
-        access_token,
-        refresh_token: new_refresh,
-    }))
+    Ok((access_token, new_refresh))
 }

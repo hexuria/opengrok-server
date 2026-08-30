@@ -25,14 +25,39 @@ pub use auth::{AuthState, TokenMinter};
 /// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
 /// smoke script was already checking.
 pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
-    Router::new()
+    let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
         .merge(seamb::router(gateway))
         .merge(auth::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
-        .merge(connections::routes::router(state))
+        .merge(connections::routes::router(state));
+    mount_web_console(app)
+}
+
+/// Serve the built web console (the Bun/Vite SPA) at `/console`, if `OG_WEB_CONSOLE_DIR` names a
+/// directory that exists. Absent or missing ⇒ no console route, which is the right default for a
+/// server that has not built the SPA (the smokes and tests run this way) rather than a boot error.
+///
+/// The fallback to `index.html` is what makes client-side routes deep-linkable: a GET for
+/// `/console/account` finds no such file, so `ServeDir` hands off to the SPA's entry document and
+/// the router inside the page takes over.
+fn mount_web_console(app: Router) -> Router {
+    use tower_http::services::{ServeDir, ServeFile};
+    let Some(dir) = std::env::var("OG_WEB_CONSOLE_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+    else {
+        return app;
+    };
+    if !std::path::Path::new(&dir).is_dir() {
+        tracing::warn!(%dir, "OG_WEB_CONSOLE_DIR is set but not a directory — /console is off");
+        return app;
+    }
+    let index = std::path::Path::new(&dir).join("index.html");
+    let serve = ServeDir::new(&dir).not_found_service(ServeFile::new(index));
+    app.nest_service("/console", serve)
 }
 
 pub(crate) use auth::password::hash_password as password_hash;

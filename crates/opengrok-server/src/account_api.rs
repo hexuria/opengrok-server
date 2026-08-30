@@ -46,14 +46,21 @@ async fn caller(
 ) -> Result<(AccountId, Account, i64), Response> {
     // account_from_bearer lives on AgUiState; the auth store is the same store, so build the check
     // against it directly rather than threading AgUiState in.
+    // The desktop/API clients present `Authorization: Bearer`; the browser console presents the
+    // `og_access` httpOnly cookie. Either is a valid token source — the cookie is just the header
+    // the browser can carry on navigation without a script ever touching the token.
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| {
+            crate::auth::cookies::read_cookie(headers, crate::auth::cookies::ACCESS_COOKIE)
+        });
     let Some(token) = token else {
         return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
     };
-    let Ok(claims) = state.minter.verify_access(token) else {
+    let Ok(claims) = state.minter.verify_access(&token) else {
         return Err((StatusCode::UNAUTHORIZED, "bad token").into_response());
     };
     let id = AccountId::from_stored(claims.sub);

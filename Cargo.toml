@@ -28,7 +28,7 @@ license = "MIT"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors"] }
+tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors", "fs"] }
 # 0.13 to match rmcp's, so the binary carries ONE http client and one TLS stack rather than two.
 # Its feature names differ from 0.12: `rustls-tls` became `rustls`, and `form` and `query` are now
 # opt-in rather than always present.
