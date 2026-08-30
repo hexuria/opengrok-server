@@ -85,10 +85,14 @@ fn refusal(code: u16, message: &str) -> Response {
 
 /// `GET /health` — the supervisor probes this on a 1500 ms deadline and only accepts
 /// `ok === true`. The busy flag is real: it reports whether any run is live right now.
-async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
-    if let Some((code, message)) = refuse(&state, &headers) {
-        return refusal(code, message);
-    }
+///
+/// UNAUTHENTICATED, on purpose. The client's reachability probe (`host-supervisor.ts`
+/// `fetchHealth`) sends no Authorization header — upstream's gateway serves health openly, and a
+/// liveness endpoint whose whole job is to answer "I am up" must be probeable without a token, or a
+/// bearered host looks permanently unreachable the instant the SSE stream drops. It reveals only
+/// that the server is up (plus pid/busy/startedAt — nothing secret), so it sits OUTSIDE `refuse`
+/// while every driving surface (`/api`, `/events`) stays behind it.
+async fn health(State(state): State<GatewayState>) -> Response {
     let busy = state
         .agui
         .auth
