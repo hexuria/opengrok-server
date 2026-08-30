@@ -87,4 +87,11 @@ pub trait Computer: Send + Sync {
 
     /// Permanent. The disk goes with it.
     async fn destroy(&self, box_id: &str) -> BoxResult<()>;
+
+    /// Which kind of computer this is, for advertising the options to a client:
+    /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
+    /// local-docker; the ascii provider overrides it.
+    fn kind(&self) -> &'static str {
+        "local-docker"
+    }
 }

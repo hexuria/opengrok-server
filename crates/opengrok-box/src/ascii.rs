@@ -207,6 +207,10 @@ impl HostedPort {
 
 #[async_trait]
 impl Computer for AsciiBoxes {
+    fn kind(&self) -> &'static str {
+        "ascii"
+    }
+
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
         let response = self
             .http

@@ -81,6 +81,13 @@ extra2=$(rpc GrokBotService ListGrokBotTemplates "$tok")
 [ "$extra2" = "{}" ] || fail "expected {}, got: $extra2"
 ok "{} for the methods the mock does not model either"
 
+echo "4b. ListGrokBotUserComputers advertises the real computer options"
+computers=$(rpc GrokBotService ListGrokBotUserComputers "$tok")
+echo "$computers" | jq -e '.computers | map(.kind) | sort == ["ascii","local-docker","windows365"]' >/dev/null || fail "computer kinds: $computers"
+echo "$computers" | jq -e '.computers[] | select(.kind=="local-docker") | .configured == true and (.label=="Local VM (on the server)")' >/dev/null || fail "Local VM should be configured with its label: $computers"
+echo "$computers" | jq -e '.computers[] | select(.kind=="windows365") | .configured == false' >/dev/null || fail "windows365 should be a placeholder: $computers"
+ok "Local VM configured; box/windows365 advertised as unconfigured placeholders"
+
 echo "5. an agent round-trips: create, list, update, delete"
 created=$(rpc GrokBotService CreateGrokBotAgent "$tok" \
   '{"name":"Backhand","description":"seam B born","title":"Analyst","avatarShape":"squircle","avatarColor":"teal"}')

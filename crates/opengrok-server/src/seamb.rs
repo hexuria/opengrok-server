@@ -559,7 +559,39 @@ async fn grok_bot(
             }
         }
 
-        "ListGrokBotUserComputers" => connect_ok(json!({ "computers": [] })),
+        "ListGrokBotUserComputers" => {
+            // Advertise the computer OPTIONS this caller can put a bot on. Local VM (a VM on the
+            // server host) needs no credential and is always offered; box.ascii.dev is offered as
+            // configured only when this server actually has an ascii provider (per-org credentials
+            // land next); Windows 365 is a placeholder until it is built. The client renders a
+            // `configured:false` option greyed with "set up by your org admin" rather than hiding it.
+            let ascii_ready = state.agui.computer.as_ref().map(|c| c.kind()) == Some("ascii");
+            connect_ok(json!({
+                "computers": [
+                    {
+                        "id": "local-docker",
+                        "label": "Local VM (on the server)",
+                        "kind": "local-docker",
+                        "state": "available",
+                        "configured": true,
+                    },
+                    {
+                        "id": "ascii",
+                        "label": "box.ascii.dev",
+                        "kind": "ascii",
+                        "state": if ascii_ready { "available" } else { "not-configured" },
+                        "configured": ascii_ready,
+                    },
+                    {
+                        "id": "windows365",
+                        "label": "Windows 365",
+                        "kind": "windows365",
+                        "state": "not-configured",
+                        "configured": false,
+                    },
+                ]
+            }))
+        }
 
         "SetGrokBotAgentClientState" => {
             let agent = args
