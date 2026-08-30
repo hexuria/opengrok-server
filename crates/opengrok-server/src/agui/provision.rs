@@ -14,7 +14,71 @@ use std::sync::Arc;
 use opengrok_box::Computer;
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerEvent};
 use opengrok_core::id::{AccountId, BoxId};
-use opengrok_store::PgStore;
+
+use crate::agui::AgUiState;
+
+/// The org that owns an account, if any — the key to which computer credentials apply.
+async fn account_org(state: &AgUiState, account_id: &AccountId) -> Option<String> {
+    let (account, _) = state.auth.store.load_account(account_id).await.ok()?;
+    account.org_id
+}
+
+/// The provider for a computer of `kind` in this org: an AsciiBoxes built from the org's sealed
+/// box.ascii.dev key for `"ascii"`, or a fresh server-host Docker for `"local-docker"`. `None`
+/// when the kind cannot be served (e.g. `"ascii"` but the org has no key or the vault is absent).
+/// The SAME provider must create and run a box, so both paths call this.
+pub async fn provider_for(
+    state: &AgUiState,
+    org_id: Option<&str>,
+    kind: &str,
+) -> Option<Arc<dyn Computer>> {
+    match kind {
+        "ascii" => {
+            let vault = state.vault.as_ref()?;
+            let org = org_id?;
+            let key = state
+                .auth
+                .store
+                .org_computer_secret(vault, org, "ascii")
+                .await
+                .ok()
+                .flatten()?;
+            Some(Arc::new(opengrok_box::AsciiBoxes::new(key)))
+        }
+        "local-docker" => Some(Arc::new(opengrok_box::DockerComputer::new())),
+        _ => None,
+    }
+}
+
+/// The provider for an account's existing computer of `kind`, resolving the account's org itself.
+/// The run path uses this so tools execute on the same provider that created the box.
+pub async fn provider_for_account(
+    state: &AgUiState,
+    account_id: &AccountId,
+    kind: &str,
+) -> Option<Arc<dyn Computer>> {
+    let org_id = account_org(state, account_id).await;
+    provider_for(state, org_id.as_deref(), kind).await
+}
+
+/// The kind a NEW account computer should be, from the org's CURRENT config: a box.ascii.dev box
+/// when the org has configured a key, else a Local VM on the server host.
+pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static str {
+    if let (Some(vault), Some(org)) = (state.vault.as_ref(), org_id)
+        && state
+            .auth
+            .store
+            .org_computer_secret(vault, org, "ascii")
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        "ascii"
+    } else {
+        "local-docker"
+    }
+}
 
 /// The outcome of assigning the account's computer to a freshly-hired coworker.
 pub struct Provisioned {
@@ -38,23 +102,26 @@ fn failed(error: impl Into<String>) -> Provisioned {
 /// first agent creates the box and records it; every later agent reuses the same box. Applies the
 /// assignment to `coworker`; returns the events to persist, the box id, and any error. Never raises.
 pub async fn ensure_account_computer(
-    computer: Option<&Arc<dyn Computer>>,
-    store: &PgStore,
+    state: &AgUiState,
     account_id: &AccountId,
     coworker: &mut Coworker,
     at_ms: i64,
 ) -> Provisioned {
-    // Reuse the account's existing computer, or create it on this — the account's first — agent.
+    let store = &state.auth.store;
+    // Reuse the account's existing computer, or create it on this — the account's first — agent,
+    // as a box.ascii.dev box when the org has a key, else a Local VM on the server.
     let box_id = match store.account_computer(account_id.as_str()).await {
         Ok(Some((box_id, _kind))) => box_id,
         Ok(None) => {
-            let Some(computer) = computer else {
-                return failed("this server has no computer provider configured");
+            let org_id = account_org(state, account_id).await;
+            let kind = kind_for_new(state, org_id.as_deref()).await;
+            let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
+                return failed("no computer provider available for this account's org");
             };
-            match computer.create(None).await {
+            match provider.create(None).await {
                 Ok(box_id) => {
                     if let Err(error) = store
-                        .set_account_computer(account_id.as_str(), &box_id, computer.kind(), at_ms)
+                        .set_account_computer(account_id.as_str(), &box_id, kind, at_ms)
                         .await
                     {
                         return failed(error.to_string());
@@ -91,11 +158,8 @@ pub async fn ensure_account_computer(
 /// Tear down the account's computer once its LAST agent is gone: if no non-retired coworkers remain
 /// for the account, destroy the box (best-effort) and clear the mapping. A no-op while any agent
 /// still shares it. Call AFTER the deleted agent's retirement is persisted, so the count is current.
-pub async fn teardown_account_computer_if_last(
-    computer: Option<&Arc<dyn Computer>>,
-    store: &PgStore,
-    account_id: &AccountId,
-) {
+pub async fn teardown_account_computer_if_last(state: &AgUiState, account_id: &AccountId) {
+    let store = &state.auth.store;
     match store.coworkers_for(account_id).await {
         // Still has at least one agent — keep the shared box.
         Ok(rows) if !rows.is_empty() => return,
@@ -103,13 +167,14 @@ pub async fn teardown_account_computer_if_last(
         Err(_) => return,
         Ok(_) => {}
     }
-    let Ok(Some((box_id, _kind))) = store.account_computer(account_id.as_str()).await else {
+    let Ok(Some((box_id, kind))) = store.account_computer(account_id.as_str()).await else {
         return;
     };
-    // Best-effort destroy: a box that will not die must not block clearing the mapping, but we log
-    // it so a leak is visible.
-    if let Some(computer) = computer
-        && let Err(error) = computer.destroy(&box_id).await
+    // Destroy on the SAME provider that made it (by its recorded kind). Best-effort: a box that
+    // will not die must not block clearing the mapping, but we log it so a leak is visible.
+    let org_id = account_org(state, account_id).await;
+    if let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await
+        && let Err(error) = provider.destroy(&box_id).await
     {
         tracing::warn!(%error, box_id, "could not destroy the account's box on last-agent delete; clearing the mapping anyway");
     }

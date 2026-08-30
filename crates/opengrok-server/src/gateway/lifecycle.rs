@@ -132,14 +132,8 @@ async fn hire(
 
     // 1 account = 1 computer: the account's first agent creates it, later agents share it. Every
     // create path uses the same helper. Non-fatal: a failure leaves a boxless agent and a reason.
-    let provisioned = provision::ensure_account_computer(
-        state.agui.computer.as_ref(),
-        &state.agui.auth.store,
-        account_id,
-        &mut coworker,
-        at_ms,
-    )
-    .await;
+    let provisioned =
+        provision::ensure_account_computer(&state.agui, account_id, &mut coworker, at_ms).await;
     events.extend(provisioned.events);
 
     let view = opengrok_core::coworker::CoworkerView {
@@ -348,12 +342,7 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
         }
     }
     // The account's shared computer is destroyed only when its LAST agent has been deleted.
-    crate::agui::provision::teardown_account_computer_if_last(
-        state.agui.computer.as_ref(),
-        &state.agui.auth.store,
-        &account.id,
-    )
-    .await;
+    crate::agui::provision::teardown_account_computer_if_last(&state.agui, &account.id).await;
     live::emit_roster(state).await;
     (200, json!({ "deleted": deleted }))
 }

@@ -2,19 +2,24 @@
 //!
 //! 1 account = 1 computer: the first agent creates the box, a second agent REUSES it (same box id,
 //! no second container), and the box is destroyed only when the account's LAST agent is deleted.
-//! Skips loudly without a Docker daemon or OG_DATABASE_URL.
+//! With no vault/org key the provider resolves to a Local VM (server Docker), which is what this
+//! test exercises. Skips loudly without a Docker daemon or OG_DATABASE_URL.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::Arc;
 
-use opengrok_box::{Computer, DockerComputer};
 use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_harness::MockDoor;
+use opengrok_server::agui::AgUiState;
 use opengrok_server::agui::provision::{
     ensure_account_computer, teardown_account_computer_if_last,
 };
+use opengrok_server::auth::{AuthState, TokenMinter};
+use opengrok_server::connections::routes::Connectors;
 use opengrok_store::PgStore;
 
 macro_rules! database_or_skip {
@@ -45,30 +50,42 @@ fn container_exists(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn store(url: &str) -> PgStore {
+async fn test_state(database_url: &str) -> AgUiState {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
-        .connect(url)
+        .connect(database_url)
         .await
         .expect("connect");
     opengrok_store::migrations::run(&pool)
         .await
         .expect("migrations");
-    PgStore::new(pool)
+    let store = PgStore::new(pool);
+    let auth = AuthState::new(
+        store,
+        Arc::new(TokenMinter::new(b"box-teardown-test-secret-box-teardown")),
+        "host@og.local".to_string(),
+    );
+    AgUiState {
+        auth,
+        door: Arc::new(MockDoor::echoing()),
+        model: "oag/cheap".to_string(),
+        computer: None,
+        // No vault ⇒ no org box key ⇒ the provider is a Local VM (server Docker).
+        vault: None,
+        connectors: Connectors {
+            providers: Arc::new(BTreeMap::new()),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+        },
+        plugins: Arc::new(BTreeMap::new()),
+    }
 }
 
 /// Hire an agent for `account`, ensure the account's computer, and persist it. Returns its id and
 /// the assigned box id.
-async fn hire_agent(
-    store: &PgStore,
-    computer: &Arc<dyn Computer>,
-    account: &AccountId,
-    name: &str,
-) -> (CoworkerId, String) {
+async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (CoworkerId, String) {
     let id = CoworkerId::new();
     let mut coworker = Coworker::default();
-    let mut events = coworker
-        .clone()
+    let mut events = Coworker::default()
         .decide(CoworkerCommand::Hire {
             name: name.to_string(),
             model: "oag/cheap".to_string(),
@@ -78,8 +95,7 @@ async fn hire_agent(
     for event in &events {
         coworker.apply(event);
     }
-    let provisioned =
-        ensure_account_computer(Some(computer), store, account, &mut coworker, 2).await;
+    let provisioned = ensure_account_computer(state, account, &mut coworker, 2).await;
     assert!(
         provisioned.error.is_none(),
         "provision failed: {:?}",
@@ -95,15 +111,17 @@ async fn hire_agent(
         retired: false,
         updated_at_ms: 2,
     };
-    store
+    state
+        .auth
+        .store
         .append_coworker(&id, account, 0, &events, &view)
         .await
         .expect("append");
     (id, box_id)
 }
 
-async fn retire(store: &PgStore, account: &AccountId, id: &CoworkerId) {
-    let (loaded, seq) = store.load_coworker(id).await.expect("load");
+async fn retire(state: &AgUiState, account: &AccountId, id: &CoworkerId) {
+    let (loaded, seq) = state.auth.store.load_coworker(id).await.expect("load");
     let mut after = loaded;
     let events = after
         .decide(CoworkerCommand::Retire { at_ms: 9 })
@@ -119,7 +137,9 @@ async fn retire(store: &PgStore, account: &AccountId, id: &CoworkerId) {
         retired: true,
         updated_at_ms: 9,
     };
-    store
+    state
+        .auth
+        .store
         .append_coworker(id, account, seq, &events, &view)
         .await
         .expect("append retire");
@@ -132,18 +152,19 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
         eprintln!("skipping: no Docker daemon");
         return;
     }
-    let store = store(&database_url).await;
-    let docker: Arc<dyn Computer> = Arc::new(DockerComputer::new());
+    let state = test_state(&database_url).await;
     let account = AccountId::new();
 
     // First agent creates the account's box.
-    let (agent1, box1) = hire_agent(&store, &docker, &account, "One").await;
+    let (agent1, box1) = hire_agent(&state, &account, "One").await;
     assert!(
         container_exists(&box1),
         "the account's box should be running"
     );
     assert_eq!(
-        store
+        state
+            .auth
+            .store
             .account_computer(account.as_str())
             .await
             .expect("acct")
@@ -152,21 +173,23 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
     );
 
     // Second agent REUSES the same box — one account, one computer.
-    let (agent2, box2) = hire_agent(&store, &docker, &account, "Two").await;
+    let (agent2, box2) = hire_agent(&state, &account, "Two").await;
     assert_eq!(
         box2, box1,
         "the second agent must share the account's one box, not make another"
     );
 
     // Deleting the first agent leaves the box (the second still shares it).
-    retire(&store, &account, &agent1).await;
-    teardown_account_computer_if_last(Some(&docker), &store, &account).await;
+    retire(&state, &account, &agent1).await;
+    teardown_account_computer_if_last(&state, &account).await;
     assert!(
         container_exists(&box1),
         "the box survives while another agent shares it"
     );
     assert!(
-        store
+        state
+            .auth
+            .store
             .account_computer(account.as_str())
             .await
             .expect("acct")
@@ -174,21 +197,22 @@ async fn one_account_one_computer_shared_and_torn_down_on_last_delete() {
     );
 
     // Deleting the last agent destroys the box and clears the mapping.
-    retire(&store, &account, &agent2).await;
-    teardown_account_computer_if_last(Some(&docker), &store, &account).await;
+    retire(&state, &account, &agent2).await;
+    teardown_account_computer_if_last(&state, &account).await;
     assert!(
         !container_exists(&box1),
         "the account's box must be destroyed on last-agent delete"
     );
     assert!(
-        store
+        state
+            .auth
+            .store
             .account_computer(account.as_str())
             .await
             .expect("acct")
             .is_none()
     );
 
-    // Safety net: never leak the container even if an assert regresses.
     if container_exists(&box1) {
         let _ = Command::new("docker").args(["rm", "-f", &box1]).output();
     }

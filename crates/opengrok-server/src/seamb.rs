@@ -277,8 +277,7 @@ async fn grok_bot(
 
             // 1 account = 1 computer: first agent creates it, later agents share it.
             let provisioned = crate::agui::provision::ensure_account_computer(
-                state.agui.computer.as_ref(),
-                &store,
+                &state.agui,
                 &account_id,
                 &mut coworker,
                 at_ms,
@@ -440,12 +439,8 @@ async fn grok_bot(
                         .await;
                 }
             }
-            crate::agui::provision::teardown_account_computer_if_last(
-                state.agui.computer.as_ref(),
-                &store,
-                &account_id,
-            )
-            .await;
+            crate::agui::provision::teardown_account_computer_if_last(&state.agui, &account_id)
+                .await;
             connect_ok(json!({}))
         }
 
@@ -556,7 +551,19 @@ async fn grok_bot(
             // configured only when this server actually has an ascii provider (per-org credentials
             // land next); Windows 365 is a placeholder until it is built. The client renders a
             // `configured:false` option greyed with "set up by your org admin" rather than hiding it.
-            let ascii_ready = state.agui.computer.as_ref().map(|c| c.kind()) == Some("ascii");
+            // box.ascii.dev shows configured when THIS caller's org has set a key on the admin
+            // dashboard. Resolve the caller's org, then check its configured kinds.
+            let ascii_ready = match store.load_account(&account_id).await {
+                Ok((account, _)) => match account.org_id {
+                    Some(org) => store
+                        .org_computer_kinds(&org)
+                        .await
+                        .map(|kinds| kinds.iter().any(|kind| kind == "ascii"))
+                        .unwrap_or(false),
+                    None => false,
+                },
+                Err(_) => false,
+            };
             connect_ok(json!({
                 "computers": [
                     {

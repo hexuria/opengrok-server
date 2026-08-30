@@ -76,12 +76,21 @@ pub(crate) async fn tools_for_coworker(
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
 ) -> Option<ToolRunner> {
-    let computer = state.computer.as_ref()?;
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
     // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
     // model is told about but that always refuses is a dead end it keeps trying.
     coworker.computer()?;
+    // Resolve the provider for THIS account's computer by its recorded kind (a box.ascii.dev box
+    // via the org's key, or a Local VM), so tools run on the same provider that created the box.
+    let (_, kind) = state
+        .auth
+        .store
+        .account_computer(account_id.as_str())
+        .await
+        .ok()
+        .flatten()?;
+    let computer = super::provision::provider_for_account(state, account_id, &kind).await?;
 
     let policy = state
         .auth
@@ -94,8 +103,7 @@ pub(crate) async fn tools_for_coworker(
     let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
     Some(ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer.clone(), policy)
-            .with_plugin_tools(sessions, tools),
+        opengrok_tools::Executor::with_policy(computer, policy).with_plugin_tools(sessions, tools),
         opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
     ))
 }
@@ -380,14 +388,8 @@ pub async fn hire(
     // A computer, if asked for — via the shared helper so REST, gateway and seam-B create paths
     // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
     // 1 account = 1 computer: the account's first agent creates it, later agents share it.
-    let provisioned = provision::ensure_account_computer(
-        state.computer.as_ref(),
-        &state.auth.store,
-        &account_id,
-        &mut coworker,
-        at_ms,
-    )
-    .await;
+    let provisioned =
+        provision::ensure_account_computer(&state, &account_id, &mut coworker, at_ms).await;
     events.extend(provisioned.events);
     let computer_error = provisioned.error;
 
