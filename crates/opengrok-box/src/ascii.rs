@@ -12,7 +12,7 @@
 //!   DELETE /boxes/{id}                         destroy
 //!
 //! TWO SHAPES ARE NOT YET PINNED and are marked at their call sites rather than guessed: the field
-//! name carrying a created box's id, and the confirmation header `DELETE` requires. The first
+//! name carrying a created box's id, and the `X-Ascii-Confirm-Delete` header `DELETE` requires. The first
 //! slice's task is to hit a real box and write them down.
 //!
 //! THE FILESYSTEM PERSISTS ACROSS STOP AND RESUME. That is what makes this the right first
@@ -357,14 +357,13 @@ impl Computer for AsciiBoxes {
     }
 
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
-        // THE CONFIRMATION HEADER IS NOT PINNED. The reference says `DELETE` requires one but does
-        // not name it. Sent as the most likely spelling; if a real delete is refused, the error
-        // will say so, which is better than quietly not deleting and billing for a box forever.
+        // Confirmed against the live API (a real key, 2026-08-31): DELETE requires the header
+        // `X-Ascii-Confirm-Delete` set to the exact box id, else 409 delete_confirmation_required.
         let response = self
             .http
             .delete(self.url(&format!("/boxes/{box_id}")))
             .bearer_auth(&self.api_key)
-            .header("X-Confirm-Delete", box_id)
+            .header("X-Ascii-Confirm-Delete", box_id)
             .send()
             .await
             .map_err(|error| BoxError::Unreachable(error.to_string()))?;
