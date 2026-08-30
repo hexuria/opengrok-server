@@ -255,10 +255,11 @@ async fn grok_bot(
                 .filter(|id| !id.is_empty())
                 .map(|id| CoworkerId::from_stored(id.to_string()))
                 .unwrap_or_else(CoworkerId::new);
-            let events = match Coworker::default().decide(CoworkerCommand::Hire {
+            let at_ms = now_ms();
+            let mut events = match Coworker::default().decide(CoworkerCommand::Hire {
                 name: name.to_string(),
                 model: state.agui.model.clone(),
-                at_ms: now_ms(),
+                at_ms,
             }) {
                 Ok(events) => events,
                 Err(reason) => {
@@ -273,13 +274,34 @@ async fn grok_bot(
             for event in &events {
                 coworker.apply(event);
             }
+
+            // A computer of its own, if asked — the shared helper, same as REST and the gateway.
+            let wish = crate::agui::provision::ComputerWish {
+                with_computer: args
+                    .get("withComputer")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                shared_box_id: args
+                    .get("sharedBoxId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            let provisioned = crate::agui::provision::provision_computer(
+                state.agui.computer.as_ref(),
+                &mut coworker,
+                &wish,
+                at_ms,
+            )
+            .await;
+            events.extend(provisioned.events);
+
             let view = opengrok_core::coworker::CoworkerView {
                 id: id.clone(),
                 name: coworker.name.clone(),
                 model: coworker.model.clone(),
-                box_id: None,
+                box_id: coworker.computer().cloned(),
                 retired: false,
-                updated_at_ms: now_ms(),
+                updated_at_ms: at_ms,
             };
             if let Err(error) = store
                 .append_coworker(&id, &account_id, 0, &events, &view)
@@ -288,6 +310,30 @@ async fn grok_bot(
                 tracing::error!(%error, "could not hire over seam B");
                 return connect_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "hire failed");
             }
+
+            // Grant the builtin tools so a boxed coworker can actually use its computer.
+            let tools = opengrok_policy::ToolSet::only(
+                opengrok_tools::Executor::builtin_tool_names().to_vec(),
+            );
+            if let Err(error) = store
+                .grant_access(
+                    &account_id,
+                    &id,
+                    &tools,
+                    &tools,
+                    &opengrok_policy::ToolSet::None,
+                    at_ms,
+                )
+                .await
+            {
+                tracing::error!(%error, "could not grant access over seam B");
+                return connect_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "the coworker was created but could not be granted",
+                );
+            }
+
             let profile = json!({
                 "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
                 "title": args.get("title").and_then(Value::as_str).unwrap_or(""),
@@ -296,10 +342,16 @@ async fn grok_bot(
                 "role": args.get("role").and_then(Value::as_str).unwrap_or(""),
             });
             let _ = store.put_seamb_profile(&id, &profile, now_ms()).await;
-            connect_ok(json!({
+            let mut reply = json!({
                 "agent": agent_json(&view, Some(&profile)),
                 "harness": "GROK_BOT_AGENT_HARNESS_KIND_BOX",
-            }))
+            });
+            if let Some(error) = provisioned.error
+                && let Some(object) = reply.as_object_mut()
+            {
+                object.insert("computerError".to_string(), json!(error));
+            }
+            connect_ok(reply)
         }
 
         "UpdateGrokBotAgent" => {

@@ -18,9 +18,9 @@ use axum::{Json, Router};
 use futures::stream::{self, Stream};
 use opengrok_wire::agui::{Event, RunAgentInput};
 
+use super::provision;
 use crate::auth::AuthState;
-use opengrok_core::coworker::{BoxMode, CoworkerCommand, CoworkerView};
-use opengrok_core::id::BoxId;
+use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
 use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
@@ -383,39 +383,20 @@ pub async fn hire(
         coworker.apply(event);
     }
 
-    // A computer, if asked for and if we can make one. A failure here leaves a hired coworker
-    // without a box rather than failing the hire: the person still has their coworker, and the
-    // reason is in the reply.
-    let mut computer_error = None;
-    if request.with_computer || request.shared_box_id.is_some() {
-        let assignment = match (&request.shared_box_id, state.computer.as_ref()) {
-            // A shared box is named, not created: creating one per coworker is what "shared" is not.
-            (Some(box_id), _) => Ok((BoxId::from_stored(box_id.clone()), BoxMode::Shared)),
-            (None, Some(computer)) => computer
-                .create(None)
-                .await
-                .map(|id| (BoxId::from_stored(id), BoxMode::Dedicated))
-                .map_err(|error| error.to_string()),
-            (None, None) => Err("this server has no computer provider configured".to_string()),
-        };
-
-        match assignment {
-            Ok((box_id, mode)) => match coworker.decide(CoworkerCommand::AssignComputer {
-                box_id,
-                mode,
-                at_ms,
-            }) {
-                Ok(assigned) => {
-                    for event in &assigned {
-                        coworker.apply(event);
-                    }
-                    events.extend(assigned);
-                }
-                Err(error) => computer_error = Some(error.to_string()),
-            },
-            Err(error) => computer_error = Some(error),
-        }
-    }
+    // A computer, if asked for — via the shared helper so REST, gateway and seam-B create paths
+    // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
+    let provisioned = provision::provision_computer(
+        state.computer.as_ref(),
+        &mut coworker,
+        &provision::ComputerWish {
+            with_computer: request.with_computer,
+            shared_box_id: request.shared_box_id.clone(),
+        },
+        at_ms,
+    )
+    .await;
+    events.extend(provisioned.events);
+    let computer_error = provisioned.error;
 
     let view = CoworkerView {
         id: coworker_id.clone(),

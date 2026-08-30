@@ -112,12 +112,15 @@ async fn hire(
     name: &str,
     args: &Value,
 ) -> (u16, Value) {
+    use crate::agui::provision::{self, ComputerWish};
     use opengrok_core::coworker::{Coworker, CoworkerCommand};
+
     let id = CoworkerId::new();
-    let events = match Coworker::default().decide(CoworkerCommand::Hire {
+    let at_ms = now_ms();
+    let mut events = match Coworker::default().decide(CoworkerCommand::Hire {
         name: name.to_string(),
         model: state.agui.model.clone(),
-        at_ms: now_ms(),
+        at_ms,
     }) {
         Ok(events) => events,
         Err(reason) => return (400, json!({ "error": reason.to_string() })),
@@ -126,13 +129,32 @@ async fn hire(
     for event in &events {
         coworker.apply(event);
     }
+
+    // A computer of its own, if asked — the same helper REST and seam-B use, so the desktop's
+    // create path provisions a box identically. Non-fatal: a failure leaves the coworker boxless
+    // and puts the reason in the reply.
+    let wish = ComputerWish {
+        with_computer: args
+            .get("withComputer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        shared_box_id: args
+            .get("sharedBoxId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let provisioned =
+        provision::provision_computer(state.agui.computer.as_ref(), &mut coworker, &wish, at_ms)
+            .await;
+    events.extend(provisioned.events);
+
     let view = opengrok_core::coworker::CoworkerView {
         id: id.clone(),
         name: coworker.name.clone(),
         model: coworker.model.clone(),
-        box_id: None,
+        box_id: coworker.computer().cloned(),
         retired: false,
-        updated_at_ms: now_ms(),
+        updated_at_ms: at_ms,
     };
     if let Err(error) = state
         .agui
@@ -144,6 +166,32 @@ async fn hire(
         tracing::error!(%error, "createAgent could not hire");
         return (500, json!({ "error": "hire failed" }));
     }
+
+    // Grant the builtin tools so a coworker with a box can actually use it — the same ceiling REST
+    // grants at hire. Without this a hired coworker silently refuses every tool.
+    let tools =
+        opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .grant_access(
+            account_id,
+            &id,
+            &tools,
+            &tools,
+            &opengrok_policy::ToolSet::None,
+            at_ms,
+        )
+        .await
+    {
+        tracing::error!(%error, "createAgent could not grant access");
+        return (
+            500,
+            json!({ "error": "the coworker was created but could not be granted" }),
+        );
+    }
+
     let profile = json!({
         "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
         "title": args.get("title").and_then(Value::as_str).unwrap_or(""),
@@ -157,7 +205,16 @@ async fn hire(
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
     live::emit_roster(state).await;
-    agent_reply(state, id.as_str()).await
+
+    // Report a failed box the way REST does — without failing the create.
+    let (code, mut reply) = agent_reply(state, id.as_str()).await;
+    if code == 200
+        && let Some(error) = provisioned.error
+        && let Some(object) = reply.as_object_mut()
+    {
+        object.insert("computerError".to_string(), json!(error));
+    }
+    (code, reply)
 }
 
 /// `{agent, transcript}` — what create and duplicate answer.
