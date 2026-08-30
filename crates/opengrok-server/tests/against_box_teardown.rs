@@ -351,3 +351,48 @@ async fn an_idle_box_is_stopped_then_resumes_on_use() {
         let _ = Command::new("docker").args(["rm", "-f", &box_id]).output();
     }
 }
+
+/// Eager provisioning: ensure_scope_box creates a scope's box with NO coworker, and is idempotent —
+/// a second call returns the same box, not a new one. This is what warms the shared org box the
+/// moment an admin selects per-org. (No org key here ⇒ Local VM, same as the other tests.)
+#[tokio::test]
+async fn eager_scope_box_creates_once_and_is_idempotent() {
+    let database_url = database_or_skip!();
+    if !docker_available() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let state = test_state(&database_url).await;
+    // A throwaway org scope id unique to this run.
+    let scope_id = format!("org_{}", uuid::Uuid::now_v7().simple());
+
+    let box_id =
+        opengrok_server::agui::provision::ensure_scope_box(&state, None, "org", &scope_id, 1)
+            .await
+            .expect("eager provision");
+    assert!(
+        container_running(&box_id),
+        "the eager box should be running"
+    );
+
+    // Idempotent: selecting per-org again (or the first bot arriving) reuses the SAME box.
+    let again =
+        opengrok_server::agui::provision::ensure_scope_box(&state, None, "org", &scope_id, 2)
+            .await
+            .expect("second call");
+    assert_eq!(
+        again, box_id,
+        "eager provisioning must not make a second box"
+    );
+
+    // Cleanup.
+    if let Ok(Some((b, kind))) = state.auth.store.scoped_computer("org", &scope_id).await {
+        assert_eq!(kind, "local-docker");
+        let _ = Command::new("docker").args(["rm", "-f", &b]).output();
+        let _ = state
+            .auth
+            .store
+            .clear_scoped_computer("org", &scope_id)
+            .await;
+    }
+}

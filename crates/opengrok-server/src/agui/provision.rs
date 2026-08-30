@@ -278,6 +278,49 @@ pub async fn ensure_computer_for(
     }
 }
 
+/// Ensure a scope's box EXISTS (create + record if absent), with no coworker assignment. This is the
+/// eager-provisioning primitive: warm the one shared org box the moment an admin selects per-org, so
+/// it is ready before anyone's first bot. Returns the box id, or `(code, message)` when it could not
+/// be provisioned (e.g. the org has no key). Idempotent — an already-provisioned scope returns its
+/// existing box.
+pub async fn ensure_scope_box(
+    state: &AgUiState,
+    org_id: Option<&str>,
+    scope: &str,
+    scope_id: &str,
+    at_ms: i64,
+) -> Result<String, (String, String)> {
+    let store = &state.auth.store;
+    if let Ok(Some((box_id, _kind))) = store.scoped_computer(scope, scope_id).await {
+        return Ok(box_id);
+    }
+    let kind = kind_for_new(state, org_id).await;
+    let Some(provider) = provider_for(state, org_id, kind).await else {
+        let code = if kind == "none" {
+            "no_org_key"
+        } else {
+            "not_supported"
+        };
+        return Err((
+            code.to_string(),
+            "no computer is configured for your organization — set up box.ascii.dev first"
+                .to_string(),
+        ));
+    };
+    match provider.create(None).await {
+        Ok(box_id) => {
+            match store
+                .set_scoped_computer(scope, scope_id, &box_id, kind, org_id, at_ms)
+                .await
+            {
+                Ok(()) => Ok(box_id),
+                Err(error) => Err(("unknown".to_string(), error.to_string())),
+            }
+        }
+        Err(error) => Err((error.code().to_string(), error.to_string())),
+    }
+}
+
 /// Destroy a scope's box (best-effort, on the provider that made it) and clear its mapping.
 async fn destroy_and_clear(
     state: &AgUiState,

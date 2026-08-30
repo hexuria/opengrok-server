@@ -235,15 +235,40 @@ async fn set_mode(
     if !VALID_MODES.contains(&body.mode.as_str()) {
         return (StatusCode::UNPROCESSABLE_ENTITY, "unknown sharing mode").into_response();
     }
-    match state
+    if let Err(_error) = state
         .auth
         .store
         .set_sharing_mode("org", org_id.as_str(), &body.mode, now_ms())
         .await
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not set the mode").into_response(),
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not set the mode").into_response();
     }
+    // Eager warming for per-org ONLY: the whole org shares ONE box, so provisioning it now (rather
+    // than at the first bot) is one box for many people, and it is ready before anyone's first bot.
+    // per-account / per-bot stay lazy at first-need — idle-stop makes an eager per-seat box no
+    // cheaper than a lazy one (it would just be stopped unused), so eager there buys nothing.
+    let warmed = if body.mode == "per-org" {
+        match crate::agui::provision::ensure_scope_box(
+            &state,
+            Some(org_id.as_str()),
+            "org",
+            org_id.as_str(),
+            now_ms(),
+        )
+        .await
+        {
+            Ok(box_id) => json!({ "provisioned": true, "boxId": box_id }),
+            // Non-fatal: the mode is set; the box just could not warm yet (e.g. no org key). The
+            // first bot will try again, and the reason is surfaced for the admin.
+            Err((code, message)) => json!({
+                "provisioned": false,
+                "computerError": { "code": code, "message": message },
+            }),
+        }
+    } else {
+        json!({ "provisioned": false })
+    };
+    Json(json!({ "mode": body.mode, "warm": warmed })).into_response()
 }
 
 /// `PUT /admin/computers/mode/account/{id}` — override the sharing mode for one member.
