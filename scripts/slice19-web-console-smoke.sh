@@ -78,8 +78,10 @@ ok "logout cleared the session (now 401)"
 
 echo "7. the console is served, and SPA deep-links fall back to index.html"
 curl -sS "$BASE/console/" | grep -q "$MARKER" || fail "/console/ did not serve index.html"
-curl -sS "$BASE/console/account" | grep -q "$MARKER" || fail "/console/account did not fall back to index.html"
-ok "static console served; deep-link falls back to the SPA entry"
+deep_code=$(curl -sS -o "$WORK/deep.html" -w '%{http_code}' "$BASE/console/account")
+[ "$deep_code" = "200" ] || fail "/console/account should be 200 (SPA route), got $deep_code"
+grep -q "$MARKER" "$WORK/deep.html" || fail "/console/account did not fall back to index.html"
+ok "static console served; deep-link is a 200 SPA page"
 
 echo
 echo "PASS — slice 19: web console cookie login (httpOnly, no token in JS) and the /console SPA mount."
