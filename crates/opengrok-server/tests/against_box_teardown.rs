@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::Arc;
 
+use opengrok_box::Computer;
 use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::MockDoor;
@@ -45,6 +46,14 @@ fn container_exists(id: &str) -> bool {
         .args(["inspect", id])
         .output()
         .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+fn container_running(id: &str) -> bool {
+    Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", id])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
@@ -257,5 +266,88 @@ async fn per_bot_mode_gives_each_bot_its_own_box() {
         if container_exists(b) {
             let _ = Command::new("docker").args(["rm", "-f", b]).output();
         }
+    }
+}
+
+/// Idle-stop: a box sitting unused past the threshold is STOPPED (its container paused, not removed)
+/// and marked stopped; resuming it and marking it used brings the container back and clears the flag.
+/// This is the cost lever — a stopped box keeps its disk and pauses billing.
+#[tokio::test]
+async fn an_idle_box_is_stopped_then_resumes_on_use() {
+    let database_url = database_or_skip!();
+    if !docker_available() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let state = test_state(&database_url).await;
+    let account = AccountId::new();
+    let (agent, box_id) = hire_agent(&state, &account, "Idler").await;
+    assert!(container_running(&box_id), "a fresh box runs");
+
+    // Sweep with a cutoff far in the future: the box (last used at create) is idle, so it stops.
+    let stopped = opengrok_server::agui::provision::idle_stop_once(
+        &state,
+        chrono::Utc::now().timestamp_millis() + 1,
+    )
+    .await;
+    // At least our box (the count is global and this DB is shared with the sibling tests running
+    // in parallel, so assert about OUR box, not the total).
+    assert!(stopped >= 1, "the idle box should be stopped");
+    assert!(
+        !container_running(&box_id),
+        "a stopped box's container is paused (not running)"
+    );
+    assert!(
+        container_exists(&box_id),
+        "stopped keeps the container (disk)"
+    );
+    let (_, _, is_stopped) = state
+        .auth
+        .store
+        .scoped_computer_full("account", account.as_str())
+        .await
+        .expect("full")
+        .expect("row");
+    assert!(is_stopped, "the row records the box as stopped");
+
+    // A second sweep leaves OUR box alone — an already-stopped box is excluded from the idle list.
+    opengrok_server::agui::provision::idle_stop_once(
+        &state,
+        chrono::Utc::now().timestamp_millis() + 1,
+    )
+    .await;
+    assert!(
+        !container_running(&box_id),
+        "our stopped box stays stopped across a second sweep"
+    );
+
+    // Resume on use: the run path resumes the box and marks it used ⇒ running again, flag cleared.
+    let docker = opengrok_box::DockerComputer::new();
+    docker.resume(&box_id).await.expect("resume");
+    state
+        .auth
+        .store
+        .mark_scoped_used(
+            "account",
+            account.as_str(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("mark used");
+    assert!(container_running(&box_id), "resumed box runs again");
+    let (_, _, is_stopped) = state
+        .auth
+        .store
+        .scoped_computer_full("account", account.as_str())
+        .await
+        .expect("full")
+        .expect("row");
+    assert!(!is_stopped, "marking used clears the stopped flag");
+
+    // Cleanup.
+    retire(&state, &account, &agent).await;
+    teardown_computer_for(&state, &account, &agent).await;
+    if container_exists(&box_id) {
+        let _ = Command::new("docker").args(["rm", "-f", &box_id]).output();
     }
 }

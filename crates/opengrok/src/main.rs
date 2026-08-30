@@ -168,6 +168,12 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
+    // Idle-stop: pause boxes that have sat unused past OG_BOX_IDLE_STOP_SECONDS (off by default).
+    // A stopped box keeps its disk and pauses billing; the run path resumes it on next use.
+    tokio::spawn(opengrok_server::agui::provision::idle_stop_forever(
+        state.clone(),
+    ));
+
     // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
     // the shipped host's own fallback — and the email names whose coworkers are the roster.
     //

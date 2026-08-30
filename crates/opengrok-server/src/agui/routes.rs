@@ -91,14 +91,25 @@ pub(crate) async fn tools_for_coworker(
         org_id.as_deref(),
         coworker_id.as_str(),
     );
-    let (_, kind) = state
+    let (box_id, kind, stopped) = state
         .auth
         .store
-        .scoped_computer(scope, &scope_id)
+        .scoped_computer_full(scope, &scope_id)
         .await
         .ok()
         .flatten()?;
     let computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
+    // Idle-stop: a box paused by the sweep is resumed before this turn runs (disk was kept, so it
+    // comes back where it was), and its last-used stamp is refreshed so the sweep leaves it running
+    // while it is in use. Best-effort — a resume failure still lets the turn try.
+    if stopped && let Err(error) = computer.resume(&box_id).await {
+        tracing::warn!(%error, box_id, "could not resume an idle-stopped box; the turn may fail");
+    }
+    let _ = state
+        .auth
+        .store
+        .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+        .await;
 
     let policy = state
         .auth

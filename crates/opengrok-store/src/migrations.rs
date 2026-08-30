@@ -82,6 +82,13 @@ create table if not exists scoped_computer (
     updated_at_ms bigint not null,
     primary key (scope, scope_id)
 );
+-- Idle-stop bookkeeping: when the box was last used, and whether it's currently stopped (disk kept,
+-- billing paused). A box idle past the threshold is stopped by the sweep and resumed on next use.
+alter table scoped_computer add column if not exists last_used_at_ms bigint;
+alter table scoped_computer add column if not exists stopped boolean not null default false;
+-- The org the box belongs to, so the idle sweep can rebuild the right provider (ascii key) to stop
+-- or resume it. Null for a Local VM (needs no key).
+alter table scoped_computer add column if not exists org_id text;
 
 -- How an org shares computers, and per-account overrides. scope 'org' with the org id is the org
 -- default; scope 'account' with an account id overrides it for that member. mode is

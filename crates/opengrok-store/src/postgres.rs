@@ -1139,28 +1139,109 @@ impl PgStore {
         .transpose()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_scoped_computer(
         &self,
         scope: &str,
         scope_id: &str,
         box_id: &str,
         kind: &str,
+        org_id: Option<&str>,
         at_ms: i64,
     ) -> StoreResult<()> {
         sqlx::query(
-            "insert into scoped_computer (scope, scope_id, box_id, kind, updated_at_ms)
-             values ($1, $2, $3, $4, $5)
+            "insert into scoped_computer (scope, scope_id, box_id, kind, org_id, last_used_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $6)
              on conflict (scope, scope_id) do update set
-               box_id = excluded.box_id, kind = excluded.kind, updated_at_ms = excluded.updated_at_ms",
+               box_id = excluded.box_id, kind = excluded.kind, org_id = excluded.org_id,
+               last_used_at_ms = excluded.last_used_at_ms, updated_at_ms = excluded.updated_at_ms",
         )
         .bind(scope)
         .bind(scope_id)
         .bind(box_id)
         .bind(kind)
+        .bind(org_id)
         .bind(at_ms)
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// A scoped computer with its idle state — (box_id, kind, stopped).
+    pub async fn scoped_computer_full(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, String, bool)>> {
+        let row = sqlx::query(
+            "select box_id, kind, stopped from scoped_computer where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+                row.try_get::<bool, _>("stopped")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Mark a scoped computer used now (and not stopped) — called on the run path.
+    pub async fn mark_scoped_used(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update scoped_computer set last_used_at_ms = $3, stopped = false where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_scoped_stopped(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("update scoped_computer set stopped = true where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Running boxes idle since before `before_ms` — the sweep stops these. Returns
+    /// (scope, scope_id, box_id, kind). A box never used yet (null last_used) is left alone.
+    #[allow(clippy::type_complexity)]
+    pub async fn idle_scoped_computers(
+        &self,
+        before_ms: i64,
+    ) -> StoreResult<Vec<(String, String, String, String, Option<String>)>> {
+        let rows = sqlx::query(
+            "select scope, scope_id, box_id, kind, org_id from scoped_computer
+             where stopped = false and last_used_at_ms is not null and last_used_at_ms < $1",
+        )
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("scope")?,
+                    row.try_get::<String, _>("scope_id")?,
+                    row.try_get::<String, _>("box_id")?,
+                    row.try_get::<String, _>("kind")?,
+                    row.try_get::<Option<String>, _>("org_id")?,
+                ))
+            })
+            .collect()
     }
 
     pub async fn clear_scoped_computer(&self, scope: &str, scope_id: &str) -> StoreResult<()> {

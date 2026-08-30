@@ -217,7 +217,14 @@ pub async fn ensure_computer_for(
             match provider.create(None).await {
                 Ok(box_id) => {
                     if let Err(error) = store
-                        .set_scoped_computer(scope, &scope_id, &box_id, kind, at_ms)
+                        .set_scoped_computer(
+                            scope,
+                            &scope_id,
+                            &box_id,
+                            kind,
+                            org_id.as_deref(),
+                            at_ms,
+                        )
                         .await
                     {
                         return record_error(
@@ -344,4 +351,76 @@ pub async fn teardown_computer_for(
             }
         }
     }
+}
+
+/// How long a box may sit idle before the sweep stops it (disk kept, billing paused). Read from
+/// `OG_BOX_IDLE_STOP_SECONDS`; `0` (the default) disables idle-stop entirely.
+fn idle_stop_seconds() -> i64 {
+    std::env::var("OG_BOX_IDLE_STOP_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Stop boxes idle past the threshold, forever. A stopped box keeps its disk and pauses billing; the
+/// run path (`tools_for_coworker`) resumes it on next use and refreshes its last-used stamp. Active
+/// only when `OG_BOX_IDLE_STOP_SECONDS > 0`; the sweep interval is a quarter of the threshold,
+/// clamped to [30s, 300s]. A box never used yet (no last-used stamp) is left alone. Each box is
+/// stopped on the SAME provider that made it, rebuilt from the org id recorded on its row.
+pub async fn idle_stop_forever(state: AgUiState) {
+    let idle_seconds = idle_stop_seconds();
+    if idle_seconds <= 0 {
+        tracing::info!("idle-stop is off (set OG_BOX_IDLE_STOP_SECONDS to enable)");
+        return;
+    }
+    let interval = (idle_seconds / 4).clamp(30, 300) as u64;
+    tracing::info!(
+        idle_seconds,
+        interval,
+        "idle-stop sweep running: idle boxes will be stopped (disk kept)"
+    );
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+    loop {
+        ticker.tick().await;
+        let before = chrono::Utc::now().timestamp_millis() - idle_seconds * 1000;
+        idle_stop_once(&state, before).await;
+    }
+}
+
+/// One idle-stop pass: stop every box idle since before `before_ms` and mark it stopped. Returns how
+/// many were stopped. Factored out of the forever loop so a test can drive a single deterministic
+/// sweep. Best-effort per box — a stop failure is logged and the box left running for the next pass.
+pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
+    let idle = match state.auth.store.idle_scoped_computers(before_ms).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "idle-stop sweep could not list idle boxes");
+            return 0;
+        }
+    };
+    let mut stopped = 0;
+    for (scope, scope_id, box_id, kind, org_id) in idle {
+        let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await else {
+            continue;
+        };
+        match provider.stop(&box_id).await {
+            Ok(()) => {
+                let _ = state
+                    .auth
+                    .store
+                    .mark_scoped_stopped(&scope, &scope_id)
+                    .await;
+                stopped += 1;
+                tracing::info!(
+                    box_id,
+                    scope,
+                    "stopped an idle box (disk kept, billing paused)"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, box_id, "could not stop an idle box");
+            }
+        }
+    }
+    stopped
 }
