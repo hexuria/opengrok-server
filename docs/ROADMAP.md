@@ -108,8 +108,12 @@ tonic gRPC server cannot answer the client.
 - [x] **9.1** Auth at the mock's own surface (`source/mock/auth-http.ts`): `/auth/poll` minting
   the `{accessToken, refreshToken}` pair, on top of slice 1's `/auth/cursor_dev_session_token`
   and `/oauth/token` with real `exp`s. *(this commit)*
-- [ ] **9.1b** The `/loginDeepControl` PKCE browser page — the drop-in login wall. Rides the
-  same sign-in; needs a client that can reach us (port-blockers B1) to be worth verifying.
+- [x] **9.1b** The `/loginDeepControl` PKCE browser leg — built, gated, live. Registers the
+  challenge, binds it to the host account (the person opening the URL is the auth on a
+  single-user self-hosted server), and `/auth/poll` only releases a token for a matching
+  verifier (404-as-pending otherwise) — which CLOSED a real hole the peer caught: the old blind
+  poll minted a LAN-reachable account token that leaked the gateway bearer via EnsureSandBox.
+  Dev sign-in is now loopback-only. `slice16-browser-login-smoke.sh`. (`0deb7a3`)
 - [x] **9.2** `DashboardService` — 6 methods, Connect unary on Axum, enums by name, plus the
   mock's load-bearing leniency: an unmodelled method answers an empty message. *(this commit)*
 - [x] **9.3** `GrokBotService` — the mock's 12 (transcripts as base64 bodies with string seqs,
