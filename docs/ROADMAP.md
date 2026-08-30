@@ -167,6 +167,16 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
 - [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
   password reset via Resend; an in-app admin surface for invites/enable (CLI-only in v1).
 
+- [x] **13 Web console** — the account + admin dashboards as a Bun/Vite/React/TanStack SPA the
+  server hosts at `/console` (Axum `ServeDir`-style handler, SPA deep-links 200 via index). Browser
+  auth is httpOnly cookies (`/auth/login|logout|refresh`; no token in JS), `caller()` accepts the
+  cookie or the Bearer header. Account self-service (name, avatar data-URL, password; email fixed)
+  and the org-admin surface (users list, enable/disable, invite links) that 12.later deferred —
+  `isAdmin`-gated in the client, enforced on the API. Guards: an admin cannot self-disable (409);
+  login no longer clobbers the account projection. `slice19-web-console-smoke.sh` +
+  `tests/against_the_web_console.rs`; browser-verified in `docs/verification/web-console/`.
+  (this commit)
+
 ## Slice 11+ — breadth (P5 → P10, in order)
 
 Per-tier, verified against the running client. Most of it adapts work that exists:

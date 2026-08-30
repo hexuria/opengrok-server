@@ -153,7 +153,7 @@ function InvitesCard() {
 
 export function AdminPage() {
   return (
-    <AuthedFrame>
+    <AuthedFrame requireAdmin>
       {() => (
         <div className="stack">
           <UsersCard />

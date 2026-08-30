@@ -578,13 +578,28 @@ async fn mint_session(
         })
         .map_err(|error: AccountError| AuthFailure::SessionRejected(error.to_string()))?;
 
-    let view = opengrok_core::account::AccountView::session_only(
-        account_id.clone(),
-        email.to_string(),
-        plan,
+    // Write the account's REAL state, not a session stub. append_account upserts the projection,
+    // so a bare session_only view would clobber the person's name, avatar and enabled flag on every
+    // sign-in — invisible to /account (which reads the aggregate) but corrupting to every reader of
+    // the projection, the admin user list included.
+    let mut after = account;
+    for event in &events {
+        after.apply(event);
+    }
+    let view = opengrok_core::account::AccountView {
+        id: account_id.clone(),
+        email: email.to_string(),
+        plan: after.plan.unwrap_or(plan),
         trial,
-        at_ms,
-    );
+        updated_at_ms: at_ms,
+        password_hash: after.password_hash.clone(),
+        first_name: after.first_name.clone(),
+        last_name: after.last_name.clone(),
+        org_id: after.org_id.clone(),
+        verified: after.verified,
+        enabled: after.enabled,
+        avatar_url: after.avatar_url.clone(),
+    };
     state
         .store
         .append_account(&account_id, seq, &events, &view)
@@ -662,13 +677,26 @@ async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, Str
         .ok_or_else(|| AuthFailure::Unavailable("refresh produced no session".to_string()))?;
 
     let plan = account.plan.unwrap_or(Plan::Ultra);
-    let view = opengrok_core::account::AccountView::session_only(
-        account_id.clone(),
-        account.email.clone(),
-        plan,
-        account.trial,
-        at_ms,
-    );
+    // Preserve the projection on refresh too — a rotation must not wipe the profile (see the note
+    // in mint_session).
+    let mut after = account;
+    for event in &events {
+        after.apply(event);
+    }
+    let view = opengrok_core::account::AccountView {
+        id: account_id.clone(),
+        email: after.email.clone(),
+        plan: after.plan.unwrap_or(plan),
+        trial: after.trial,
+        updated_at_ms: at_ms,
+        password_hash: after.password_hash.clone(),
+        first_name: after.first_name.clone(),
+        last_name: after.last_name.clone(),
+        org_id: after.org_id.clone(),
+        verified: after.verified,
+        enabled: after.enabled,
+        avatar_url: after.avatar_url.clone(),
+    };
     state
         .store
         .append_account(&account_id, seq, &events, &view)
@@ -679,7 +707,7 @@ async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, Str
         .mint_access(
             account_id.as_str(),
             session_id.as_str(),
-            &account.email,
+            &after.email,
             plan.as_wire(),
             at_ms / 1_000,
             ACCESS_TOKEN_TTL_SECONDS,

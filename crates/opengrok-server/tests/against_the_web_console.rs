@@ -275,3 +275,50 @@ async fn bad_credentials_and_gated_accounts_set_no_cookie_and_say_which() {
         });
     assert!(cleared, "logout expires og_access");
 }
+
+#[tokio::test]
+async fn logging_in_does_not_clobber_the_account_projection() {
+    // A regression guard for a real bug: mint_session/rotate used to write a bare "session_only"
+    // view, which append_account upserts over the projection — silently wiping the person's name
+    // and enabled flag on every sign-in. Invisible to GET /account (it reads the aggregate) but
+    // corrupting to the admin user list, which reads the projection.
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let email = format!("keep-{}@og.local", uuid::Uuid::now_v7().simple());
+    seed_account(&store, &email, "password1", true, true).await;
+
+    let base = spawn(app_with(
+        store.clone(),
+        b"web-console-test-secret-web-console",
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    // Sign in twice — under the old code the second login would already have disabled the row.
+    for _ in 0..2 {
+        let res = client
+            .post(format!("{base}/auth/login"))
+            .json(&serde_json::json!({ "email": email, "password": "password1" }))
+            .send()
+            .await
+            .expect("login");
+        assert_eq!(res.status(), 200);
+    }
+
+    // The projection still carries the real profile and the enabled flag.
+    let view = store
+        .account_by_email(&email)
+        .await
+        .expect("query")
+        .expect("account exists");
+    assert!(
+        view.enabled,
+        "login must not disable the account in the projection"
+    );
+    assert!(
+        view.verified,
+        "login must not un-verify the account in the projection"
+    );
+    assert_eq!(view.first_name, "Test");
+    assert_eq!(view.last_name, "User");
+}

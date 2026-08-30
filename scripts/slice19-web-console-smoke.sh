@@ -31,9 +31,11 @@ start_server() {
 
 echo "1. bootstrap an org + admin, start the server (with a console dir)"
 STAMP=$(date +%s)-$$; DOMAIN="co$STAMP.com"; ADMIN="admin@$DOMAIN"
-admin_cli org create --name "Co" --admin-email "$ADMIN" --domain "$DOMAIN" --password "adminpass1" >/dev/null
+ORG=$(admin_cli org create --name "Co" --admin-email "$ADMIN" --domain "$DOMAIN" --password "adminpass1" | awk '/org id:/{print $3}')
+[ -n "$ORG" ] || fail "could not read the org id from org create"
+admin_cli account create --email "mel@$DOMAIN" --org "$ORG" --name "Mel Ber" --password "memberpass1" >/dev/null
 start_server
-ok "server up on $PORT"
+ok "server up on $PORT (org $ORG, admin + member seeded)"
 
 echo "2. cookie login: POST /auth/login sets httpOnly cookies, body carries the email not a token"
 body=$(curl -sS -c "$JAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' \
@@ -82,6 +84,25 @@ deep_code=$(curl -sS -o "$WORK/deep.html" -w '%{http_code}' "$BASE/console/accou
 [ "$deep_code" = "200" ] || fail "/console/account should be 200 (SPA route), got $deep_code"
 grep -q "$MARKER" "$WORK/deep.html" || fail "/console/account did not fall back to index.html"
 ok "static console served; deep-link is a 200 SPA page"
+
+echo "8. isAdmin is reported, the user list is org-scoped and survives logins, self-disable is refused"
+AJAR="$WORK/ajar"; MJAR="$WORK/mjar"
+curl -sS -c "$AJAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' -d "{\"email\":\"$ADMIN\",\"password\":\"adminpass1\"}" -o /dev/null
+curl -sS -c "$MJAR" -X POST "$BASE/auth/login" -H 'content-type: application/json' -d "{\"email\":\"mel@$DOMAIN\",\"password\":\"memberpass1\"}" -o /dev/null
+curl -sS -b "$AJAR" "$BASE/account" | jq -e '.isAdmin == true'  >/dev/null || fail "admin should report isAdmin:true"
+curl -sS -b "$MJAR" "$BASE/account" | jq -e '.isAdmin == false' >/dev/null || fail "member should report isAdmin:false"
+users=$(curl -sS -b "$AJAR" "$BASE/admin/users")
+echo "$users" | jq -e '.users | map(.email) | contains(["'"$ADMIN"'","mel@'"$DOMAIN"'"])' >/dev/null || fail "user list missing org accounts: $users"
+# The two logins just above would clobber the projection under the old bug; assert it did not.
+echo "$users" | jq -e '.users[] | select(.email=="mel@'"$DOMAIN"'") | (.enabled==true) and (.firstName=="Mel") and (.lastName=="Ber")' >/dev/null || fail "member projection was clobbered by login: $users"
+ok "isAdmin correct; org-scoped user list with intact profiles after logins"
+admin_id=$(echo "$users" | jq -r '.users[] | select(.email=="'"$ADMIN"'") | .id')
+mel_id=$(echo "$users" | jq -r '.users[] | select(.email=="mel@'"$DOMAIN"'") | .id')
+sd=$(curl -sS -b "$AJAR" -o /dev/null -w '%{http_code}' -X POST "$BASE/admin/users/$admin_id/disable")
+[ "$sd" = "409" ] || fail "admin self-disable must be refused (409), got $sd"
+curl -sS -b "$AJAR" -X POST "$BASE/admin/users/$mel_id/disable" | jq -e '.enabled==false' >/dev/null || fail "disable member failed"
+curl -sS -b "$AJAR" -X POST "$BASE/admin/users/$mel_id/enable"  | jq -e '.enabled==true'  >/dev/null || fail "enable member failed"
+ok "self-disable refused (409); member disable/enable round-trips"
 
 echo
 echo "PASS — slice 19: web console cookie login (httpOnly, no token in JS) and the /console SPA mount."

@@ -219,6 +219,39 @@ impl PgStore {
         })
         .transpose()
     }
+
+    /// Every account belonging to an org — the admin's user list. Reads the projection, so it
+    /// captures CLI-created accounts, signups and the admin alike, not only those who redeemed an
+    /// invite. Ordered by email for a stable display.
+    pub async fn accounts_by_org(&self, org_id: &str) -> StoreResult<Vec<AccountView>> {
+        let rows = sqlx::query(
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,
+                    org_id, verified, enabled, avatar_url
+             from account_view where org_id = $1 order by email",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(AccountView {
+                    id: AccountId::from_stored(row.try_get::<String, _>("id")?),
+                    email: row.try_get("email")?,
+                    plan: Plan::from_wire(&row.try_get::<String, _>("plan")?),
+                    trial: row.try_get("trial")?,
+                    updated_at_ms: row.try_get("updated_at_ms")?,
+                    password_hash: row.try_get("password_hash")?,
+                    first_name: row.try_get("first_name")?,
+                    last_name: row.try_get("last_name")?,
+                    org_id: row.try_get("org_id")?,
+                    verified: row.try_get("verified")?,
+                    enabled: row.try_get("enabled")?,
+                    avatar_url: row.try_get("avatar_url")?,
+                })
+            })
+            .collect()
+    }
 }
 
 /// Runs: the durable half of the promise that work survives a client.

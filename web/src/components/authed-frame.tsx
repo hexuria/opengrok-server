@@ -9,7 +9,13 @@ import { getAccount, logout, type Account } from "../api/account";
 import { ApiError } from "../api/client";
 import { Chrome } from "./shell";
 
-export function AuthedFrame({ children }: { children: (account: Account) => ReactNode }) {
+export function AuthedFrame({
+  children,
+  requireAdmin = false,
+}: {
+  children: (account: Account) => ReactNode;
+  requireAdmin?: boolean;
+}) {
   const navigate = useNavigate();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -25,6 +31,14 @@ export function AuthedFrame({ children }: { children: (account: Account) => Reac
     }
   }, [error, navigate]);
 
+  // An admin-only page: a member who reaches it (typed URL, stale link) is sent back to their
+  // account rather than shown a door they cannot open. The server still enforces admin on the API.
+  useEffect(() => {
+    if (requireAdmin && data && data.isAdmin !== true) {
+      navigate({ to: "/account" });
+    }
+  }, [requireAdmin, data, navigate]);
+
   const signOut = async () => {
     await logout().catch(() => undefined);
     queryClient.clear();
@@ -34,9 +48,10 @@ export function AuthedFrame({ children }: { children: (account: Account) => Reac
 
   if (isLoading) return <div className="center muted">Loading…</div>;
   if (!data) return <div className="center muted">Redirecting…</div>;
+  if (requireAdmin && data.isAdmin !== true) return <div className="center muted">Redirecting…</div>;
 
   return (
-    <Chrome email={data.email} onSignOut={signOut}>
+    <Chrome email={data.email} isAdmin={data.isAdmin === true} onSignOut={signOut}>
       {children(data)}
     </Chrome>
   );

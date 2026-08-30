@@ -70,6 +70,19 @@ async fn caller(
     }
 }
 
+fn account_json_from_view(view: &AccountView) -> Value {
+    json!({
+        "id": view.id.as_str(),
+        "email": view.email,
+        "firstName": view.first_name,
+        "lastName": view.last_name,
+        "avatarUrl": view.avatar_url,
+        "orgId": view.org_id,
+        "verified": view.verified,
+        "enabled": view.enabled,
+    })
+}
+
 fn account_json(id: &AccountId, account: &Account) -> Value {
     json!({
         "id": id.as_str(),
@@ -87,8 +100,32 @@ fn account_json(id: &AccountId, account: &Account) -> Value {
 /// not to change).
 async fn me(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
     match caller(&state, &headers).await {
-        Ok((id, account, _)) => Json(account_json(&id, &account)).into_response(),
+        Ok((id, account, _)) => {
+            // Tell the caller whether they are their org's admin, so the console can hide the admin
+            // surface for a member rather than offer a door that only answers 403. The admin checks
+            // below still enforce it server-side; this is the client's cue, not the gate.
+            let is_admin = caller_is_admin(&state, &id, &account).await;
+            let mut body = account_json(&id, &account);
+            body["isAdmin"] = json!(is_admin);
+            Json(body).into_response()
+        }
         Err(refusal) => refusal,
+    }
+}
+
+/// Is this caller the admin of their own org? False when they are in no org, the org is gone, or
+/// someone else is its admin.
+async fn caller_is_admin(state: &AuthState, id: &AccountId, account: &Account) -> bool {
+    let Some(org_id) = account
+        .org_id
+        .as_ref()
+        .map(|o| OrgId::from_stored(o.clone()))
+    else {
+        return false;
+    };
+    match state.store.load_org(&org_id).await {
+        Ok((org, _)) => org.admin.as_ref() == Some(id),
+        Err(_) => false,
     }
 }
 
@@ -283,18 +320,19 @@ async fn admin_org(
 
 /// `GET /admin/users` — the org's members with their state.
 async fn list_users(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (_, org) = match admin_org(&state, &headers).await {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    let mut users = Vec::new();
-    for member in &org.members {
-        if let Ok((account, _)) = state.store.load_account(member).await {
-            users.push(account_json(member, &account));
+    // Every account in the org — CLI-created, signed-up, and the admin themselves — not only those
+    // who happened to redeem an invite (which is all `org.members` records).
+    match state.store.accounts_by_org(org_id.as_str()).await {
+        Ok(views) => {
+            let users: Vec<Value> = views.iter().map(account_json_from_view).collect();
+            Json(json!({ "users": users })).into_response()
         }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not list users").into_response(),
     }
-    // The admin themselves, who is not always in `members` (they created the org).
-    Json(json!({ "users": users })).into_response()
 }
 
 async fn set_enabled(state: &AuthState, id: &str, enabled: bool) -> Response {
@@ -333,8 +371,17 @@ async fn disable_user(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    let caller = match caller(&state, &headers).await {
+        Ok((caller_id, _, _)) => caller_id,
+        Err(refusal) => return refusal,
+    };
     if let Err(refusal) = admin_org(&state, &headers).await {
         return refusal;
+    }
+    // Disabling yourself could lock the org out (a disabled account cannot sign in). Refuse it —
+    // an admin who wants to leave hands the role over first.
+    if caller.as_str() == id {
+        return (StatusCode::CONFLICT, "you cannot disable your own account").into_response();
     }
     set_enabled(&state, &id, false).await
 }

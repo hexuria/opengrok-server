@@ -11,6 +11,8 @@ export interface Account {
   orgId: string | null;
   verified: boolean;
   enabled: boolean;
+  /** Whether this caller is their org's admin. Only the GET /account (me) response carries it. */
+  isAdmin?: boolean;
 }
 
 export function getAccount(): Promise<Account> {

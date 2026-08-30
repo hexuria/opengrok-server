@@ -32,7 +32,17 @@ export function CenterCard({ subtitle, children }: { subtitle?: string; children
 }
 
 /** The signed-in frame: brand, the person's email, a sign-out slot, and the Account/Admin tabs. */
-export function Chrome({ email, onSignOut, children }: { email: string; onSignOut: () => void; children: ReactNode }) {
+export function Chrome({
+  email,
+  isAdmin,
+  onSignOut,
+  children,
+}: {
+  email: string;
+  isAdmin: boolean;
+  onSignOut: () => void;
+  children: ReactNode;
+}) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   return (
     <div className="wrap">
@@ -52,9 +62,11 @@ export function Chrome({ email, onSignOut, children }: { email: string; onSignOu
         <Link to="/account" className={path.endsWith("/account") ? "active" : ""}>
           Account
         </Link>
-        <Link to="/admin" className={path.endsWith("/admin") ? "active" : ""}>
-          Admin
-        </Link>
+        {isAdmin ? (
+          <Link to="/admin" className={path.endsWith("/admin") ? "active" : ""}>
+            Admin
+          </Link>
+        ) : null}
       </nav>
       {children}
     </div>
