@@ -1014,4 +1014,73 @@ impl PgStore {
         })
         .transpose()
     }
+
+    // ---- Per-org computer credentials (box.ascii.dev key, Windows 365 creds) ----
+    //
+    // Reuses the generic sealed `secret_store`, keyed `org-computer:{org}:{kind}`. The org admin
+    // sets these on the admin dashboard; the server opens them to provision that org's boxes. The
+    // plaintext key never leaves the server and is never returned to any client — only whether a
+    // kind is configured.
+
+    pub async fn set_org_computer_secret(
+        &self,
+        vault: &Vault,
+        org_id: &str,
+        kind: &str,
+        plaintext: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        let id = format!("org-computer:{org_id}:{kind}");
+        let sealed = vault.seal(&id, plaintext)?;
+        sqlx::query(
+            "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (id) do update set
+               nonce = excluded.nonce,
+               ciphertext = excluded.ciphertext,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(&id)
+        .bind(&sealed.nonce)
+        .bind(&sealed.ciphertext)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The plaintext credential for one org+kind — the one place it is in the clear, at provision
+    /// time. `None` when the org has not configured that kind.
+    pub async fn org_computer_secret(
+        &self,
+        vault: &Vault,
+        org_id: &str,
+        kind: &str,
+    ) -> StoreResult<Option<String>> {
+        self.open_credential(vault, &format!("org-computer:{org_id}:{kind}"))
+            .await
+    }
+
+    pub async fn clear_org_computer_secret(&self, org_id: &str, kind: &str) -> StoreResult<()> {
+        sqlx::query("delete from secret_store where id = $1")
+            .bind(format!("org-computer:{org_id}:{kind}"))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Which computer kinds this org has configured — the names only, never the secrets. Drives the
+    /// admin dashboard's status and the `configured` flag advertised to clients.
+    pub async fn org_computer_kinds(&self, org_id: &str) -> StoreResult<Vec<String>> {
+        let prefix = format!("org-computer:{org_id}:");
+        let rows = sqlx::query("select id from secret_store where id like $1")
+            .bind(format!("{prefix}%"))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("id").ok())
+            .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
+            .collect())
+    }
 }

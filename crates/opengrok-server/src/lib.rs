@@ -9,6 +9,7 @@ pub mod account_api;
 pub mod agui;
 pub mod auth;
 pub mod autonomy;
+pub mod computers;
 pub mod connections;
 pub mod gateway;
 pub mod grpc;
@@ -32,6 +33,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
+        .merge(computers::router(state.clone()))
         .merge(connections::routes::router(state));
     mount_web_console(app)
 }

@@ -292,7 +292,7 @@ async fn persist(
 // ---- Admin: the org's admin manages its users ----
 
 /// The caller's org and a confirmation they are its admin — or a refusal.
-async fn admin_org(
+pub async fn admin_org(
     state: &AuthState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(OrgId, opengrok_core::org::Org), Response> {
