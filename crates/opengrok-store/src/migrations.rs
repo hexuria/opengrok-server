@@ -221,6 +221,20 @@ create table if not exists gateway_entry (
 -- The prompt-acceptance ledger: (account slot, clientNonce) -> what was accepted. A repeated
 -- nonce with the same digest answers accepted again; a different digest is refused. This is what
 -- makes the client's retry safe instead of a duplicate send.
+-- Bot keys: the durable credential a client Bot presents so its runs arrive AS a coworker.
+-- A credential record, not a domain event — the same bargain as secret_store: the log records
+-- what coworkers did, not which tokens exist. The row is what makes revocation real; a signed
+-- key whose row is revoked (or missing) is refused.
+create table if not exists bot_key_view (
+    jti           text    primary key,
+    account_id    text    not null,
+    coworker_id   text    not null,
+    label         text    not null,
+    revoked       boolean not null default false,
+    created_at_ms bigint  not null
+);
+create index if not exists bot_key_account_idx on bot_key_view (account_id);
+
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
 -- and colour). A wire-format projection like gateway_entry: the client is the only reader.
 create table if not exists seamb_profile (

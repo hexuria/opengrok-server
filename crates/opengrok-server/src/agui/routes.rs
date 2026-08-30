@@ -69,15 +69,6 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 ///
 /// THE GRANT IS READ HERE, ON THIS TURN. Not cached from sign-in and not carried in the request:
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
-async fn tools_for(
-    state: &AgUiState,
-    input: &RunAgentInput,
-    account_id: &opengrok_core::id::AccountId,
-) -> Option<ToolRunner> {
-    let coworker_id = coworker_id_from(input)?;
-    tools_for_coworker(state, account_id, &coworker_id).await
-}
-
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
 pub(crate) async fn tools_for_coworker(
@@ -337,6 +328,14 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
+        .route(
+            "/coworkers/{coworker_id}/keys",
+            post(mint_bot_key).get(list_bot_keys),
+        )
+        .route(
+            "/coworkers/{coworker_id}/keys/{jti}",
+            axum::routing::delete(revoke_bot_key),
+        )
         .with_state(state)
 }
 
@@ -590,6 +589,173 @@ pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Mint a durable key that lets a client Bot run AS this coworker.
+///
+/// Access tokens live an hour; a Bot registered in a client's vault with a static header dies
+/// hourly. This key is signed like everything else but LONG-lived, because its real lifecycle
+/// control is the revocable row — showing the token once at mint is the only time it exists in
+/// a reply, the same bargain every credential here makes.
+async fn mint_bot_key(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    // Owner-and-permitted, or a 404 that does not confirm the coworker exists.
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(&account_id)
+        .await
+        .map(|roster| {
+            roster
+                .iter()
+                .any(|view| view.id == coworker_id && !view.retired)
+        })
+        .unwrap_or(false);
+    if !owns {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+
+    let jti = format!("bk_{}", uuid::Uuid::now_v7());
+    let at_ms = now_ms();
+    let claims = BotKeyClaims {
+        purpose: "bot-key".to_string(),
+        sub: account_id.as_str().to_string(),
+        coworker: coworker_id.as_str().to_string(),
+        jti: jti.clone(),
+        // Ten years: the row is the real lifecycle; the exp only bounds a leaked key whose
+        // revocation row was somehow lost with it.
+        exp: at_ms / 1_000 + 10 * 365 * 24 * 60 * 60,
+    };
+    let Ok(token) = state.auth.minter.mint_claims(&claims) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not mint").into_response();
+    };
+    if let Err(error) = state
+        .auth
+        .store
+        .insert_bot_key(&jti, &account_id, &coworker_id, "bot key", at_ms)
+        .await
+    {
+        tracing::error!(%error, "could not record a bot key");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not record the key",
+        )
+            .into_response();
+    }
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "jti": jti,
+            "coworkerId": coworker_id.as_str(),
+            // Shown exactly once. The row keeps the jti; the token is the caller's to keep.
+            "key": token,
+        })),
+    )
+        .into_response()
+}
+
+async fn list_bot_keys(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match state
+        .auth
+        .store
+        .bot_keys_for(&account_id, &coworker_id)
+        .await
+    {
+        Ok(keys) => Json(keys).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not list bot keys");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
+async fn revoke_bot_key(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((_coworker_id, jti)): axum::extract::Path<(String, String)>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    match state.auth.store.revoke_bot_key(&account_id, &jti).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such key").into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not revoke a bot key");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
+/// What a bot key says about itself. The `use` claim is the discriminator the minter's own
+/// documentation demands: without it, a stolen access token would verify here too.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BotKeyClaims {
+    #[serde(rename = "use")]
+    pub purpose: String,
+    pub sub: String,
+    pub coworker: String,
+    pub jti: String,
+    pub exp: i64,
+}
+
+/// Who is calling, and — when the credential is a bot key — AS which coworker.
+///
+/// Three outcomes, and the middle one matters most: `Err(response)` is a bot key that VERIFIES
+/// but is revoked or unknown. That must refuse rather than fall through to anonymous, or a
+/// revoked Bot silently keeps talking on the deployment's model and nobody notices the
+/// revocation did nothing.
+pub(crate) async fn principal_from_bearer(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(opengrok_core::id::AccountId, Option<CoworkerId>)>, Response> {
+    let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Ok(None);
+    };
+    if let Ok(claims) = state.auth.minter.verify_access(token) {
+        return Ok(Some((
+            opengrok_core::id::AccountId::from_stored(claims.sub),
+            None,
+        )));
+    }
+    if let Ok(claims) = state.auth.minter.verify_claims::<BotKeyClaims>(token) {
+        if claims.purpose != "bot-key" {
+            return Ok(None);
+        }
+        let live = state
+            .auth
+            .store
+            .bot_key_live(&claims.jti)
+            .await
+            .unwrap_or(false);
+        if !live {
+            return Err((StatusCode::UNAUTHORIZED, "this bot key has been revoked").into_response());
+        }
+        return Ok(Some((
+            opengrok_core::id::AccountId::from_stored(claims.sub),
+            Some(CoworkerId::from_stored(claims.coworker)),
+        )));
+    }
+    Ok(None)
+}
+
 /// Start a run and stream its events.
 pub async fn run(
     State(state): State<AgUiState>,
@@ -602,12 +768,21 @@ pub async fn run(
     // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
     // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
     // no coworker just talks to a model.
-    let account_id = account_from_bearer(&state, &headers);
+    let (account_id, key_coworker) = match principal_from_bearer(&state, &headers).await {
+        Ok(Some((account, coworker))) => (Some(account), coworker),
+        Ok(None) => (None, None),
+        // A revoked bot key refuses; downgrading to anonymous would make revocation invisible.
+        Err(refusal) => return refusal,
+    };
+    // A BOT KEY NAMES THE COWORKER. barok-works registers a Bot with an endpoint and a header —
+    // it has no forwardedProps to send — so the key itself carries which coworker the Bot IS.
+    // An explicit forwardedProps still wins: a client that says what it means is believed.
+    let run_coworker = coworker_id_from(&input).or(key_coworker);
 
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
 
-    if let (Some(account_id), Some(coworker_id)) = (&account_id, coworker_id_from(&input)) {
+    if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
         let policy = state
             .auth
             .store
@@ -648,7 +823,10 @@ pub async fn run(
     };
 
     let tools = match &account_id {
-        Some(account_id) => tools_for(&state, &input, account_id).await,
+        Some(account_id) => match &run_coworker {
+            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id).await,
+            None => None,
+        },
         // No bearer, no identity, and therefore no tools: tools always run as somebody.
         None => None,
     };
@@ -660,7 +838,7 @@ pub async fn run(
         state: state.clone(),
         thread_id: input.thread_id.clone(),
         account_id: account_id.clone(),
-        coworker_id: coworker_id_from(&input),
+        coworker_id: run_coworker,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for

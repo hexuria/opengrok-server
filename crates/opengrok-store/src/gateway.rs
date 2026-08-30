@@ -224,3 +224,89 @@ impl PgStore {
         row.map(|row| Ok(row.try_get("record")?)).transpose()
     }
 }
+
+/// One bot key, as the list endpoint reports it. The signed token itself is never stored —
+/// it is shown once at mint, like every credential worth having.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BotKeyView {
+    pub jti: String,
+    pub coworker_id: String,
+    pub label: String,
+    pub revoked: bool,
+    pub created_at_ms: i64,
+}
+
+impl PgStore {
+    pub async fn insert_bot_key(
+        &self,
+        jti: &str,
+        account: &opengrok_core::id::AccountId,
+        coworker: &CoworkerId,
+        label: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into bot_key_view (jti, account_id, coworker_id, label, revoked, created_at_ms)
+             values ($1, $2, $3, $4, false, $5)",
+        )
+        .bind(jti)
+        .bind(account.as_str())
+        .bind(coworker.as_str())
+        .bind(label)
+        .bind(at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Is this key still good? Missing and revoked answer alike: no.
+    pub async fn bot_key_live(&self, jti: &str) -> StoreResult<bool> {
+        let row = sqlx::query("select 1 as one from bot_key_view where jti = $1 and not revoked")
+            .bind(jti)
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn bot_keys_for(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Vec<BotKeyView>> {
+        let rows = sqlx::query(
+            "select jti, coworker_id, label, revoked, created_at_ms from bot_key_view
+             where account_id = $1 and coworker_id = $2 order by created_at_ms desc",
+        )
+        .bind(account.as_str())
+        .bind(coworker.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(BotKeyView {
+                    jti: row.try_get("jti")?,
+                    coworker_id: row.try_get("coworker_id")?,
+                    label: row.try_get("label")?,
+                    revoked: row.try_get("revoked")?,
+                    created_at_ms: row.try_get("created_at_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Revoke, if the caller owns it. Answers whether anything changed — the 404-vs-204 fact.
+    pub async fn revoke_bot_key(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        jti: &str,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "update bot_key_view set revoked = true where jti = $1 and account_id = $2",
+        )
+        .bind(jti)
+        .bind(account.as_str())
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+}

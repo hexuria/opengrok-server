@@ -129,11 +129,20 @@ tonic gRPC server cannot answer the client.
 Runs from a client Bot arrive anonymous today: no tools, no policy, the deployment's model.
 Access tokens live one hour, so a Bot registered with a static header dies hourly.
 
-- [ ] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key (signed, names account +
-  coworker; a `key_view` row makes revocation real).
-- [ ] **10.2** `account_from_bearer` accepts it; a bot-key names the coworker for the run.
-- [ ] **10.3** Proven from barok-works: a Bot registered with the key runs as its coworker — tools,
-  approvals, and the coworker's own model, from the UI instead of curl.
+- [x] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key — signed with a `use`
+  discriminator so an access token can never pass as one, shown exactly once at mint, its
+  `bot_key_view` row making revocation real. List and revoke ride the same 404-not-403
+  ownership rule. *(this commit)*
+- [x] **10.2** `principal_from_bearer` accepts it, and the key NAMES the coworker: a bare
+  POST /ag-ui with nothing but the key runs as the coworker, on its model, owned by the minting
+  account — and a revoked key answers 401 rather than silently downgrading to anonymous.
+  *(this commit)*
+- [ ] **10.3** Proven from barok-works end to end. Every hop holds separately — the key sits in
+  their vault (`hasAuth: true`), their loader attaches it per load, and the same minted key via
+  curl runs owned on the same live server — but the one browser send with the header attached is
+  still owed: the first attempt bound the STALE duplicate Bot (the package-sync-never-prunes
+  finding, now cleaned up), and the retry died under machine load. One quiet-machine send
+  closes it.
 
 ## Slice 11+ — breadth (P5 → P10, in order)
 
