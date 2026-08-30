@@ -157,6 +157,7 @@ pub async fn login_deep_control(
             },
         );
     }
+    tracing::info!(uuid = %query.uuid, "loginDeepControl: served the browser login page");
     super::pages::login(&query.challenge, &query.uuid, None)
 }
 
@@ -201,6 +202,7 @@ pub async fn login_submit(
         return refuse("This sign-in link expired. Return to the app and try again.");
     }
 
+    tracing::info!(email = %view.email, uuid = %form.uuid, "loginDeepControl: credentials bound; poll can now complete");
     super::pages::message(
         StatusCode::OK,
         "Signed in",
@@ -402,6 +404,7 @@ pub async fn auth_poll(
         // Pending — exactly what the client waits on.
         return (StatusCode::NOT_FOUND, "pending").into_response();
     };
+    tracing::info!(email = %email, uuid = %query.uuid, "auth/poll: releasing a session token to the client");
 
     match mint_session(&state, &email, Plan::Ultra, false).await {
         Ok((access_token, refresh_token)) => Json(DevSessionReply {
