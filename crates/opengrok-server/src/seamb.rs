@@ -427,24 +427,33 @@ async fn grok_bot(
                 );
             };
             let coworker_id = CoworkerId::from_stored(id.to_string());
-            if let Ok((loaded, seq)) = store.load_coworker(&coworker_id).await
-                && let Ok(events) = loaded.decide(CoworkerCommand::Retire { at_ms: now_ms() })
-            {
-                let mut after = loaded.clone();
-                for event in &events {
-                    after.apply(event);
+            if let Ok((loaded, seq)) = store.load_coworker(&coworker_id).await {
+                let at_ms = now_ms();
+                let mut after = loaded;
+                // Destroy the dedicated box + release it before retiring, so delete does not leak.
+                let mut events = crate::agui::provision::release_computer(
+                    state.agui.computer.as_ref(),
+                    &mut after,
+                    at_ms,
+                )
+                .await;
+                if let Ok(retire) = after.decide(CoworkerCommand::Retire { at_ms }) {
+                    for event in &retire {
+                        after.apply(event);
+                    }
+                    events.extend(retire);
+                    let view = opengrok_core::coworker::CoworkerView {
+                        id: coworker_id.clone(),
+                        name: after.name.clone(),
+                        model: after.model.clone(),
+                        box_id: after.box_id.clone(),
+                        retired: after.retired,
+                        updated_at_ms: at_ms,
+                    };
+                    let _ = store
+                        .append_coworker(&coworker_id, &account_id, seq, &events, &view)
+                        .await;
                 }
-                let view = opengrok_core::coworker::CoworkerView {
-                    id: coworker_id.clone(),
-                    name: after.name.clone(),
-                    model: after.model.clone(),
-                    box_id: after.box_id.clone(),
-                    retired: after.retired,
-                    updated_at_ms: now_ms(),
-                };
-                let _ = store
-                    .append_coworker(&coworker_id, &account_id, seq, &events, &view)
-                    .await;
             }
             connect_ok(json!({}))
         }

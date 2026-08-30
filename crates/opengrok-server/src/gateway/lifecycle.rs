@@ -322,20 +322,31 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
     let mut deleted = 0;
     for id in ids {
         let coworker_id = CoworkerId::from_stored(id.clone());
-        if let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await
-            && let Ok(events) = loaded.decide(CoworkerCommand::Retire { at_ms: now_ms() })
-        {
-            let mut after = loaded.clone();
-            for event in &events {
+        if let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await {
+            let at_ms = now_ms();
+            let mut after = loaded;
+            // Tear the dedicated box down (destroy + ComputerReleased) BEFORE retiring, so a
+            // deleted bot does not leave a running box behind (an ascii bill / a docker container).
+            let mut events = crate::agui::provision::release_computer(
+                state.agui.computer.as_ref(),
+                &mut after,
+                at_ms,
+            )
+            .await;
+            let Ok(retire) = after.decide(CoworkerCommand::Retire { at_ms }) else {
+                continue;
+            };
+            for event in &retire {
                 after.apply(event);
             }
+            events.extend(retire);
             let view = opengrok_core::coworker::CoworkerView {
                 id: coworker_id.clone(),
                 name: after.name.clone(),
                 model: after.model.clone(),
                 box_id: after.box_id.clone(),
                 retired: after.retired,
-                updated_at_ms: now_ms(),
+                updated_at_ms: at_ms,
             };
             if state
                 .agui

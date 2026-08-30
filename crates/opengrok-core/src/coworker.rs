@@ -146,6 +146,11 @@ impl Coworker {
         self.box_id.as_ref()
     }
 
+    /// The box's mode — dedicated (this coworker's own) or shared — or `None` when it has no box.
+    pub fn box_mode(&self) -> Option<BoxMode> {
+        self.box_mode
+    }
+
     fn alive(&self) -> Result<(), CoworkerError> {
         if !self.hired {
             return Err(CoworkerError::NotHired);

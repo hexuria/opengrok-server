@@ -99,6 +99,38 @@ pub async fn provision_computer(
     }
 }
 
+/// Tear down a coworker's DEDICATED computer as part of retiring it: destroy the box (best-effort
+/// — a provider hiccup must not strand the retirement) and emit `ComputerReleased`. A shared box
+/// is left alone (it is not one coworker's to destroy), and a boxless coworker yields nothing.
+/// Applies the release to `coworker` and returns the events to persist alongside `Retire`.
+pub async fn release_computer(
+    computer: Option<&Arc<dyn Computer>>,
+    coworker: &mut Coworker,
+    at_ms: i64,
+) -> Vec<CoworkerEvent> {
+    // Only a dedicated box is ours to tear down.
+    let box_id = match coworker.computer().cloned() {
+        Some(id) if coworker.box_mode() == Some(BoxMode::Dedicated) => id,
+        _ => return Vec::new(),
+    };
+    // Destroy the real box first — stop the ascii bill / remove the docker container. Best-effort:
+    // log and proceed, because a box that will not die must not block the person from retiring.
+    if let Some(computer) = computer
+        && let Err(error) = computer.destroy(box_id.as_str()).await
+    {
+        tracing::warn!(%error, box_id = box_id.as_str(), "could not destroy the box on retire; releasing it anyway");
+    }
+    match coworker.decide(CoworkerCommand::ReleaseComputer { at_ms }) {
+        Ok(events) => {
+            for event in &events {
+                coworker.apply(event);
+            }
+            events
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -160,5 +192,61 @@ mod tests {
         assert_eq!(out.box_id.as_ref().map(BoxId::as_str), Some("box_shared"));
         assert_eq!(coworker.computer().map(BoxId::as_str), Some("box_shared"));
         assert!(!out.events.is_empty());
+    }
+
+    fn with_dedicated_box(box_id: &str) -> Coworker {
+        let mut coworker = hired();
+        let events = coworker
+            .decide(CoworkerCommand::AssignComputer {
+                box_id: BoxId::from_stored(box_id.to_string()),
+                mode: BoxMode::Dedicated,
+                at_ms: 2,
+            })
+            .expect("assign");
+        for event in &events {
+            coworker.apply(event);
+        }
+        coworker
+    }
+
+    #[tokio::test]
+    async fn releasing_a_boxless_coworker_is_a_no_op() {
+        let mut coworker = hired();
+        let events = release_computer(None, &mut coworker, 3).await;
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_shared_box_is_not_torn_down() {
+        let mut coworker = hired();
+        let assign = coworker
+            .decide(CoworkerCommand::AssignComputer {
+                box_id: BoxId::from_stored("box_shared".to_string()),
+                mode: BoxMode::Shared,
+                at_ms: 2,
+            })
+            .expect("assign");
+        for event in &assign {
+            coworker.apply(event);
+        }
+        let events = release_computer(None, &mut coworker, 3).await;
+        assert!(
+            events.is_empty(),
+            "a shared box is not one coworker's to destroy"
+        );
+        assert_eq!(coworker.computer().map(BoxId::as_str), Some("box_shared"));
+    }
+
+    #[tokio::test]
+    async fn a_dedicated_box_is_released_even_when_the_provider_is_absent() {
+        // With no provider the destroy is skipped, but the release still records — so the coworker
+        // row stops claiming a box that is (or will be) gone.
+        let mut coworker = with_dedicated_box("box_dedicated");
+        let events = release_computer(None, &mut coworker, 3).await;
+        assert!(!events.is_empty(), "a dedicated box releases");
+        assert!(
+            coworker.computer().is_none(),
+            "the box is released off the coworker"
+        );
     }
 }
