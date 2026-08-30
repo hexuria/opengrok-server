@@ -84,13 +84,17 @@ fn parse_args(body: &str) -> Result<Value, Response> {
     if body.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(body).map_err(|_| {
-        connect_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_argument",
-            "the request body is not JSON",
-        )
-    })
+    // Lenient by design, like the GrokBotService default arm: a body we cannot read as plain JSON is
+    // treated as no args rather than a 400. The Connect client frames its server-STREAM calls
+    // (e.g. WatchSandBoxMigration) and some unary calls (GetUserPrivacyMode) with an enveloped body
+    // that is not bare JSON; those methods carry no arguments we need, so an empty map lets them
+    // reach their handler (or the benign empty-reply default) and the app keeps booting, instead of
+    // a protocol error on a question we do answer. Methods that DO need args send real JSON and are
+    // unaffected.
+    Ok(serde_json::from_str(body).unwrap_or_else(|_| {
+        tracing::debug!("seam-B body was not plain JSON; treating as empty args");
+        json!({})
+    }))
 }
 
 /// Accepts proto3 JSON's both spellings of an int64: number or string.

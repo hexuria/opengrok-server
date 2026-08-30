@@ -35,7 +35,44 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(account_api::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
         .merge(connections::routes::router(state));
-    mount_web_console(app)
+    let app = mount_web_console(app);
+    // Opt-in request trace (OG_TRACE_REQUESTS=1): one INFO line per request with method, path,
+    // status, whether an Origin header was present (the gateway refuses those 403 before the token),
+    // and the LENGTH of the presented bearer (never its value) so a 0- or wrong-length token that
+    // can never match is visible. A diagnostic for driving the client end to end; off by default.
+    if std::env::var("OG_TRACE_REQUESTS").as_deref() == Ok("1") {
+        app.layer(axum::middleware::from_fn(trace_request))
+    } else {
+        app
+    }
+}
+
+/// See `OG_TRACE_REQUESTS` above. Logs presence/length of sensitive headers, never their contents.
+async fn trace_request(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let has_origin = req.headers().contains_key(axum::http::header::ORIGIN);
+    let auth_len = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let started = std::time::Instant::now();
+    let response = next.run(req).await;
+    tracing::info!(
+        %method,
+        %uri,
+        status = response.status().as_u16(),
+        origin = has_origin,
+        auth_len,
+        ms = started.elapsed().as_millis() as u64,
+        "request"
+    );
+    response
 }
 
 /// Serve the built web console (the Bun/Vite SPA) at `/console`, if `OG_WEB_CONSOLE_DIR` names a
