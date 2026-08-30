@@ -8,6 +8,7 @@ use axum::routing::get;
 
 pub mod agui;
 pub mod auth;
+pub mod autonomy;
 pub mod connections;
 pub mod recovery;
 
@@ -20,6 +21,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/health", get(health))
         .merge(auth::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
+        .merge(autonomy::routes::router(state.clone()))
         .merge(connections::routes::router(state))
 }
 

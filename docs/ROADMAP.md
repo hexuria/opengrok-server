@@ -4,7 +4,8 @@ The living tracker. `docs/GOAL.md` is the canonical mission record and the why; 
 what-is-left, in checkboxes.
 
 **The rule: a box is ticked only in the commit that makes it true.** Never ticked in advance,
-never ticked for work that is "basically done", and each tick names its commit. A box with no
+never ticked for work that is "basically done", and each tick names its commit — *(this commit)*
+is allowed when the tick rides with the work itself, since `git blame` resolves it. A box with no
 commit next to it is a claim nobody has to believe.
 
 ---
@@ -33,24 +34,25 @@ commit next to it is a claim nobody has to believe.
 The mission is "keeps working when the laptop is off", and today every run starts with a client
 POST. This slice makes the server start runs itself.
 
-- [ ] **6a.1** `schedule` aggregate in `opengrok-core`: Create/Pause/Resume/Delete, cron validated
-  in `decide`, pure and unit-tested.
-- [ ] **6a.2** Projection + store: `schedule_view`, `claim_due_schedules` advancing `next_due_ms`
+- [x] **6a.1** `schedule` aggregate in `opengrok-core`: Create/Pause/Resume/Delete, cron validated
+  in `decide`, pure and unit-tested. *(this commit)*
+- [x] **6a.2** Projection + store: `schedule_view`, `claim_due_schedules` advancing `next_due_ms`
   inside the claiming update (crash between claim and fire skips one occurrence, never
-  double-fires).
-- [ ] **6a.3** The tick: a sweep beside `recovery::sweep_forever` that fires due schedules through
+  double-fires). *(this commit)*
+- [x] **6a.3** The tick: a sweep beside `recovery::sweep_forever` that fires due schedules through
   `run_conversation`, on the coworker's own model and tools, with `policy_for` checked at fire
-  time.
-- [ ] **6a.4** Endpoints: `POST/GET /schedules`, pause/resume, delete — ownership as 404, same as
-  runs.
-- [ ] **6b.1** `monitor` aggregate + projection: an event-type matcher over our own `events` table,
-  cursor-driven, no new infra.
-- [ ] **6b.2** The loop guard: fired runs are stamped with their monitor, and a monitor never
-  matches events from its own firings.
-- [ ] **6b.3** Endpoints: `/monitors`, same shape as `/schedules`.
-- [ ] **6.v** `scripts/slice10-autonomy-smoke.sh` in `gate.sh`: a run appears that no client
-  started; SIGKILL mid-schedule and firing resumes after restart; a monitor fires on `run-failed`
-  and the guard holds.
+  time. *(this commit)*
+- [x] **6a.4** Endpoints: `POST/GET /schedules`, pause/resume, delete — ownership as 404, same as
+  runs. *(this commit)*
+- [x] **6b.1** `monitor` aggregate + projection: an event-type matcher over our own `events` table,
+  cursor-driven, no new infra. *(this commit)*
+- [x] **6b.2** The loop guard: fired runs are stamped with their monitor, and a monitor never
+  matches events from its own firings. *(this commit)*
+- [x] **6b.3** Endpoints: `/monitors`, same shape as `/schedules`. *(this commit)*
+- [x] **6.v** `scripts/slice10-autonomy-smoke.sh` in `gate.sh`: a run appears that no client
+  started; SIGKILL mid-schedule and firing resumes after restart; a monitor fires and the loop
+  guard holds — it watches `run-started`, the sharpest case, since its own run emits that very
+  event. *(this commit)*
 
 ## Slice 7 — Bot ↔ coworker binding
 

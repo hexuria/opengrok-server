@@ -7,7 +7,9 @@ pub mod account;
 pub mod connection;
 pub mod coworker;
 pub mod id;
+pub mod monitor;
 pub mod run;
+pub mod schedule;
 
 pub use account::{
     Account, AccountCommand, AccountError, AccountEvent, AccountView, Plan, Session,
@@ -18,8 +20,16 @@ pub use connection::{
 pub use coworker::{
     BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,
 };
-pub use id::{AccountId, BoxId, CoworkerId, PrincipalId, RunId, SessionId, TranscriptEntryId};
+pub use id::{
+    AccountId, BoxId, CoworkerId, MonitorId, PrincipalId, RunId, ScheduleId, SessionId,
+    TranscriptEntryId,
+};
+pub use monitor::{Monitor, MonitorCommand, MonitorError, MonitorEvent, MonitorView};
 pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};
+pub use schedule::{
+    Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView, next_fire_ms,
+    normalized_cron,
+};
 
 /// What went wrong, in the vocabulary of the domain rather than of a transport.
 #[derive(Debug, thiserror::Error)]

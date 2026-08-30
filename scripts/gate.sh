@@ -118,5 +118,10 @@ step "scripts/slice9-recovery-smoke.sh"
 OG_PORT="$PORT" scripts/slice9-recovery-smoke.sh >/dev/null || fail "recovery"
 echo "  passed"
 
+# Also starts and kills its own servers — the SIGKILL mid-schedule is the point of it.
+step "scripts/slice10-autonomy-smoke.sh"
+OG_PORT="$PORT" scripts/slice10-autonomy-smoke.sh >/dev/null || fail "autonomy"
+echo "  passed"
+
 echo
-echo "GATE PASSED (checks, tests and all five smoke scripts)."
+echo "GATE PASSED (checks, tests and every smoke script)."

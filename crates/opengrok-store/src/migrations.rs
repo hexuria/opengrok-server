@@ -162,6 +162,50 @@ create table if not exists account_view (
     trial         boolean     not null,
     updated_at_ms bigint      not null
 );
+
+-- Autonomy (slice 6). Projections; the truth is the events stream, as everywhere.
+create table if not exists schedule_view (
+    id            text        primary key,
+    account_id    text        not null,
+    coworker_id   text        not null,
+    cron          text        not null,
+    prompt        text        not null,
+    active        boolean     not null,
+    -- When this next fires, epoch ms. NULL when inactive, or when the expression has no future
+    -- occurrence left. The sweep claims by this column and ADVANCES IT IN THE CLAIMING UPDATE, so
+    -- a crash between claim and fire skips one occurrence rather than firing it twice.
+    next_due_ms   bigint,
+    updated_at_ms bigint      not null
+);
+create index if not exists schedule_due_idx on schedule_view (next_due_ms) where active;
+create index if not exists schedule_account_idx on schedule_view (account_id);
+
+create table if not exists monitor_view (
+    id            text        primary key,
+    account_id    text        not null,
+    coworker_id   text        not null,
+    watches       text        not null,
+    prompt        text        not null,
+    active        boolean     not null,
+    updated_at_ms bigint      not null
+);
+create index if not exists monitor_account_idx on monitor_view (account_id);
+
+-- The loop guard's memory: which runs each monitor started. A monitor never matches an event
+-- from a run it fired. Written in the same transaction as the Fired event.
+create table if not exists monitor_firing (
+    monitor_id text not null,
+    run_id     text not null,
+    primary key (monitor_id, run_id)
+);
+
+-- Where the monitor sweep has read to in `events`. One row; advanced under a row lock so two
+-- replicas never process the same span. Seeded at the log's current end on first use — a new
+-- deployment must not replay history into freshly created monitors.
+create table if not exists monitor_cursor (
+    id            int    primary key,
+    last_event_id bigint not null
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

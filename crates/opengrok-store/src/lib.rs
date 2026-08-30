@@ -20,10 +20,12 @@ use opengrok_core::account::{Account, AccountEvent, AccountView};
 use opengrok_core::id::AccountId;
 use serde::{Serialize, de::DeserializeOwned};
 
+pub mod autonomy;
 pub mod migrations;
 pub mod postgres;
 pub mod vault;
 
+pub use autonomy::{DueSchedule, LogEvent};
 pub use postgres::{CredentialUpdate, PgStore};
 pub use vault::{Sealed, Vault};
 
@@ -144,6 +146,16 @@ pub fn coworker_stream(id: &opengrok_core::id::CoworkerId) -> String {
 /// One stream per run. Runs and accounts share the `events` table and never the same stream.
 pub fn run_stream(id: &opengrok_core::id::RunId) -> String {
     format!("run/{id}")
+}
+
+/// One stream per schedule.
+pub fn schedule_stream(id: &opengrok_core::id::ScheduleId) -> String {
+    format!("schedule/{id}")
+}
+
+/// The stream a monitor's events live on.
+pub fn monitor_stream(id: &opengrok_core::id::MonitorId) -> String {
+    format!("monitor/{id}")
 }
 
 /// The account stream's id. One stream per account, keyed by the account id.

@@ -74,8 +74,19 @@ async fn tools_for(
     input: &RunAgentInput,
     account_id: &opengrok_core::id::AccountId,
 ) -> Option<ToolRunner> {
-    let computer = state.computer.as_ref()?;
     let coworker_id = coworker_id_from(input)?;
+    tools_for_coworker(state, account_id, &coworker_id).await
+}
+
+/// The same binding, addressed by coworker rather than by request — because the scheduler and the
+/// monitor fire runs with no `RunAgentInput` anywhere in sight.
+pub(crate) async fn tools_for_coworker(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<ToolRunner> {
+    let computer = state.computer.as_ref()?;
+    let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
     // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
     // model is told about but that always refuses is a dead end it keeps trying.
@@ -1101,7 +1112,9 @@ async fn continue_run(
     };
 
     let request = ModelRequest {
-        model: state.model.clone(),
+        // The coworker's model, not the deployment's — the same rule `run()` enforces, and the
+        // same silent substitution if it slips.
+        model: coworker.model.clone(),
         system: None,
         messages: conversation_from(&run),
     };

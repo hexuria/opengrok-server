@@ -48,6 +48,16 @@ id!(
     "One coworker: a name, a face, a computer, a model route."
 );
 id!(RunId, "run", "One turn taken by one coworker.");
+id!(
+    ScheduleId,
+    "sched",
+    "A standing instruction: this coworker acts on this cron, with this prompt."
+);
+id!(
+    MonitorId,
+    "mon",
+    "A standing question against the event log: when this happens, this coworker looks."
+);
 id!(BoxId, "box", "The computer a coworker works on.");
 id!(
     PrincipalId,
