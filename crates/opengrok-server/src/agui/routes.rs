@@ -585,19 +585,17 @@ pub async fn run(
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    let request = ModelRequest {
-        model: state.model.clone(),
-        system: None,
-        messages: to_chat_messages(&input),
-    };
-
-    // Who is asking. Established first, because both the permission check and the run's ownership
-    // depend on it.
+    // Who is asking. Established first, because the permission check, the run's ownership and the
+    // model it thinks with all depend on it.
     //
     // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
     // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
     // no coworker just talks to a model.
     let account_id = account_from_bearer(&state, &headers);
+
+    // The deployment's model is the default, not the answer: a named coworker overrides it below.
+    let mut model = state.model.clone();
+
     if let (Some(account_id), Some(coworker_id)) = (&account_id, coworker_id_from(&input)) {
         let policy = state
             .auth
@@ -615,7 +613,28 @@ pub async fn run(
             // A refusal the client can read, not a dead socket.
             return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
         }
+
+        // WHICH MODEL A COWORKER THINKS WITH IS THE COWORKER'S, NOT THE DEPLOYMENT'S. Hiring takes
+        // a model and stores it, and the roster reports it; a run that read past it left every one
+        // of those answers describing a choice that never happened — a coworker hired on one model
+        // silently answered on another, and the only visible symptom was the bill.
+        //
+        // AFTER the policy check and only for a named principal. An anonymous caller may still talk
+        // to the deployment's model, but must not learn a coworker's configuration by noticing
+        // which model replies.
+        //
+        // A coworker that cannot be loaded keeps the default rather than failing the run: the model
+        // is how the turn is answered, not whether it is allowed, and that question was just asked.
+        if let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await {
+            model = coworker.model.clone();
+        }
     }
+
+    let request = ModelRequest {
+        model,
+        system: None,
+        messages: to_chat_messages(&input),
+    };
 
     let tools = match &account_id {
         Some(account_id) => tools_for(&state, &input, account_id).await,

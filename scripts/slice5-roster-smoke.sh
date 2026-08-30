@@ -60,5 +60,35 @@ else
   ok "a computer was assigned: $box"
 fi
 
+echo "7. the coworker's own model is the one its turn is answered with"
+# THE REGRESSION THIS EXISTS FOR. Hiring takes a model, stores it and reports it on the roster,
+# while the run read the deployment's `OG_MODEL` and ignored all three. Every visible surface said
+# `xai/grok-4.6` and every call went somewhere else; nothing failed, so nothing caught it.
+#
+# The mock door names the model it was asked for, which is the only place that answer is observable
+# from out here — a real door would answer identically either way.
+T=$(date +%s)
+answered=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $token_one" \
+  -H 'content-type: application/json' \
+  -d "{\"threadId\":\"t-model-$T\",\"runId\":\"r-model-$T\",\"messages\":[{\"id\":\"m1\",\"role\":\"user\",\"content\":\"hello\"}],\"forwardedProps\":{\"coworkerId\":\"$id\"}}" \
+  --max-time 20 | sed -n 's/^data: //p' | jq -r 'select(.delta != null) | .delta' | tr -d '\n')
+case "$answered" in
+  *"xai/grok-4.6"*) ok "the turn was answered with the coworker's model" ;;
+  *) fail "the coworker's model did not reach the door; the reply was: $answered" ;;
+esac
+
+echo "8. a run with no coworker still gets the deployment's model"
+# The default has to survive the fix: the AG-UI endpoint is also how a client with no coworker at
+# all just talks to a model, and that path must not start requiring one.
+plain=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' \
+  -d "{\"threadId\":\"t-plain-$T\",\"runId\":\"r-plain-$T\",\"messages\":[{\"id\":\"m1\",\"role\":\"user\",\"content\":\"hello\"}]}" \
+  --max-time 20 | sed -n 's/^data: //p' | jq -r 'select(.delta != null) | .delta' | tr -d '\n')
+case "$plain" in
+  *"xai/grok-4.6"*) fail "a run with no coworker borrowed a coworker's model: $plain" ;;
+  "") fail "a run with no coworker produced nothing" ;;
+  *) ok "answered without a coworker, on the deployment's own model" ;;
+esac
+
 echo
-echo "PASS — slice 5: a coworker is hired, scoped to its account, and honest about its computer."
+echo "PASS — slice 5: a coworker is hired, scoped to its account, honest about its computer, and
+       answered with its own model."

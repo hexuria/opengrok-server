@@ -94,7 +94,13 @@ impl MockDoor {
             .map(|message| message.content.clone())
             .unwrap_or_else(|| "nothing".to_string());
 
-        let reply = format!("You said: {asked}. This is the mock door — no model was called.");
+        // NAMING THE MODEL IS THE POINT, not decoration. Which model a turn was asked for is
+        // otherwise invisible to every test: a run that quietly substituted the deployment's model
+        // for the coworker's answered exactly like a correct one, and did so for weeks.
+        let model = &request.model;
+        let reply = format!(
+            "You said: {asked}. This is the mock door standing in for {model} — no model was called."
+        );
         reply
             .split_inclusive(' ')
             .map(|word| ModelDelta::Text(word.to_string()))
