@@ -110,6 +110,7 @@ async fn mint_account(
         org_id: Some(org_id.to_string()),
         verified: true,
         enabled: true,
+        avatar_url: None,
     };
     store
         .append_account(&id, 0, &events, &view)
@@ -271,6 +272,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 org_id: after.org_id.clone(),
                 verified: after.verified,
                 enabled: after.enabled,
+                avatar_url: after.avatar_url.clone(),
             };
             store
                 .append_account(&view.id, seq, &events, &updated)

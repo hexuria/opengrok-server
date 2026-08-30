@@ -14,10 +14,10 @@ use serde_json::json;
 pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
     // The sender identity. Its DOMAIN must be verified in the Resend account, or Resend rejects
     // the send — so this is a real address under a domain the operator controls, not a placeholder.
-    let from_email = std::env::var("RESEND_FROM_EMAIL")
-        .unwrap_or_else(|_| "support@goldcoders.dev".to_string());
-    let from_name = std::env::var("RESEND_FROM_NAME")
-        .unwrap_or_else(|_| "Open Grok Support Team".to_string());
+    let from_email =
+        std::env::var("RESEND_FROM_EMAIL").unwrap_or_else(|_| "support@goldcoders.dev".to_string());
+    let from_name =
+        std::env::var("RESEND_FROM_NAME").unwrap_or_else(|_| "Open Grok Support Team".to_string());
     let from = format!("{from_name} <{from_email}>");
     let body = json!({
         "from": from,

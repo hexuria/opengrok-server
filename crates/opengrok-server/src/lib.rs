@@ -5,6 +5,7 @@
 
 use axum::Router;
 
+pub mod account_api;
 pub mod agui;
 pub mod auth;
 pub mod autonomy;
@@ -30,5 +31,10 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(auth::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
+        .merge(account_api::router(state.auth.clone()))
         .merge(connections::routes::router(state))
 }
+
+pub(crate) use auth::password::hash_password as password_hash;
+/// Re-exports so `account_api` can call the password helpers by a stable path.
+pub(crate) use auth::password::verify_password as password_verify;

@@ -28,6 +28,7 @@ fn now_ms() -> i64 {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SignupRequest {
     pub email: String,
     pub password: String,
@@ -140,6 +141,7 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
         org_id: Some(org_id.as_str().to_string()),
         verified: account.verified,
         enabled: false,
+        avatar_url: None,
     };
     if state
         .store
@@ -248,6 +250,7 @@ pub async fn verify_email(
         org_id: after.org_id.clone(),
         verified: after.verified,
         enabled: after.enabled,
+        avatar_url: after.avatar_url.clone(),
     };
     if state
         .store

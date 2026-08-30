@@ -136,15 +136,17 @@ impl PgStore {
                 | AccountEvent::CredentialsSet { .. }
                 | AccountEvent::EmailVerified { .. }
                 | AccountEvent::Enabled { .. }
-                | AccountEvent::Disabled { .. } => {}
+                | AccountEvent::Disabled { .. }
+                | AccountEvent::ProfileUpdated { .. }
+                | AccountEvent::PasswordChanged { .. } => {}
             }
         }
 
         sqlx::query(
             "insert into account_view
                (id, email, plan, trial, updated_at_ms,
-                password_hash, first_name, last_name, org_id, verified, enabled)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                password_hash, first_name, last_name, org_id, verified, enabled, avatar_url)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              on conflict (id) do update set
                email = excluded.email,
                plan = excluded.plan,
@@ -168,6 +170,7 @@ impl PgStore {
         .bind(&view.org_id)
         .bind(view.verified)
         .bind(view.enabled)
+        .bind(&view.avatar_url)
         .execute(&mut *tx)
         .await?;
 
@@ -192,7 +195,7 @@ impl PgStore {
     /// The read side: answered from the projection, never by replaying a log.
     pub async fn account_by_email(&self, email: &str) -> StoreResult<Option<AccountView>> {
         let row = sqlx::query(
-            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,\n                    org_id, verified, enabled\n             from account_view where email = $1",
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,\n                    org_id, verified, enabled, avatar_url\n             from account_view where email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -211,6 +214,7 @@ impl PgStore {
                 org_id: row.try_get("org_id")?,
                 verified: row.try_get("verified")?,
                 enabled: row.try_get("enabled")?,
+                avatar_url: row.try_get("avatar_url")?,
             })
         })
         .transpose()

@@ -270,6 +270,7 @@ alter table account_view add column if not exists last_name text not null defaul
 alter table account_view add column if not exists org_id text;
 alter table account_view add column if not exists verified boolean not null default false;
 alter table account_view add column if not exists enabled boolean not null default false;
+alter table account_view add column if not exists avatar_url text;
 
 create table if not exists gateway_nonce (
     account_slot text   not null,

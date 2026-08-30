@@ -109,6 +109,19 @@ pub enum AccountEvent {
     Disabled {
         at_ms: i64,
     },
+    /// Self-service profile edit — name and avatar. Email is deliberately NOT here: a person
+    /// cannot change the address their org and their invite were bound to.
+    ProfileUpdated {
+        first_name: String,
+        last_name: String,
+        avatar_url: Option<String>,
+        at_ms: i64,
+    },
+    /// A password change (self-service, after proving the current one) or an admin reset.
+    PasswordChanged {
+        password_hash: String,
+        at_ms: i64,
+    },
 }
 
 impl AccountEvent {
@@ -125,6 +138,8 @@ impl AccountEvent {
             Self::EmailVerified { .. } => "email-verified",
             Self::Enabled { .. } => "account-enabled",
             Self::Disabled { .. } => "account-disabled",
+            Self::ProfileUpdated { .. } => "account-profile-updated",
+            Self::PasswordChanged { .. } => "account-password-changed",
         }
     }
 }
@@ -151,6 +166,7 @@ pub struct Account {
     pub org_id: Option<String>,
     pub verified: bool,
     pub enabled: bool,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -212,6 +228,16 @@ pub enum AccountCommand {
         at_ms: i64,
     },
     Disable {
+        at_ms: i64,
+    },
+    UpdateProfile {
+        first_name: String,
+        last_name: String,
+        avatar_url: Option<String>,
+        at_ms: i64,
+    },
+    ChangePassword {
+        password_hash: String,
         at_ms: i64,
     },
 }
@@ -283,6 +309,19 @@ impl Account {
             AccountEvent::EmailVerified { .. } => self.verified = true,
             AccountEvent::Enabled { .. } => self.enabled = true,
             AccountEvent::Disabled { .. } => self.enabled = false,
+            AccountEvent::ProfileUpdated {
+                first_name,
+                last_name,
+                avatar_url,
+                ..
+            } => {
+                self.first_name = first_name.clone();
+                self.last_name = last_name.clone();
+                self.avatar_url = avatar_url.clone();
+            }
+            AccountEvent::PasswordChanged { password_hash, .. } => {
+                self.password_hash = Some(password_hash.clone());
+            }
         }
     }
 
@@ -401,6 +440,31 @@ impl Account {
             }
 
             AccountCommand::Disable { at_ms } => Ok(vec![AccountEvent::Disabled { at_ms }]),
+
+            AccountCommand::UpdateProfile {
+                first_name,
+                last_name,
+                avatar_url,
+                at_ms,
+            } => Ok(vec![AccountEvent::ProfileUpdated {
+                first_name,
+                last_name,
+                avatar_url,
+                at_ms,
+            }]),
+
+            AccountCommand::ChangePassword {
+                password_hash,
+                at_ms,
+            } => {
+                if self.password_hash.is_none() {
+                    return Err(AccountError::NoCredentials);
+                }
+                Ok(vec![AccountEvent::PasswordChanged {
+                    password_hash,
+                    at_ms,
+                }])
+            }
         }
     }
 
@@ -445,6 +509,8 @@ pub struct AccountView {
     pub verified: bool,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 impl AccountView {
@@ -468,6 +534,7 @@ impl AccountView {
             org_id: None,
             verified: false,
             enabled: false,
+            avatar_url: None,
         }
     }
 }

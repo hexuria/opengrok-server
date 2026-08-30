@@ -153,5 +153,10 @@ OG_PORT="$((PORT + 4))" OG_DATABASE_URL="${OG_DATABASE_URL%/*}/opengrok_s17_gate
   scripts/slice17-identity-smoke.sh >/dev/null || fail "identity"
 echo "  passed"
 
+step "scripts/slice18-account-admin-smoke.sh"
+OG_PORT="$((PORT + 5))" OG_DATABASE_URL="${OG_DATABASE_URL%/*}/opengrok_s18_gate" \
+  scripts/slice18-account-admin-smoke.sh >/dev/null || fail "account-admin"
+echo "  passed"
+
 echo
 echo "GATE PASSED (checks, tests and every smoke script)."
