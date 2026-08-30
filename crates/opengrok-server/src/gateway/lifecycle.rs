@@ -112,7 +112,7 @@ async fn hire(
     name: &str,
     args: &Value,
 ) -> (u16, Value) {
-    use crate::agui::provision::{self, ComputerWish};
+    use crate::agui::provision;
     use opengrok_core::coworker::{Coworker, CoworkerCommand};
 
     let id = CoworkerId::new();
@@ -130,22 +130,16 @@ async fn hire(
         coworker.apply(event);
     }
 
-    // A computer of its own, if asked — the same helper REST and seam-B use, so the desktop's
-    // create path provisions a box identically. Non-fatal: a failure leaves the coworker boxless
-    // and puts the reason in the reply.
-    let wish = ComputerWish {
-        with_computer: args
-            .get("withComputer")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        shared_box_id: args
-            .get("sharedBoxId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    };
-    let provisioned =
-        provision::provision_computer(state.agui.computer.as_ref(), &mut coworker, &wish, at_ms)
-            .await;
+    // 1 account = 1 computer: the account's first agent creates it, later agents share it. Every
+    // create path uses the same helper. Non-fatal: a failure leaves a boxless agent and a reason.
+    let provisioned = provision::ensure_account_computer(
+        state.agui.computer.as_ref(),
+        &state.agui.auth.store,
+        account_id,
+        &mut coworker,
+        at_ms,
+    )
+    .await;
     events.extend(provisioned.events);
 
     let view = opengrok_core::coworker::CoworkerView {
@@ -325,21 +319,14 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
         if let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await {
             let at_ms = now_ms();
             let mut after = loaded;
-            // Tear the dedicated box down (destroy + ComputerReleased) BEFORE retiring, so a
-            // deleted bot does not leave a running box behind (an ascii bill / a docker container).
-            let mut events = crate::agui::provision::release_computer(
-                state.agui.computer.as_ref(),
-                &mut after,
-                at_ms,
-            )
-            .await;
-            let Ok(retire) = after.decide(CoworkerCommand::Retire { at_ms }) else {
+            // Retire the agent. Its box is the ACCOUNT's shared computer, not the agent's, so it is
+            // not destroyed here — that happens once the account's last agent is gone (below).
+            let Ok(events) = after.decide(CoworkerCommand::Retire { at_ms }) else {
                 continue;
             };
-            for event in &retire {
+            for event in &events {
                 after.apply(event);
             }
-            events.extend(retire);
             let view = opengrok_core::coworker::CoworkerView {
                 id: coworker_id.clone(),
                 name: after.name.clone(),
@@ -360,6 +347,13 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
             }
         }
     }
+    // The account's shared computer is destroyed only when its LAST agent has been deleted.
+    crate::agui::provision::teardown_account_computer_if_last(
+        state.agui.computer.as_ref(),
+        &state.agui.auth.store,
+        &account.id,
+    )
+    .await;
     live::emit_roster(state).await;
     (200, json!({ "deleted": deleted }))
 }

@@ -275,21 +275,12 @@ async fn grok_bot(
                 coworker.apply(event);
             }
 
-            // A computer of its own, if asked — the shared helper, same as REST and the gateway.
-            let wish = crate::agui::provision::ComputerWish {
-                with_computer: args
-                    .get("withComputer")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                shared_box_id: args
-                    .get("sharedBoxId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-            let provisioned = crate::agui::provision::provision_computer(
+            // 1 account = 1 computer: first agent creates it, later agents share it.
+            let provisioned = crate::agui::provision::ensure_account_computer(
                 state.agui.computer.as_ref(),
+                &store,
+                &account_id,
                 &mut coworker,
-                &wish,
                 at_ms,
             )
             .await;
@@ -430,18 +421,12 @@ async fn grok_bot(
             if let Ok((loaded, seq)) = store.load_coworker(&coworker_id).await {
                 let at_ms = now_ms();
                 let mut after = loaded;
-                // Destroy the dedicated box + release it before retiring, so delete does not leak.
-                let mut events = crate::agui::provision::release_computer(
-                    state.agui.computer.as_ref(),
-                    &mut after,
-                    at_ms,
-                )
-                .await;
-                if let Ok(retire) = after.decide(CoworkerCommand::Retire { at_ms }) {
-                    for event in &retire {
+                // Retire the agent; its box is the account's shared computer, torn down below only
+                // when the account's last agent is gone.
+                if let Ok(events) = after.decide(CoworkerCommand::Retire { at_ms }) {
+                    for event in &events {
                         after.apply(event);
                     }
-                    events.extend(retire);
                     let view = opengrok_core::coworker::CoworkerView {
                         id: coworker_id.clone(),
                         name: after.name.clone(),
@@ -455,6 +440,12 @@ async fn grok_bot(
                         .await;
                 }
             }
+            crate::agui::provision::teardown_account_computer_if_last(
+                state.agui.computer.as_ref(),
+                &store,
+                &account_id,
+            )
+            .await;
             connect_ok(json!({}))
         }
 

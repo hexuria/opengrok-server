@@ -52,6 +52,15 @@ create table if not exists coworker_view (
     updated_at_ms bigint      not null
 );
 
+-- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
+-- on the account's first agent, torn down when its last agent is deleted. A single row per account.
+create table if not exists account_computer (
+    account_id    text   primary key,
+    box_id        text   not null,
+    kind          text   not null,
+    updated_at_ms bigint not null
+);
+
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
 -- An authentication that happened. The token is NOT here — it is in `secret_store`, encrypted, and

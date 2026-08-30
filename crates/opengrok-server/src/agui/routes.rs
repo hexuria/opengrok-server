@@ -345,12 +345,6 @@ pub struct HireRequest {
     /// A route through the gateway, never a key.
     #[serde(default)]
     pub model: Option<String>,
-    /// Give this coworker a computer of its own. Costs money, so it is asked for rather than
-    /// assumed.
-    #[serde(default)]
-    pub with_computer: bool,
-    #[serde(default)]
-    pub shared_box_id: Option<String>,
 }
 
 /// Hire a coworker, and optionally give it a computer.
@@ -385,13 +379,12 @@ pub async fn hire(
 
     // A computer, if asked for — via the shared helper so REST, gateway and seam-B create paths
     // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
-    let provisioned = provision::provision_computer(
+    // 1 account = 1 computer: the account's first agent creates it, later agents share it.
+    let provisioned = provision::ensure_account_computer(
         state.computer.as_ref(),
+        &state.auth.store,
+        &account_id,
         &mut coworker,
-        &provision::ComputerWish {
-            with_computer: request.with_computer,
-            shared_box_id: request.shared_box_id.clone(),
-        },
         at_ms,
     )
     .await;

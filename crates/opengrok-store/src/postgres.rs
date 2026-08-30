@@ -1069,6 +1069,58 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- The account's one shared computer (1 account = 1 computer) ----
+
+    /// The account's computer, if it has one — the box id and its kind.
+    pub async fn account_computer(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row = sqlx::query("select box_id, kind from account_computer where account_id = $1")
+            .bind(account_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Record the account's computer (created on its first agent). One row per account.
+    pub async fn set_account_computer(
+        &self,
+        account_id: &str,
+        box_id: &str,
+        kind: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into account_computer (account_id, box_id, kind, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id) do update set
+               box_id = excluded.box_id, kind = excluded.kind, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(box_id)
+        .bind(kind)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forget the account's computer (its last agent was deleted and the box destroyed).
+    pub async fn clear_account_computer(&self, account_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from account_computer where account_id = $1")
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Which computer kinds this org has configured — the names only, never the secrets. Drives the
     /// admin dashboard's status and the `configured` flag advertised to clients.
     pub async fn org_computer_kinds(&self, org_id: &str) -> StoreResult<Vec<String>> {
