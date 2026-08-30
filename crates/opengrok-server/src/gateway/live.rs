@@ -42,9 +42,31 @@ fn active_agent_id(state: &GatewayState) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// One §8.1 row with the live run-state overlaid — what a static projection cannot know.
-fn live_summary(state: &GatewayState, view: &opengrok_core::coworker::CoworkerView) -> Value {
+/// One §8.1 row with the live run-state and the stored profile overlaid — what a static
+/// projection cannot know, and what the profile row knows better.
+async fn live_summary(state: &GatewayState, view: &opengrok_core::coworker::CoworkerView) -> Value {
     let mut row = summaries::summary(view);
+    if let Ok(Some(profile)) = state.agui.auth.store.seamb_profile(&view.id).await {
+        // The model stays the description's fallback — it is also the blank-agent defence.
+        if let Some(description) = profile.get("description").and_then(Value::as_str)
+            && !description.is_empty()
+        {
+            row["description"] = json!(description);
+        }
+        for (key, target) in [
+            ("title", "title"),
+            ("avatarShape", "avatarShape"),
+            ("avatarColor", "avatarColor"),
+            ("avatarVersion", "avatarVersion"),
+            ("avatarDataUrl", "avatarDataUrl"),
+        ] {
+            if let Some(value) = profile.get(key)
+                && !value.is_null()
+            {
+                row[target] = value.clone();
+            }
+        }
+    }
     let running = state
         .running
         .lock()
@@ -116,11 +138,11 @@ pub async fn roster_rows(state: &GatewayState) -> Result<Vec<Value>, opengrok_st
         return Ok(Vec::new());
     };
     let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;
-    Ok(coworkers
-        .iter()
-        .filter(|view| !view.retired)
-        .map(|view| live_summary(state, view))
-        .collect())
+    let mut rows = Vec::new();
+    for view in coworkers.iter().filter(|view| !view.retired) {
+        rows.push(live_summary(state, view).await);
+    }
+    Ok(rows)
 }
 
 /// Flip a coworker's running state and tell the roster about it.

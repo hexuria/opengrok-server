@@ -16,6 +16,7 @@
 //! closed instead of open.
 
 pub mod conversation;
+pub mod lifecycle;
 pub mod live;
 pub mod routes;
 pub mod summaries;

@@ -17,7 +17,7 @@ use futures::StreamExt;
 use futures::stream;
 use serde_json::{Value, json};
 
-use super::{GatewayState, refuse, summaries};
+use super::{GatewayState, refuse};
 
 pub fn router(state: GatewayState) -> Router {
     Router::new()
@@ -194,7 +194,20 @@ async fn command(
     match method.as_str() {
         // ---- the roster ----
         "listAgents" => match roster(&state).await {
-            Ok(rows) => reply(StatusCode::OK, Value::Array(rows)),
+            Ok(mut rows) => {
+                // §2.2, the slim-avatar variant: when the client says slim, the bytes stay home
+                // and the version is the pointer it fetches /avatars/<id> with.
+                let slim = headers
+                    .get("x-sand-slim-avatars")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("1");
+                if slim {
+                    for row in &mut rows {
+                        row["avatarDataUrl"] = Value::Null;
+                    }
+                }
+                reply(StatusCode::OK, Value::Array(rows))
+            }
             Err(error) => {
                 tracing::error!(%error, "listAgents could not read the roster");
                 refusal(500, "roster unavailable")
@@ -318,9 +331,137 @@ async fn command(
         "getAgentThread" => reply(StatusCode::OK, json!({ "entries": [] })),
         "getConversationOutline" => reply(StatusCode::OK, json!([])),
 
+        // ---- P5: the agent lifecycle (slice 11) ----
+        "createAgent" => wrap(super::lifecycle::create_agent(&state, &args).await),
+        "updateAgent" => wrap(super::lifecycle::update_agent(&state, &args).await),
+        "deleteAgent" => {
+            let ids: Vec<String> = args
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| vec![id.to_string()])
+                .unwrap_or_default();
+            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+        }
+        "deleteAgents" => {
+            let ids: Vec<String> = args
+                .get("ids")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+        }
+        "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args).await),
+        "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
+        "searchMedia" => reply(StatusCode::OK, json!([])),
+        "setAgentAvatarBytes" => wrap(super::lifecycle::set_avatar(&state, &args).await),
+        "getAgentAvatar" => wrap(super::lifecycle::get_avatar(&state, &args).await),
+        // The shipped host answers undefined and does nothing; keeping the no-op IS the contract.
+        "setAgentNotificationsEnabled" => reply(StatusCode::OK, Value::Null),
+        "setAgentUnread"
+        | "setAgentNotifyOnUpdates"
+        | "setAgentHiddenFromSidebar"
+        | "kickstartAgent" => reply(StatusCode::OK, Value::Null),
+        // Groups are not modelled yet; a readable refusal beats a summary that lies about one.
+        "createGroup" | "setGroupMembers" => {
+            refusal(400, "groups are not supported by this server yet")
+        }
+
+        // ---- P6: entry mutation ----
+        "reactToMessage" => {
+            let emoji = args
+                .get("emoji")
+                .and_then(Value::as_str)
+                .unwrap_or("👍")
+                .to_string();
+            wrap(
+                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                    let reactions = entry
+                        .as_object_mut()
+                        .map(|map| map.entry("reactions").or_insert_with(|| json!([])));
+                    if let Some(Value::Array(reactions)) = reactions {
+                        reactions.push(json!({ "emoji": emoji, "by": "me" }));
+                    }
+                })
+                .await,
+            )
+        }
+        "respondToWidget" => {
+            let value = args.get("value").cloned().unwrap_or(Value::Null);
+            wrap(
+                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                    if let Some(map) = entry.as_object_mut() {
+                        map.insert("respondedValue".to_string(), value);
+                    }
+                })
+                .await,
+            )
+        }
+        "dismissWidget" => wrap(
+            super::lifecycle::mutate_entry(&state, &args, |entry| {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("widgetDismissed".to_string(), json!(true));
+                }
+            })
+            .await,
+        ),
+        "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
+        "submitSecret"
+        | "resolveAutoReviewApproval"
+        | "resolveLocalToolPermission"
+        | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
+
+        // ---- P9: automations are slice 6's schedules wearing the client's names ----
+        "getAgentAutomations" | "listAllAutomations" => {
+            wrap(super::lifecycle::get_automations(&state, &args).await)
+        }
+        "createAgentAutomation" | "updateAgentAutomation" => {
+            wrap(super::lifecycle::create_automation(&state, &args).await)
+        }
+        "setAgentAutomationEnabled" => {
+            let action = if args.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                "enable"
+            } else {
+                "disable"
+            };
+            wrap(super::lifecycle::change_automation(&state, &args, action).await)
+        }
+        "deleteAgentAutomation" => {
+            wrap(super::lifecycle::change_automation(&state, &args, "delete").await)
+        }
+        "runAgentAutomationNow" => wrap(super::lifecycle::run_automation_now(&state, &args).await),
+        // Workflows, memories, subagents, async tasks: the honest empties in the right containers.
+        "getAgentWorkflows" => reply(StatusCode::OK, json!([])),
+        "getSubagents" | "getAsyncTasks" => reply(StatusCode::OK, json!([])),
+        "getAgentMemories" => reply(StatusCode::OK, json!([])),
+        "deleteAgentMemory" | "clearAgentMemories" => reply(StatusCode::OK, Value::Null),
+
+        // ---- P8-adjacent surfaces the boot may poke: empty, in the validated shapes ----
+        "getSharingState" => reply(
+            StatusCode::OK,
+            json!({ "rooms": [], "invites": [], "requests": [] }),
+        ),
+        "getAgentChannels" => reply(StatusCode::OK, json!({ "channels": [] })),
+        "getListenerIntegrations" => reply(StatusCode::OK, json!({})),
+        "listBoxMcpServers" => reply(StatusCode::OK, json!({ "servers": [] })),
+        "skillsCatalog" => reply(StatusCode::OK, json!([])),
+
         // ---- everything else, exactly as the shipped host words it ----
         other => refusal(404, &format!("unknown gateway method: {other}")),
     }
+}
+
+/// `(status, body)` from a lifecycle helper into the gateway's reply mechanics.
+fn wrap(result: (u16, Value)) -> Response {
+    let (code, body) = result;
+    reply(
+        StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
 }
 
 fn settings_snapshot(state: &GatewayState) -> Value {
@@ -331,17 +472,8 @@ fn settings_snapshot(state: &GatewayState) -> Value {
         .unwrap_or_else(|_| super::default_settings())
 }
 
-/// The roster: the gateway account's coworkers, newest first, as §8.1 rows.
+/// The roster: the gateway account's coworkers as live §8.1 rows. An empty roster is a truthful
+/// answer, not an error — the client shows onboarding.
 async fn roster(state: &GatewayState) -> Result<Vec<Value>, opengrok_store::StoreError> {
-    let Some(account) = state.agui.auth.store.account_by_email(&state.email).await? else {
-        // Nobody has signed in as the gateway's person yet: an empty roster, not an error —
-        // the client shows onboarding, which is the truthful screen.
-        return Ok(Vec::new());
-    };
-    let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;
-    Ok(coworkers
-        .iter()
-        .filter(|view| !view.retired)
-        .map(summaries::summary)
-        .collect())
+    super::live::roster_rows(state).await
 }

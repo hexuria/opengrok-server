@@ -165,6 +165,44 @@ impl PgStore {
             .collect()
     }
 
+    /// Find one entry by its client-visible id. A scan by jsonb key, indexed well enough by the
+    /// per-coworker primary key range for transcripts of human size.
+    pub async fn find_gateway_entry(
+        &self,
+        coworker: &CoworkerId,
+        entry_id: &str,
+    ) -> StoreResult<Option<(i64, Value)>> {
+        let row = sqlx::query(
+            "select seq, entry from gateway_entry
+             where coworker_id = $1 and entry->>'id' = $2
+             order by seq desc limit 1",
+        )
+        .bind(coworker.as_str())
+        .bind(entry_id)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(|row| Ok((row.try_get("seq")?, row.try_get("entry")?)))
+            .transpose()
+    }
+
+    /// Delete entries by client id, answering which ids actually went away.
+    pub async fn delete_gateway_entries(
+        &self,
+        coworker: &CoworkerId,
+        ids: &[String],
+    ) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "delete from gateway_entry
+             where coworker_id = $1 and entry->>'id' = any($2)
+             returning entry->>'id' as id",
+        )
+        .bind(coworker.as_str())
+        .bind(ids)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(|row| Ok(row.try_get("id")?)).collect()
+    }
+
     /// Record an accepted prompt. Answers what the ledger now holds for the nonce:
     /// `Ok(record)` — either freshly written or the identical earlier acceptance —
     /// or `Err(())` when the nonce exists with a DIFFERENT digest, which the client treats as
@@ -207,6 +245,27 @@ impl PgStore {
         } else {
             Ok(Err(()))
         }
+    }
+
+    /// Replace a nonce's record once the fact it was holding a place for is settled.
+    pub async fn overwrite_nonce_record(
+        &self,
+        account_slot: &str,
+        nonce: &str,
+        digest: &str,
+        record: &Value,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update gateway_nonce set record = $4
+             where account_slot = $1 and nonce = $2 and digest = $3",
+        )
+        .bind(account_slot)
+        .bind(nonce)
+        .bind(digest)
+        .bind(record)
+        .execute(self.pool())
+        .await?;
+        Ok(())
     }
 
     /// What the ledger holds for a nonce — `promptAcceptanceStatus`.
