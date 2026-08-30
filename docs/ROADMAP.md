@@ -151,15 +151,19 @@ P6 approvals ride slice 4's exactly-once answers, P8 MCP/skills ride `opengrok-p
 vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle rides
 `opengrok-box`.
 
-- [ ] P5 agent lifecycle (19 commands, 10 already answered client-side)
-- [ ] P6 tools, approvals, widgets (7)
+- [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
+  avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
+- [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its
+  `updated`/`removed` SSE frame. (`c8ee938`)
 - [x] P7 — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
   commands refuse readably until the artifacts slice lands (they are its client surface).
   *(this commit)*
 - [x] P8 — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
   publishing and routed-MCP execution refuse readably (a coworker's connections drive MCP on
   this server, from runs). *(this commit)*
-- [ ] P9 automations and workflows (15)
+- [x] P9 automations — slice 6's schedules wearing the client's names; one scheduler, two
+  vocabularies, the same rows readable under `/schedules`. Workflows stay honest empties.
+  (`c8ee938`)
 - [x] P10 — the box control surface over what the deployment has: null (the validated
   truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
   click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
