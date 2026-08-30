@@ -144,7 +144,21 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
-    let app = opengrok_server::router(state);
+    // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
+    // the shipped host's own fallback — and the email names whose coworkers are the roster.
+    //
+    // OG_GATEWAY_BEARER, deliberately not OG_GATEWAY_TOKEN: that name already means the key WE
+    // present to the model gateway. One name meaning "what we show upstream" and "what clients
+    // must show us" is how a model key ends up handed to every desktop client.
+    let gateway = opengrok_server::gateway::GatewayState::new(
+        state.clone(),
+        std::env::var("OG_GATEWAY_BEARER")
+            .ok()
+            .filter(|token| !token.is_empty()),
+        std::env::var("OG_GATEWAY_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string()),
+    );
+
+    let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("could not bind {bind}"))?;

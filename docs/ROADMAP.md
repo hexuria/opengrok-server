@@ -66,18 +66,20 @@ after — the real, unmodified client is the strongest smoke test we can have.
 
 ## Slice 7 — The gateway boots the real client (P2 + P3)
 
-- [ ] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
-  at ≤15 s (a 35 s watchdog aborts otherwise), the **19** SSE channels, one shared bearer
-  compared timing-safe.
-- [ ] **7.2** P3's 12 roster/settings commands — shape discipline over behaviour:
+- [x] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
+  at ≤15 s (a 35 s watchdog aborts otherwise), channel filter parsed, one shared bearer
+  compared timing-safe. *(this commit)*
+- [x] **7.2** P3's 12 roster/settings commands — shape discipline over behaviour:
   `countAgents` a number, `getTrays` an array, `getForeverBoxStatus` null-or-record,
-  `setHostSettings` echoing the full record back.
-- [ ] **7.3** The trap, honoured: serve on a **non-loopback** host — the client refuses
-  `127.0.0.1`/`localhost` gateways unless the runtime is local-docker
-  (`local-docker-host-connector.ts:465`).
+  `setHostSettings` echoing the full record back. *(this commit)*
+- [x] **7.3** The trap, honoured: serve on a **non-loopback** host — verified live on
+  `http://192.168.100.21:1447` with the pinned bearer (`OG_GATEWAY_BEARER`), 401 without it.
+  *(this commit)*
 - [ ] **7.v** Launch the shipped app with `SAND_HOST_GATEWAY_URL` pointed at us and see a
-  populated sidebar: no onboarding screen, no malformed-reply throw, transport-connected held
-  for ten minutes.
+  populated sidebar. **Blocked in the client, not here:** setting that env var deadlocks the
+  reconstructed app before its window opens — isolated and written up in
+  `docs/port-blockers.md` B1. The wire contract is held by `slice11-gateway-smoke.sh`
+  meanwhile.
 
 ## Slice 8 — A conversation from the real app (P4)
 

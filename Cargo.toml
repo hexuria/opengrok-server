@@ -63,6 +63,9 @@ prost = "0.14"
 # Cron parsing for the scheduler. Parsing only — the ticking is ours, in the same sweep pattern
 #   as recovery, so firing stays durable and policy-checked rather than delegated to a framework.
 cron = "0.17"
+# Constant-time equality for the gateway bearer. The shipped host compares its token
+#   timing-safe; a port that string-compares invites the classic byte-at-a-time probe.
+subtle = "2"
 # Slice 1 (auth): our own JWTs. The client base64url-decodes the payload itself and reads
 #   sub/email/exp, so the access token has to be a real JWT — see opengrok-server/src/auth/token.rs.
 # `rust_crypto` rather than `aws_lc_rs`: jsonwebtoken 11 refuses to pick a provider by itself, and

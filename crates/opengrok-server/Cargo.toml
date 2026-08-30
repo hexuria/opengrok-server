@@ -13,6 +13,7 @@ reqwest.workspace = true
 workspace = true
 
 [dependencies]
+subtle.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
 opengrok-tools = { path = "../opengrok-tools" }
