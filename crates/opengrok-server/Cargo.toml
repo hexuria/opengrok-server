@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 base64.workspace = true
 reqwest.workspace = true
 
@@ -14,11 +15,13 @@ workspace = true
 
 [dependencies]
 subtle.workspace = true
+tonic.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
 opengrok-tools = { path = "../opengrok-tools" }
 opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-wire = { path = "../opengrok-wire" }
+opengrok-proto = { path = "../opengrok-proto" }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-store = { path = "../opengrok-store" }
 opengrok-policy = { path = "../opengrok-policy" }

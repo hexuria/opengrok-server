@@ -99,6 +99,60 @@ impl PgStore {
         ))
     }
 
+    /// A page of (seq, entry) pairs, oldest first — seam B ships the sequence itself.
+    pub async fn gateway_page(
+        &self,
+        coworker: &CoworkerId,
+        before_seq: Option<i64>,
+        limit: i64,
+    ) -> StoreResult<Vec<(i64, Value)>> {
+        let rows = sqlx::query(
+            "select seq, entry from gateway_entry
+             where coworker_id = $1 and ($2::bigint is null or seq < $2)
+             order by seq desc limit $3",
+        )
+        .bind(coworker.as_str())
+        .bind(before_seq)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        let mut page: Vec<(i64, Value)> = rows
+            .into_iter()
+            .map(|row| Ok::<_, crate::StoreError>((row.try_get("seq")?, row.try_get("entry")?)))
+            .collect::<Result<_, _>>()?;
+        page.reverse();
+        Ok(page)
+    }
+
+    /// Seam B's extra profile fields for a coworker (description, title, avatar shape/colour).
+    pub async fn seamb_profile(&self, coworker: &CoworkerId) -> StoreResult<Option<Value>> {
+        let row = sqlx::query("select profile from seamb_profile where coworker_id = $1")
+            .bind(coworker.as_str())
+            .fetch_optional(self.pool())
+            .await?;
+        row.map(|row| Ok(row.try_get("profile")?)).transpose()
+    }
+
+    pub async fn put_seamb_profile(
+        &self,
+        coworker: &CoworkerId,
+        profile: &Value,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into seamb_profile (coworker_id, profile, updated_at_ms)
+             values ($1, $2, $3)
+             on conflict (coworker_id) do update set
+               profile = excluded.profile, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(coworker.as_str())
+        .bind(profile)
+        .bind(at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// The whole transcript, oldest first. Unbounded on purpose — `getAgentTranscript` is.
     pub async fn gateway_transcript(&self, coworker: &CoworkerId) -> StoreResult<Vec<Value>> {
         let rows =

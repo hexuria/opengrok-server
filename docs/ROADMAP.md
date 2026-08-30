@@ -105,16 +105,24 @@ Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two s
 no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the Axum edge; a bare
 tonic gRPC server cannot answer the client.
 
-- [ ] **9.1** Auth: `/loginDeepControl` (PKCE-shaped challenge), `/auth/poll`, `/oauth/token`
-  with a real `exp` — the client parses the JWT for expiry and loops on refresh without one.
-- [ ] **9.2** `DashboardService` — 6 methods (`getMe`, `getTeams`, both admin-settings
-  variants, `getUserPrivacyMode`, `updateUserName`).
-- [ ] **9.3** `GrokBotService` — the mock's 12, plus `EnsureSandBox` returning
-  `{gatewayUrl, gatewayToken, networkToken, vncUrl, forkVncBaseUrl}` with a **non-loopback**
-  `gatewayUrl`.
-- [ ] **9.4** The same services on a tonic gRPC listener for internal use — the operator
-  decision of 30 Aug, unchanged.
-- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us.
+- [x] **9.1** Auth at the mock's own surface (`source/mock/auth-http.ts`): `/auth/poll` minting
+  the `{accessToken, refreshToken}` pair, on top of slice 1's `/auth/cursor_dev_session_token`
+  and `/oauth/token` with real `exp`s. *(this commit)*
+- [ ] **9.1b** The `/loginDeepControl` PKCE browser page — the drop-in login wall. Rides the
+  same sign-in; needs a client that can reach us (port-blockers B1) to be worth verifying.
+- [x] **9.2** `DashboardService` — 6 methods, Connect unary on Axum, enums by name, plus the
+  mock's load-bearing leniency: an unmodelled method answers an empty message. *(this commit)*
+- [x] **9.3** `GrokBotService` — the mock's 12 (transcripts as base64 bodies with string seqs,
+  sends idempotent on `(agent, messageId)`, real turns instead of the mock's canned line), plus
+  `EnsureSandBox` minting OUR gateway: `OG_PUBLIC_GATEWAY_URL` + the gateway bearer, refused
+  outright when no non-loopback address is configured. *(this commit)*
+- [x] **9.4** tonic is in: `proto/opengrok_seamb.proto` (hand-transcribed, provenance in the
+  file, codegen into target/ never the tree), both services on an opt-in `OG_GRPC_BIND`
+  listener, proven by a real tonic client in `against_our_own_grpc.rs` — unauthenticated
+  refusal, GetMe, the mint. *(this commit)*
+- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us
+  (`SAND_BACKEND_URL` pointed here). Blocked behind port-blockers B1 with 7.v/8.v; the contract
+  is held by `slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
 

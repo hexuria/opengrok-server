@@ -60,6 +60,11 @@ rmcp = { version = "3", default-features = false, features = [
 # prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
 #   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
 prost = "0.14"
+# tonic enters (operator decision, 30 Aug 2026): internal gRPC on our OWN transcribed protos.
+# The client edge stays Connect-on-Axum — a bare tonic server cannot answer HTTP/1.1 Connect.
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 # Cron parsing for the scheduler. Parsing only — the ticking is ours, in the same sweep pattern
 #   as recovery, so firing stays durable and policy-checked rather than delegated to a framework.
 cron = "0.17"

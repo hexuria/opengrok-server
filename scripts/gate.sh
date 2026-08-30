@@ -131,5 +131,10 @@ step "scripts/slice10-autonomy-smoke.sh"
 OG_PORT="$PORT" scripts/slice10-autonomy-smoke.sh >/dev/null || fail "autonomy"
 echo "  passed"
 
+# Starts its own server too: it needs OG_GATEWAY_BEARER and OG_PUBLIC_GATEWAY_URL in its env.
+step "scripts/slice13-seamb-smoke.sh"
+OG_PORT="$PORT" scripts/slice13-seamb-smoke.sh >/dev/null || fail "seamb"
+echo "  passed"
+
 echo
 echo "GATE PASSED (checks, tests and every smoke script)."

@@ -1,0 +1,103 @@
+// Seam B, transcribed — NOT vendored (docs/LEGAL.md).
+//
+// Every message and field below was hand-transcribed on 30 Aug 2026 from the client's own
+// generated types (`source/packages/proto/generated/aiserver/v1/{dashboard_pb,grok_bot_pb,
+// sand_box_pb}.ts`) and its checked-in mock (`source/mock/`), limited to the fields our server
+// actually answers. The package name matches the wire (`aiserver.v1`) so the Connect paths and
+// any internal gRPC agree on what they are talking about.
+syntax = "proto3";
+
+package aiserver.v1;
+
+// --- DashboardService (dashboard_pb.ts) ---
+
+message GetMeRequest {}
+message GetMeResponse {
+  string auth_id = 1;
+  int32 user_id = 2;
+  optional string email = 3;
+  optional string first_name = 4;
+  optional string last_name = 5;
+}
+
+message GetTeamsRequest {}
+message Team {
+  string name = 1;
+  int32 id = 2;
+  int32 seats = 4;
+  bool has_billing = 5;
+  bool is_enterprise = 13;
+  string team_slug = 38;
+}
+message GetTeamsResponse { repeated Team teams = 1; }
+
+message GetUserPrivacyModeRequest {}
+enum PrivacyMode {
+  PRIVACY_MODE_UNSPECIFIED = 0;
+  PRIVACY_MODE_NO_STORAGE = 1;
+  PRIVACY_MODE_NO_TRAINING = 2;
+  PRIVACY_MODE_USAGE_DATA_TRAINING_ALLOWED = 3;
+  PRIVACY_MODE_USAGE_CODEBASE_TRAINING_ALLOWED = 4;
+}
+message GetUserPrivacyModeResponse { PrivacyMode privacy_mode = 1; }
+
+message GetTeamAdminSettingsRequest { optional int32 team_id = 1; }
+enum LocalToolPermissionCeiling {
+  LOCAL_TOOL_PERMISSION_CEILING_UNSPECIFIED = 0;
+  LOCAL_TOOL_PERMISSION_CEILING_NEVER = 1;
+  LOCAL_TOOL_PERMISSION_CEILING_ASK = 2;
+  LOCAL_TOOL_PERMISSION_CEILING_ALWAYS = 3;
+}
+message LocalToolControls { LocalToolPermissionCeiling permission_ceiling = 1; }
+message GetTeamAdminSettingsResponse { optional LocalToolControls local_tool_controls = 44; }
+
+message UpdateUserNameRequest {
+  string first_name = 1;
+  string last_name = 2;
+}
+message UpdateUserNameResponse {}
+
+service DashboardService {
+  rpc GetMe(GetMeRequest) returns (GetMeResponse);
+  rpc GetTeams(GetTeamsRequest) returns (GetTeamsResponse);
+  rpc GetUserPrivacyMode(GetUserPrivacyModeRequest) returns (GetUserPrivacyModeResponse);
+  rpc GetTeamAdminSettings(GetTeamAdminSettingsRequest) returns (GetTeamAdminSettingsResponse);
+  rpc GetTeamAdminSettingsOrEmptyIfNotInTeam(GetTeamAdminSettingsRequest) returns (GetTeamAdminSettingsResponse);
+  rpc UpdateUserName(UpdateUserNameRequest) returns (UpdateUserNameResponse);
+}
+
+// --- GrokBotService (grok_bot_pb.ts, sand_box_pb.ts) — the internal-gRPC keystones ---
+
+message GrokBotAgent {
+  string id = 1;
+  string legacy_agent_id = 2;
+  string name = 3;
+  string description = 4;
+  string title = 5;
+  string avatar_shape = 6;
+  string avatar_color = 7;
+  int64 created_at_ms = 10;
+  int64 updated_at_ms = 11;
+  string agent_id = 12;
+  string harness = 13;
+  string role = 14;
+}
+message ListGrokBotAgentsRequest { optional string role = 1; }
+message ListGrokBotAgentsResponse { repeated GrokBotAgent agents = 1; }
+
+message EnsureSandBoxRequest { int32 window_index = 1; }
+message EnsureSandBoxResponse {
+  string cluster = 1;
+  string tenant_id = 2;
+  string pod_id = 3;
+  string network_token = 4;
+  string vnc_url = 7;
+  string fork_vnc_base_url = 9;
+  string gateway_url = 11;
+  string gateway_token = 12;
+}
+
+service GrokBotService {
+  rpc ListGrokBotAgents(ListGrokBotAgentsRequest) returns (ListGrokBotAgentsResponse);
+  rpc EnsureSandBox(EnsureSandBoxRequest) returns (EnsureSandBoxResponse);
+}

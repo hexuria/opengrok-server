@@ -209,7 +209,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value) -> (u16, Value) {
 
     // The turn, off this request's clock. `accepted` means accepted, not answered.
     let task_state = state.clone();
-    let history = conversation_history(state, &coworker_id).await;
+    let history = history_for(state, &coworker_id).await;
     tokio::spawn(run_turn(
         task_state,
         account.id,
@@ -225,7 +225,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value) -> (u16, Value) {
 
 /// The transcript so far, as chat messages — so a coworker remembers its own conversation
 /// rather than greeting every message as its first.
-async fn conversation_history(state: &GatewayState, coworker: &CoworkerId) -> Vec<ChatMessage> {
+pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> Vec<ChatMessage> {
     let Ok(entries) = state.agui.auth.store.gateway_transcript(coworker).await else {
         return Vec::new();
     };
@@ -264,7 +264,7 @@ async fn conversation_history(state: &GatewayState, coworker: &CoworkerId) -> Ve
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_turn(
+pub(crate) async fn run_turn(
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,
     coworker_id: CoworkerId,

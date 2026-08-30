@@ -51,6 +51,9 @@ pub struct GatewayState {
     /// Monotonic sequence per replica key (`roster`, `transcript:<agentId>`), for the `ordered`
     /// stamp every roster and transcript event carries.
     pub seqs: Arc<Mutex<std::collections::HashMap<String, i64>>>,
+    /// The address `EnsureSandBox` hands out — the mint. Non-loopback or the client refuses it;
+    /// `None` means the mint answers failed_precondition rather than inventing an address.
+    pub public_gateway_url: Option<String>,
     /// Which agent the client last opened. `getTranscript` and `sendPrompt` fall back to it.
     pub active_agent: Arc<Mutex<Option<String>>>,
     /// Coworkers with a turn in flight right now — the roster's `isRunning`.
@@ -58,11 +61,17 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
-    pub fn new(agui: AgUiState, bearer: Option<String>, email: String) -> Self {
+    pub fn new(
+        agui: AgUiState,
+        bearer: Option<String>,
+        email: String,
+        public_gateway_url: Option<String>,
+    ) -> Self {
         Self {
             agui,
             bearer,
             email,
+            public_gateway_url,
             settings: Arc::new(Mutex::new(default_settings())),
             started_at_ms: chrono::Utc::now().timestamp_millis(),
             events_tx: tokio::sync::broadcast::channel(256).0,

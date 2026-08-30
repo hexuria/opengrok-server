@@ -221,6 +221,14 @@ create table if not exists gateway_entry (
 -- The prompt-acceptance ledger: (account slot, clientNonce) -> what was accepted. A repeated
 -- nonce with the same digest answers accepted again; a different digest is refused. This is what
 -- makes the client's retry safe instead of a duplicate send.
+-- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
+-- and colour). A wire-format projection like gateway_entry: the client is the only reader.
+create table if not exists seamb_profile (
+    coworker_id text  primary key,
+    profile     jsonb not null,
+    updated_at_ms bigint not null
+);
+
 create table if not exists gateway_nonce (
     account_slot text   not null,
     nonce        text   not null,

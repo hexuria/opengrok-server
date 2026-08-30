@@ -14,3 +14,14 @@
 //! Every message here is hand-transcribed from what the client observably sends and expects,
 //! carries a provenance comment naming the file it was read from, and exists only because the
 //! client calls it. "Match the whole proto so it's 100% compatible" is the trap, not the goal.
+
+/// The transcribed seam-B surface, generated from `proto/opengrok_seamb.proto` at build time.
+///
+/// `aiserver.v1` because that is the package the wire speaks; the transcription's provenance is
+/// the proto file's own header.
+pub mod aiserver {
+    pub mod v1 {
+        #![allow(clippy::all)]
+        tonic::include_proto!("aiserver.v1");
+    }
+}
