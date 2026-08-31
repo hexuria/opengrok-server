@@ -92,7 +92,15 @@ fn refusal(code: u16, message: &str) -> Response {
 /// bearered host looks permanently unreachable the instant the SSE stream drops. It reveals only
 /// that the server is up (plus pid/busy/startedAt — nothing secret), so it sits OUTSIDE `refuse`
 /// while every driving surface (`/api`, `/events`) stays behind it.
-async fn health(State(state): State<GatewayState>) -> Response {
+///
+/// Token-free is not origin-free. The supervisor sends no Authorization AND no Origin (it is
+/// Electron main, not a page); a browser page that learned this host still gets nothing — not
+/// even "up" — which is the rule the gateway smoke asserts for every path. Dropping `refuse` for
+/// the bearer took the Origin block with it by accident; this keeps only the half that was meant.
+async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+    if headers.get(axum::http::header::ORIGIN).is_some() {
+        return refusal(403, "browser origins are not served");
+    }
     let busy = state
         .agui
         .auth
