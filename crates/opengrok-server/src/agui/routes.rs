@@ -126,13 +126,24 @@ pub(crate) async fn tools_for_coworker(
     // the same box we just resumed above, so exec must run on it, or a reset would leave the bot
     // executing against a destroyed box.
     let mut context =
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker);
+        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id.clone(), &coworker);
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
-    Some(ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer, policy).with_plugin_tools(sessions, tools),
-        context,
-    ))
+    let mut executor =
+        opengrok_tools::Executor::with_policy(computer, policy).with_plugin_tools(sessions, tools);
+    // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
+    // reach — otherwise the model is never told about a channel it cannot use. Bound to that
+    // machine, and to this coworker for the audit origin.
+    if let Some(machine_id) = crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
+    {
+        executor = executor.with_user_machine(std::sync::Arc::new(crate::local_exec::ReverseExecSink {
+            auth: state.auth.clone(),
+            coworker_id: coworker_id.as_str().to_string(),
+            machine_id,
+        }));
+    }
+
+    Some(ToolRunner::new(executor, context))
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.

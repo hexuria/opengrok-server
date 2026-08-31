@@ -104,6 +104,32 @@ impl ToolResult {
     }
 }
 
+/// The name of the reverse-exec tool: a shell command on the USER'S OWN machine, not the bot's box.
+pub const USER_MACHINE_SHELL: &str = "user_machine_shell";
+
+/// What the reverse-exec sink hands back for one command. The gate + machine selection + audit all
+/// live behind the sink (the server); the tool only forwards a command and renders the reply.
+#[derive(Debug, Clone)]
+pub enum UserMachineReply {
+    /// The command ran on the user's machine; here is the rendered outcome.
+    Ran(String),
+    /// The gate refused it (channel off, a deny rule, or no daemon connected). Never ran.
+    Refused(String),
+    /// The user must approve this command. The run SUSPENDS, exactly like a policy `NeedsApproval`.
+    NeedsApproval,
+}
+
+/// The bridge from the `user_machine_shell` tool to the reverse-exec channel. The server implements
+/// it over its enqueue path; `opengrok-tools` only defines the seam so it need not depend on the
+/// server. Attached to an `Executor` ONLY when the account has an enrolled, enabled machine — so the
+/// tool is advertised exactly when there is a live machine to reach, never as a dead end.
+#[async_trait::async_trait]
+pub trait UserMachineSink: Send + Sync {
+    /// Enqueue `command` on this account holder's own machine through the gate, and wait for the
+    /// outcome. The server picks the machine, runs the gate, and writes the audit row.
+    async fn run(&self, account_id: &AccountId, command: &str) -> UserMachineReply;
+}
+
 /// The arguments `shell` accepts. `box_id` is deliberately absent — see the module note.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShellArgs {
@@ -149,6 +175,10 @@ pub struct Executor {
     sessions: BTreeMap<String, Arc<crate::mcp::Session>>,
     /// Every plugin tool on offer, in the order a model is told about them.
     plugin_tools: Vec<crate::mcp::McpTool>,
+    /// The reverse-exec bridge, present ONLY when this account has an enrolled, enabled machine.
+    /// Its presence is what advertises `user_machine_shell` — the tool exists iff a machine can
+    /// actually be reached.
+    user_machine: Option<Arc<dyn UserMachineSink>>,
 }
 
 impl Executor {
@@ -161,6 +191,7 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            user_machine: None,
         }
     }
 
@@ -172,6 +203,7 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            user_machine: None,
         }
     }
 
@@ -179,6 +211,14 @@ impl Executor {
     #[must_use]
     pub fn with_approved(mut self, approved: impl IntoIterator<Item = String>) -> Self {
         self.approved_calls = approved.into_iter().collect();
+        self
+    }
+
+    /// Attach the reverse-exec bridge — the server does this only when the account has an enrolled,
+    /// enabled machine, which is precisely when `user_machine_shell` should be offered.
+    #[must_use]
+    pub fn with_user_machine(mut self, sink: Arc<dyn UserMachineSink>) -> Self {
+        self.user_machine = Some(sink);
         self
     }
 
@@ -212,6 +252,11 @@ impl Executor {
         Self::builtin_tool_names()
             .iter()
             .map(|name| (*name).to_string())
+            .chain(
+                self.user_machine
+                    .is_some()
+                    .then(|| USER_MACHINE_SHELL.to_string()),
+            )
             .chain(
                 self.plugin_tools
                     .iter()
@@ -255,6 +300,15 @@ impl Executor {
                     "function": { "name": name, "description": description, "parameters": parameters },
                 }));
             }
+        }
+        if self.user_machine.is_some()
+            && permitted(USER_MACHINE_SHELL)
+            && let Some((description, parameters)) = builtin_tool_spec(USER_MACHINE_SHELL)
+        {
+            schemas.push(serde_json::json!({
+                "type": "function",
+                "function": { "name": USER_MACHINE_SHELL, "description": description, "parameters": parameters },
+            }));
         }
         for tool in &self.plugin_tools {
             if permitted(&tool.qualified_name) {
@@ -303,6 +357,29 @@ impl Executor {
             if let Some(reason) = decision.reason() {
                 return ToolResult::refused(&call.id, reason);
             }
+        }
+
+        // The reverse-exec tool runs on the USER'S machine, not the bot's box, so it is handled
+        // before the box gate. The server's sink runs its OWN gate on the command; a `NeedsApproval`
+        // here suspends the run exactly as a policy approval does.
+        if call.name == USER_MACHINE_SHELL {
+            let Some(sink) = self.user_machine.as_ref() else {
+                return ToolResult::refused(
+                    &call.id,
+                    "no machine of yours is connected, so nothing can run there",
+                );
+            };
+            return match serde_json::from_value::<ShellArgs>(arguments) {
+                Ok(args) => match sink.run(&context.account_id, &args.command).await {
+                    UserMachineReply::Ran(text) => ToolResult::ok(&call.id, text),
+                    UserMachineReply::Refused(why) => ToolResult::refused(&call.id, why),
+                    UserMachineReply::NeedsApproval => ToolResult::awaiting(
+                        &call.id,
+                        "your machine's owner must approve this command",
+                    ),
+                },
+                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
+            };
         }
 
         let Some(box_id) = context.box_id.as_ref() else {
@@ -456,6 +533,14 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["path", "content"],
             }),
         )),
+        USER_MACHINE_SHELL => Some((
+            "Run a shell command on the USER'S OWN machine — their real computer (for example their              Mac), NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string", "description": "The shell command to run on the USER's own machine." } },
+                "required": ["command"],
+            }),
+        )),
         _ => None,
     }
 }
@@ -591,6 +676,9 @@ mod tests {
         }
         async fn destroy(&self, _b: &str) -> BoxResult<()> {
             Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            Ok("running".to_string())
         }
     }
 
@@ -1052,4 +1140,103 @@ mod tests {
             );
         }
     }
+
+    // ---- The reverse-exec tool (slice 6) ------------------------------------------------------
+
+    /// A sink whose reply is fixed, and which records what command it was asked to run.
+    struct FakeSink {
+        reply: UserMachineReply,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+    impl FakeSink {
+        fn new(reply: UserMachineReply) -> Arc<Self> {
+            Arc::new(Self { reply, seen: std::sync::Mutex::new(Vec::new()) })
+        }
+    }
+    #[async_trait]
+    impl UserMachineSink for FakeSink {
+        async fn run(&self, _account_id: &AccountId, command: &str) -> UserMachineReply {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(command.to_string());
+            }
+            self.reply.clone()
+        }
+    }
+
+    fn no_box_context() -> ToolContext {
+        ToolContext {
+            account_id: AccountId::from_stored("acct_1"),
+            coworker_id: CoworkerId::from_stored("cw_1"),
+            box_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_is_offered_only_when_a_machine_is_attached() {
+        let without = allowing(Arc::new(SpyComputer::default()));
+        assert!(!without.tool_names().iter().any(|n| n == USER_MACHINE_SHELL));
+        let schemas = without.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(!schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL));
+
+        let with = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(FakeSink::new(UserMachineReply::Ran("exit 0".into())));
+        assert!(with.tool_names().iter().any(|n| n == USER_MACHINE_SHELL));
+        let schemas = with.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL));
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_routes_the_command_to_the_sink_without_a_box() {
+        let sink = FakeSink::new(UserMachineReply::Ran("exit 0\n--- stdout ---\nuriah\n".into()));
+        let executor = allowing(Arc::new(SpyComputer::default())).with_user_machine(sink.clone());
+        // No box on the context — the reverse-exec tool must not need one.
+        let result = executor
+            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "whoami"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert!(result.content.contains("uriah"));
+        assert_eq!(sink.seen.lock().unwrap().as_slice(), &["whoami".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_suspends_the_run_when_the_owner_must_approve() {
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(FakeSink::new(UserMachineReply::NeedsApproval));
+        let result = executor
+            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "rm -rf x"})))
+            .await;
+        assert!(!result.ok);
+        assert!(result.awaiting_approval, "an Ask must suspend the run");
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_relays_a_refusal_from_the_gate() {
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(FakeSink::new(UserMachineReply::Refused("a deny rule matched".into())));
+        let result = executor
+            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "rm -rf /"})))
+            .await;
+        assert!(!result.ok);
+        assert!(!result.awaiting_approval);
+        assert!(result.content.contains("deny rule"));
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_refuses_cleanly_when_no_sink_is_attached() {
+        // Offered-set == executed-set: it is never offered without a sink, but if a stale call
+        // arrives it refuses rather than pretending, and never touches the bot's box.
+        let executor = allowing(Arc::new(SpyComputer::default()));
+        let result = executor
+            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "whoami"})))
+            .await;
+        assert!(!result.ok);
+        assert!(!result.awaiting_approval);
+    }
 }
+

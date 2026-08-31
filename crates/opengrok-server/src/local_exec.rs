@@ -732,6 +732,70 @@ async fn post_responses(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ---------------------------------------------------------------------------------------------
+// The bot-facing side (slice 6): the `user_machine_shell` tool reaches this. The tool lives in
+// `opengrok-tools`, which cannot depend on the server, so the server implements the sink trait here
+// over the enqueue path and attaches it per request — only when the account has an enabled machine.
+// ---------------------------------------------------------------------------------------------
+
+/// The account's first enrolled, enabled machine, if any — the target `user_machine_shell` binds to.
+/// `Never` (or revoked) machines are skipped, so the tool is offered ONLY when there is a live,
+/// consenting machine to reach. (v1 targets the first such machine; per-machine choice is later.)
+pub async fn enabled_machine(store: &opengrok_store::PgStore, account_id: &str) -> Option<String> {
+    let machines = store.list_daemons(account_id).await.ok()?;
+    for (machine_id, _label, _enrolled_at_ms, revoked) in machines {
+        if revoked {
+            continue;
+        }
+        let mode = store
+            .local_exec_mode(account_id, &machine_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|mode| LocalExecMode::from_stored(&mode))
+            .unwrap_or_default();
+        if mode != LocalExecMode::Never {
+            return Some(machine_id);
+        }
+    }
+    None
+}
+
+/// The server's implementation of the reverse-exec tool seam. A bot's `user_machine_shell` call
+/// lands in `run`, which forwards the command through the SAME gated enqueue path as everything
+/// else — as a `Bot`, so `Ask` suspends the run for the user to approve.
+pub struct ReverseExecSink {
+    pub auth: AuthState,
+    /// The coworker asking — recorded as the audit origin.
+    pub coworker_id: String,
+    /// The machine this tool is bound to for this request.
+    pub machine_id: String,
+}
+
+#[async_trait::async_trait]
+impl opengrok_tools::UserMachineSink for ReverseExecSink {
+    async fn run(
+        &self,
+        account_id: &opengrok_core::id::AccountId,
+        command: &str,
+    ) -> opengrok_tools::UserMachineReply {
+        match enqueue_and_wait(
+            &self.auth,
+            account_id.as_str(),
+            &self.machine_id,
+            command,
+            &[command.to_string()],
+            Origin::Bot(self.coworker_id.clone()),
+        )
+        .await
+        {
+            EnqueueResult::Ran(outcome) => opengrok_tools::UserMachineReply::Ran(outcome.render()),
+            EnqueueResult::Refused(why) => opengrok_tools::UserMachineReply::Refused(why),
+            EnqueueResult::NeedsApproval => opengrok_tools::UserMachineReply::NeedsApproval,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
