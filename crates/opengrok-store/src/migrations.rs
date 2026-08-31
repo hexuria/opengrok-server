@@ -364,10 +364,10 @@ create table if not exists local_exec_daemon (
     primary key (account_id, machine_id)
 );
 
--- Auto-review policy: three tiers (global < machine < coworker), one row per scope, every field
--- TRI-STATE — null inherits from the tier below, '' is an explicit "none" that stops inheritance.
--- Override is per field, never a merge. Precedence is decided in opengrok-server::auto_review
--- (one place); this table never pre-resolves. Design: docs/AUTO-REVIEW.md.
+-- Auto-review policy: two tiers (global < coworker), one row per scope, every field TRI-STATE —
+-- null inherits from the tier below, '' is an explicit "none" that stops inheritance. Override is
+-- per field, never a merge. Precedence is decided in opengrok-server::auto_review (one place);
+-- this table never pre-resolves. Design: docs/AUTO-REVIEW.md.
 create table if not exists auto_review_policy (
     account_id         text    not null,
     scope_kind         text    not null,
@@ -378,6 +378,11 @@ create table if not exists auto_review_policy (
     updated_at_ms      bigint  not null,
     primary key (account_id, scope_kind, scope_id)
 );
+
+-- A device tier existed for one evening and was cut before any client wrote to it: "what on this
+-- machine" is that machine's standing rules. A row nobody resolves is precisely the surprise a
+-- policy store must not hold, so any that got in is removed here (idempotent).
+delete from auto_review_policy where scope_kind = 'machine';
 
 -- Every reverse-exec command and its outcome — the record the user can read afterward. Written at
 -- enqueue (decision), updated when the daemon returns a result. `origin` names the bot, or the user.

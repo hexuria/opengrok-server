@@ -1,10 +1,10 @@
-//! Store operations for auto-review policy: three tiers (global, machine, coworker), one row per
-//! scope, every field tri-state. Design: `docs/AUTO-REVIEW.md`.
+//! Store operations for auto-review policy: two tiers (global, coworker), one row per scope,
+//! every field tri-state. Design: `docs/AUTO-REVIEW.md`.
 //!
-//! This module only persists rows and fetches the (at most three) that apply to one
-//! (machine, coworker). Precedence is NOT decided here — it lives in the server's
-//! `auto_review::resolve`, so the rule "coworker beats machine beats global" exists in exactly one
-//! place and the store never pre-resolves a view the settings UI would then have to un-resolve.
+//! This module only persists rows and fetches the (at most two) that apply to one coworker.
+//! Precedence is NOT decided here — it lives in the server's `auto_review::resolve`, so the rule
+//! "coworker beats global" exists in exactly one place and the store never pre-resolves a view
+//! the settings UI would then have to un-resolve.
 
 use sqlx::Row;
 
@@ -51,14 +51,13 @@ impl PgStore {
         rows.iter().map(row_from).collect()
     }
 
-    /// The rows that apply to one decision: the global row, this machine's row, this coworker's
-    /// row — whichever exist. One query, at most three rows; the caller resolves precedence.
-    /// An absent machine or coworker binds `''`, which no machine/coworker row can carry (the
-    /// PUT refuses an empty scope id for those kinds), so it simply matches nothing.
+    /// The rows that apply to one decision: the global row and this coworker's row — whichever
+    /// exist. One query, at most two rows; the caller resolves precedence. An absent coworker
+    /// binds `''`, which no coworker row can carry (the PUT refuses an empty scope id for that
+    /// kind), so it simply matches nothing. Rows of any other scope kind are never returned.
     pub async fn auto_review_tiers(
         &self,
         account_id: &str,
-        machine_id: Option<&str>,
         coworker_id: Option<&str>,
     ) -> StoreResult<Vec<AutoReviewRow>> {
         let rows = sqlx::query(
@@ -67,11 +66,9 @@ impl PgStore {
                from auto_review_policy
               where account_id = $1
                 and (scope_kind = 'global'
-                     or (scope_kind = 'machine' and scope_id = $2)
-                     or (scope_kind = 'coworker' and scope_id = $3))",
+                     or (scope_kind = 'coworker' and scope_id = $2))",
         )
         .bind(account_id)
-        .bind(machine_id.unwrap_or(""))
         .bind(coworker_id.unwrap_or(""))
         .fetch_all(self.pool())
         .await?;
