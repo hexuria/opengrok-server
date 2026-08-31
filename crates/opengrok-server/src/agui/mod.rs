@@ -3,6 +3,7 @@
 //! `docs/GOAL.md` slice 2. This is the spine — the harness, the boxes and the tools all reach a
 //! client through this stream.
 
+pub mod provision;
 pub mod routes;
 
 pub use routes::{AgUiState, router, to_chat_messages};

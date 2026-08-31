@@ -424,6 +424,14 @@ impl PgStore {
         Ok(events)
     }
 
+    /// How many runs are live right now — the gateway's `/health` reports it as `isBusy`.
+    pub async fn running_runs(&self) -> StoreResult<i64> {
+        let row = sqlx::query("select count(*) as n from run_view where status = 'running'")
+            .fetch_one(self.pool())
+            .await?;
+        Ok(row.try_get("n")?)
+    }
+
     /// The loop guard's question: did this monitor start that run?
     pub async fn was_fired_by(&self, monitor: &MonitorId, run: &RunId) -> StoreResult<bool> {
         let row = sqlx::query(

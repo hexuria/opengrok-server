@@ -1,5 +1,7 @@
 //! OpenGrok — the server the coworkers live on.
 
+mod admin;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -12,6 +14,11 @@ use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `opengrok admin …` runs a CLI command and exits before any listener starts.
+    if let Some(code) = admin::maybe_run().await {
+        std::process::exit(code);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -47,23 +54,40 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("migrations failed: {error}"))?;
 
-    let auth = AuthState {
-        store: PgStore::new(pool),
-        minter: Arc::new(TokenMinter::new(token_secret.as_bytes())),
-    };
+    // Who a browser login signs in as — the single user of a self-hosted OpenGrok. Defaults to
+    // the gateway's own account so the desktop's roster and its sign-in are the same person.
+    let login_email = std::env::var("OG_LOGIN_EMAIL")
+        .ok()
+        .or_else(|| std::env::var("OG_GATEWAY_EMAIL").ok())
+        .unwrap_or_else(|| "host@opengrok.local".to_string());
+    let public_url = std::env::var("OG_PUBLIC_GATEWAY_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| format!("http://{bind}"));
+    let auth = AuthState::new(
+        PgStore::new(pool),
+        Arc::new(TokenMinter::new(token_secret.as_bytes())),
+        login_email,
+    )
+    .with_resend(
+        std::env::var("OG_RESEND_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("RESEND_API").ok()),
+        public_url,
+    );
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.
     let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
         Ok("mock") => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
-            Arc::new(MockDoor::echoing())
+            Arc::new(with_mock_verdict(MockDoor::echoing()))
         }
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
         Ok("mock-tools") => {
             tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
-            Arc::new(MockDoor::asking_for_a_tool())
+            Arc::new(with_mock_verdict(MockDoor::asking_for_a_tool()))
         }
         door => {
             let url = std::env::var("OG_GATEWAY_URL")
@@ -124,7 +148,10 @@ async fn main() -> anyhow::Result<()> {
     let state = AgUiState {
         auth,
         door,
-        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
+        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string()),
+        auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL").unwrap_or_else(|_| {
+            std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string())
+        }),
         computer,
         vault,
         connectors,
@@ -144,7 +171,39 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
-    let app = opengrok_server::router(state);
+    // Idle-stop: pause boxes that have sat unused past OG_BOX_IDLE_STOP_SECONDS (off by default).
+    // A stopped box keeps its disk and pauses billing; the run path resumes it on next use.
+    tokio::spawn(opengrok_server::agui::provision::idle_stop_forever(
+        state.clone(),
+    ));
+
+    // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
+    // the shipped host's own fallback — and the email names whose coworkers are the roster.
+    //
+    // OG_GATEWAY_BEARER, deliberately not OG_GATEWAY_TOKEN: that name already means the key WE
+    // present to the model gateway. One name meaning "what we show upstream" and "what clients
+    // must show us" is how a model key ends up handed to every desktop client.
+    let gateway = opengrok_server::gateway::GatewayState::new(
+        state.clone(),
+        std::env::var("OG_GATEWAY_BEARER")
+            .ok()
+            .filter(|token| !token.is_empty()),
+        std::env::var("OG_GATEWAY_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string()),
+        std::env::var("OG_PUBLIC_GATEWAY_URL")
+            .ok()
+            .filter(|url| !url.is_empty()),
+    );
+
+    // The tonic listener — internal gRPC on the transcribed seam-B contract. Opt-in: absent
+    // means no listener, because nothing internal dials it yet and an unused open port is a
+    // liability, not a feature.
+    if let Ok(bind) = std::env::var("OG_GRPC_BIND")
+        && let Ok(addr) = bind.parse()
+    {
+        tokio::spawn(opengrok_server::grpc::serve(gateway.clone(), addr));
+    }
+
+    let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("could not bind {bind}"))?;
@@ -285,5 +344,17 @@ async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => tracing::info!("interrupted; shutting down"),
         () = terminate => tracing::info!("terminated; shutting down"),
+    }
+}
+
+/// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask` makes a mock door answer the auto-review judge
+/// with that word, so the card and the refusal can be driven in the real app with no provider.
+fn with_mock_verdict(door: MockDoor) -> MockDoor {
+    match std::env::var("OG_AUTO_REVIEW_MOCK_VERDICT") {
+        Ok(word) if !word.trim().is_empty() => {
+            tracing::warn!(%word, "OG_AUTO_REVIEW_MOCK_VERDICT — the auto-review judge is canned");
+            door.with_judge_verdict(word.trim().to_string())
+        }
+        _ => door,
     }
 }

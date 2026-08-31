@@ -58,7 +58,8 @@ pub(crate) async fn fire(
         return;
     };
 
-    let tools = crate::agui::routes::tools_for_coworker(&state, &account_id, &coworker_id).await;
+    let tools =
+        crate::agui::routes::tools_for_coworker(&state, &account_id, &coworker_id, &[], &[]).await;
 
     let journal = StoreJournal {
         state: state.clone(),
@@ -71,6 +72,7 @@ pub(crate) async fn fire(
         // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
         model: coworker.model.clone(),
         system: None,
+        tools: Vec::new(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: prompt,

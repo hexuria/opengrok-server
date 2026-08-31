@@ -6,8 +6,8 @@
 //! wrong path is green in unit tests and broken in production.
 //!
 //! It is a stand-in, not the vendor, so it cannot prove the vendor agrees with the reference doc.
-//! The two shapes the doc leaves unpinned (the created-box id field, the DELETE confirmation
-//! header) are still unverified against the real service and are marked as such in `ascii.rs`.
+//! The created-box id field and the DELETE confirmation header (`X-Ascii-Confirm-Delete`) were
+//! confirmed against the real service (a live key, 2026-08-31); this stand-in mirrors them.
 
 // `expect`/`panic` are denied workspace-wide because a panic in the server is a coworker's work
 // lost. In a test they are the correct failure: a wrong assertion should stop the test loudly.
@@ -159,7 +159,7 @@ fn full_api(recorded_ok: Value) -> Router<Recorded> {
             "/boxes/{id}",
             delete(|State(state): State<Recorded>, Path(id): Path<String>, headers: HeaderMap| async move {
                 let confirm = headers
-                    .get("x-confirm-delete")
+                    .get("x-ascii-confirm-delete")
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or_default()
                     .to_string();

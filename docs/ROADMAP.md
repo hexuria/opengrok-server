@@ -66,28 +66,37 @@ after — the real, unmodified client is the strongest smoke test we can have.
 
 ## Slice 7 — The gateway boots the real client (P2 + P3)
 
-- [ ] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
-  at ≤15 s (a 35 s watchdog aborts otherwise), the **19** SSE channels, one shared bearer
-  compared timing-safe.
-- [ ] **7.2** P3's 12 roster/settings commands — shape discipline over behaviour:
+- [x] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
+  at ≤15 s (a 35 s watchdog aborts otherwise), channel filter parsed, one shared bearer
+  compared timing-safe. *(this commit)*
+- [x] **7.2** P3's 12 roster/settings commands — shape discipline over behaviour:
   `countAgents` a number, `getTrays` an array, `getForeverBoxStatus` null-or-record,
-  `setHostSettings` echoing the full record back.
-- [ ] **7.3** The trap, honoured: serve on a **non-loopback** host — the client refuses
-  `127.0.0.1`/`localhost` gateways unless the runtime is local-docker
-  (`local-docker-host-connector.ts:465`).
+  `setHostSettings` echoing the full record back. *(this commit)*
+- [x] **7.3** The trap, honoured: serve on a **non-loopback** host — verified live on
+  `http://192.168.100.21:1447` with the pinned bearer (`OG_GATEWAY_BEARER`), 401 without it.
+  *(this commit)*
 - [ ] **7.v** Launch the shipped app with `SAND_HOST_GATEWAY_URL` pointed at us and see a
-  populated sidebar: no onboarding screen, no malformed-reply throw, transport-connected held
-  for ten minutes.
+  populated sidebar. **Blocked in the client, not here:** setting that env var deadlocks the
+  reconstructed app before its window opens — isolated and written up in
+  `docs/port-blockers.md` B1. The wire contract is held by `slice11-gateway-smoke.sh`
+  meanwhile.
 
 ## Slice 8 — A conversation from the real app (P4)
 
 The milestone that proves the port; everything after it is breadth, not risk.
 
-- [ ] **8.1** P4's 13 conversation commands (`sendPrompt`, the transcript reads, `openAgent`,
-  `setWindowFocused`, …) backed by the harness we already have.
-- [ ] **8.2** The two SSE shapes that carry an answer: `transcript`
-  (`appended`/`updated`) and `agent-upserted`.
+- [x] **8.1** P4's 13 conversation commands (`sendPrompt` with the Postgres acceptance ledger —
+  idempotent on a repeated nonce, 409 `NONCE_DIGEST_MISMATCH` on a reused one — the four
+  tail/window/page reads, the array forms, `openAgent`, `promptAcceptanceStatus`) backed by the
+  harness we already have; turns run on the coworker's own model and are journaled like every
+  other run. *(this commit)*
+- [x] **8.2** The two SSE shapes that carry an answer: `transcript` `appended`/`updated` (user
+  echo carrying `clientNonce`, streaming placeholder, final update) and `agent-upserted` pulsing
+  `isRunning` — every frame stamped `ordered: {replicaKey, epoch, sequence}`, plus an `agents`
+  snapshot on every `/events` connect. *(this commit)*
 - [ ] **8.v** Send a message from the real, unmodified app and watch the answer stream back.
+  Blocked by the same client bug as 7.v (`docs/port-blockers.md` B1); the choreography is held by
+  `slice12-conversation-smoke.sh` meanwhile.
 
 ## Slice 9 — Seam B: identity and the mint (P0 + P1)
 
@@ -96,27 +105,77 @@ Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two s
 no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the Axum edge; a bare
 tonic gRPC server cannot answer the client.
 
-- [ ] **9.1** Auth: `/loginDeepControl` (PKCE-shaped challenge), `/auth/poll`, `/oauth/token`
-  with a real `exp` — the client parses the JWT for expiry and loops on refresh without one.
-- [ ] **9.2** `DashboardService` — 6 methods (`getMe`, `getTeams`, both admin-settings
-  variants, `getUserPrivacyMode`, `updateUserName`).
-- [ ] **9.3** `GrokBotService` — the mock's 12, plus `EnsureSandBox` returning
-  `{gatewayUrl, gatewayToken, networkToken, vncUrl, forkVncBaseUrl}` with a **non-loopback**
-  `gatewayUrl`.
-- [ ] **9.4** The same services on a tonic gRPC listener for internal use — the operator
-  decision of 30 Aug, unchanged.
-- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us.
+- [x] **9.1** Auth at the mock's own surface (`source/mock/auth-http.ts`): `/auth/poll` minting
+  the `{accessToken, refreshToken}` pair, on top of slice 1's `/auth/cursor_dev_session_token`
+  and `/oauth/token` with real `exp`s. *(this commit)*
+- [x] **9.1b** The `/loginDeepControl` PKCE browser leg — built, gated, live. Registers the
+  challenge, binds it to the host account (the person opening the URL is the auth on a
+  single-user self-hosted server), and `/auth/poll` only releases a token for a matching
+  verifier (404-as-pending otherwise) — which CLOSED a real hole the peer caught: the old blind
+  poll minted a LAN-reachable account token that leaked the gateway bearer via EnsureSandBox.
+  Dev sign-in is now loopback-only. `slice16-browser-login-smoke.sh`. (`0deb7a3`)
+- [x] **9.2** `DashboardService` — 6 methods, Connect unary on Axum, enums by name, plus the
+  mock's load-bearing leniency: an unmodelled method answers an empty message. *(this commit)*
+- [x] **9.3** `GrokBotService` — the mock's 12 (transcripts as base64 bodies with string seqs,
+  sends idempotent on `(agent, messageId)`, real turns instead of the mock's canned line), plus
+  `EnsureSandBox` minting OUR gateway: `OG_PUBLIC_GATEWAY_URL` + the gateway bearer, refused
+  outright when no non-loopback address is configured. *(this commit)*
+- [x] **9.4** tonic is in: `proto/opengrok_seamb.proto` (hand-transcribed, provenance in the
+  file, codegen into target/ never the tree), both services on an opt-in `OG_GRPC_BIND`
+  listener, proven by a real tonic client in `against_our_own_grpc.rs` — unauthenticated
+  refusal, GetMe, the mint. *(this commit)*
+- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us
+  (`SAND_BACKEND_URL` pointed here). Blocked behind port-blockers B1 with 7.v/8.v; the contract
+  is held by `slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
 
 Runs from a client Bot arrive anonymous today: no tools, no policy, the deployment's model.
 Access tokens live one hour, so a Bot registered with a static header dies hourly.
 
-- [ ] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key (signed, names account +
-  coworker; a `key_view` row makes revocation real).
-- [ ] **10.2** `account_from_bearer` accepts it; a bot-key names the coworker for the run.
-- [ ] **10.3** Proven from barok-works: a Bot registered with the key runs as its coworker — tools,
-  approvals, and the coworker's own model, from the UI instead of curl.
+- [x] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key — signed with a `use`
+  discriminator so an access token can never pass as one, shown exactly once at mint, its
+  `bot_key_view` row making revocation real. List and revoke ride the same 404-not-403
+  ownership rule. *(this commit)*
+- [x] **10.2** `principal_from_bearer` accepts it, and the key NAMES the coworker: a bare
+  POST /ag-ui with nothing but the key runs as the coworker, on its model, owned by the minting
+  account — and a revoked key answers 401 rather than silently downgrading to anonymous.
+  *(this commit)*
+- [ ] **10.3** Proven from barok-works end to end. Every hop holds separately — the key sits in
+  their vault (`hasAuth: true`), their loader attaches it per load, and the same minted key via
+  curl runs owned on the same live server — but the one browser send with the header attached is
+  still owed: the first attempt bound the STALE duplicate Bot (the package-sync-never-prunes
+  finding, now cleaned up), and the retry died under machine load. One quiet-machine send
+  closes it.
+
+## Slice 12 — Identity: orgs, invites, credential accounts (`796bf61`)
+
+Uriah's UI review turned the single-user host into a real, multi-tenant identity model.
+
+- [x] **12.1** `org` aggregate — name, admin, domains, invites; `RedeemInvite` enforces BOTH the
+  open-code gate and the domain-match gate atomically, each refusal distinguishable.
+- [x] **12.2** `account` extended — argon2id password, name, org, `verified` (Resend-driven),
+  `enabled` (admin-flipped); credential login checks all three in order.
+- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account create`) — the
+  operator bootstraps the first org from shell; no HTTP admin surface. `account create` mints a
+  ready test identity (the multi-account-under-a-different-name need).
+- [x] **12.4** HTTP — `POST /auth/signup` (both gates), the credential form at `/loginDeepControl`
+  (superseding 9.1b's opener-is-host), `GET /auth/verify`. Resend behind `OG_RESEND_API_KEY`:
+  set ⇒ send + require verification, unset ⇒ auto-verify.
+- [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
+  verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
+- [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
+  password reset via Resend; an in-app admin surface for invites/enable (CLI-only in v1).
+
+- [x] **13 Web console** — the account + admin dashboards as a Bun/Vite/React/TanStack SPA the
+  server hosts at `/console` (Axum `ServeDir`-style handler, SPA deep-links 200 via index). Browser
+  auth is httpOnly cookies (`/auth/login|logout|refresh`; no token in JS), `caller()` accepts the
+  cookie or the Bearer header. Account self-service (name, avatar data-URL, password; email fixed)
+  and the org-admin surface (users list, enable/disable, invite links) that 12.later deferred —
+  `isAdmin`-gated in the client, enforced on the API. Guards: an admin cannot self-disable (409);
+  login no longer clobbers the account projection. `slice19-web-console-smoke.sh` +
+  `tests/against_the_web_console.rs`; browser-verified in `docs/verification/web-console/`.
+  (this commit)
 
 ## Slice 11+ — breadth (P5 → P10, in order)
 
@@ -125,12 +184,22 @@ P6 approvals ride slice 4's exactly-once answers, P8 MCP/skills ride `opengrok-p
 vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle rides
 `opengrok-box`.
 
-- [ ] P5 agent lifecycle (19 commands, 10 already answered client-side)
-- [ ] P6 tools, approvals, widgets (7)
-- [ ] P7 attachments, media, `/avatars/<id>`, `x-sand-slim-avatars` (5)
-- [ ] P8 MCP and skills (15)
-- [ ] P9 automations and workflows (15)
-- [ ] P10 box lifecycle and store (13)
+- [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
+  avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
+- [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its
+  `updated`/`removed` SSE frame. (`c8ee938`)
+- [x] P7 — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
+  commands refuse readably until the artifacts slice lands (they are its client surface).
+  *(this commit)*
+- [x] P8 — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
+  publishing and routed-MCP execution refuse readably (a coworker's connections drive MCP on
+  this server, from runs). *(this commit)*
+- [x] P9 automations — slice 6's schedules wearing the client's names; one scheduler, two
+  vocabularies, the same rows readable under `/schedules`. Workflows stay honest empties.
+  (`c8ee938`)
+- [x] P10 — the box control surface over what the deployment has: null (the validated
+  truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
+  click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
 
 **P11 is deliberately not here.** Sharing/rooms, teach recording, channels, memories and the
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.
@@ -150,5 +219,5 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 - [ ] GitHub Actions CI — billing. `scripts/gate.sh --smoke` is the gate meanwhile.
 - [ ] Rights review → publication (LEGAL.md; the repo stays private until then).
-- [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); terra/5.5/5.4-mini
+- [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway.

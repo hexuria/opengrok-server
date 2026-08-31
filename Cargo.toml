@@ -28,7 +28,7 @@ license = "MIT"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 axum = { version = "0.8", features = ["macros", "ws"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors"] }
+tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors", "fs"] }
 # 0.13 to match rmcp's, so the binary carries ONE http client and one TLS stack rather than two.
 # Its feature names differ from 0.12: `rustls-tls` became `rustls`, and `form` and `query` are now
 # opt-in rather than always present.
@@ -60,15 +60,26 @@ rmcp = { version = "3", default-features = false, features = [
 # prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
 #   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
 prost = "0.14"
+# tonic enters (operator decision, 30 Aug 2026): internal gRPC on our OWN transcribed protos.
+# The client edge stays Connect-on-Axum — a bare tonic server cannot answer HTTP/1.1 Connect.
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 # Cron parsing for the scheduler. Parsing only — the ticking is ours, in the same sweep pattern
 #   as recovery, so firing stays durable and policy-checked rather than delegated to a framework.
 cron = "0.17"
+# Constant-time equality for the gateway bearer. The shipped host compares its token
+#   timing-safe; a port that string-compares invites the classic byte-at-a-time probe.
+subtle = "2"
 # Slice 1 (auth): our own JWTs. The client base64url-decodes the payload itself and reads
 #   sub/email/exp, so the access token has to be a real JWT — see opengrok-server/src/auth/token.rs.
 # `rust_crypto` rather than `aws_lc_rs`: jsonwebtoken 11 refuses to pick a provider by itself, and
 #   the pure-Rust one keeps a C toolchain out of the CI image. Exactly one must be enabled.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 sha2 = "0.11"
+# Password hashing for credential accounts. Argon2id — a real KDF; ChaCha20/SHA-256 already in the
+#   tree are AEAD/hash, neither is a password hash. `password-hash` gives the PHC string format.
+argon2 = "0.5"
 rand = "0.10"
 base64 = "0.23"
 # The credential vault. An AEAD so a tampered ciphertext fails to open rather than decrypting to

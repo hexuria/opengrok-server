@@ -22,6 +22,14 @@ impl ToolRunner {
         Self { executor, context }
     }
 
+    /// The OpenAI tool definitions to advertise to the model this turn — the offering that pairs
+    /// with `run_all`'s execution. The harness fills `ModelRequest.tools` from this before each door
+    /// call, so the model actually knows the tools exist.
+    pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
+        self.executor
+            .tool_schemas(&self.context.account_id, &self.context.coworker_id)
+    }
+
     pub async fn run_all(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
@@ -156,6 +164,9 @@ pub mod tests_support {
         }
         async fn resume(&self, _b: &str) -> BoxResult<()> {
             Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            Ok("running".to_string())
         }
         async fn destroy(&self, _b: &str) -> BoxResult<()> {
             Ok(())

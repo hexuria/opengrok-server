@@ -15,6 +15,11 @@
 //! in a form it can reason about and recover from — a refusal that killed the run would turn every
 //! policy decision into an outage.
 
+pub mod review;
+pub use review::{
+    AwaitingReason, Gate, Outcome, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy,
+    ReviewVerdict, block_refusal, combine, redact_arguments,
+};
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
@@ -70,6 +75,10 @@ pub struct ToolResult {
     /// a refusal ends a turn, an approval pauses one that can still be finished tomorrow.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub awaiting_approval: bool,
+    /// WHY it is waiting — which card to raise, and which verb may answer it. Two different cards
+    /// can come from the same tool, so the tool name no longer says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_reason: Option<AwaitingReason>,
 }
 
 impl ToolResult {
@@ -79,17 +88,19 @@ impl ToolResult {
             ok: true,
             content: content.into(),
             awaiting_approval: false,
+            awaiting_reason: None,
         }
     }
 
     /// Waiting on a person. `ok` is false because nothing ran — treating a pending approval as
     /// success is how a model concludes its command already worked.
-    pub fn awaiting(call_id: &str, why: impl Into<String>) -> Self {
+    pub fn awaiting(call_id: &str, reason: AwaitingReason, why: impl Into<String>) -> Self {
         Self {
             call_id: call_id.to_string(),
             ok: false,
             content: format!("waiting for approval: {}", why.into()),
             awaiting_approval: true,
+            awaiting_reason: Some(reason),
         }
     }
 
@@ -100,8 +111,57 @@ impl ToolResult {
             ok: false,
             content: format!("refused: {}", why.into()),
             awaiting_approval: false,
+            awaiting_reason: None,
         }
     }
+}
+
+/// The name of the reverse-exec tool: a shell command on the USER'S OWN machine, not the bot's box.
+pub const USER_MACHINE_SHELL: &str = "user_machine_shell";
+
+/// What the reverse-exec sink hands back for one command. The gate + machine selection + audit all
+/// live behind the sink (the server); the tool only forwards a command and renders the reply.
+#[derive(Debug, Clone)]
+pub enum UserMachineReply {
+    /// The command ran on the user's machine; here is the rendered outcome.
+    Ran(String),
+    /// The gate refused it (channel off, a deny rule, or no daemon connected). Never ran.
+    Refused(String),
+    /// The user must approve this command. The run SUSPENDS, exactly like a policy `NeedsApproval`.
+    NeedsApproval,
+}
+
+/// The bridge from the `user_machine_shell` tool to the reverse-exec channel. The server implements
+/// it over its enqueue path; `opengrok-tools` only defines the seam so it need not depend on the
+/// server. Attached to an `Executor` ONLY when the account has an enrolled, enabled machine — so the
+/// tool is advertised exactly when there is a live machine to reach, never as a dead end.
+/// The gate's verdict for a command, WITHOUT dispatching it. Auto-review must judge before a
+/// command runs, and the gate must judge first — so they are two questions, not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserMachineVerdict {
+    Allow,
+    Ask,
+    Deny(String),
+}
+
+#[async_trait::async_trait]
+pub trait UserMachineSink: Send + Sync {
+    /// Judge `command` against the machine's policy (mode + rules) and say what `run` would do —
+    /// allow, ask, or deny — without queueing anything. `run` judges again when it runs; this is
+    /// the executor's chance to consult auto-review in between.
+    async fn decide(&self, account_id: &AccountId, command: &str) -> UserMachineVerdict;
+
+    /// Enqueue `command` on this account holder's own machine through the gate, and wait for the
+    /// outcome. The server picks the machine, runs the gate, and writes the audit row. `call_id` is
+    /// the tool call id — the stable approval id the inline card uses; `approved` is true on resume
+    /// (the card said yes), so the Ask gate dispatches instead of suspending again.
+    async fn run(
+        &self,
+        account_id: &AccountId,
+        command: &str,
+        call_id: &str,
+        approved: bool,
+    ) -> UserMachineReply;
 }
 
 /// The arguments `shell` accepts. `box_id` is deliberately absent — see the module note.
@@ -141,6 +201,11 @@ pub struct Executor {
     /// person approved *that command*, and a set of call ids is the only shape that says so. A
     /// resumed run carries exactly the id that was answered, so nothing else slips through with it.
     approved_calls: std::collections::BTreeSet<String>,
+    /// Calls a person answered on an AUTO-REVIEW card. Kept apart from `approved_calls` on
+    /// purpose: a review approval skips the judge and nothing else. It must never release the
+    /// machine's own consent gate — if the machine's mode flipped to `ask` between the card and
+    /// the answer, the owner still gets their own card.
+    review_approved_calls: std::collections::BTreeSet<String>,
     /// Live sessions with the MCP servers this coworker's plugins bring, keyed by
     /// `<plugin>.<server>`.
     ///
@@ -149,6 +214,46 @@ pub struct Executor {
     sessions: BTreeMap<String, Arc<crate::mcp::Session>>,
     /// Every plugin tool on offer, in the order a model is told about them.
     plugin_tools: Vec<crate::mcp::McpTool>,
+    /// The reverse-exec bridge, present ONLY when this account has an enrolled, enabled machine.
+    /// Its presence is what advertises `user_machine_shell` — the tool exists iff a machine can
+    /// actually be reached.
+    user_machine: Option<Arc<dyn UserMachineSink>>,
+    /// Auto-review, when the run's effective policy is on: the instruction texts (resolved once
+    /// per run by the server) and the judge that reads them. `None` is the cheapest short-circuit.
+    auto_review: Option<AutoReview>,
+}
+
+/// The auto-review pair a run carries.
+struct AutoReview {
+    policy: ReviewPolicy,
+    judge: Arc<dyn ReviewJudge>,
+}
+
+impl AutoReview {
+    /// One question, one word back, rendered into what the ladder needs. The judge sees the
+    /// arguments AFTER identity overwrite and redaction, never as the model wrote them.
+    async fn judge(&self, tool: &str, arguments: &Value) -> ReviewOutcome {
+        let redacted = redact_arguments(arguments);
+        let verdict = self
+            .judge
+            .judge(ReviewAsk {
+                tool,
+                arguments: &redacted,
+                allow_instructions: &self.policy.allow_instructions,
+                block_instructions: &self.policy.block_instructions,
+            })
+            .await;
+        match verdict {
+            ReviewVerdict::Allow => ReviewOutcome::Allow,
+            ReviewVerdict::Block => {
+                ReviewOutcome::Block(block_refusal(&self.policy.block_instructions))
+            }
+            ReviewVerdict::Ask => ReviewOutcome::Ask(review::REVIEW_ASK_REASON.to_string()),
+            ReviewVerdict::Unavailable => {
+                ReviewOutcome::Ask(review::REVIEW_UNAVAILABLE_REASON.to_string())
+            }
+        }
+    }
 }
 
 impl Executor {
@@ -161,6 +266,9 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            user_machine: None,
+            auto_review: None,
+            review_approved_calls: std::collections::BTreeSet::new(),
         }
     }
 
@@ -172,6 +280,9 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            user_machine: None,
+            auto_review: None,
+            review_approved_calls: std::collections::BTreeSet::new(),
         }
     }
 
@@ -179,6 +290,31 @@ impl Executor {
     #[must_use]
     pub fn with_approved(mut self, approved: impl IntoIterator<Item = String>) -> Self {
         self.approved_calls = approved.into_iter().collect();
+        self
+    }
+
+    /// Carry the calls a person approved on an auto-review card: the judge is skipped for them,
+    /// and NOTHING else is released (see `review_approved_calls`).
+    #[must_use]
+    pub fn with_review_approved(mut self, approved: impl IntoIterator<Item = String>) -> Self {
+        self.review_approved_calls = approved.into_iter().collect();
+        self
+    }
+
+    /// Attach the reverse-exec bridge — the server does this only when the account has an enrolled,
+    /// enabled machine, which is precisely when `user_machine_shell` should be offered.
+    #[must_use]
+    pub fn with_user_machine(mut self, sink: Arc<dyn UserMachineSink>) -> Self {
+        self.user_machine = Some(sink);
+        self
+    }
+
+    /// Attach auto-review for this run: the effective instruction texts and the judge. The server
+    /// resolves the texts once per run (`docs/AUTO-REVIEW.md` §3) and attaches only when the
+    /// policy is on; an inactive policy attached here is still a no-op per call.
+    #[must_use]
+    pub fn with_auto_review(mut self, policy: ReviewPolicy, judge: Arc<dyn ReviewJudge>) -> Self {
+        self.auto_review = Some(AutoReview { policy, judge });
         self
     }
 
@@ -213,6 +349,11 @@ impl Executor {
             .iter()
             .map(|name| (*name).to_string())
             .chain(
+                self.user_machine
+                    .is_some()
+                    .then(|| USER_MACHINE_SHELL.to_string()),
+            )
+            .chain(
                 self.plugin_tools
                     .iter()
                     .map(|tool| tool.qualified_name.clone()),
@@ -228,36 +369,172 @@ impl Executor {
             .collect()
     }
 
+    /// The OpenAI function-calling tool definitions this coworker is OFFERED for a request: built-ins
+    /// the policy permits (Allow or NeedsApproval — a `Deny` is never advertised, so the model is not
+    /// told about a dead end it would keep trying) plus its plugin tools. This is the OFFERING half
+    /// that must pair with `run`; without it the model is never told the tools exist and answers "I
+    /// can't run commands" even with a computer attached. Empty when the coworker may run nothing.
+    pub fn tool_schemas(&self, account_id: &AccountId, coworker_id: &CoworkerId) -> Vec<Value> {
+        let permitted = |name: &str| {
+            !matches!(
+                opengrok_policy::decide(
+                    account_id,
+                    coworker_id,
+                    opengrok_policy::Action::RunTool(name),
+                    &self.policy,
+                ),
+                opengrok_policy::Decision::Deny(_)
+            )
+        };
+        let mut schemas = Vec::new();
+        for name in Self::builtin_tool_names() {
+            if permitted(name)
+                && let Some((description, parameters)) = builtin_tool_spec(name)
+            {
+                schemas.push(serde_json::json!({
+                    "type": "function",
+                    "function": { "name": name, "description": description, "parameters": parameters },
+                }));
+            }
+        }
+        // The reverse-exec tool is NOT gated by the per-coworker tool grant: its authorization is
+        // the account's local-exec policy (enrolled machine + never/ask/bypass) and the machine's
+        // own consent, applied per command inside the sink. Gating it behind the grant would deny
+        // every existing coworker (whose grant lists only the box tools) a capability the account
+        // explicitly enabled. Offered whenever a machine is attached.
+        if self.user_machine.is_some()
+            && let Some((description, parameters)) = builtin_tool_spec(USER_MACHINE_SHELL)
+        {
+            schemas.push(serde_json::json!({
+                "type": "function",
+                "function": { "name": USER_MACHINE_SHELL, "description": description, "parameters": parameters },
+            }));
+        }
+        for tool in &self.plugin_tools {
+            if permitted(&tool.qualified_name) {
+                schemas.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.qualified_name,
+                        "description": tool.description.clone().unwrap_or_default(),
+                        // The MCP server validates the real arguments; we advertise an open object so
+                        // the model can call it, rather than a schema we do not have here.
+                        "parameters": { "type": "object" },
+                    },
+                }));
+            }
+        }
+        schemas
+    }
+
     /// Run one call. Never returns `Err` for a *tool* failure: the model gets a result either way,
     /// and only the caller's own bugs propagate.
+    ///
+    /// THE ORDER IS THE SAFETY ARGUMENT. Identity first, for every tool. Then the PRIMARY gate for
+    /// the tool — the machine's own policy for `user_machine_shell`, the coworker's grant for
+    /// everything else. Then, once, the auto-review judge — skipped when the gate already denied
+    /// (no spend on a refused command), when a person already answered this call (a resumed call
+    /// is never re-judged), or when no active policy is attached. Then the ladder in
+    /// `review::combine`, which is pure and table-tested. Only `Outcome::Run` reaches a dispatch.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
-        // The identity rule, applied once, before anything reads an argument. Whatever the model
-        // wrote for these keys is discarded rather than checked.
+        // The identity rule, applied once, before anything reads an argument — including the judge
+        // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
+        // Two different yeses. The gate's approval (the machine owner's or the policy's card)
+        // releases the gate's ask AND skips the judge; a review approval skips only the judge.
+        let gate_approved = self.approved_calls.contains(&call.id);
+        let review_approved = gate_approved || self.review_approved_calls.contains(&call.id);
 
-        // POLICY BEFORE ANYTHING RUNS, AND BEFORE ANYTHING IS EVEN LOOKED UP. A refusal reaches
-        // the model as a result it can reason about rather than an exception that kills the run
-        // (CLAUDE.md #8), and it names the rule so a person can fix it.
-        let decision = opengrok_policy::decide(
-            &context.account_id,
-            &context.coworker_id,
-            opengrok_policy::Action::RunTool(&call.name),
-            &self.policy,
-        );
-        // A person may already have said yes — to THIS call, by id. An approval is about one
-        // command, so matching on the tool name here would let the next `shell` ride in on the last
-        // one's yes. Note this releases only `NeedsApproval`: a denial stays a denial, because
-        // approving something policy forbids is not a thing a person can do.
-        let answered_yes = decision.needs_approval() && self.approved_calls.contains(&call.id);
-
-        if !answered_yes {
-            // Waiting is not permission and not refusal: the run suspends, and a person decides.
+        // The reverse-exec tool is authorized by the LOCAL-EXEC policy (its sink judges the
+        // command against never/ask/bypass + the standing rules), NOT the per-coworker tool grant —
+        // which would Deny it for any coworker whose grant lists only the box tools. It runs on
+        // the USER'S machine, so it needs no box.
+        let user_machine_command = if call.name == USER_MACHINE_SHELL {
+            match serde_json::from_value::<ShellArgs>(arguments.clone()) {
+                Ok(args) => Some(args.command),
+                Err(error) => {
+                    return ToolResult::refused(&call.id, format!("bad arguments: {error}"));
+                }
+            }
+        } else {
+            None
+        };
+        let gate = if let Some(command) = user_machine_command.as_deref() {
+            let Some(sink) = self.user_machine.as_ref() else {
+                return ToolResult::refused(
+                    &call.id,
+                    "no machine of yours is connected, so nothing can run there",
+                );
+            };
+            match sink.decide(&context.account_id, command).await {
+                UserMachineVerdict::Allow => Gate::Allow,
+                UserMachineVerdict::Ask => Gate::Ask(
+                    AwaitingReason::ExecConsent,
+                    "your machine's owner must approve this command".to_string(),
+                ),
+                UserMachineVerdict::Deny(why) => Gate::Deny(why),
+            }
+        } else {
+            // POLICY BEFORE ANYTHING RUNS, AND BEFORE ANYTHING IS EVEN LOOKED UP. A refusal
+            // reaches the model as a result it can reason about rather than an exception that
+            // kills the run (CLAUDE.md #8), and it names the rule so a person can fix it.
+            let decision = opengrok_policy::decide(
+                &context.account_id,
+                &context.coworker_id,
+                opengrok_policy::Action::RunTool(&call.name),
+                &self.policy,
+            );
             if decision.needs_approval() {
-                return ToolResult::awaiting(&call.id, decision.reason().unwrap_or("a human yes"));
+                Gate::Ask(
+                    AwaitingReason::PolicyApproval,
+                    decision.reason().unwrap_or("a human yes").to_string(),
+                )
+            } else if let Some(reason) = decision.reason() {
+                Gate::Deny(reason.to_string())
+            } else {
+                Gate::Allow
             }
-            if let Some(reason) = decision.reason() {
-                return ToolResult::refused(&call.id, reason);
-            }
+        };
+
+        // ONE judge call site, for every tool.
+        let review = match (&gate, review_approved, self.auto_review.as_ref()) {
+            (Gate::Deny(_), _, _) | (_, true, _) | (_, _, None) => None,
+            (_, false, Some(review)) if !review.policy.is_active() => None,
+            (_, false, Some(review)) => Some(review.judge(&call.name, &arguments).await),
+        };
+
+        match combine(gate, review, gate_approved) {
+            Outcome::Refuse(why) => return ToolResult::refused(&call.id, why),
+            // The machine's own ask is answered by the sink: `run` re-judges, writes the audit
+            // row every other verdict gets, and replies NeedsApproval without dispatching. Going
+            // through it keeps "one audit row per command that touched the channel" true.
+            Outcome::Ask(AwaitingReason::ExecConsent, _) if user_machine_command.is_some() => {}
+            Outcome::Ask(reason, why) => return ToolResult::awaiting(&call.id, reason, why),
+            Outcome::Run => {}
+        }
+
+        if let Some(command) = user_machine_command.as_deref() {
+            let Some(sink) = self.user_machine.as_ref() else {
+                return ToolResult::refused(
+                    &call.id,
+                    "no machine of yours is connected, so nothing can run there",
+                );
+            };
+            // The sink judges again as it runs (the gate is the single choke point on the way to
+            // a machine). If the policy changed underneath us and it now asks, honour that — a
+            // review approval must never stand in for the machine owner's consent.
+            return match sink
+                .run(&context.account_id, command, &call.id, gate_approved)
+                .await
+            {
+                UserMachineReply::Ran(text) => ToolResult::ok(&call.id, text),
+                UserMachineReply::Refused(why) => ToolResult::refused(&call.id, why),
+                UserMachineReply::NeedsApproval => ToolResult::awaiting(
+                    &call.id,
+                    AwaitingReason::ExecConsent,
+                    "your machine's owner must approve this command",
+                ),
+            };
         }
 
         let Some(box_id) = context.box_id.as_ref() else {
@@ -372,6 +649,57 @@ impl Executor {
 /// Additive on purpose: a key the model did not send is still set, so a tool cannot be reached
 /// with an absent identity either. The list is small and explicit — a new identity-bearing
 /// argument must be added here, and the test below is what notices when one is not.
+/// The description and JSON-Schema parameters a builtin tool is advertised to the model with, or
+/// `None` if the name is not a builtin. `box_id` is deliberately ABSENT from every schema — the
+/// computer is not the model's to choose; `overwrite_identity` injects it server-side.
+fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
+    // Every description names the target unambiguously: THIS BOT'S OWN sandboxed box on the server,
+    // which is NOT the user's own machine. A bot that runs `write_file` has written to its box, and
+    // must never describe that as touching the user's computer. (When a reverse channel to the user's
+    // machine exists, "my computer" will name two real machines; this wording keeps them apart.)
+    match name {
+        "shell" => Some((
+            "Run a shell command on THIS BOT'S OWN computer — a sandboxed box on the server, \
+             not the user's own machine — and return its stdout, stderr and exit code.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string", "description": "The shell command to run on the bot's own box." } },
+                "required": ["command"],
+            }),
+        )),
+        "read_file" => Some((
+            "Read a file from THIS BOT'S OWN computer (the sandboxed box on the server, not the \
+             user's machine) and return its contents.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Absolute path on the bot's own box." } },
+                "required": ["path"],
+            }),
+        )),
+        "write_file" => Some((
+            "Create or overwrite a file on THIS BOT'S OWN computer (the sandboxed box on the server, \
+             not the user's machine).",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path on the bot's own box." },
+                    "content": { "type": "string", "description": "The file's full new contents." },
+                },
+                "required": ["path", "content"],
+            }),
+        )),
+        USER_MACHINE_SHELL => Some((
+            "Run a shell command on the USER'S OWN machine — the real computer they enrolled,              NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string", "description": "The shell command to run on the USER's own machine." } },
+                "required": ["command"],
+            }),
+        )),
+        _ => None,
+    }
+}
+
 pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     let mut object = match arguments {
         Value::Object(map) => map.clone(),
@@ -503,6 +831,9 @@ mod tests {
         }
         async fn destroy(&self, _b: &str) -> BoxResult<()> {
             Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            Ok("running".to_string())
         }
     }
 
@@ -963,5 +1294,476 @@ mod tests {
                 "{name} is offered but not implemented"
             );
         }
+    }
+
+    // ---- The reverse-exec tool (slice 6) ------------------------------------------------------
+
+    /// A sink whose reply is fixed, and which records what command it was asked to run.
+    struct FakeSink {
+        reply: UserMachineReply,
+        seen: std::sync::Mutex<Vec<String>>,
+        /// The `approved` flag each `run` was handed — the machine-consent release, by call.
+        approved_flags: std::sync::Mutex<Vec<bool>>,
+    }
+    impl FakeSink {
+        fn new(reply: UserMachineReply) -> Arc<Self> {
+            Arc::new(Self {
+                reply,
+                seen: std::sync::Mutex::new(Vec::new()),
+                approved_flags: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+    #[async_trait]
+    impl UserMachineSink for FakeSink {
+        async fn decide(&self, _account_id: &AccountId, _command: &str) -> UserMachineVerdict {
+            match &self.reply {
+                UserMachineReply::Ran(_) => UserMachineVerdict::Allow,
+                UserMachineReply::Refused(why) => UserMachineVerdict::Deny(why.clone()),
+                UserMachineReply::NeedsApproval => UserMachineVerdict::Ask,
+            }
+        }
+        async fn run(
+            &self,
+            _account_id: &AccountId,
+            command: &str,
+            _call_id: &str,
+            approved: bool,
+        ) -> UserMachineReply {
+            if let Ok(mut seen) = self.seen.lock() {
+                seen.push(command.to_string());
+            }
+            if let Ok(mut flags) = self.approved_flags.lock() {
+                flags.push(approved);
+            }
+            self.reply.clone()
+        }
+    }
+
+    fn no_box_context() -> ToolContext {
+        ToolContext {
+            account_id: AccountId::from_stored("acct_1"),
+            coworker_id: CoworkerId::from_stored("cw_1"),
+            box_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_is_offered_only_when_a_machine_is_attached() {
+        let without = allowing(Arc::new(SpyComputer::default()));
+        assert!(!without.tool_names().iter().any(|n| n == USER_MACHINE_SHELL));
+        let schemas = without.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(
+            !schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL)
+        );
+
+        let with = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(FakeSink::new(UserMachineReply::Ran("exit 0".into())));
+        assert!(with.tool_names().iter().any(|n| n == USER_MACHINE_SHELL));
+        let schemas = with.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(
+            schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL)
+        );
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
+        // The real bug: a coworker's grant lists only the box tools, so the per-coworker policy would
+        // DENY "user_machine_shell". The reverse-exec tool must be authorized by the local-exec
+        // policy (the sink), not the grant — so it is still offered AND still runs.
+        let restrictive = opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: AccountId::from_stored("acct_1"),
+                coworker: CoworkerId::from_stored("cw_1"),
+                profile: opengrok_policy::ToolSet::only(["read_file", "shell", "write_file"]),
+                needs_approval: opengrok_policy::ToolSet::None,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_1"),
+                tools: opengrok_policy::ToolSet::only(["read_file", "shell", "write_file"]),
+            }),
+        };
+        let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+        let executor = Executor::with_policy(Arc::new(SpyComputer::default()), restrictive)
+            .with_user_machine(sink.clone());
+
+        // Offered despite the grant omitting it.
+        let schemas = executor.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(
+            schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL),
+            "reverse-exec tool must be offered even when the grant lists only box tools"
+        );
+        // And it RUNS (routes to the sink) rather than being refused by the grant.
+        let result = executor
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "mkdir ~/Code/x"})),
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(
+            sink.seen.lock().unwrap().as_slice(),
+            &["mkdir ~/Code/x".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_routes_the_command_to_the_sink_without_a_box() {
+        let sink = FakeSink::new(UserMachineReply::Ran(
+            "exit 0\n--- stdout ---\nuriah\n".into(),
+        ));
+        let executor = allowing(Arc::new(SpyComputer::default())).with_user_machine(sink.clone());
+        // No box on the context — the reverse-exec tool must not need one.
+        let result = executor
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "whoami"})),
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert!(result.content.contains("uriah"));
+        assert_eq!(
+            sink.seen.lock().unwrap().as_slice(),
+            &["whoami".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_suspends_the_run_when_the_owner_must_approve() {
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(FakeSink::new(UserMachineReply::NeedsApproval));
+        let result = executor
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "rm -rf x"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(result.awaiting_approval, "an Ask must suspend the run");
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_relays_a_refusal_from_the_gate() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_user_machine(FakeSink::new(
+            UserMachineReply::Refused("a deny rule matched".into()),
+        ));
+        let result = executor
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "rm -rf /"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(!result.awaiting_approval);
+        assert!(result.content.contains("deny rule"));
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_refuses_cleanly_when_no_sink_is_attached() {
+        // Offered-set == executed-set: it is never offered without a sink, but if a stale call
+        // arrives it refuses rather than pretending, and never touches the bot's box.
+        let executor = allowing(Arc::new(SpyComputer::default()));
+        let result = executor
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "whoami"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(!result.awaiting_approval);
+    }
+
+    // ---- Auto-review at the seam ---------------------------------------------------------------
+
+    /// A judge with a fixed word, recording what it was shown.
+    struct CountingJudge {
+        verdict: ReviewVerdict,
+        shown: std::sync::Mutex<Vec<String>>,
+    }
+    impl CountingJudge {
+        fn new(verdict: ReviewVerdict) -> Arc<Self> {
+            Arc::new(Self {
+                verdict,
+                shown: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn calls(&self) -> usize {
+            self.shown.lock().map(|shown| shown.len()).unwrap_or(0)
+        }
+        fn first_shown(&self) -> String {
+            self.shown
+                .lock()
+                .ok()
+                .and_then(|shown| shown.first().cloned())
+                .unwrap_or_default()
+        }
+    }
+    #[async_trait]
+    impl ReviewJudge for CountingJudge {
+        async fn judge(&self, ask: ReviewAsk<'_>) -> ReviewVerdict {
+            if let Ok(mut shown) = self.shown.lock() {
+                shown.push(ask.arguments.to_string());
+            }
+            self.verdict
+        }
+    }
+
+    fn blocking_policy() -> ReviewPolicy {
+        ReviewPolicy {
+            allow_instructions: String::new(),
+            block_instructions: "never touch prod".to_string(),
+        }
+    }
+
+    fn shell_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "shell".to_string(),
+            arguments: json!({ "command": "ls" }),
+        }
+    }
+
+    fn machine_call() -> ToolCall {
+        ToolCall {
+            id: "m1".to_string(),
+            name: USER_MACHINE_SHELL.to_string(),
+            arguments: json!({ "command": "uname" }),
+        }
+    }
+
+    fn sink_saw_nothing(sink: &FakeSink) -> bool {
+        sink.seen
+            .lock()
+            .map(|seen| seen.is_empty())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn an_inactive_policy_never_calls_the_judge() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor =
+            allowing(spy.clone()).with_auto_review(ReviewPolicy::default(), judge.clone());
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(judge.calls(), 0, "nothing written ⇒ no judge call");
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn an_approved_call_is_never_re_judged() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(spy.clone())
+            .with_approved(["c1".to_string()])
+            .with_auto_review(blocking_policy(), judge.clone());
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(judge.calls(), 0, "a person already answered this call");
+    }
+
+    #[tokio::test]
+    async fn a_review_block_refuses_and_touches_no_box() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge.clone());
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(!result.ok);
+        assert!(!result.awaiting_approval);
+        assert!(result.content.contains("never touch prod"), "{result:?}");
+        assert_eq!(
+            spy.last_box(),
+            None,
+            "a blocked call must not reach the box"
+        );
+        assert_eq!(judge.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_review_ask_suspends_with_the_auto_review_reason() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Ask);
+        let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert_eq!(spy.last_box(), None);
+    }
+
+    #[tokio::test]
+    async fn a_judge_outage_asks_rather_than_allows() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Unavailable);
+        let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(result.content.contains("did not answer"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
+    }
+
+    #[tokio::test]
+    async fn a_denied_machine_gate_calls_neither_judge_nor_sink() {
+        let sink = FakeSink::new(UserMachineReply::Refused("channel off".into()));
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(sink.clone())
+            .with_auto_review(blocking_policy(), judge.clone());
+        let result = executor.execute(&no_box_context(), &machine_call()).await;
+        assert!(!result.ok);
+        assert!(result.content.contains("channel off"), "{result:?}");
+        assert_eq!(
+            judge.calls(),
+            0,
+            "no spend on a command the channel refused"
+        );
+        assert!(sink_saw_nothing(&sink));
+    }
+
+    #[tokio::test]
+    async fn a_machine_ask_plus_review_ask_is_one_card_the_exec_one() {
+        let sink = FakeSink::new(UserMachineReply::NeedsApproval);
+        let judge = CountingJudge::new(ReviewVerdict::Ask);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(sink.clone())
+            .with_auto_review(blocking_policy(), judge);
+        let result = executor.execute(&no_box_context(), &machine_call()).await;
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
+        // The sink IS consulted (it records the ask and answers NeedsApproval); it dispatches
+        // nothing — that is the sink's contract, and the fake's reply is fixed.
+        assert_eq!(sink.seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+    }
+
+    #[tokio::test]
+    async fn a_machine_ask_plus_review_block_refuses_without_dispatch() {
+        let sink = FakeSink::new(UserMachineReply::NeedsApproval);
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(sink.clone())
+            .with_auto_review(blocking_policy(), judge);
+        let result = executor.execute(&no_box_context(), &machine_call()).await;
+        assert!(!result.ok);
+        assert!(
+            !result.awaiting_approval,
+            "a written rule outranks a pending click"
+        );
+        assert!(result.content.contains("never touch prod"), "{result:?}");
+        assert!(sink_saw_nothing(&sink));
+    }
+
+    #[tokio::test]
+    async fn a_machine_allow_plus_review_ask_raises_the_review_card() {
+        let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+        let judge = CountingJudge::new(ReviewVerdict::Ask);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(sink.clone())
+            .with_auto_review(blocking_policy(), judge);
+        let result = executor.execute(&no_box_context(), &machine_call()).await;
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(sink_saw_nothing(&sink));
+    }
+
+    #[tokio::test]
+    async fn the_judge_sees_redacted_arguments() {
+        let judge = CountingJudge::new(ReviewVerdict::Allow);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_auto_review(blocking_policy(), judge.clone());
+        let call = ToolCall {
+            id: "c1".to_string(),
+            name: "shell".to_string(),
+            arguments: json!({ "command": "ls", "coworker_id": "cw_evil", "api_key": "sk-abc" }),
+        };
+        let result = executor.execute(&context_with_box("box_mine"), &call).await;
+        assert!(result.ok, "{result:?}");
+        let shown = judge.first_shown();
+        assert!(shown.contains("ls"), "{shown}");
+        assert!(!shown.contains("cw_evil"), "{shown}");
+        assert!(!shown.contains("sk-abc"), "{shown}");
+    }
+
+    /// Nothing escapes the gate: every tool this executor offers, including the reverse-exec tool
+    /// and the box tools, is refused under an always-block judge, and none of them touches a
+    /// machine on the way.
+    #[tokio::test]
+    async fn nothing_offered_escapes_an_always_block_judge() {
+        let spy = Arc::new(SpyComputer::default());
+        let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(spy.clone())
+            .with_user_machine(sink.clone())
+            .with_auto_review(blocking_policy(), judge);
+        let context = context_with_box("box_mine");
+        for name in executor.tool_names() {
+            let result = executor
+                .execute(
+                    &context,
+                    &call(
+                        &name,
+                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                    ),
+                )
+                .await;
+            assert!(!result.ok, "{name} slipped past the judge: {result:?}");
+            assert!(
+                result.content.contains("auto-review blocked"),
+                "{name}: {result:?}"
+            );
+        }
+        assert_eq!(spy.last_box(), None);
+        assert!(sink_saw_nothing(&sink));
+    }
+
+    /// A review-card approval skips the judge and NOTHING else: if the machine now asks for its
+    /// owner's consent, the sink is not told the call was approved.
+    #[tokio::test]
+    async fn a_review_approval_never_releases_the_machines_own_consent() {
+        let sink = FakeSink::new(UserMachineReply::NeedsApproval);
+        let judge = CountingJudge::new(ReviewVerdict::Block);
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_user_machine(sink.clone())
+            .with_review_approved(["m1".to_string()])
+            .with_auto_review(blocking_policy(), judge.clone());
+        let result = executor.execute(&no_box_context(), &machine_call()).await;
+        assert_eq!(judge.calls(), 0, "the review answer stands");
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
+        let flags = sink
+            .approved_flags
+            .lock()
+            .map(|f| f.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            flags,
+            vec![false],
+            "the sink must not be told the owner consented"
+        );
     }
 }

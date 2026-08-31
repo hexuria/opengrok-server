@@ -35,6 +35,43 @@ pub enum RunStatus {
     Failed,
 }
 
+/// WHY a run is waiting. Two different cards can now come from the same tool — the machine owner's
+/// consent for a command, or the auto-review judge's "ask" — so the answer path has to know which
+/// question was asked: the wrong verb must not settle the other card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum SuspendReason {
+    /// The remote-control gate wants the machine owner's consent for this command (the
+    /// `local-tool-permission` card). THE DEFAULT ON PURPOSE: every suspension recorded before
+    /// reasons existed meant exactly this, so an old row in the append-only log replays unchanged.
+    #[default]
+    ExecConsent,
+    /// The coworker's policy grant marks this tool `needs_approval`.
+    PolicyApproval,
+    /// The auto-review judge said "ask" (the `auto-review-approval` card).
+    AutoReview,
+}
+
+impl SuspendReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExecConsent => "exec-consent",
+            Self::PolicyApproval => "policy-approval",
+            Self::AutoReview => "auto-review",
+        }
+    }
+
+    /// From the wire word; anything unrecognised is the default, which is the closed reading
+    /// (an exec-consent card asks the machine owner, the strictest of the three).
+    pub fn from_stored(word: &str) -> Self {
+        match word {
+            "policy-approval" => Self::PolicyApproval,
+            "auto-review" => Self::AutoReview,
+            _ => Self::ExecConsent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum RunEvent {
@@ -57,6 +94,8 @@ pub enum RunEvent {
         call_id: String,
         tool: String,
         arguments: Value,
+        #[serde(default)]
+        reason: SuspendReason,
         at_ms: i64,
     },
     /// A person answered. `approved` false is a refusal, which is also an answer and also ends the
@@ -130,6 +169,8 @@ pub struct PendingApproval {
     pub call_id: String,
     pub tool: String,
     pub arguments: Value,
+    #[serde(default)]
+    pub reason: SuspendReason,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -167,6 +208,7 @@ pub enum RunCommand {
         call_id: String,
         tool: String,
         arguments: Value,
+        reason: SuspendReason,
         at_ms: i64,
     },
     /// A person answered. Refused if that call was already answered — the exactly-once check.
@@ -204,6 +246,7 @@ impl Run {
                 call_id,
                 tool,
                 arguments,
+                reason,
                 ..
             } => {
                 self.status = RunStatus::AwaitingApproval;
@@ -211,6 +254,7 @@ impl Run {
                     call_id: call_id.clone(),
                     tool: tool.clone(),
                     arguments: arguments.clone(),
+                    reason: *reason,
                 });
             }
             RunEvent::Answered { call_id, .. } => {
@@ -282,6 +326,7 @@ impl Run {
                 call_id,
                 tool,
                 arguments,
+                reason,
                 at_ms,
             } => {
                 if matches!(self.status, RunStatus::Finished | RunStatus::Failed) {
@@ -291,6 +336,7 @@ impl Run {
                     call_id,
                     tool,
                     arguments,
+                    reason,
                     at_ms,
                 }])
             }
@@ -478,6 +524,7 @@ mod tests {
                 call_id: "c1".to_string(),
                 tool: "shell".to_string(),
                 arguments: json!({"command": "rm -rf /"}),
+                reason: SuspendReason::default(),
                 at_ms: 10,
             })
             .unwrap()
@@ -613,6 +660,7 @@ mod tests {
                 call_id: "c1".to_string(),
                 tool: "shell".to_string(),
                 arguments: json!({}),
+                reason: SuspendReason::default(),
                 at_ms: 2,
             },
             RunEvent::Answered {

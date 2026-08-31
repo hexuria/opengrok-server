@@ -53,6 +53,22 @@ pub enum BoxError {
     NoSuchBox,
 }
 
+impl BoxError {
+    /// A stable code the client maps to copy, independent of the (rewordable) message. Matches the
+    /// server/client contract: invalid_key | quota_exceeded | provider_unreachable | provider_error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            BoxError::Unreachable(_) => "provider_unreachable",
+            BoxError::Refused { status, .. } if *status == 401 || *status == 403 => "invalid_key",
+            BoxError::Refused { status, .. } if *status == 402 || *status == 429 => {
+                "quota_exceeded"
+            }
+            BoxError::Refused { .. } => "provider_error",
+            BoxError::NoSuchBox => "provider_error",
+        }
+    }
+}
+
 pub type BoxResult<T> = std::result::Result<T, BoxError>;
 
 /// A computer a coworker can work on.
@@ -87,4 +103,27 @@ pub trait Computer: Send + Sync {
 
     /// Permanent. The disk goes with it.
     async fn destroy(&self, box_id: &str) -> BoxResult<()>;
+
+    /// The box's live run-state, as a lowercase word the boot UI can render honestly:
+    /// `"running"` (up and serving), `"absent"` (no such box — released or never created), or the
+    /// provider's own word for anything in between (`"exited"`, `"stopped"`, `"created"`, …). The
+    /// client treats every non-`"running"` value as "no live screen" and reports it, so this is the
+    /// signal that lets a dead box say it is dead instead of spinning "Booting up" forever. Cheap to
+    /// poll. Never errors on a missing box — that is `"absent"`, not a failure.
+    async fn state(&self, box_id: &str) -> BoxResult<String>;
+
+    /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
+    /// is the default, because most of our computers are headless (shell + files, no desktop). A
+    /// provider that can surface a graphical desktop (box.ascii.dev) overrides this; the client draws
+    /// the screen when it is `Some`, and says "no screen" when it is `None`, so we never invent one.
+    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Which kind of computer this is, for advertising the options to a client:
+    /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
+    /// local-docker; the ascii provider overrides it.
+    fn kind(&self) -> &'static str {
+        "local-docker"
+    }
 }

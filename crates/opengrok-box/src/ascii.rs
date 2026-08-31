@@ -12,7 +12,7 @@
 //!   DELETE /boxes/{id}                         destroy
 //!
 //! TWO SHAPES ARE NOT YET PINNED and are marked at their call sites rather than guessed: the field
-//! name carrying a created box's id, and the confirmation header `DELETE` requires. The first
+//! name carrying a created box's id, and the `X-Ascii-Confirm-Delete` header `DELETE` requires. The first
 //! slice's task is to hit a real box and write them down.
 //!
 //! THE FILESYSTEM PERSISTS ACROSS STOP AND RESUME. That is what makes this the right first
@@ -158,10 +158,25 @@ impl From<FinishedCommand> for CommandOutput {
     }
 }
 
+/// Read an id that the API may send as a JSON string OR a number (a pid) into a `String`. Anything
+/// else (null, missing handled by `default`) reads as empty rather than failing the whole reply.
+fn de_id_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        _ => Ok(String::new()),
+    }
+}
+
 /// `{type:"command.started", …}` and the poll reply share enough shape to read as one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProcessStatus {
-    #[serde(default, rename = "processId")]
+    // The API returns `processId` as an INTEGER pid, not a string, so accept either — a fixed
+    // `String` here fails the whole reply with "invalid type: integer, expected a string".
+    #[serde(default, rename = "processId", deserialize_with = "de_id_string")]
     pub process_id: String,
     #[serde(default)]
     pub running: bool,
@@ -207,6 +222,10 @@ impl HostedPort {
 
 #[async_trait]
 impl Computer for AsciiBoxes {
+    fn kind(&self) -> &'static str {
+        "ascii"
+    }
+
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
         let response = self
             .http
@@ -353,25 +372,108 @@ impl Computer for AsciiBoxes {
     }
 
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
-        // THE CONFIRMATION HEADER IS NOT PINNED. The reference says `DELETE` requires one but does
-        // not name it. Sent as the most likely spelling; if a real delete is refused, the error
-        // will say so, which is better than quietly not deleting and billing for a box forever.
+        // Confirmed against the live API (a real key, 2026-08-31): DELETE requires the header
+        // `X-Ascii-Confirm-Delete` set to the exact box id, else 409 delete_confirmation_required.
         let response = self
             .http
             .delete(self.url(&format!("/boxes/{box_id}")))
             .bearer_auth(&self.api_key)
-            .header("X-Confirm-Delete", box_id)
+            .header("X-Ascii-Confirm-Delete", box_id)
             .send()
             .await
             .map_err(|error| BoxError::Unreachable(error.to_string()))?;
         let _: serde_json::Value = self.json(response).await?;
         Ok(())
     }
+
+    async fn state(&self, box_id: &str) -> BoxResult<String> {
+        // GET /boxes/{id} returns box.info with the real `state` (confirmed against the live API):
+        // "idle"/"running"/"busy" mean up, and 404 means the box is gone. An earlier version probed a
+        // file read, but ascii restricts reads to /home/user and /tmp, so it 400'd on any system path
+        // and reported EVERY running box as "stopped". Read the actual state instead.
+        let response = self
+            .http
+            .get(self.url(&format!("/boxes/{box_id}")))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok("absent".to_string());
+        }
+        if !response.status().is_success() {
+            return Ok("stopped".to_string());
+        }
+        let info: BoxInfo = self.json(response).await?;
+        // Normalise the up states to "running" (what the client reads as live); pass anything else
+        // through verbatim ("stopped", "paused", "starting", …) so a not-up box says what it is.
+        Ok(match info.box_.state.as_str() {
+            "idle" | "running" | "busy" | "ready" | "active" => "running".to_string(),
+            "" => "running".to_string(),
+            other => other.to_string(),
+        })
+    }
+
+    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        // POST /boxes/{id}/desktop?vnc=1 provisions (first call) then returns a noVNC URL
+        // (`desktopUrl`) once ready — confirmed live. Idempotent: polling returns the same URL, so a
+        // status poll can call it. While it is still provisioning there is no URL yet ⇒ `None`, and
+        // the client shows "preparing" until a later poll carries the link.
+        let response = self
+            .http
+            .post(self.url(&format!("/boxes/{box_id}/desktop")))
+            .bearer_auth(&self.api_key)
+            .query(&[("vnc", "1")])
+            .send()
+            .await
+            .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let desktop: DesktopReply = self.json(response).await?;
+        Ok(desktop.desktop_url.filter(|url| !url.is_empty()))
+    }
+}
+
+/// `GET /boxes/{id}` — `{ box: { state } }`; only the state is read, the rest of box.info ignored.
+#[derive(Deserialize)]
+struct BoxInfo {
+    #[serde(rename = "box")]
+    box_: BoxInner,
+}
+
+#[derive(Deserialize)]
+struct BoxInner {
+    #[serde(default)]
+    state: String,
+}
+
+/// `POST /boxes/{id}/desktop` — the noVNC URL, absent while the desktop is still provisioning.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopReply {
+    #[serde(default)]
+    desktop_url: Option<String>,
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+
+    // A detached-start reply whose processId is a NUMBER (a pid) must parse, not fail the reply.
+    #[test]
+    fn process_status_accepts_a_numeric_process_id() {
+        let started: super::ProcessStatus =
+            serde_json::from_str(r#"{"type":"command.started","processId":15182,"running":true}"#)
+                .unwrap();
+        assert_eq!(started.process_id, "15182");
+        assert!(started.running);
+
+        // A string processId still works.
+        let s: super::ProcessStatus =
+            serde_json::from_str(r#"{"processId":"proc_abc","running":false}"#).unwrap();
+        assert_eq!(s.process_id, "proc_abc");
+    }
     use super::*;
 
     /// The id field is not pinned, so every plausible spelling must be read.

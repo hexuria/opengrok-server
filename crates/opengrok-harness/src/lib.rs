@@ -14,6 +14,7 @@ pub mod journal;
 pub mod mock;
 pub mod model;
 pub mod projection;
+pub mod review;
 pub mod rig_door;
 pub mod tools;
 
@@ -22,6 +23,7 @@ pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 pub use projection::Projection;
+pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
 pub use rig_door::RigDoor;
 pub use tools::{ToolRunner, collect_tool_calls};
 
@@ -56,13 +58,18 @@ pub const MAX_ROUNDS: usize = 8;
 pub async fn run_turn_with_tools(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
-    request: ModelRequest,
+    mut request: ModelRequest,
     thread_id: &str,
     run_id: &str,
     at_ms: i64,
 ) -> Vec<Event> {
     let mut projection = Projection::new(thread_id, run_id, at_ms);
     let mut events = projection.start();
+
+    // Offer the tools to the model — see the note in `converse`.
+    if let Some(runner) = tools {
+        request.tools = runner.tool_schemas();
+    }
 
     let mut stream = match door.stream(request).await {
         Ok(stream) => stream,
@@ -137,13 +144,46 @@ impl RunContext {
     }
 }
 
-/// What a resumed run already knows: the call to run, and where the first half left off.
+/// How the person answered. A refusal is ALSO an answer: the run carries on with a refusal
+/// result the model can reason about (CLAUDE.md #8), rather than dying on the card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeOutcome {
+    Approved,
+    /// Refused, with the text the model reads — the rule that stopped it.
+    Refused(String),
+}
+
+/// What a resumed run already knows: the call that was answered, how, and where the first half
+/// left off.
 #[derive(Debug, Clone)]
 pub struct Resumption {
-    /// The call the person approved. Run directly, not re-proposed.
+    /// The call the person answered. On approval it is run directly, not re-proposed.
     pub approved: opengrok_tools::ToolCall,
     /// So the second half cannot collide with the first on a message id.
     pub message_seq: u32,
+    pub outcome: ResumeOutcome,
+}
+
+impl Resumption {
+    pub fn approved(call: opengrok_tools::ToolCall, message_seq: u32) -> Self {
+        Self {
+            approved: call,
+            message_seq,
+            outcome: ResumeOutcome::Approved,
+        }
+    }
+
+    pub fn refused(
+        call: opengrok_tools::ToolCall,
+        message_seq: u32,
+        why: impl Into<String>,
+    ) -> Self {
+        Self {
+            approved: call,
+            message_seq,
+            outcome: ResumeOutcome::Refused(why.into()),
+        }
+    }
 }
 
 /// Carry on a run that a person has just answered.
@@ -163,6 +203,7 @@ pub async fn resume_conversation(
     let Resumption {
         approved,
         message_seq,
+        outcome,
     } = resumption;
     let run_id = context.run_id.clone();
     // Already started: a resumed run must not draw itself twice.
@@ -174,7 +215,12 @@ pub async fn resume_conversation(
     );
     let mut all = Vec::new();
 
-    let results = tools.run_all(std::slice::from_ref(&approved)).await;
+    // A refusal never reaches the executor: the result is synthesised here and pushed exactly
+    // like a real one, so the model learns which rule stopped it and carries on.
+    let results = match outcome {
+        ResumeOutcome::Approved => tools.run_all(std::slice::from_ref(&approved)).await,
+        ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
+    };
     for result in &results {
         all.extend(projection.push_tool_result(result));
         request.messages.push(ChatMessage {
@@ -186,8 +232,11 @@ pub async fn resume_conversation(
 
     // If the approved call itself is still waiting, something is wrong with the approval rather
     // than with the run; stop rather than loop.
-    if results.iter().any(|result| result.awaiting_approval) {
-        let mut waiting = projection.awaiting_approval(&approved);
+    if let Some(still_waiting) = results.iter().find(|result| result.awaiting_approval) {
+        let reason = still_waiting
+            .awaiting_reason
+            .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
+        let mut waiting = projection.awaiting_approval(&approved, reason);
         let _ = journal.record(&run_id, &waiting).await;
         all.append(&mut waiting);
         return all;
@@ -208,6 +257,13 @@ async fn converse(
     run_id: &str,
 ) -> Vec<Event> {
     let mut all = Vec::new();
+
+    // Advertise the run's tools to the model — the offering half of tool use. Set once; every round
+    // clones this request, so a bot that CAN run a shell command is now told it can, instead of
+    // answering "I can't run commands" with a computer sitting right there.
+    if let Some(runner) = tools {
+        request.tools = runner.tool_schemas();
+    }
 
     let mut opening = projection.start();
     if let Err(error) = journal.record(run_id, &opening).await {
@@ -264,15 +320,20 @@ async fn converse(
                         });
                     }
 
-                    if let Some(waiting) = results
+                    if let Some((waiting, reason)) = results
                         .iter()
                         .position(|result| result.awaiting_approval)
-                        .and_then(|index| calls.get(index))
+                        .and_then(|index| {
+                            let reason = results[index]
+                                .awaiting_reason
+                                .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
+                            calls.get(index).map(|call| (call, reason))
+                        })
                     {
                         // Ended as a readable state, not a silent stop and not a failure. The run
                         // stays `running` in the log, which is exactly what `interrupted_runs`
                         // looks for — resumption and approval share the same machinery.
-                        let mut waiting_events = projection.awaiting_approval(waiting);
+                        let mut waiting_events = projection.awaiting_approval(waiting, reason);
                         let _ = journal.record(run_id, &round_events).await;
                         let _ = journal.record(run_id, &waiting_events).await;
                         all.append(&mut round_events);
@@ -380,6 +441,7 @@ mod tests {
         ModelRequest {
             model: "mock".to_string(),
             system: None,
+            tools: Vec::new(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: text.to_string(),

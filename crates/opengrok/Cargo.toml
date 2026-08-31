@@ -20,9 +20,12 @@ opengrok-plugins = { path = "../opengrok-plugins" }
 serde_json.workspace = true
 opengrok-store = { path = "../opengrok-store" }
 opengrok-core = { path = "../opengrok-core" }
+uuid.workspace = true
 tokio.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rand.workspace = true
+chrono.workspace = true

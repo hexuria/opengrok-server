@@ -66,6 +66,28 @@ struct Delta {
     /// Where a provider exposes it; absent for most.
     #[serde(default, rename = "reasoning_content")]
     reasoning: Option<String>,
+    /// The model asking to call tools. This gateway delivers each call WHOLE in one chunk (id, name
+    /// and the complete JSON arguments together), so a per-line parse can emit the full start/args/end
+    /// without cross-chunk state. A provider that fragments arguments across chunks is not handled
+    /// here — this one does not.
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallChunk>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCallChunk {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FunctionChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionChunk {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 /// Turn one SSE line into deltas. Pure, so the parsing rules are tested without a socket.
@@ -95,6 +117,30 @@ pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
             if let Some(content) = choice.delta.content.filter(|text| !text.is_empty()) {
                 deltas.push(ModelDelta::Text(content));
             }
+            // Each tool call arrives whole: emit its start, its complete arguments, and its end
+            // together, keyed by the provider's own call id so `collect_tool_calls` can pair them.
+            for call in choice.delta.tool_calls.into_iter().flatten() {
+                let Some(id) = call.id.filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                let function = call.function.unwrap_or(FunctionChunk {
+                    name: None,
+                    arguments: None,
+                });
+                if let Some(name) = function.name.filter(|name| !name.is_empty()) {
+                    deltas.push(ModelDelta::ToolCallStart {
+                        id: id.clone(),
+                        name,
+                    });
+                }
+                if let Some(arguments) = function.arguments.filter(|args| !args.is_empty()) {
+                    deltas.push(ModelDelta::ToolCallArgs {
+                        id: id.clone(),
+                        delta: arguments,
+                    });
+                }
+                deltas.push(ModelDelta::ToolCallEnd { id });
+            }
             deltas
         })
         .collect()
@@ -114,15 +160,25 @@ impl ModelDoor for GatewayDoor {
             }));
         }
 
+        let mut payload = serde_json::json!({
+            "model": request.model,
+            "stream": true,
+            "messages": messages,
+        });
+        // Advertise the run's tools so the model can call them. Only when there are any — an empty
+        // `tools: []` makes some gateways reject the request, and "no tools" is a plain chat turn.
+        if !request.tools.is_empty()
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert("tools".to_string(), serde_json::json!(request.tools));
+            object.insert("tool_choice".to_string(), serde_json::json!("auto"));
+        }
+
         let response = self
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.key)
-            .json(&serde_json::json!({
-                "model": request.model,
-                "stream": true,
-                "messages": messages,
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(|error| ModelError::Unreachable(error.to_string()))?;
@@ -163,6 +219,27 @@ impl ModelDoor for GatewayDoor {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_call_frame_becomes_start_args_end() {
+        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
+        assert_eq!(
+            parse_sse_line(line),
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: "call_1".to_string(),
+                    name: "shell".to_string()
+                },
+                ModelDelta::ToolCallArgs {
+                    id: "call_1".to_string(),
+                    delta: "{\"command\":\"ls\"}".to_string()
+                },
+                ModelDelta::ToolCallEnd {
+                    id: "call_1".to_string()
+                },
+            ]
+        );
+    }
 
     #[test]
     fn a_content_frame_becomes_a_text_delta() {

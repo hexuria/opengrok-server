@@ -7,6 +7,7 @@
 #
 # Usage:  OG_BASE=http://127.0.0.1:1337 scripts/slice1-auth-smoke.sh
 set -euo pipefail
+PGDB="$(printf %s "${OG_DATABASE_URL:-}" | sed -E 's#.*/([^/?]+).*#\1#')"; PGDB="${PGDB:-opengrok}"
 
 BASE="${OG_BASE:-http://127.0.0.1:1337}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -89,7 +90,7 @@ echo "6. the same person signing in twice is one account, not two"
 # The client dev-logs-in on every launch. Two accounts would split somebody's coworkers in half.
 curl -fsS -H 'accept: application/json' \
   "$BASE/auth/cursor_dev_session_token?plan=pro&trial=true&email=$EMAIL" >/dev/null
-count=$(docker exec oag-dev-postgres-1 psql -U oag -d opengrok -tAc \
+count=$(docker exec oag-dev-postgres-1 psql -U oag -d "$PGDB" -tAc \
   "select count(*) from account_view where email = '$EMAIL'" 2>/dev/null || echo "skip")
 if [ "$count" = "skip" ]; then
   echo "  (skipped: no direct database access)"
@@ -100,7 +101,7 @@ fi
 
 echo "7. the account came from Postgres, not from a constant"
 if [ "$count" != "skip" ]; then
-  events=$(docker exec oag-dev-postgres-1 psql -U oag -d opengrok -tAc \
+  events=$(docker exec oag-dev-postgres-1 psql -U oag -d "$PGDB" -tAc \
     "select count(*) from events where payload->>'email' = '$EMAIL'")
   [ "$events" -ge 1 ] || fail "no events were written for $EMAIL"
   ok "$events event(s) in the log for this account"

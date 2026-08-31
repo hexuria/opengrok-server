@@ -182,6 +182,7 @@ mod tests {
         ModelRequest {
             model: "oag/cheap".to_string(),
             system: None,
+            tools: Vec::new(),
             messages: messages
                 .iter()
                 .map(|(role, content)| ChatMessage {

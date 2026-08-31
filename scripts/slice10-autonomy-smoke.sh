@@ -8,6 +8,7 @@
 #
 # Usage:  OG_PORT=1461 OG_DATABASE_URL=… scripts/slice10-autonomy-smoke.sh
 set -euo pipefail
+PGDB="$(printf %s "${OG_DATABASE_URL:-}" | sed -E 's#.*/([^/?]+).*#\1#')"; PGDB="${PGDB:-opengrok}"
 
 PORT="${OG_PORT:-1337}"
 BASE="${OG_BASE:-http://127.0.0.1:$PORT}"
@@ -18,7 +19,7 @@ ok()   { echo "  ok: $*"; }
 
 command -v jq >/dev/null || fail "jq is required"
 : "${OG_DATABASE_URL:?needs OG_DATABASE_URL}"
-PSQL=(docker exec oag-dev-postgres-1 psql -U oag -d opengrok -tAc)
+PSQL=(docker exec oag-dev-postgres-1 psql -U oag -d "$PGDB" -tAc)
 "${PSQL[@]}" "select 1" >/dev/null 2>&1 || fail "cannot reach Postgres"
 
 start_server() {

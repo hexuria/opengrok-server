@@ -1,0 +1,98 @@
+/* The Open Grok brand, transcribed from the server's auth/pages.rs shell so the console and the
+   sign-in pages look like one product: near-black ground with a radial glow, a single dark card,
+   a violet focus ring, a white pill button. */
+:root {
+  color-scheme: dark;
+  --ground: #0a0a0b;
+  --card: #141417;
+  --field: #0e0e10;
+  --border: #24242a;
+  --border-field: #2a2a31;
+  --text: #ededef;
+  --muted: #9a9aa2;
+  --label: #b9b9c2;
+  --accent: #5b6cff;
+  --danger-bg: rgba(220, 60, 60, 0.14);
+  --danger-border: rgba(220, 60, 60, 0.35);
+  --danger-text: #ffd0d0;
+  --ok: #7ee2a8;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: var(--text);
+  background: var(--ground);
+  background-image: radial-gradient(70rem 40rem at 50% -10%, #16161a 0%, #0a0a0b 60%);
+}
+a { color: #a9b2ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.wrap { max-width: 60rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+.center { min-height: 100vh; display: grid; place-items: center; padding: 1.25rem; }
+
+.brand { display: flex; align-items: center; gap: 0.7rem; }
+.brand b { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.01em; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7);
+  padding: 2rem 2.25rem;
+}
+.card.narrow { width: min(92vw, 25rem); }
+
+.sub { color: var(--muted); font-size: 0.95rem; margin: 0.35rem 0 1.5rem; }
+h1 { font-size: 1.4rem; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 1.05rem; margin: 0 0 0.9rem; }
+
+label { display: block; font-size: 0.82rem; color: var(--label); margin: 1rem 0 0.4rem; font-weight: 500; }
+input, select {
+  width: 100%; padding: 0.7rem 0.8rem; font-size: 1rem; color: #f5f5f7;
+  background: var(--field); border: 1px solid var(--border-field); border-radius: 10px; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91, 108, 255, 0.22); }
+input:read-only { opacity: 0.6; cursor: not-allowed; }
+
+button {
+  padding: 0.6rem 1rem; font-size: 0.95rem; font-weight: 600;
+  color: #0a0a0b; background: #fff; border: 0; border-radius: 10px; cursor: pointer;
+  transition: transform 0.06s ease, background 0.15s;
+}
+button:hover { background: #ececf2; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: default; }
+button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border-field); }
+button.ghost:hover { background: rgba(255, 255, 255, 0.04); }
+button.danger { background: transparent; color: var(--danger-text); border: 1px solid var(--danger-border); }
+button.wide { width: 100%; margin-top: 1.4rem; }
+
+.err { margin: 0.6rem 0 0; padding: 0.6rem 0.75rem; border-radius: 9px; font-size: 0.88rem;
+  color: var(--danger-text); background: var(--danger-bg); border: 1px solid var(--danger-border); }
+.note { margin: 0.6rem 0 0; padding: 0.6rem 0.75rem; border-radius: 9px; font-size: 0.88rem;
+  color: var(--ok); background: rgba(126, 226, 168, 0.1); border: 1px solid rgba(126, 226, 168, 0.3); }
+
+.row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+.spread { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.stack > * + * { margin-top: 1.25rem; }
+.muted { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+
+.avatar { width: 72px; height: 72px; border-radius: 999px; object-fit: cover;
+  background: var(--field); border: 1px solid var(--border); }
+.avatar.placeholder { display: grid; place-items: center; color: var(--muted); font-size: 1.6rem; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.65rem 0.5rem; border-bottom: 1px solid var(--border); font-size: 0.92rem; }
+th { color: var(--muted); font-weight: 500; font-size: 0.8rem; }
+.pill { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.78rem;
+  border: 1px solid var(--border-field); }
+.pill.on { color: var(--ok); border-color: rgba(126, 226, 168, 0.4); }
+.pill.off { color: var(--muted); }
+
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+.tabs a { padding: 0.4rem 0.9rem; border-radius: 999px; color: var(--muted); }
+.tabs a.active { background: var(--card); color: var(--text); border: 1px solid var(--border); }

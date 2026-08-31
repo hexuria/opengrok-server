@@ -52,6 +52,55 @@ create table if not exists coworker_view (
     updated_at_ms bigint      not null
 );
 
+-- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
+-- on the account's first agent, torn down when its last agent is deleted. A single row per account.
+create table if not exists account_computer (
+    account_id    text   primary key,
+    box_id        text   not null,
+    kind          text   not null,
+    updated_at_ms bigint not null
+);
+
+-- A computer keyed by the SCOPE that shares it: 'org' (one box for the whole org), 'account' (one
+-- per member, the default), or 'bot' (a dedicated box per bot). Supersedes account_computer, which
+-- is the 'account' scope; kept above for the rows already written under it.
+-- The last provisioning failure for an account's computer, so a boxless account can say WHY —
+-- surfaced on listOpenGrokComputers (top-level) and stamped on the account's boxless agents.
+-- Cleared when a computer is provisioned. {code, message}; code is one of the seven stable codes.
+create table if not exists account_computer_error (
+    account_id    text   primary key,
+    code          text   not null,
+    message       text   not null,
+    updated_at_ms bigint not null
+);
+
+create table if not exists scoped_computer (
+    scope         text   not null,
+    scope_id      text   not null,
+    box_id        text   not null,
+    kind          text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope, scope_id)
+);
+-- Idle-stop bookkeeping: when the box was last used, and whether it's currently stopped (disk kept,
+-- billing paused). A box idle past the threshold is stopped by the sweep and resumed on next use.
+alter table scoped_computer add column if not exists last_used_at_ms bigint;
+alter table scoped_computer add column if not exists stopped boolean not null default false;
+-- The org the box belongs to, so the idle sweep can rebuild the right provider (ascii key) to stop
+-- or resume it. Null for a Local VM (needs no key).
+alter table scoped_computer add column if not exists org_id text;
+
+-- How an org shares computers, and per-account overrides. scope 'org' with the org id is the org
+-- default; scope 'account' with an account id overrides it for that member. mode is
+-- 'per-org' | 'per-account' | 'per-bot'. Absent ⇒ the built-in default (per-account).
+create table if not exists computer_sharing (
+    scope         text   not null,
+    scope_id      text   not null,
+    mode          text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope, scope_id)
+);
+
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
 -- An authentication that happened. The token is NOT here — it is in `secret_store`, encrypted, and
@@ -206,6 +255,177 @@ create table if not exists monitor_cursor (
     id            int    primary key,
     last_event_id bigint not null
 );
+
+-- Seam A (the desktop client's gateway), slice 8. The transcript the client renders: one row per
+-- durable entry, sequenced per coworker. The entry itself is stored as the client-shaped JSON —
+-- this is a wire-format projection, not domain truth; the runs journal remains the truth.
+create table if not exists gateway_entry (
+    coworker_id text   not null,
+    seq         bigint not null,
+    entry       jsonb  not null,
+    at_ms       bigint not null,
+    primary key (coworker_id, seq)
+);
+
+-- The prompt-acceptance ledger: (account slot, clientNonce) -> what was accepted. A repeated
+-- nonce with the same digest answers accepted again; a different digest is refused. This is what
+-- makes the client's retry safe instead of a duplicate send.
+-- Bot keys: the durable credential a client Bot presents so its runs arrive AS a coworker.
+-- A credential record, not a domain event — the same bargain as secret_store: the log records
+-- what coworkers did, not which tokens exist. The row is what makes revocation real; a signed
+-- key whose row is revoked (or missing) is refused.
+create table if not exists bot_key_view (
+    jti           text    primary key,
+    account_id    text    not null,
+    coworker_id   text    not null,
+    label         text    not null,
+    revoked       boolean not null default false,
+    created_at_ms bigint  not null
+);
+create index if not exists bot_key_account_idx on bot_key_view (account_id);
+
+-- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
+-- and colour). A wire-format projection like gateway_entry: the client is the only reader.
+create table if not exists seamb_profile (
+    coworker_id text  primary key,
+    profile     jsonb not null,
+    updated_at_ms bigint not null
+);
+
+-- Identity (orgs + invites + credential accounts). Projections; the events stream is the truth.
+create table if not exists org_view (
+    id            text  primary key,
+    name          text  not null,
+    admin_id      text  not null,
+    domains       jsonb not null,
+    updated_at_ms bigint not null
+);
+
+-- One row per invite code, so signup can find the org a code belongs to and its state without
+-- replaying every org. state: open | redeemed | revoked.
+create table if not exists org_invite (
+    code          text  primary key,
+    org_id        text  not null,
+    state         text  not null,
+    updated_at_ms bigint not null
+);
+create index if not exists org_invite_org_idx on org_invite (org_id);
+
+-- Credential accounts: the login lookup reads password/verified/enabled/name without replaying
+-- the whole account log. account_view stays the identity-agnostic projection; this augments it.
+alter table account_view add column if not exists password_hash text;
+alter table account_view add column if not exists first_name text not null default '';
+alter table account_view add column if not exists last_name text not null default '';
+alter table account_view add column if not exists org_id text;
+alter table account_view add column if not exists verified boolean not null default false;
+alter table account_view add column if not exists enabled boolean not null default false;
+alter table account_view add column if not exists avatar_url text;
+
+create table if not exists gateway_nonce (
+    account_slot text   not null,
+    nonce        text   not null,
+    digest       text   not null,
+    record       jsonb  not null,
+    at_ms        bigint not null,
+    primary key (account_slot, nonce)
+);
+
+-- Reverse-exec consent, per (account, machine). `mode` is 'never' (default, the channel off) |
+-- 'ask' | 'bypass'. Absent ⇒ never — the channel does nothing until the user turns it on.
+create table if not exists local_exec_policy (
+    account_id    text   not null,
+    machine_id    text   not null,
+    mode          text   not null,
+    updated_at_ms bigint not null,
+    primary key (account_id, machine_id)
+);
+
+-- On-demand allow/deny rules for a machine's reverse-exec channel. `kind` is 'allow' | 'deny';
+-- `pattern` is a command prefix matched on a word boundary. Deny beats allow (enforced in the gate).
+create table if not exists local_exec_rule (
+    account_id text   not null,
+    machine_id text   not null,
+    kind       text   not null,
+    pattern    text   not null,
+    added_at_ms bigint not null,
+    primary key (account_id, machine_id, kind, pattern)
+);
+
+-- An enrolled machine's daemon. The token is NOT stored — only its `jti` (the token's id), so a
+-- token can be verified as still-current and revoked without the token ever being at rest here.
+-- One active daemon per (account, machine); re-enrolment replaces the jti, revoke flips `revoked`.
+create table if not exists local_exec_daemon (
+    account_id    text    not null,
+    machine_id    text    not null,
+    label         text    not null,
+    jti           text    not null,
+    enrolled_at_ms bigint not null,
+    revoked       boolean not null default false,
+    primary key (account_id, machine_id)
+);
+
+-- Auto-review policy: two tiers (global < coworker), one row per scope, every field TRI-STATE —
+-- null inherits from the tier below, '' is an explicit "none" that stops inheritance. Override is
+-- per field, never a merge. Precedence is decided in opengrok-server::auto_review (one place);
+-- this table never pre-resolves. Design: docs/AUTO-REVIEW.md.
+create table if not exists auto_review_policy (
+    account_id         text    not null,
+    scope_kind         text    not null,
+    scope_id           text    not null,
+    enabled            boolean,
+    allow_instructions text,
+    block_instructions text,
+    updated_at_ms      bigint  not null,
+    primary key (account_id, scope_kind, scope_id)
+);
+
+-- A device tier existed for one evening and was cut before any client wrote to it: "what on this
+-- machine" is that machine's standing rules. A row nobody resolves is precisely the surprise a
+-- policy store must not hold, so any that got in is removed here (idempotent).
+delete from auto_review_policy where scope_kind = 'machine';
+
+-- Every reverse-exec command and its outcome — the record the user can read afterward. Written at
+-- enqueue (decision), updated when the daemon returns a result. `origin` names the bot, or the user.
+create table if not exists local_exec_audit (
+    id             text   not null primary key,
+    account_id     text   not null,
+    machine_id     text   not null,
+    origin         text   not null,
+    command        text   not null,
+    decision       text   not null,
+    requested_at_ms bigint not null,
+    exit_code      integer,
+    finished_at_ms bigint
+);
+
+create index if not exists local_exec_audit_acct_idx
+    on local_exec_audit (account_id, machine_id, requested_at_ms desc);
+
+-- The command's OUTCOME (the ShellResult oneof case: success / failure / timeout / rejected /
+-- spawnError / permissionDenied), distinct from `decision` (the gate's verdict at enqueue). A
+-- refusal is a case, not a non-zero exit, so the two are recorded separately.
+alter table local_exec_audit add column if not exists outcome text;
+
+-- Registered devices for the passkey step-up (reverse-exec slice 7). Each row is ONE WebAuthn
+-- credential a person registered from an authenticated session; a step-up on a dangerous control
+-- (enrol a machine, enable the channel, set bypass) is honored only for a credential that lives
+-- here and is not revoked. The public key + sign_count are the RP's verification state; the private
+-- key never leaves the authenticator. No credential material is secret enough to need the vault (a
+-- public key is public), but the row is per-account and revocable — the whole point of the registry.
+create table if not exists webauthn_credential (
+    account_id      text   not null,
+    credential_id   text   not null,   -- base64url, the authenticator's credential id
+    public_key      text   not null,   -- serialized RP-side credential (webauthn-rs Passkey JSON)
+    sign_count      bigint not null default 0,
+    label           text   not null default '',
+    created_at_ms    bigint not null,
+    last_used_at_ms  bigint,
+    revoked          boolean not null default false,
+    primary key (account_id, credential_id)
+);
+
+create index if not exists webauthn_credential_acct_idx
+    on webauthn_credential (account_id) where not revoked;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

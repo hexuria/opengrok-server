@@ -18,9 +18,9 @@ use axum::{Json, Router};
 use futures::stream::{self, Stream};
 use opengrok_wire::agui::{Event, RunAgentInput};
 
+use super::provision;
 use crate::auth::AuthState;
-use opengrok_core::coworker::{BoxMode, CoworkerCommand, CoworkerView};
-use opengrok_core::id::BoxId;
+use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
 use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
@@ -41,6 +41,10 @@ pub struct AgUiState {
     /// a server-wide `ToolRunner` would carry one identity for everybody, which is precisely the
     /// confusion the identity rule exists to prevent.
     pub computer: Option<Arc<dyn opengrok_box::Computer>>,
+    /// The route the auto-review judge asks on — the deployment's own, never the coworker's: one
+    /// call per reviewed tool call must be cheap, the reviewer must not be the reviewed, and a
+    /// coworker-route outage must not become a wall of cards. `OG_AUTO_REVIEW_MODEL`.
+    pub auto_review_model: String,
     /// Seals connector credentials. `None` means no connector can be stored, which is a legitimate
     /// deployment — and must read as "connectors unavailable" rather than as a crash.
     pub vault: Option<Arc<opengrok_store::Vault>>,
@@ -69,28 +73,49 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 ///
 /// THE GRANT IS READ HERE, ON THIS TURN. Not cached from sign-in and not carried in the request:
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
-async fn tools_for(
-    state: &AgUiState,
-    input: &RunAgentInput,
-    account_id: &opengrok_core::id::AccountId,
-) -> Option<ToolRunner> {
-    let coworker_id = coworker_id_from(input)?;
-    tools_for_coworker(state, account_id, &coworker_id).await
-}
-
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
 pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    approved: &[String],
+    review_approved: &[String],
 ) -> Option<ToolRunner> {
-    let computer = state.computer.as_ref()?;
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
     // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
     // model is told about but that always refuses is a dead end it keeps trying.
     coworker.computer()?;
+    // Resolve the provider for this coworker's computer by its account's effective sharing mode and
+    // scope (per-org / per-account / per-bot), then that scope's recorded kind — so tools run on the
+    // same provider that created the box.
+    let (mode, org_id) = super::provision::resolve_mode(state, account_id).await;
+    let (scope, scope_id, _) = super::provision::scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id.as_str(),
+    );
+    let (box_id, kind, stopped) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+        .ok()
+        .flatten()?;
+    let computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
+    // Idle-stop: a box paused by the sweep is resumed before this turn runs (disk was kept, so it
+    // comes back where it was), and its last-used stamp is refreshed so the sweep leaves it running
+    // while it is in use. Best-effort — a resume failure still lets the turn try.
+    if stopped && let Err(error) = computer.resume(&box_id).await {
+        tracing::warn!(%error, box_id, "could not resume an idle-stopped box; the turn may fail");
+    }
+    let _ = state
+        .auth
+        .store
+        .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+        .await;
 
     let policy = state
         .auth
@@ -102,11 +127,56 @@ pub(crate) async fn tools_for_coworker(
     // The plugins this coworker may use, connected with its own credentials.
     let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
-    Some(ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer.clone(), policy)
-            .with_plugin_tools(sessions, tools),
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
-    ))
+    // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
+    // reset or re-provision changes the account's box while the aggregate id stays put — and this is
+    // the same box we just resumed above, so exec must run on it, or a reset would leave the bot
+    // executing against a destroyed box.
+    let mut context = opengrok_tools::ToolContext::from_coworker(
+        account_id.clone(),
+        coworker_id.clone(),
+        &coworker,
+    );
+    context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
+
+    let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_plugin_tools(sessions, tools)
+        .with_approved(approved.iter().cloned())
+        .with_review_approved(review_approved.iter().cloned());
+    // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
+    // reach — otherwise the model is never told about a channel it cannot use. Bound to that
+    // machine, and to this coworker for the audit origin.
+    if let Some((machine_id, _label)) =
+        crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
+    {
+        executor =
+            executor.with_user_machine(std::sync::Arc::new(crate::local_exec::ReverseExecSink {
+                auth: state.auth.clone(),
+                coworker_id: coworker_id.as_str().to_string(),
+                machine_id,
+            }));
+    }
+
+    // THE TIER WALK HAPPENS HERE, ONCE PER RUN (docs/AUTO-REVIEW.md §3). Per tool call the check
+    // is one in-memory test on the runner; a run that started before a PUT keeps the policy it
+    // started with, and a resumed run rebuilds its runner through this function and re-resolves.
+    // Nothing is attached when the policy is off or empty, so an unreviewed run costs nothing.
+    let effective = crate::auto_review::load_effective(
+        &state.auth.store,
+        account_id.as_str(),
+        Some(coworker_id.as_str()),
+    )
+    .await;
+    if let Some(policy) = effective.review_policy() {
+        executor = executor.with_auto_review(
+            policy,
+            Arc::new(opengrok_harness::ModelJudge::new(
+                state.door.clone(),
+                state.auto_review_model.clone(),
+            )),
+        );
+    }
+
+    Some(ToolRunner::new(executor, context))
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.
@@ -337,6 +407,14 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
+        .route(
+            "/coworkers/{coworker_id}/keys",
+            post(mint_bot_key).get(list_bot_keys),
+        )
+        .route(
+            "/coworkers/{coworker_id}/keys/{jti}",
+            axum::routing::delete(revoke_bot_key),
+        )
         .with_state(state)
 }
 
@@ -346,12 +424,6 @@ pub struct HireRequest {
     /// A route through the gateway, never a key.
     #[serde(default)]
     pub model: Option<String>,
-    /// Give this coworker a computer of its own. Costs money, so it is asked for rather than
-    /// assumed.
-    #[serde(default)]
-    pub with_computer: bool,
-    #[serde(default)]
-    pub shared_box_id: Option<String>,
 }
 
 /// Hire a coworker, and optionally give it a computer.
@@ -384,39 +456,14 @@ pub async fn hire(
         coworker.apply(event);
     }
 
-    // A computer, if asked for and if we can make one. A failure here leaves a hired coworker
-    // without a box rather than failing the hire: the person still has their coworker, and the
-    // reason is in the reply.
-    let mut computer_error = None;
-    if request.with_computer || request.shared_box_id.is_some() {
-        let assignment = match (&request.shared_box_id, state.computer.as_ref()) {
-            // A shared box is named, not created: creating one per coworker is what "shared" is not.
-            (Some(box_id), _) => Ok((BoxId::from_stored(box_id.clone()), BoxMode::Shared)),
-            (None, Some(computer)) => computer
-                .create(None)
-                .await
-                .map(|id| (BoxId::from_stored(id), BoxMode::Dedicated))
-                .map_err(|error| error.to_string()),
-            (None, None) => Err("this server has no computer provider configured".to_string()),
-        };
-
-        match assignment {
-            Ok((box_id, mode)) => match coworker.decide(CoworkerCommand::AssignComputer {
-                box_id,
-                mode,
-                at_ms,
-            }) {
-                Ok(assigned) => {
-                    for event in &assigned {
-                        coworker.apply(event);
-                    }
-                    events.extend(assigned);
-                }
-                Err(error) => computer_error = Some(error.to_string()),
-            },
-            Err(error) => computer_error = Some(error),
-        }
-    }
+    // A computer, if asked for — via the shared helper so REST, gateway and seam-B create paths
+    // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
+    // 1 account = 1 computer: the account's first agent creates it, later agents share it.
+    let provisioned =
+        provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
+            .await;
+    events.extend(provisioned.events);
+    let computer_error = provisioned.error;
 
     let view = CoworkerView {
         id: coworker_id.clone(),
@@ -480,7 +527,7 @@ pub async fn hire(
             "name": view.name,
             "model": view.model,
             "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": computer_error,
+            "computerError": provision::error_json(&computer_error),
         })),
     )
         .into_response()
@@ -590,6 +637,173 @@ pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Mint a durable key that lets a client Bot run AS this coworker.
+///
+/// Access tokens live an hour; a Bot registered in a client's vault with a static header dies
+/// hourly. This key is signed like everything else but LONG-lived, because its real lifecycle
+/// control is the revocable row — showing the token once at mint is the only time it exists in
+/// a reply, the same bargain every credential here makes.
+async fn mint_bot_key(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    // Owner-and-permitted, or a 404 that does not confirm the coworker exists.
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(&account_id)
+        .await
+        .map(|roster| {
+            roster
+                .iter()
+                .any(|view| view.id == coworker_id && !view.retired)
+        })
+        .unwrap_or(false);
+    if !owns {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+
+    let jti = format!("bk_{}", uuid::Uuid::now_v7());
+    let at_ms = now_ms();
+    let claims = BotKeyClaims {
+        purpose: "bot-key".to_string(),
+        sub: account_id.as_str().to_string(),
+        coworker: coworker_id.as_str().to_string(),
+        jti: jti.clone(),
+        // Ten years: the row is the real lifecycle; the exp only bounds a leaked key whose
+        // revocation row was somehow lost with it.
+        exp: at_ms / 1_000 + 10 * 365 * 24 * 60 * 60,
+    };
+    let Ok(token) = state.auth.minter.mint_claims(&claims) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not mint").into_response();
+    };
+    if let Err(error) = state
+        .auth
+        .store
+        .insert_bot_key(&jti, &account_id, &coworker_id, "bot key", at_ms)
+        .await
+    {
+        tracing::error!(%error, "could not record a bot key");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not record the key",
+        )
+            .into_response();
+    }
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "jti": jti,
+            "coworkerId": coworker_id.as_str(),
+            // Shown exactly once. The row keeps the jti; the token is the caller's to keep.
+            "key": token,
+        })),
+    )
+        .into_response()
+}
+
+async fn list_bot_keys(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match state
+        .auth
+        .store
+        .bot_keys_for(&account_id, &coworker_id)
+        .await
+    {
+        Ok(keys) => Json(keys).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not list bot keys");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
+async fn revoke_bot_key(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((_coworker_id, jti)): axum::extract::Path<(String, String)>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    match state.auth.store.revoke_bot_key(&account_id, &jti).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such key").into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not revoke a bot key");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
+/// What a bot key says about itself. The `use` claim is the discriminator the minter's own
+/// documentation demands: without it, a stolen access token would verify here too.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BotKeyClaims {
+    #[serde(rename = "use")]
+    pub purpose: String,
+    pub sub: String,
+    pub coworker: String,
+    pub jti: String,
+    pub exp: i64,
+}
+
+/// Who is calling, and — when the credential is a bot key — AS which coworker.
+///
+/// Three outcomes, and the middle one matters most: `Err(response)` is a bot key that VERIFIES
+/// but is revoked or unknown. That must refuse rather than fall through to anonymous, or a
+/// revoked Bot silently keeps talking on the deployment's model and nobody notices the
+/// revocation did nothing.
+pub(crate) async fn principal_from_bearer(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(opengrok_core::id::AccountId, Option<CoworkerId>)>, Response> {
+    let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return Ok(None);
+    };
+    if let Ok(claims) = state.auth.minter.verify_access(token) {
+        return Ok(Some((
+            opengrok_core::id::AccountId::from_stored(claims.sub),
+            None,
+        )));
+    }
+    if let Ok(claims) = state.auth.minter.verify_claims::<BotKeyClaims>(token) {
+        if claims.purpose != "bot-key" {
+            return Ok(None);
+        }
+        let live = state
+            .auth
+            .store
+            .bot_key_live(&claims.jti)
+            .await
+            .unwrap_or(false);
+        if !live {
+            return Err((StatusCode::UNAUTHORIZED, "this bot key has been revoked").into_response());
+        }
+        return Ok(Some((
+            opengrok_core::id::AccountId::from_stored(claims.sub),
+            Some(CoworkerId::from_stored(claims.coworker)),
+        )));
+    }
+    Ok(None)
+}
+
 /// Start a run and stream its events.
 pub async fn run(
     State(state): State<AgUiState>,
@@ -602,12 +816,21 @@ pub async fn run(
     // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
     // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
     // no coworker just talks to a model.
-    let account_id = account_from_bearer(&state, &headers);
+    let (account_id, key_coworker) = match principal_from_bearer(&state, &headers).await {
+        Ok(Some((account, coworker))) => (Some(account), coworker),
+        Ok(None) => (None, None),
+        // A revoked bot key refuses; downgrading to anonymous would make revocation invisible.
+        Err(refusal) => return refusal,
+    };
+    // A BOT KEY NAMES THE COWORKER. barok-works registers a Bot with an endpoint and a header —
+    // it has no forwardedProps to send — so the key itself carries which coworker the Bot IS.
+    // An explicit forwardedProps still wins: a client that says what it means is believed.
+    let run_coworker = coworker_id_from(&input).or(key_coworker);
 
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
 
-    if let (Some(account_id), Some(coworker_id)) = (&account_id, coworker_id_from(&input)) {
+    if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
         let policy = state
             .auth
             .store
@@ -645,10 +868,16 @@ pub async fn run(
         model,
         system: None,
         messages: to_chat_messages(&input),
+        tools: Vec::new(),
     };
 
     let tools = match &account_id {
-        Some(account_id) => tools_for(&state, &input, account_id).await,
+        Some(account_id) => match &run_coworker {
+            Some(coworker_id) => {
+                tools_for_coworker(&state, account_id, coworker_id, &[], &[]).await
+            }
+            None => None,
+        },
         // No bearer, no identity, and therefore no tools: tools always run as somebody.
         None => None,
     };
@@ -660,7 +889,7 @@ pub async fn run(
         state: state.clone(),
         thread_id: input.thread_id.clone(),
         account_id: account_id.clone(),
-        coworker_id: coworker_id_from(&input),
+        coworker_id: run_coworker,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -793,6 +1022,15 @@ async fn append_events(
                         .get("arguments")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
+                    // Absent on rows written before reasons existed ⇒ exec-consent, which is
+                    // what every such suspension meant.
+                    reason: opengrok_core::run::SuspendReason::from_stored(
+                        event
+                            .extra
+                            .get("reason")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    ),
                     at_ms,
                 })
             {
@@ -1026,7 +1264,7 @@ pub async fn answer_run(
 /// The log is the only record of a run that outlives the request that started it, so a resumed run
 /// has to read its own history rather than being handed one. Text the assistant said and results
 /// its tools returned are what the model needs to carry on; the framing events are not.
-fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
+pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     let mut assistant = String::new();
 
@@ -1087,22 +1325,26 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no coworker, so it cannot continue");
         return;
     };
-    let Some(computer) = state.computer.clone() else {
-        return;
-    };
     let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
         return;
     };
-    let Ok(policy) = state.auth.store.policy_for(&account_id, &coworker_id).await else {
+
+    // The approved call, and only it — carried on the SAME runner every other path builds
+    // (plugins, the user's machine, auto-review). This path once built a bare executor of its
+    // own and so resumed with no plugins and no review: a resumed call slipped every gate but the
+    // grant's. Which yes it was decides which gate it releases.
+    let (gate_yes, review_yes): (&[String], &[String]) = match approved.reason {
+        opengrok_core::run::SuspendReason::AutoReview => {
+            (&[], std::slice::from_ref(&approved.call_id))
+        }
+        _ => (std::slice::from_ref(&approved.call_id), &[]),
+    };
+    let Some(runner) =
+        tools_for_coworker(&state, &account_id, &coworker_id, gate_yes, review_yes).await
+    else {
+        tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
-
-    // The approved call, and only it: the executor carries the id the person actually answered.
-    let runner = ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer, policy)
-            .with_approved([approved.call_id.clone()]),
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
-    );
 
     let journal = StoreJournal {
         state: state.clone(),
@@ -1117,6 +1359,7 @@ async fn continue_run(
         model: coworker.model.clone(),
         system: None,
         messages: conversation_from(&run),
+        tools: Vec::new(),
     };
 
     // The run keeps its id, so everything the resumption emits lands in the same log and a client
@@ -1134,6 +1377,7 @@ async fn continue_run(
                 arguments: approved.arguments,
             },
             message_seq: resumed_seq,
+            outcome: opengrok_harness::ResumeOutcome::Approved,
         },
     )
     .await;
@@ -1300,6 +1544,7 @@ mod tests {
                 model: "mock".to_string(),
                 system: None,
                 messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),
+                tools: Vec::new(),
             },
             "t1",
             "r1",

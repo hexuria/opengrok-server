@@ -8,6 +8,7 @@ pub mod connection;
 pub mod coworker;
 pub mod id;
 pub mod monitor;
+pub mod org;
 pub mod run;
 pub mod schedule;
 
@@ -21,10 +22,11 @@ pub use coworker::{
     BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,
 };
 pub use id::{
-    AccountId, BoxId, CoworkerId, MonitorId, PrincipalId, RunId, ScheduleId, SessionId,
+    AccountId, BoxId, CoworkerId, MonitorId, OrgId, PrincipalId, RunId, ScheduleId, SessionId,
     TranscriptEntryId,
 };
 pub use monitor::{Monitor, MonitorCommand, MonitorError, MonitorEvent, MonitorView};
+pub use org::{Org, OrgCommand, OrgError, OrgEvent, OrgView, email_domain, normalize_domain};
 pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};
 pub use schedule::{
     Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView, next_fire_ms,

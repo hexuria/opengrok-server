@@ -226,7 +226,11 @@ impl Projection {
     /// NOT `finish` AND NOT `fail`. A finished run tells the client there is nothing more coming;
     /// a failed one tells it to give up. This says "stop watching, come back" — the run stays
     /// `running` in the log so it can be picked up when the answer arrives.
-    pub fn awaiting_approval(&mut self, waiting: &opengrok_tools::ToolCall) -> Vec<Event> {
+    pub fn awaiting_approval(
+        &mut self,
+        waiting: &opengrok_tools::ToolCall,
+        reason: opengrok_tools::AwaitingReason,
+    ) -> Vec<Event> {
         let mut events = self.start();
         if self.finished {
             return Vec::new();
@@ -244,7 +248,10 @@ impl Projection {
                 // name its call cannot be exactly-once.
                 .with("callId", waiting.id.clone())
                 .with("tool", waiting.name.clone())
-                .with("arguments", waiting.arguments.clone()),
+                .with("arguments", waiting.arguments.clone())
+                // WHY: which card the gateway raises and which verb may answer it. Absent on rows
+                // written before reasons existed, which the reader treats as exec-consent.
+                .with("reason", reason.as_str()),
         );
         events
     }
@@ -479,11 +486,14 @@ mod tests {
     fn awaiting_approval_leaves_the_run_open() {
         let mut projection = Projection::new("t1", "r1", 100);
         projection.push(ModelDelta::Text("about to run something".to_string()));
-        let waiting = projection.awaiting_approval(&opengrok_tools::ToolCall {
-            id: "c1".to_string(),
-            name: "shell".to_string(),
-            arguments: serde_json::Value::Null,
-        });
+        let waiting = projection.awaiting_approval(
+            &opengrok_tools::ToolCall {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                arguments: serde_json::Value::Null,
+            },
+            opengrok_tools::AwaitingReason::ExecConsent,
+        );
 
         // The open message is closed, so nothing streams forever.
         assert!(types(&waiting).contains(&EventType::TextMessageEnd));

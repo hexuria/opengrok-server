@@ -89,6 +89,39 @@ pub enum AccountEvent {
         trial: bool,
         at_ms: i64,
     },
+    /// Credential registration — signup or admin mint. Carries the argon2 hash (never the
+    /// password), the person's name, and the org they belong to.
+    CredentialsSet {
+        password_hash: String,
+        first_name: String,
+        last_name: String,
+        org_id: String,
+        at_ms: i64,
+    },
+    /// The Resend round-trip completed (or was auto-passed when no mailer is configured).
+    EmailVerified {
+        at_ms: i64,
+    },
+    /// An admin flipped the account's usability. Login refuses a disabled account distinguishably.
+    Enabled {
+        at_ms: i64,
+    },
+    Disabled {
+        at_ms: i64,
+    },
+    /// Self-service profile edit — name and avatar. Email is deliberately NOT here: a person
+    /// cannot change the address their org and their invite were bound to.
+    ProfileUpdated {
+        first_name: String,
+        last_name: String,
+        avatar_url: Option<String>,
+        at_ms: i64,
+    },
+    /// A password change (self-service, after proving the current one) or an admin reset.
+    PasswordChanged {
+        password_hash: String,
+        at_ms: i64,
+    },
 }
 
 impl AccountEvent {
@@ -101,6 +134,12 @@ impl AccountEvent {
             Self::SessionRefreshed { .. } => "session-refreshed",
             Self::SessionRevoked { .. } => "session-revoked",
             Self::PlanChanged { .. } => "plan-changed",
+            Self::CredentialsSet { .. } => "credentials-set",
+            Self::EmailVerified { .. } => "email-verified",
+            Self::Enabled { .. } => "account-enabled",
+            Self::Disabled { .. } => "account-disabled",
+            Self::ProfileUpdated { .. } => "account-profile-updated",
+            Self::PasswordChanged { .. } => "account-password-changed",
         }
     }
 }
@@ -119,6 +158,15 @@ pub struct Account {
     pub plan: Option<Plan>,
     pub trial: bool,
     pub sessions: BTreeMap<SessionId, Session>,
+    /// Credential fields — present once `CredentialsSet` has been applied. A dev/session-only
+    /// account (the pre-identity path) has none of these and cannot credential-login.
+    pub password_hash: Option<String>,
+    pub first_name: String,
+    pub last_name: String,
+    pub org_id: Option<String>,
+    pub verified: bool,
+    pub enabled: bool,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -129,6 +177,12 @@ pub enum AccountError {
     SessionRevoked,
     #[error("the account does not exist")]
     NotRegistered,
+    #[error("that account has no password set")]
+    NoCredentials,
+    #[error("that account's email is not verified")]
+    NotVerified,
+    #[error("that account is not enabled")]
+    NotEnabled,
 }
 
 /// What a caller wants to happen. Named for the intent, not the endpoint that carries it.
@@ -152,6 +206,38 @@ pub enum AccountCommand {
     },
     SignOut {
         session_id: SessionId,
+        at_ms: i64,
+    },
+    /// Set credentials on this account. `verified`/`enabled` let the CLI mint a ready account
+    /// (both true) while signup mints a pending one (verified per the mailer, enabled false).
+    Register {
+        email: String,
+        password_hash: String,
+        first_name: String,
+        last_name: String,
+        org_id: String,
+        plan: Plan,
+        verified: bool,
+        enabled: bool,
+        at_ms: i64,
+    },
+    VerifyEmail {
+        at_ms: i64,
+    },
+    Enable {
+        at_ms: i64,
+    },
+    Disable {
+        at_ms: i64,
+    },
+    UpdateProfile {
+        first_name: String,
+        last_name: String,
+        avatar_url: Option<String>,
+        at_ms: i64,
+    },
+    ChangePassword {
+        password_hash: String,
         at_ms: i64,
     },
 }
@@ -206,6 +292,35 @@ impl Account {
                 if let Some(session) = self.sessions.get_mut(session_id) {
                     session.revoked = true;
                 }
+            }
+            AccountEvent::CredentialsSet {
+                password_hash,
+                first_name,
+                last_name,
+                org_id,
+                ..
+            } => {
+                self.registered = true;
+                self.password_hash = Some(password_hash.clone());
+                self.first_name = first_name.clone();
+                self.last_name = last_name.clone();
+                self.org_id = Some(org_id.clone());
+            }
+            AccountEvent::EmailVerified { .. } => self.verified = true,
+            AccountEvent::Enabled { .. } => self.enabled = true,
+            AccountEvent::Disabled { .. } => self.enabled = false,
+            AccountEvent::ProfileUpdated {
+                first_name,
+                last_name,
+                avatar_url,
+                ..
+            } => {
+                self.first_name = first_name.clone();
+                self.last_name = last_name.clone();
+                self.avatar_url = avatar_url.clone();
+            }
+            AccountEvent::PasswordChanged { password_hash, .. } => {
+                self.password_hash = Some(password_hash.clone());
             }
         }
     }
@@ -270,7 +385,103 @@ impl Account {
                 }
                 Ok(vec![AccountEvent::SessionRevoked { session_id, at_ms }])
             }
+
+            AccountCommand::Register {
+                email,
+                password_hash,
+                first_name,
+                last_name,
+                org_id,
+                plan,
+                verified,
+                enabled,
+                at_ms,
+            } => {
+                // Registration is the account coming into being as a person, not a session. A
+                // fresh account also needs its `Registered` marker (email/plan) if it never had a
+                // dev sign-in — emit it first so a credential-only account still has a plan.
+                let mut events = Vec::new();
+                if !self.registered {
+                    events.push(AccountEvent::Registered {
+                        email: email.clone(),
+                        plan,
+                        trial: false,
+                        at_ms,
+                    });
+                }
+                events.push(AccountEvent::CredentialsSet {
+                    password_hash,
+                    first_name,
+                    last_name,
+                    org_id,
+                    at_ms,
+                });
+                if verified {
+                    events.push(AccountEvent::EmailVerified { at_ms });
+                }
+                if enabled {
+                    events.push(AccountEvent::Enabled { at_ms });
+                }
+                Ok(events)
+            }
+
+            AccountCommand::VerifyEmail { at_ms } => {
+                if self.password_hash.is_none() {
+                    return Err(AccountError::NoCredentials);
+                }
+                Ok(vec![AccountEvent::EmailVerified { at_ms }])
+            }
+
+            AccountCommand::Enable { at_ms } => {
+                if self.password_hash.is_none() {
+                    return Err(AccountError::NoCredentials);
+                }
+                Ok(vec![AccountEvent::Enabled { at_ms }])
+            }
+
+            AccountCommand::Disable { at_ms } => Ok(vec![AccountEvent::Disabled { at_ms }]),
+
+            AccountCommand::UpdateProfile {
+                first_name,
+                last_name,
+                avatar_url,
+                at_ms,
+            } => Ok(vec![AccountEvent::ProfileUpdated {
+                first_name,
+                last_name,
+                avatar_url,
+                at_ms,
+            }]),
+
+            AccountCommand::ChangePassword {
+                password_hash,
+                at_ms,
+            } => {
+                if self.password_hash.is_none() {
+                    return Err(AccountError::NoCredentials);
+                }
+                Ok(vec![AccountEvent::PasswordChanged {
+                    password_hash,
+                    at_ms,
+                }])
+            }
         }
+    }
+
+    /// The gate a credential login must pass, in order, each failure distinguishable so the client
+    /// can say which. Returns the password hash to verify against on success.
+    pub fn credential_login_ready(&self) -> Result<&str, AccountError> {
+        let hash = self
+            .password_hash
+            .as_deref()
+            .ok_or(AccountError::NoCredentials)?;
+        if !self.verified {
+            return Err(AccountError::NotVerified);
+        }
+        if !self.enabled {
+            return Err(AccountError::NotEnabled);
+        }
+        Ok(hash)
     }
 }
 
@@ -285,6 +496,47 @@ pub struct AccountView {
     pub plan: Plan,
     pub trial: bool,
     pub updated_at_ms: i64,
+    /// Credential fields — `None`/empty/false for a dev/session-only account.
+    #[serde(default)]
+    pub password_hash: Option<String>,
+    #[serde(default)]
+    pub first_name: String,
+    #[serde(default)]
+    pub last_name: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
+impl AccountView {
+    /// The identity-agnostic view a dev/session sign-in produces — no credentials.
+    pub fn session_only(
+        id: AccountId,
+        email: String,
+        plan: Plan,
+        trial: bool,
+        updated_at_ms: i64,
+    ) -> Self {
+        Self {
+            id,
+            email,
+            plan,
+            trial,
+            updated_at_ms,
+            password_hash: None,
+            first_name: String::new(),
+            last_name: String::new(),
+            org_id: None,
+            verified: false,
+            enabled: false,
+            avatar_url: None,
+        }
+    }
 }
 
 #[cfg(test)]

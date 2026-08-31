@@ -131,24 +131,46 @@ impl PgStore {
                         .execute(&mut *tx)
                         .await?;
                 }
-                AccountEvent::Registered { .. } | AccountEvent::PlanChanged { .. } => {}
+                AccountEvent::Registered { .. }
+                | AccountEvent::PlanChanged { .. }
+                | AccountEvent::CredentialsSet { .. }
+                | AccountEvent::EmailVerified { .. }
+                | AccountEvent::Enabled { .. }
+                | AccountEvent::Disabled { .. }
+                | AccountEvent::ProfileUpdated { .. }
+                | AccountEvent::PasswordChanged { .. } => {}
             }
         }
 
         sqlx::query(
-            "insert into account_view (id, email, plan, trial, updated_at_ms)
-             values ($1, $2, $3, $4, $5)
+            "insert into account_view
+               (id, email, plan, trial, updated_at_ms,
+                password_hash, first_name, last_name, org_id, verified, enabled, avatar_url)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              on conflict (id) do update set
                email = excluded.email,
                plan = excluded.plan,
                trial = excluded.trial,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               password_hash = coalesce(excluded.password_hash, account_view.password_hash),
+               first_name = excluded.first_name,
+               last_name = excluded.last_name,
+               org_id = coalesce(excluded.org_id, account_view.org_id),
+               verified = excluded.verified or account_view.verified,
+               enabled = excluded.enabled",
         )
         .bind(view.id.as_str())
         .bind(&view.email)
         .bind(view.plan.as_wire())
         .bind(view.trial)
         .bind(view.updated_at_ms)
+        .bind(&view.password_hash)
+        .bind(&view.first_name)
+        .bind(&view.last_name)
+        .bind(&view.org_id)
+        .bind(view.verified)
+        .bind(view.enabled)
+        .bind(&view.avatar_url)
         .execute(&mut *tx)
         .await?;
 
@@ -173,7 +195,7 @@ impl PgStore {
     /// The read side: answered from the projection, never by replaying a log.
     pub async fn account_by_email(&self, email: &str) -> StoreResult<Option<AccountView>> {
         let row = sqlx::query(
-            "select id, email, plan, trial, updated_at_ms from account_view where email = $1",
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,\n                    org_id, verified, enabled, avatar_url\n             from account_view where email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -186,9 +208,49 @@ impl PgStore {
                 plan: Plan::from_wire(&row.try_get::<String, _>("plan")?),
                 trial: row.try_get("trial")?,
                 updated_at_ms: row.try_get("updated_at_ms")?,
+                password_hash: row.try_get("password_hash")?,
+                first_name: row.try_get("first_name")?,
+                last_name: row.try_get("last_name")?,
+                org_id: row.try_get("org_id")?,
+                verified: row.try_get("verified")?,
+                enabled: row.try_get("enabled")?,
+                avatar_url: row.try_get("avatar_url")?,
             })
         })
         .transpose()
+    }
+
+    /// Every account belonging to an org — the admin's user list. Reads the projection, so it
+    /// captures CLI-created accounts, signups and the admin alike, not only those who redeemed an
+    /// invite. Ordered by email for a stable display.
+    pub async fn accounts_by_org(&self, org_id: &str) -> StoreResult<Vec<AccountView>> {
+        let rows = sqlx::query(
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,
+                    org_id, verified, enabled, avatar_url
+             from account_view where org_id = $1 order by email",
+        )
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(AccountView {
+                    id: AccountId::from_stored(row.try_get::<String, _>("id")?),
+                    email: row.try_get("email")?,
+                    plan: Plan::from_wire(&row.try_get::<String, _>("plan")?),
+                    trial: row.try_get("trial")?,
+                    updated_at_ms: row.try_get("updated_at_ms")?,
+                    password_hash: row.try_get("password_hash")?,
+                    first_name: row.try_get("first_name")?,
+                    last_name: row.try_get("last_name")?,
+                    org_id: row.try_get("org_id")?,
+                    verified: row.try_get("verified")?,
+                    enabled: row.try_get("enabled")?,
+                    avatar_url: row.try_get("avatar_url")?,
+                })
+            })
+            .collect()
     }
 }
 
@@ -339,7 +401,12 @@ impl PgStore {
     /// same list and run somebody's work twice.
     ///
     /// A run with no lease at all is claimable: it predates leases, or its holder died before
-    /// writing one.
+    /// writing one. BUT NOT A NEWBORN. The first journal batch inserts the row with no lease, and
+    /// the holder's first renewal is an UPDATE that raced it — so for a moment every fresh run
+    /// looks abandoned. A sweep that ticked in that window claimed a live run and failed it two
+    /// seconds after birth (it ate a user_machine_shell suspension in production). A run whose
+    /// last write is younger than the lease period has a process behind it; only silence that
+    /// outlives a lease is abandonment.
     pub async fn claim_abandoned_runs(
         &self,
         now_ms: i64,
@@ -353,6 +420,7 @@ impl PgStore {
                     select id from run_view
                      where status = 'running'
                        and (leased_until_ms is null or leased_until_ms < $1)
+                       and updated_at_ms < $1 - $2
                      order by updated_at_ms
                      limit $3
                      for update skip locked
@@ -951,5 +1019,757 @@ impl PgStore {
             vault.open(id, &sealed)
         })
         .transpose()
+    }
+
+    // ---- Per-org computer credentials (box.ascii.dev key, Windows 365 creds) ----
+    //
+    // Reuses the generic sealed `secret_store`, keyed `org-computer:{org}:{kind}`. The org admin
+    // sets these on the admin dashboard; the server opens them to provision that org's boxes. The
+    // plaintext key never leaves the server and is never returned to any client — only whether a
+    // kind is configured.
+
+    pub async fn set_org_computer_secret(
+        &self,
+        vault: &Vault,
+        org_id: &str,
+        kind: &str,
+        plaintext: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        let id = format!("org-computer:{org_id}:{kind}");
+        let sealed = vault.seal(&id, plaintext)?;
+        sqlx::query(
+            "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (id) do update set
+               nonce = excluded.nonce,
+               ciphertext = excluded.ciphertext,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(&id)
+        .bind(&sealed.nonce)
+        .bind(&sealed.ciphertext)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The plaintext credential for one org+kind — the one place it is in the clear, at provision
+    /// time. `None` when the org has not configured that kind.
+    pub async fn org_computer_secret(
+        &self,
+        vault: &Vault,
+        org_id: &str,
+        kind: &str,
+    ) -> StoreResult<Option<String>> {
+        self.open_credential(vault, &format!("org-computer:{org_id}:{kind}"))
+            .await
+    }
+
+    pub async fn clear_org_computer_secret(&self, org_id: &str, kind: &str) -> StoreResult<()> {
+        sqlx::query("delete from secret_store where id = $1")
+            .bind(format!("org-computer:{org_id}:{kind}"))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- Computer sharing mode (org default + per-account override) ----
+
+    /// Set a sharing mode for a scope. scope is "org" (the org default) or "account" (an override);
+    /// mode is "per-org" | "per-account" | "per-bot".
+    pub async fn set_sharing_mode(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        mode: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into computer_sharing (scope, scope_id, mode, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (scope, scope_id) do update set
+               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(mode)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn sharing_mode(&self, scope: &str, scope_id: &str) -> StoreResult<Option<String>> {
+        let row =
+            sqlx::query("select mode from computer_sharing where scope = $1 and scope_id = $2")
+                .bind(scope)
+                .bind(scope_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .map(|row| row.try_get::<String, _>("mode"))
+            .transpose()?)
+    }
+
+    pub async fn clear_sharing_mode(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from computer_sharing where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- Reverse-exec consent, per (account, machine). Raw pieces only — the server assembles the
+    //      LocalExecPolicy and runs the gate; this crate stays free of that logic. ----
+
+    /// The stored mode for a machine, or `None` when unset (the gate reads that as the default,
+    /// `never` — the channel is off).
+    pub async fn local_exec_mode(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+    ) -> StoreResult<Option<String>> {
+        let row = sqlx::query(
+            "select mode from local_exec_policy where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .map(|row| row.try_get::<String, _>("mode"))
+            .transpose()?)
+    }
+
+    pub async fn set_local_exec_mode(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        mode: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_policy (account_id, machine_id, mode, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id, machine_id) do update set
+               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(mode)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The allow or deny patterns for a machine (`kind` = "allow" | "deny").
+    pub async fn local_exec_rules(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+    ) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "select pattern from local_exec_rule
+             where account_id = $1 and machine_id = $2 and kind = $3 order by added_at_ms",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(row.try_get::<String, _>("pattern")?))
+            .collect()
+    }
+
+    pub async fn add_local_exec_rule(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+        pattern: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_rule (account_id, machine_id, kind, pattern, added_at_ms)
+             values ($1, $2, $3, $4, $5)
+             on conflict (account_id, machine_id, kind, pattern) do nothing",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .bind(pattern)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_local_exec_rule(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+        pattern: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "delete from local_exec_rule
+             where account_id = $1 and machine_id = $2 and kind = $3 and pattern = $4",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .bind(pattern)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ---- Reverse-exec: enrolled machine daemons (token id only) and the audit log. ----
+
+    /// Enrol (or re-enrol) a machine's daemon: store its token id, clear any prior revocation.
+    pub async fn enrol_daemon(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        label: &str,
+        jti: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_daemon (account_id, machine_id, label, jti, enrolled_at_ms, revoked)
+             values ($1, $2, $3, $4, $5, false)
+             on conflict (account_id, machine_id) do update set
+               label = excluded.label, jti = excluded.jti,
+               enrolled_at_ms = excluded.enrolled_at_ms, revoked = false",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(label)
+        .bind(jti)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The daemon's current token id and whether it is revoked, for verifying a presented token.
+    pub async fn daemon_jti(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+    ) -> StoreResult<Option<(String, bool)>> {
+        let row = sqlx::query(
+            "select jti, revoked from local_exec_daemon where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("jti")?,
+                row.try_get::<bool, _>("revoked")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn revoke_daemon(&self, account_id: &str, machine_id: &str) -> StoreResult<()> {
+        sqlx::query(
+            "update local_exec_daemon set revoked = true where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's enrolled machines: (machine_id, label, enrolled_at_ms, revoked).
+    #[allow(clippy::type_complexity)]
+    pub async fn list_daemons(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Vec<(String, String, i64, bool)>> {
+        let rows = sqlx::query(
+            "select machine_id, label, enrolled_at_ms, revoked from local_exec_daemon
+             where account_id = $1 order by enrolled_at_ms desc",
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("machine_id")?,
+                    row.try_get::<String, _>("label")?,
+                    row.try_get::<i64, _>("enrolled_at_ms")?,
+                    row.try_get::<bool, _>("revoked")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Write an audit row at enqueue time (before the command runs).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn audit_local_exec(
+        &self,
+        id: &str,
+        account_id: &str,
+        machine_id: &str,
+        origin: &str,
+        command: &str,
+        decision: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_audit
+               (id, account_id, machine_id, origin, command, decision, requested_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(origin)
+        .bind(command)
+        .bind(decision)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record a command's result on its audit row: the ShellResult `outcome` case (success /
+    /// failure / timeout / rejected / spawnError / permissionDenied) and, when there is one, the
+    /// process exit code. A refusal is a case with no exit code, not a non-zero exit.
+    pub async fn finish_local_exec_audit(
+        &self,
+        id: &str,
+        outcome: &str,
+        exit_code: Option<i32>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update local_exec_audit
+                set outcome = $2, exit_code = $3, finished_at_ms = $4
+              where id = $1",
+        )
+        .bind(id)
+        .bind(outcome)
+        .bind(exit_code)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's recent audit rows, newest first (all machines).
+    pub async fn local_exec_audit_log(
+        &self,
+        account_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            "select id, machine_id, origin, command, decision, requested_at_ms, outcome,
+                    exit_code, finished_at_ms
+             from local_exec_audit where account_id = $1
+             order by requested_at_ms desc limit $2",
+        )
+        .bind(account_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(serde_json::json!({
+                    "id": row.try_get::<String, _>("id")?,
+                    "machineId": row.try_get::<String, _>("machine_id")?,
+                    "origin": row.try_get::<String, _>("origin")?,
+                    "command": row.try_get::<String, _>("command")?,
+                    "decision": row.try_get::<String, _>("decision")?,
+                    "requestedAtMs": row.try_get::<i64, _>("requested_at_ms")?,
+                    "outcome": row.try_get::<Option<String>, _>("outcome")?,
+                    "exitCode": row.try_get::<Option<i32>, _>("exit_code")?,
+                    "finishedAtMs": row.try_get::<Option<i64>, _>("finished_at_ms")?,
+                }))
+            })
+            .collect()
+    }
+
+    // ---- WebAuthn device registry (passkey step-up, slice 7) ----
+
+    /// Register (or replace) a WebAuthn credential for an account. Upsert on the credential id so a
+    /// re-registration of the same authenticator refreshes it rather than erroring; a re-register
+    /// also clears a prior revocation, because registering it again IS re-authorising it.
+    pub async fn register_webauthn_credential(
+        &self,
+        account_id: &str,
+        credential_id: &str,
+        public_key: &str,
+        label: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into webauthn_credential
+               (account_id, credential_id, public_key, sign_count, label, created_at_ms, revoked)
+             values ($1, $2, $3, 0, $4, $5, false)
+             on conflict (account_id, credential_id) do update
+               set public_key = excluded.public_key,
+                   label = excluded.label,
+                   revoked = false",
+        )
+        .bind(account_id)
+        .bind(credential_id)
+        .bind(public_key)
+        .bind(label)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// An account's registered devices, newest first. Includes revoked rows (the dashboard shows
+    /// them as revoked); callers that verify an assertion filter to `!revoked` themselves.
+    pub async fn webauthn_credentials(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Vec<(String, String, i64, String, i64, Option<i64>, bool)>> {
+        let rows = sqlx::query(
+            "select credential_id, public_key, sign_count, label, created_at_ms,
+                    last_used_at_ms, revoked
+             from webauthn_credential where account_id = $1
+             order by created_at_ms desc",
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("credential_id")?,
+                    row.try_get::<String, _>("public_key")?,
+                    row.try_get::<i64, _>("sign_count")?,
+                    row.try_get::<String, _>("label")?,
+                    row.try_get::<i64, _>("created_at_ms")?,
+                    row.try_get::<Option<i64>, _>("last_used_at_ms")?,
+                    row.try_get::<bool, _>("revoked")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Record a successful assertion: bump the stored sign_count (replay/cloning defence) and stamp
+    /// last-used. Only touches a non-revoked row.
+    pub async fn touch_webauthn_credential(
+        &self,
+        account_id: &str,
+        credential_id: &str,
+        sign_count: i64,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update webauthn_credential
+                set sign_count = $3, last_used_at_ms = $4
+              where account_id = $1 and credential_id = $2 and not revoked",
+        )
+        .bind(account_id)
+        .bind(credential_id)
+        .bind(sign_count)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Revoke a device from the registry — it can no longer satisfy a step-up. Not deleted, so the
+    /// dashboard can still show it as revoked and a re-register can un-revoke it.
+    pub async fn revoke_webauthn_credential(
+        &self,
+        account_id: &str,
+        credential_id: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update webauthn_credential set revoked = true
+              where account_id = $1 and credential_id = $2",
+        )
+        .bind(account_id)
+        .bind(credential_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Does this account have ANY registered, non-revoked device? The gate for "an unregistered
+    /// device gets no remote control" — false ⇒ the control plane refuses the dangerous actions.
+    pub async fn has_registered_device(&self, account_id: &str) -> StoreResult<bool> {
+        let row = sqlx::query(
+            "select 1 as one from webauthn_credential
+              where account_id = $1 and not revoked limit 1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    // ---- A computer keyed by the scope that shares it (org / account / bot) ----
+
+    pub async fn scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row = sqlx::query(
+            "select box_id, kind from scoped_computer where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+            ))
+        })
+        .transpose()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        box_id: &str,
+        kind: &str,
+        org_id: Option<&str>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into scoped_computer (scope, scope_id, box_id, kind, org_id, last_used_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $6)
+             on conflict (scope, scope_id) do update set
+               box_id = excluded.box_id, kind = excluded.kind, org_id = excluded.org_id,
+               last_used_at_ms = excluded.last_used_at_ms, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(box_id)
+        .bind(kind)
+        .bind(org_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A scoped computer with its idle state — (box_id, kind, stopped).
+    pub async fn scoped_computer_full(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, String, bool)>> {
+        let row = sqlx::query(
+            "select box_id, kind, stopped from scoped_computer where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+                row.try_get::<bool, _>("stopped")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Mark a scoped computer used now (and not stopped) — called on the run path.
+    pub async fn mark_scoped_used(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update scoped_computer set last_used_at_ms = $3, stopped = false where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_scoped_stopped(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("update scoped_computer set stopped = true where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Running boxes idle since before `before_ms` — the sweep stops these. Returns
+    /// (scope, scope_id, box_id, kind). A box never used yet (null last_used) is left alone.
+    #[allow(clippy::type_complexity)]
+    pub async fn idle_scoped_computers(
+        &self,
+        before_ms: i64,
+    ) -> StoreResult<Vec<(String, String, String, String, Option<String>)>> {
+        let rows = sqlx::query(
+            "select scope, scope_id, box_id, kind, org_id from scoped_computer
+             where stopped = false and last_used_at_ms is not null and last_used_at_ms < $1",
+        )
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("scope")?,
+                    row.try_get::<String, _>("scope_id")?,
+                    row.try_get::<String, _>("box_id")?,
+                    row.try_get::<String, _>("kind")?,
+                    row.try_get::<Option<String>, _>("org_id")?,
+                ))
+            })
+            .collect()
+    }
+
+    pub async fn clear_scoped_computer(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from scoped_computer where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- The account's last computer-provisioning error ----
+
+    pub async fn set_account_computer_error(
+        &self,
+        account_id: &str,
+        code: &str,
+        message: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into account_computer_error (account_id, code, message, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id) do update set
+               code = excluded.code, message = excluded.message, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(code)
+        .bind(message)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's last provisioning error as (code, message), or None when it has none.
+    pub async fn account_computer_error(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row =
+            sqlx::query("select code, message from account_computer_error where account_id = $1")
+                .bind(account_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("code")?,
+                row.try_get::<String, _>("message")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn clear_account_computer_error(&self, account_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from account_computer_error where account_id = $1")
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- The account's one shared computer (1 account = 1 computer) ----
+
+    /// The account's computer, if it has one — the box id and its kind.
+    pub async fn account_computer(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        let row = sqlx::query("select box_id, kind from account_computer where account_id = $1")
+            .bind(account_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("box_id")?,
+                row.try_get::<String, _>("kind")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Record the account's computer (created on its first agent). One row per account.
+    pub async fn set_account_computer(
+        &self,
+        account_id: &str,
+        box_id: &str,
+        kind: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into account_computer (account_id, box_id, kind, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id) do update set
+               box_id = excluded.box_id, kind = excluded.kind, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(box_id)
+        .bind(kind)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Forget the account's computer (its last agent was deleted and the box destroyed).
+    pub async fn clear_account_computer(&self, account_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from account_computer where account_id = $1")
+            .bind(account_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Which computer kinds this org has configured — the names only, never the secrets. Drives the
+    /// admin dashboard's status and the `configured` flag advertised to clients.
+    pub async fn org_computer_kinds(&self, org_id: &str) -> StoreResult<Vec<String>> {
+        let prefix = format!("org-computer:{org_id}:");
+        let rows = sqlx::query("select id from secret_store where id like $1")
+            .bind(format!("{prefix}%"))
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("id").ok())
+            .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
+            .collect())
     }
 }
