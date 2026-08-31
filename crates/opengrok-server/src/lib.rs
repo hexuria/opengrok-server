@@ -8,6 +8,7 @@ use axum::Router;
 pub mod account_api;
 pub mod agui;
 pub mod auth;
+pub mod auto_review;
 pub mod autonomy;
 pub mod computers;
 pub mod connections;
@@ -35,6 +36,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
         .merge(local_exec::router(state.auth.clone()))
+        .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);

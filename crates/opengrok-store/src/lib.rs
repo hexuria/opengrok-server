@@ -20,6 +20,7 @@ use opengrok_core::account::{Account, AccountEvent, AccountView};
 use opengrok_core::id::AccountId;
 use serde::{Serialize, de::DeserializeOwned};
 
+pub mod auto_review;
 pub mod autonomy;
 pub mod gateway;
 pub mod identity;

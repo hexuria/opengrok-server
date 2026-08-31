@@ -364,6 +364,21 @@ create table if not exists local_exec_daemon (
     primary key (account_id, machine_id)
 );
 
+-- Auto-review policy: three tiers (global < machine < coworker), one row per scope, every field
+-- TRI-STATE — null inherits from the tier below, '' is an explicit "none" that stops inheritance.
+-- Override is per field, never a merge. Precedence is decided in opengrok-server::auto_review
+-- (one place); this table never pre-resolves. Design: docs/AUTO-REVIEW.md.
+create table if not exists auto_review_policy (
+    account_id         text    not null,
+    scope_kind         text    not null,
+    scope_id           text    not null,
+    enabled            boolean,
+    allow_instructions text,
+    block_instructions text,
+    updated_at_ms      bigint  not null,
+    primary key (account_id, scope_kind, scope_id)
+);
+
 -- Every reverse-exec command and its outcome — the record the user can read afterward. Written at
 -- enqueue (decision), updated when the daemon returns a result. `origin` names the bot, or the user.
 create table if not exists local_exec_audit (
