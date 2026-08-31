@@ -1484,6 +1484,7 @@ mod tests {
                 model: "mock".to_string(),
                 system: None,
                 messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),
+                tools: Vec::new(),
             },
             "t1",
             "r1",

@@ -37,11 +37,22 @@ Six points, all load-bearing:
    the *server* (the token/response is signed), so a LAN attacker impersonating the
    server cannot feed the daemon commands.
 
-2. **Consent enforced SERVER-SIDE, before a command is ever queued.** The
-   `never | ask | always` setting is checked on the server; it never hands a command to
-   the daemon unless the setting permits. A bypassed or compromised client cannot get a
-   command through. Default is **never** — the channel does nothing until the user
-   deliberately turns it on.
+2. **Consent enforced SERVER-SIDE, as a Claude-Code-style permission model** (Uriah's
+   call, 31 Aug). Per machine there is a **mode** and two pattern lists, all checked on
+   the server before a command is ever queued — a bypassed or compromised client cannot
+   get a command through:
+   - **mode** = `never` (the DEFAULT — channel off, every command denied) | `ask` |
+     `bypass` (allow everything, deliberately turned on, like Claude Code's bypass).
+   - an **allowlist** and a **denylist** of command patterns, added ON DEMAND: an `ask`
+     prompt offers "run once", "always allow" (→ allowlist), or "always deny" (→
+     denylist).
+   - **precedence in `ask` mode:** denylist match → DENY; else allowlist match → ALLOW;
+     else → ASK the user. `bypass` allows all and skips the lists; `never` denies all.
+     Deny always wins over allow within the lists.
+   The audit log (point 3) records EVERY command including under `bypass`, so there is
+   always a record even when nothing prompts. The decision function is pure and
+   closed-by-default (unknown ⇒ deny/ask, never ⇒ deny), tested in isolation before any
+   transport can carry a command — gate first.
 
 3. **A durable, user-readable audit log, server-side.** Every reverse-exec request and
    its result is recorded: which bot (or that it was the user from another device),
@@ -53,10 +64,11 @@ Six points, all load-bearing:
    driving someone else's machine. The daemon token binds a machine to one account; a
    request is refused unless the caller's account owns that daemon.
 
-5. **A higher bar than the box, by design.** `ask` is **per-command**, never a blanket
-   session yes. `always` is a deliberate, scoped choice a person turns on, never a
-   default and never inferred. Where the box and the Mac differ, the Mac's rule is the
-   stricter one.
+5. **A higher bar than the box, by design.** `ask` prompts **per command** (a one-off
+   "run once" is one command, not a session). Broadening to always-allow a pattern is a
+   deliberate act that writes an allowlist rule the user can see and remove; `bypass` is
+   a deliberate machine-wide choice, never a default and never inferred. Where the box
+   and the Mac differ, the Mac's rule is the stricter one.
 
 6. **The naming prerequisite is done.** A reverse-exec request must be unambiguous
    about Mac-vs-box; the model already distinguishes them and says which it acted on.

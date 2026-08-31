@@ -13,6 +13,7 @@ pub mod computers;
 pub mod connections;
 pub mod gateway;
 pub mod grpc;
+pub mod local_exec;
 pub mod recovery;
 pub mod seamb;
 pub mod seamb_send;
