@@ -572,6 +572,27 @@ async fn grok_bot(
                 },
                 Err(_) => false,
             };
+            // WHICH kind this account is actually ON right now — the advertised list is options, but
+            // the client also needs to say "this is your computer". Resolve the account's effective
+            // scope and read the kind of the box mapped there; null when it has no box yet (or, in
+            // per-bot mode, there is no single account computer). This is a plain statement of fact,
+            // separate from the options, so the desktop can stop implying a choice that isn't one.
+            let (mode, org_id) =
+                crate::agui::provision::resolve_mode(&state.agui, &account_id).await;
+            let (active_scope, active_scope_id, _) = crate::agui::provision::scope_for(
+                &mode,
+                account_id.as_str(),
+                org_id.as_deref(),
+                "",
+            );
+            let active_kind: Option<String> = store
+                .scoped_computer(active_scope, &active_scope_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|(_, kind)| kind);
+            let is_active = |kind: &str| active_kind.as_deref() == Some(kind);
+
             let mut computers = Vec::new();
             // Local VM only where it is allowed (self-host / dev) — a hosted deploy hides it.
             if crate::agui::provision::local_docker_allowed() {
@@ -581,6 +602,7 @@ async fn grok_bot(
                     "kind": "local-docker",
                     "state": "available",
                     "configured": true,
+                    "active": is_active("local-docker"),
                 }));
             }
             computers.push(json!({
@@ -589,6 +611,7 @@ async fn grok_bot(
                 "kind": "ascii",
                 "state": if ascii_ready { "available" } else { "not-configured" },
                 "configured": ascii_ready,
+                "active": is_active("ascii"),
             }));
             computers.push(json!({
                 "id": "windows365",
@@ -596,19 +619,22 @@ async fn grok_bot(
                 "kind": "windows365",
                 "state": "not-configured",
                 "configured": false,
+                "active": is_active("windows365"),
             }));
             let account_error = store
                 .account_computer_error(account_id.as_str())
                 .await
                 .ok()
                 .flatten();
-            // The caller's EFFECTIVE sharing mode, so the client knows whether a computer is
-            // pre-provisioned (per-org/per-account) or made per bot, and can render accordingly.
-            let (mode, _) = crate::agui::provision::resolve_mode(&state.agui, &account_id).await;
+            // `mode` (resolved above) is the caller's EFFECTIVE sharing mode, so the client knows
+            // whether a computer is pre-provisioned (per-org/per-account) or made per bot.
+            // `activeKind` names the kind this account is actually on (null if none) — the field that
+            // turns the options list into an honest "this is yours, these are also available".
             connect_ok(json!({
                 "computers": computers,
                 "computerError": crate::agui::provision::error_json(&account_error),
                 "mode": mode,
+                "activeKind": active_kind,
             }))
         }
 
