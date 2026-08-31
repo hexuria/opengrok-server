@@ -580,7 +580,15 @@ pub async fn enqueue_and_wait(
                 "allow"
             };
             audit(word).await;
-            run_on_machine(state, machine_id, &request_id, approval_id, command, simple_commands).await
+            run_on_machine(
+                state,
+                machine_id,
+                &request_id,
+                approval_id,
+                command,
+                simple_commands,
+            )
+            .await
         }
     }
 }
@@ -707,7 +715,8 @@ async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Re
     let rx = state.local_exec.connect(&machine_id).await;
     // The reconnect hint goes first, before any frame (mirrors the gateway `/events` stream and what
     // the daemon's SSE reader expects).
-    let opening = futures::stream::once(async { Ok::<_, Infallible>("retry: 1000\n\n".to_string()) });
+    let opening =
+        futures::stream::once(async { Ok::<_, Infallible>("retry: 1000\n\n".to_string()) });
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
@@ -756,15 +765,24 @@ async fn post_responses(
                 (Some("client"), Some(request_id), Some(message)) => {
                     if message.get("shellResult").is_some() {
                         let outcome = wire::outcome_from_client_message(message);
-                        state.local_exec.resolve(&machine_id, request_id, outcome).await;
+                        state
+                            .local_exec
+                            .resolve(&machine_id, request_id, outcome)
+                            .await;
                     } else if let Some(action) = wire::stream_action(message) {
                         use wire::StreamAction;
                         match action {
                             StreamAction::Stdout(chunk) => {
-                                state.local_exec.accumulate(&machine_id, request_id, false, &chunk).await;
+                                state
+                                    .local_exec
+                                    .accumulate(&machine_id, request_id, false, &chunk)
+                                    .await;
                             }
                             StreamAction::Stderr(chunk) => {
-                                state.local_exec.accumulate(&machine_id, request_id, true, &chunk).await;
+                                state
+                                    .local_exec
+                                    .accumulate(&machine_id, request_id, true, &chunk)
+                                    .await;
                             }
                             StreamAction::Exit(code) => {
                                 let case = if code == 0 { "success" } else { "failure" };

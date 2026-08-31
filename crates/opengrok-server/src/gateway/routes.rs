@@ -484,9 +484,7 @@ async fn command(
             .await,
         ),
         "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
-        "submitSecret" | "appendConnectorCard" => {
-            reply(StatusCode::OK, Value::Null)
-        }
+        "submitSecret" | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
         "getAgentAutomations" | "listAllAutomations" => {

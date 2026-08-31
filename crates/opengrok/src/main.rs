@@ -149,8 +149,9 @@ async fn main() -> anyhow::Result<()> {
         auth,
         door,
         model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
-        auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL")
-            .unwrap_or_else(|_| std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string())),
+        auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL").unwrap_or_else(|_| {
+            std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string())
+        }),
         computer,
         vault,
         connectors,

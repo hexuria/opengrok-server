@@ -193,7 +193,9 @@ async fn seed_suspended_run(
 fn app_with(store: PgStore, host_email: &str) -> axum::Router {
     let auth = AuthState::new(
         store,
-        Arc::new(TokenMinter::new(b"auto-review-gate-test-secret-auto-review")),
+        Arc::new(TokenMinter::new(
+            b"auto-review-gate-test-secret-auto-review",
+        )),
         host_email.to_string(),
     );
     let agui = AgUiState {
@@ -265,8 +267,14 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_coworker(&store, &account).await;
     let call_id = format!("call_{}", uuid::Uuid::now_v7().simple());
-    let (run_id, entry_id) =
-        seed_suspended_run(&store, &account, &coworker, &call_id, SuspendReason::AutoReview).await;
+    let (run_id, entry_id) = seed_suspended_run(
+        &store,
+        &account,
+        &coworker,
+        &call_id,
+        SuspendReason::AutoReview,
+    )
+    .await;
     let base = spawn(app_with(store.clone(), &host_email)).await;
 
     // The exec verb must NOT settle an auto-review suspension: it finds no run and heals nothing
@@ -279,7 +287,10 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     )
     .await;
     assert_eq!(status, 410, "the wrong verb settles nothing");
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("pending"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("pending")
+    );
 
     // The right verb: approved, once.
     let (status, body) = call(
@@ -291,7 +302,10 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     .await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true);
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("approved"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("approved")
+    );
     let (run, _) = store.load_run(&run_id).await.expect("run");
     assert_eq!(run.status, RunStatus::Running, "answered ⇒ running again");
     assert!(run.answered.contains(&call_id));
@@ -306,7 +320,10 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(body["alreadyAnswered"], true);
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("approved"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("approved")
+    );
 }
 
 #[tokio::test]
@@ -317,8 +334,14 @@ async fn a_denied_auto_review_card_settles_as_denied() {
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_coworker(&store, &account).await;
     let call_id = format!("call_{}", uuid::Uuid::now_v7().simple());
-    let (run_id, entry_id) =
-        seed_suspended_run(&store, &account, &coworker, &call_id, SuspendReason::AutoReview).await;
+    let (run_id, entry_id) = seed_suspended_run(
+        &store,
+        &account,
+        &coworker,
+        &call_id,
+        SuspendReason::AutoReview,
+    )
+    .await;
     let base = spawn(app_with(store.clone(), &host_email)).await;
 
     // `status` is accepted where `resolution` would be — the transcription records both.
@@ -330,7 +353,10 @@ async fn a_denied_auto_review_card_settles_as_denied() {
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("denied"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("denied")
+    );
     let (run, _) = store.load_run(&run_id).await.expect("run");
     // A refusal is an answer: the run is no longer waiting.
     assert_ne!(run.status, RunStatus::AwaitingApproval);
@@ -368,7 +394,10 @@ async fn a_press_on_a_dead_request_heals_the_card_to_expired_with_410() {
     )
     .await;
     assert_eq!(status, 410, "{body}");
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("expired"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("expired")
+    );
     // The command the user was shown survives the flip (status-only jsonb_set).
     let entry = store
         .gateway_transcript(&coworker)
@@ -388,8 +417,14 @@ async fn the_exec_card_verb_ignores_an_auto_review_suspension_and_vice_versa() {
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_coworker(&store, &account).await;
     let call_id = format!("call_{}", uuid::Uuid::now_v7().simple());
-    let (run_id, entry_id) =
-        seed_suspended_run(&store, &account, &coworker, &call_id, SuspendReason::ExecConsent).await;
+    let (run_id, entry_id) = seed_suspended_run(
+        &store,
+        &account,
+        &coworker,
+        &call_id,
+        SuspendReason::ExecConsent,
+    )
+    .await;
     let base = spawn(app_with(store.clone(), &host_email)).await;
 
     // The auto-review verb finds no auto-review suspension ⇒ 410, and the exec card (which has an
@@ -402,7 +437,14 @@ async fn the_exec_card_verb_ignores_an_auto_review_suspension_and_vice_versa() {
     )
     .await;
     assert_eq!(status, 410);
-    assert_eq!(card_status(&store, &coworker, &entry_id).await.as_deref(), Some("pending"));
+    assert_eq!(
+        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        Some("pending")
+    );
     let (run, _) = store.load_run(&run_id).await.expect("run");
-    assert_eq!(run.status, RunStatus::AwaitingApproval, "still waiting for the owner");
+    assert_eq!(
+        run.status,
+        RunStatus::AwaitingApproval,
+        "still waiting for the owner"
+    );
 }

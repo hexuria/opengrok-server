@@ -49,11 +49,27 @@ async fn tiers_round_trip_and_resolve_per_field() {
 
     // Global: on, with a block rule. Coworker: switched off, adds an allow rule, inherits block.
     store
-        .set_auto_review_policy(&account, "global", "", Some(true), None, Some("never touch prod"), 1)
+        .set_auto_review_policy(
+            &account,
+            "global",
+            "",
+            Some(true),
+            None,
+            Some("never touch prod"),
+            1,
+        )
         .await
         .expect("global");
     store
-        .set_auto_review_policy(&account, "coworker", &coworker, Some(false), Some("git is fine"), None, 2)
+        .set_auto_review_policy(
+            &account,
+            "coworker",
+            &coworker,
+            Some(false),
+            Some("git is fine"),
+            None,
+            2,
+        )
         .await
         .expect("coworker");
 
@@ -64,7 +80,10 @@ async fn tiers_round_trip_and_resolve_per_field() {
     assert_eq!(effective.decided_by.allow_instructions, DecidedBy::Coworker);
     assert_eq!(effective.block_instructions, "never touch prod");
     assert_eq!(effective.decided_by.block_instructions, DecidedBy::Global);
-    assert!(!effective.is_active(), "off ⇒ short-circuit, whatever the rules say");
+    assert!(
+        !effective.is_active(),
+        "off ⇒ short-circuit, whatever the rules say"
+    );
 
     // Another coworker has no row of its own: on, from global, and active.
     let effective = auto_review::load_effective(&store, &account, Some(&other_coworker)).await;
@@ -77,7 +96,15 @@ async fn tiers_round_trip_and_resolve_per_field() {
     // Re-PUT the coworker row with an explicit '' block: it must come back as '' from the
     // coworker tier, NOT collapse into "inherit" and let global's block leak back in.
     store
-        .set_auto_review_policy(&account, "coworker", &coworker, Some(true), None, Some(""), 3)
+        .set_auto_review_policy(
+            &account,
+            "coworker",
+            &coworker,
+            Some(true),
+            None,
+            Some(""),
+            3,
+        )
         .await
         .expect("coworker again");
     let effective = auto_review::load_effective(&store, &account, Some(&coworker)).await;
@@ -87,7 +114,10 @@ async fn tiers_round_trip_and_resolve_per_field() {
     // The settings view sees both rows, keyed by scope.
     let rows = store.auto_review_rows(&account).await.expect("rows");
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|row| row.scope_kind == "coworker" && row.scope_id == coworker));
+    assert!(
+        rows.iter()
+            .any(|row| row.scope_kind == "coworker" && row.scope_id == coworker)
+    );
 
     // Delete the coworker row ⇒ full inheritance again.
     store
@@ -97,7 +127,10 @@ async fn tiers_round_trip_and_resolve_per_field() {
     let effective = auto_review::load_effective(&store, &account, Some(&coworker)).await;
     assert_eq!(effective.block_instructions, "never touch prod");
     assert_eq!(effective.decided_by.block_instructions, DecidedBy::Global);
-    assert_eq!(store.auto_review_rows(&account).await.expect("rows").len(), 1);
+    assert_eq!(
+        store.auto_review_rows(&account).await.expect("rows").len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -111,7 +144,15 @@ async fn a_legacy_machine_row_is_never_resolved() {
     // is what refuses "machine". A row that got in anyway — an old client, a hand edit — must be
     // invisible to resolution, not a hidden third tier.
     store
-        .set_auto_review_policy(&account, "machine", "mac_ghost", Some(true), None, Some("haunt"), 1)
+        .set_auto_review_policy(
+            &account,
+            "machine",
+            "mac_ghost",
+            Some(true),
+            None,
+            Some("haunt"),
+            1,
+        )
         .await
         .expect("legacy row");
     let effective = auto_review::load_effective(&store, &account, Some(&coworker)).await;
@@ -122,5 +163,8 @@ async fn a_legacy_machine_row_is_never_resolved() {
         .auto_review_tiers(&account, Some(&coworker))
         .await
         .expect("tiers");
-    assert!(tiers.is_empty(), "the tier query must not return foreign scope kinds");
+    assert!(
+        tiers.is_empty(),
+        "the tier query must not return foreign scope kinds"
+    );
 }

@@ -131,8 +131,11 @@ pub(crate) async fn tools_for_coworker(
     // reset or re-provision changes the account's box while the aggregate id stays put — and this is
     // the same box we just resumed above, so exec must run on it, or a reset would leave the bot
     // executing against a destroyed box.
-    let mut context =
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id.clone(), &coworker);
+    let mut context = opengrok_tools::ToolContext::from_coworker(
+        account_id.clone(),
+        coworker_id.clone(),
+        &coworker,
+    );
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
@@ -142,13 +145,15 @@ pub(crate) async fn tools_for_coworker(
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
-    if let Some((machine_id, _label)) = crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
+    if let Some((machine_id, _label)) =
+        crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
     {
-        executor = executor.with_user_machine(std::sync::Arc::new(crate::local_exec::ReverseExecSink {
-            auth: state.auth.clone(),
-            coworker_id: coworker_id.as_str().to_string(),
-            machine_id,
-        }));
+        executor =
+            executor.with_user_machine(std::sync::Arc::new(crate::local_exec::ReverseExecSink {
+                auth: state.auth.clone(),
+                coworker_id: coworker_id.as_str().to_string(),
+                machine_id,
+            }));
     }
 
     // THE TIER WALK HAPPENS HERE, ONCE PER RUN (docs/AUTO-REVIEW.md §3). Per tool call the check
@@ -868,7 +873,9 @@ pub async fn run(
 
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
-            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id, &[], &[]).await,
+            Some(coworker_id) => {
+                tools_for_coworker(&state, account_id, coworker_id, &[], &[]).await
+            }
             None => None,
         },
         // No bearer, no identity, and therefore no tools: tools always run as somebody.

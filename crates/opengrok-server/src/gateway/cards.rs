@@ -156,7 +156,13 @@ mod tests {
         for tool in ["read_file", "write_file", "gmail.api.send"] {
             assert_eq!(command_for(tool, &args), None);
         }
-        for tool in [USER_MACHINE_SHELL, "shell", "read_file", "write_file", "gmail.api.send"] {
+        for tool in [
+            USER_MACHINE_SHELL,
+            "shell",
+            "read_file",
+            "write_file",
+            "gmail.api.send",
+        ] {
             let summary = summary_for(tool, &args);
             assert!(!summary.is_empty());
             assert!(!boilerplate(&summary), "{tool}: {summary}");
@@ -167,7 +173,15 @@ mod tests {
     #[test]
     fn the_card_carries_the_transcribed_shape_and_settles_on_the_same_id() {
         let args = json!({ "command": "brew install jq" });
-        let pending = auto_review_card("e_1", "call_1", "pending", USER_MACHINE_SHELL, &args, Some("why"), 7);
+        let pending = auto_review_card(
+            "e_1",
+            "call_1",
+            "pending",
+            USER_MACHINE_SHELL,
+            &args,
+            Some("why"),
+            7,
+        );
         assert_eq!(pending["kind"], "send-message");
         assert_eq!(pending["id"], "e_1");
         assert_eq!(pending["message"]["type"], "auto-review-approval");
@@ -178,9 +192,20 @@ mod tests {
         assert_eq!(approval["command"], "brew install jq");
         assert_eq!(approval["reason"], "why");
         assert!(approval["summary"].as_str().is_some_and(|s| !s.is_empty()));
-        assert_eq!(approval["proposedRule"], "Allow `brew install jq` on my own computer.");
+        assert_eq!(
+            approval["proposedRule"],
+            "Allow `brew install jq` on my own computer."
+        );
 
-        let settled = auto_review_card("e_1", "call_1", "approved", USER_MACHINE_SHELL, &args, Some("why"), 8);
+        let settled = auto_review_card(
+            "e_1",
+            "call_1",
+            "approved",
+            USER_MACHINE_SHELL,
+            &args,
+            Some("why"),
+            8,
+        );
         assert_eq!(settled["id"], pending["id"]);
         assert_eq!(settled["message"]["approval"]["status"], "approved");
     }

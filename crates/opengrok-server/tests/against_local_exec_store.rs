@@ -153,10 +153,10 @@ async fn daemon_enrolment_and_audit_round_trip() {
 // row. No HTTP — the broker is exercised directly, standing in for a connected daemon.
 // -------------------------------------------------------------------------------------------------
 
-use opengrok_server::auth::token::TokenMinter;
 use opengrok_server::auth::routes::AuthState;
-use opengrok_server::local_exec::{enqueue_and_wait, EnqueueResult, Origin};
+use opengrok_server::auth::token::TokenMinter;
 use opengrok_server::local_exec::broker::ExecOutcome;
+use opengrok_server::local_exec::{EnqueueResult, Origin, enqueue_and_wait};
 use std::sync::Arc;
 
 fn auth_state(store: PgStore) -> AuthState {
@@ -203,17 +203,36 @@ async fn a_bot_allowlisted_command_runs_and_audits_success() {
     let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
     let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
 
-    state.store.set_local_exec_mode(&account, &machine, "ask", 1).await.expect("mode");
-    state.store.add_local_exec_rule(&account, &machine, "allow", "echo", 2).await.expect("allow");
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
+    state
+        .store
+        .add_local_exec_rule(&account, &machine, "allow", "echo", 2)
+        .await
+        .expect("allow");
 
     fake_daemon(&state, &machine, success()).await;
     let result = enqueue_and_wait(
-        &state, &account, &machine, "echo hi", &["echo hi".to_string()],
-        Origin::Bot("cw_1".to_string()), "appr", false,
-    ).await;
+        &state,
+        &account,
+        &machine,
+        "echo hi",
+        &["echo hi".to_string()],
+        Origin::Bot("cw_1".to_string()),
+        "appr",
+        false,
+    )
+    .await;
     assert!(matches!(&result, EnqueueResult::Ran(o) if o.succeeded()));
 
-    let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
     assert_eq!(log.len(), 1);
     assert_eq!(log[0]["decision"], "allow");
     assert_eq!(log[0]["outcome"], "success");
@@ -227,15 +246,30 @@ async fn a_bot_unlisted_command_needs_approval_and_never_dispatches() {
     let state = auth_state(store);
     let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
     let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
-    state.store.set_local_exec_mode(&account, &machine, "ask", 1).await.expect("mode");
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
 
     // No daemon connected — if this dispatched it would refuse; instead it must suspend for a person.
     let result = enqueue_and_wait(
-        &state, &account, &machine, "curl example.com", &["curl example.com".to_string()],
-        Origin::Bot("cw_1".to_string()), "appr", false,
-    ).await;
+        &state,
+        &account,
+        &machine,
+        "curl example.com",
+        &["curl example.com".to_string()],
+        Origin::Bot("cw_1".to_string()),
+        "appr",
+        false,
+    )
+    .await;
     assert!(matches!(result, EnqueueResult::NeedsApproval));
-    let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
     assert_eq!(log[0]["decision"], "ask");
     assert_eq!(log[0]["outcome"], serde_json::Value::Null);
 }
@@ -248,14 +282,30 @@ async fn a_user_direct_command_skips_ask_and_runs() {
     let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
     let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
     // Ask mode, no allow rule — a bot would suspend here, but the user is the approver.
-    state.store.set_local_exec_mode(&account, &machine, "ask", 1).await.expect("mode");
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
 
     fake_daemon(&state, &machine, success()).await;
     let result = enqueue_and_wait(
-        &state, &account, &machine, "whoami", &["whoami".to_string()], Origin::User, "appr", false,
-    ).await;
+        &state,
+        &account,
+        &machine,
+        "whoami",
+        &["whoami".to_string()],
+        Origin::User,
+        "appr",
+        false,
+    )
+    .await;
     assert!(matches!(result, EnqueueResult::Ran(_)));
-    let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
     assert_eq!(log[0]["decision"], "allow-user");
     assert_eq!(log[0]["outcome"], "success");
     assert_eq!(log[0]["origin"], "user");
@@ -268,14 +318,34 @@ async fn a_denylisted_command_is_refused_for_the_user_too() {
     let state = auth_state(store);
     let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
     let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
-    state.store.set_local_exec_mode(&account, &machine, "ask", 1).await.expect("mode");
-    state.store.add_local_exec_rule(&account, &machine, "deny", "rm", 2).await.expect("deny");
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
+    state
+        .store
+        .add_local_exec_rule(&account, &machine, "deny", "rm", 2)
+        .await
+        .expect("deny");
 
     let result = enqueue_and_wait(
-        &state, &account, &machine, "rm -rf /", &["rm -rf /".to_string()], Origin::User, "appr", false,
-    ).await;
+        &state,
+        &account,
+        &machine,
+        "rm -rf /",
+        &["rm -rf /".to_string()],
+        Origin::User,
+        "appr",
+        false,
+    )
+    .await;
     assert!(matches!(result, EnqueueResult::Refused(_)));
-    let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
     assert_eq!(log[0]["decision"], "deny");
 }
 
@@ -286,14 +356,30 @@ async fn an_allowed_command_with_no_daemon_is_refused_not_hung() {
     let state = auth_state(store);
     let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
     let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
-    state.store.set_local_exec_mode(&account, &machine, "bypass", 1).await.expect("mode");
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "bypass", 1)
+        .await
+        .expect("mode");
 
     // Bypass allows it, but nothing is connected: refuse crisply rather than wait forever.
     let result = enqueue_and_wait(
-        &state, &account, &machine, "echo hi", &["echo hi".to_string()], Origin::User, "appr", false,
-    ).await;
+        &state,
+        &account,
+        &machine,
+        "echo hi",
+        &["echo hi".to_string()],
+        Origin::User,
+        "appr",
+        false,
+    )
+    .await;
     assert!(matches!(&result, EnqueueResult::Refused(reason) if reason.contains("not connected")));
-    let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
     assert_eq!(log[0]["decision"], "allow");
     assert_eq!(log[0]["outcome"], "spawnError");
 }

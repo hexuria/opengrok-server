@@ -463,10 +463,9 @@ mod tests {
     // A detached-start reply whose processId is a NUMBER (a pid) must parse, not fail the reply.
     #[test]
     fn process_status_accepts_a_numeric_process_id() {
-        let started: super::ProcessStatus = serde_json::from_str(
-            r#"{"type":"command.started","processId":15182,"running":true}"#,
-        )
-        .unwrap();
+        let started: super::ProcessStatus =
+            serde_json::from_str(r#"{"type":"command.started","processId":15182,"running":true}"#)
+                .unwrap();
         assert_eq!(started.process_id, "15182");
         assert!(started.running);
 

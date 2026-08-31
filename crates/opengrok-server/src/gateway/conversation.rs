@@ -740,7 +740,8 @@ pub(crate) async fn run_turn(
     };
 
     let tools =
-        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[], &[]).await;
+        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[], &[])
+            .await;
     // Whether this turn can actually reach the user's machine — read from the offered schemas so
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
@@ -1268,14 +1269,20 @@ pub async fn resolve_auto_review_approval(
         .unwrap_or_default()
         .to_string();
     if request_id.is_empty() || word.is_empty() {
-        return (400, json!({ "error": "requestId and resolution are required" }));
+        return (
+            400,
+            json!({ "error": "requestId and resolution are required" }),
+        );
     }
     let Some(agent_id) = agent_or_active(state, args) else {
         return (400, json!({ "error": "no agent named and none active" }));
     };
     let coworker_id = CoworkerId::from_stored(agent_id.clone());
     let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
-        return (401, json!({ "error": "the gateway account does not exist yet" }));
+        return (
+            401,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
     };
     let account_id = account.id;
 

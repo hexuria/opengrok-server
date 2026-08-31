@@ -99,8 +99,7 @@ pub enum Outcome {
 }
 
 /// The paragraph a card shows when the judge itself said "ask".
-pub const REVIEW_ASK_REASON: &str =
-    "Your auto-review instructions did not clearly allow this, so it is being asked rather than allowed.";
+pub const REVIEW_ASK_REASON: &str = "Your auto-review instructions did not clearly allow this, so it is being asked rather than allowed.";
 /// The paragraph a card shows when the judge could not answer at all.
 pub const REVIEW_UNAVAILABLE_REASON: &str =
     "The reviewer did not answer, so this is being asked rather than allowed.";
@@ -204,7 +203,8 @@ fn redact_value(value: &Value, key: Option<&str>) -> Value {
 /// a false negative shows a secret to a model.
 fn looks_like_a_secret(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.starts_with("Bearer ") || trimmed.starts_with("sk-") || trimmed.starts_with("xoxb-") {
+    if trimmed.starts_with("Bearer ") || trimmed.starts_with("sk-") || trimmed.starts_with("xoxb-")
+    {
         return true;
     }
     trimmed.len() >= 40
@@ -235,7 +235,11 @@ mod tests {
 
     #[test]
     fn a_denied_gate_refuses_whatever_the_judge_would_say() {
-        for review in [None, Some(ReviewOutcome::Allow), Some(ReviewOutcome::Ask("a".into()))] {
+        for review in [
+            None,
+            Some(ReviewOutcome::Allow),
+            Some(ReviewOutcome::Ask("a".into())),
+        ] {
             assert_eq!(
                 combine(Gate::Deny("off".into()), review, true),
                 Outcome::Refuse("off".into())
@@ -247,7 +251,11 @@ mod tests {
     fn a_review_block_beats_a_pending_consent_and_a_click() {
         // A standing written rule outranks a click: even an approved call stays refused.
         assert_eq!(
-            combine(ask(AwaitingReason::ExecConsent), Some(ReviewOutcome::Block("no".into())), true),
+            combine(
+                ask(AwaitingReason::ExecConsent),
+                Some(ReviewOutcome::Block("no".into())),
+                true
+            ),
             Outcome::Refuse("no".into())
         );
         assert_eq!(
@@ -259,7 +267,11 @@ mod tests {
     #[test]
     fn the_gates_ask_subsumes_a_review_ask_one_card_per_call() {
         assert_eq!(
-            combine(ask(AwaitingReason::ExecConsent), Some(ReviewOutcome::Ask("r".into())), false),
+            combine(
+                ask(AwaitingReason::ExecConsent),
+                Some(ReviewOutcome::Ask("r".into())),
+                false
+            ),
             Outcome::Ask(AwaitingReason::ExecConsent, "why".into())
         );
     }
@@ -278,7 +290,10 @@ mod tests {
 
     #[test]
     fn allow_all_round_runs() {
-        assert_eq!(combine(Gate::Allow, Some(ReviewOutcome::Allow), false), Outcome::Run);
+        assert_eq!(
+            combine(Gate::Allow, Some(ReviewOutcome::Allow), false),
+            Outcome::Run
+        );
         assert_eq!(combine(Gate::Allow, None, false), Outcome::Run);
     }
 

@@ -486,11 +486,14 @@ mod tests {
     fn awaiting_approval_leaves_the_run_open() {
         let mut projection = Projection::new("t1", "r1", 100);
         projection.push(ModelDelta::Text("about to run something".to_string()));
-        let waiting = projection.awaiting_approval(&opengrok_tools::ToolCall {
-            id: "c1".to_string(),
-            name: "shell".to_string(),
-            arguments: serde_json::Value::Null,
-        }, opengrok_tools::AwaitingReason::ExecConsent);
+        let waiting = projection.awaiting_approval(
+            &opengrok_tools::ToolCall {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                arguments: serde_json::Value::Null,
+            },
+            opengrok_tools::AwaitingReason::ExecConsent,
+        );
 
         // The open message is closed, so nothing streams forever.
         assert!(types(&waiting).contains(&EventType::TextMessageEnd));

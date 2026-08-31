@@ -154,7 +154,13 @@ mod tests {
         ] {
             assert_eq!(parse_verdict(text), verdict, "{text:?}");
         }
-        for text in ["", "I think allow", "allow block", "allowed", "allow, but carefully"] {
+        for text in [
+            "",
+            "I think allow",
+            "allow block",
+            "allowed",
+            "allow, but carefully",
+        ] {
             assert_eq!(parse_verdict(text), ReviewVerdict::Unavailable, "{text:?}");
         }
     }
@@ -170,7 +176,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_door_is_unavailable_never_allow() {
-        let judge = ModelJudge::new(Arc::new(MockDoor::failing_with("upstream hung up")), "oag/cheap");
+        let judge = ModelJudge::new(
+            Arc::new(MockDoor::failing_with("upstream hung up")),
+            "oag/cheap",
+        );
         assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable);
     }
 
@@ -223,7 +232,12 @@ mod tests {
         let request = seen.expect("the door was asked");
         assert_eq!(request.model, "oag/judge-route");
         assert!(request.tools.is_empty());
-        assert!(request.system.as_deref().is_some_and(|s| s.starts_with(JUDGE_MARKER)));
+        assert!(
+            request
+                .system
+                .as_deref()
+                .is_some_and(|s| s.starts_with(JUDGE_MARKER))
+        );
         assert!(request.messages[0].content.contains("<<<ARGS"));
         assert!(request.messages[0].content.contains("(none)"));
     }

@@ -24,7 +24,9 @@ async fn store(database_url: &str) -> PgStore {
         .connect(database_url)
         .await
         .expect("connect");
-    opengrok_store::migrations::run(&pool).await.expect("migrations");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
     PgStore::new(pool)
 }
 
@@ -65,7 +67,10 @@ async fn a_device_registers_lists_touches_and_revokes() {
     assert_eq!(devices[0].5, Some(200));
 
     // Revoke ⇒ the gate closes again and the row reads revoked.
-    store.revoke_webauthn_credential(&account, &cred).await.expect("revoke");
+    store
+        .revoke_webauthn_credential(&account, &cred)
+        .await
+        .expect("revoke");
     assert!(!store.has_registered_device(&account).await.expect("gate"));
     let devices = store.webauthn_credentials(&account).await.expect("list");
     assert!(devices[0].6, "the row should read revoked");

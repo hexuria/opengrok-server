@@ -24,7 +24,7 @@
 //!   `{ "shellResult": ShellResult }` (success|failure|timeout|rejected|spawnError|permissionDenied)
 //!   is still read if it ever arrives. Either way the audit records the CASE, not just an exit code.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::broker::ExecOutcome;
 
@@ -86,7 +86,12 @@ pub fn outcome_from_client_message(message: &Value) -> ExecOutcome {
         return ExecOutcome::malformed("the daemon returned a shell result with no known case");
     };
     let body = &shell[*case];
-    let string = |key: &str| body.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let string = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     let exit_code = body
         .get("exitCode")
         .and_then(Value::as_i64)
@@ -124,7 +129,10 @@ pub enum StreamAction {
     Exit(i32),
     /// A terminal non-exit outcome (rejected / permissionDenied / backgrounded / sandboxUnsupported),
     /// with the case name the audit records and a human reason.
-    Terminal { case: String, detail: String },
+    Terminal {
+        case: String,
+        detail: String,
+    },
     /// A non-terminal event we do not act on (start / hookContext / anything unknown).
     Ignore,
 }
@@ -152,12 +160,20 @@ pub fn stream_action(message: &Value) -> Option<StreamAction> {
     } else if let Some(rejected) = stream.get("rejected") {
         Some(StreamAction::Terminal {
             case: "rejected".to_string(),
-            detail: rejected.get("reason").and_then(Value::as_str).unwrap_or("").to_string(),
+            detail: rejected
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         })
     } else if let Some(denied) = stream.get("permissionDenied") {
         Some(StreamAction::Terminal {
             case: "permissionDenied".to_string(),
-            detail: denied.get("error").and_then(Value::as_str).unwrap_or("").to_string(),
+            detail: denied
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         })
     } else if stream.get("backgrounded").is_some() {
         Some(StreamAction::Terminal {
@@ -181,11 +197,18 @@ mod tests {
 
     #[test]
     fn server_message_never_carries_a_caller_skip_approval() {
-        let msg = shell_server_message("req-1", "git status", &["git status".into()], "/repo", 5000);
+        let msg =
+            shell_server_message("req-1", "git status", &["git status".into()], "/repo", 5000);
         assert_eq!(msg["shellStreamArgs"]["skipApproval"], json!(false));
         assert_eq!(msg["shellStreamArgs"]["command"], "git status");
-        assert!(msg.get("shellArgs").is_none(), "the shell path is shellStreamArgs, not shellArgs");
-        assert!(msg.get("execId").is_none(), "ExecServerMessage has no execId field");
+        assert!(
+            msg.get("shellArgs").is_none(),
+            "the shell path is shellStreamArgs, not shellArgs"
+        );
+        assert!(
+            msg.get("execId").is_none(),
+            "ExecServerMessage has no execId field"
+        );
         assert_eq!(msg["shellStreamArgs"]["simpleCommands"][0], "git status");
     }
 
@@ -248,10 +271,16 @@ mod tests {
     #[test]
     fn stream_action_reads_chunks_and_a_terminal_exit() {
         let stdout = json!({ "id": 0, "shellStream": { "stdout": { "data": "Darwin\n" } } });
-        assert_eq!(stream_action(&stdout), Some(StreamAction::Stdout("Darwin\n".to_string())));
+        assert_eq!(
+            stream_action(&stdout),
+            Some(StreamAction::Stdout("Darwin\n".to_string()))
+        );
 
         let stderr = json!({ "shellStream": { "stderr": { "data": "oops" } } });
-        assert_eq!(stream_action(&stderr), Some(StreamAction::Stderr("oops".to_string())));
+        assert_eq!(
+            stream_action(&stderr),
+            Some(StreamAction::Stderr("oops".to_string()))
+        );
 
         let exit = json!({ "shellStream": { "exit": { "code": 0 } } });
         assert_eq!(stream_action(&exit), Some(StreamAction::Exit(0)));
@@ -262,10 +291,16 @@ mod tests {
         let denied = json!({ "shellStream": { "permissionDenied": { "error": "nope" } } });
         assert_eq!(
             stream_action(&denied),
-            Some(StreamAction::Terminal { case: "permissionDenied".to_string(), detail: "nope".to_string() })
+            Some(StreamAction::Terminal {
+                case: "permissionDenied".to_string(),
+                detail: "nope".to_string()
+            })
         );
 
         // A shellResult message is NOT a stream frame.
-        assert_eq!(stream_action(&json!({ "shellResult": { "success": {} } })), None);
+        assert_eq!(
+            stream_action(&json!({ "shellResult": { "success": {} } })),
+            None
+        );
     }
 }

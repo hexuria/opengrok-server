@@ -1356,7 +1356,11 @@ mod tests {
             &AccountId::from_stored("acct_1"),
             &CoworkerId::from_stored("cw_1"),
         );
-        assert!(!schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL));
+        assert!(
+            !schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL)
+        );
 
         let with = allowing(Arc::new(SpyComputer::default()))
             .with_user_machine(FakeSink::new(UserMachineReply::Ran("exit 0".into())));
@@ -1365,7 +1369,11 @@ mod tests {
             &AccountId::from_stored("acct_1"),
             &CoworkerId::from_stored("cw_1"),
         );
-        assert!(schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL));
+        assert!(
+            schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL)
+        );
     }
 
     #[tokio::test]
@@ -1396,28 +1404,44 @@ mod tests {
             &CoworkerId::from_stored("cw_1"),
         );
         assert!(
-            schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL),
+            schemas
+                .iter()
+                .any(|s| s["function"]["name"] == USER_MACHINE_SHELL),
             "reverse-exec tool must be offered even when the grant lists only box tools"
         );
         // And it RUNS (routes to the sink) rather than being refused by the grant.
         let result = executor
-            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "mkdir ~/Code/x"})))
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "mkdir ~/Code/x"})),
+            )
             .await;
         assert!(result.ok, "{result:?}");
-        assert_eq!(sink.seen.lock().unwrap().as_slice(), &["mkdir ~/Code/x".to_string()]);
+        assert_eq!(
+            sink.seen.lock().unwrap().as_slice(),
+            &["mkdir ~/Code/x".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn user_machine_shell_routes_the_command_to_the_sink_without_a_box() {
-        let sink = FakeSink::new(UserMachineReply::Ran("exit 0\n--- stdout ---\nuriah\n".into()));
+        let sink = FakeSink::new(UserMachineReply::Ran(
+            "exit 0\n--- stdout ---\nuriah\n".into(),
+        ));
         let executor = allowing(Arc::new(SpyComputer::default())).with_user_machine(sink.clone());
         // No box on the context — the reverse-exec tool must not need one.
         let result = executor
-            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "whoami"})))
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "whoami"})),
+            )
             .await;
         assert!(result.ok, "{result:?}");
         assert!(result.content.contains("uriah"));
-        assert_eq!(sink.seen.lock().unwrap().as_slice(), &["whoami".to_string()]);
+        assert_eq!(
+            sink.seen.lock().unwrap().as_slice(),
+            &["whoami".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1425,7 +1449,10 @@ mod tests {
         let executor = allowing(Arc::new(SpyComputer::default()))
             .with_user_machine(FakeSink::new(UserMachineReply::NeedsApproval));
         let result = executor
-            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "rm -rf x"})))
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "rm -rf x"})),
+            )
             .await;
         assert!(!result.ok);
         assert!(result.awaiting_approval, "an Ask must suspend the run");
@@ -1433,10 +1460,14 @@ mod tests {
 
     #[tokio::test]
     async fn user_machine_shell_relays_a_refusal_from_the_gate() {
-        let executor = allowing(Arc::new(SpyComputer::default()))
-            .with_user_machine(FakeSink::new(UserMachineReply::Refused("a deny rule matched".into())));
+        let executor = allowing(Arc::new(SpyComputer::default())).with_user_machine(FakeSink::new(
+            UserMachineReply::Refused("a deny rule matched".into()),
+        ));
         let result = executor
-            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "rm -rf /"})))
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "rm -rf /"})),
+            )
             .await;
         assert!(!result.ok);
         assert!(!result.awaiting_approval);
@@ -1449,7 +1480,10 @@ mod tests {
         // arrives it refuses rather than pretending, and never touches the bot's box.
         let executor = allowing(Arc::new(SpyComputer::default()));
         let result = executor
-            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "whoami"})))
+            .execute(
+                &no_box_context(),
+                &call(USER_MACHINE_SHELL, json!({"command": "whoami"})),
+            )
             .await;
         assert!(!result.ok);
         assert!(!result.awaiting_approval);
@@ -1464,7 +1498,10 @@ mod tests {
     }
     impl CountingJudge {
         fn new(verdict: ReviewVerdict) -> Arc<Self> {
-            Arc::new(Self { verdict, shown: std::sync::Mutex::new(Vec::new()) })
+            Arc::new(Self {
+                verdict,
+                shown: std::sync::Mutex::new(Vec::new()),
+            })
         }
         fn calls(&self) -> usize {
             self.shown.lock().map(|shown| shown.len()).unwrap_or(0)
@@ -1511,15 +1548,21 @@ mod tests {
     }
 
     fn sink_saw_nothing(sink: &FakeSink) -> bool {
-        sink.seen.lock().map(|seen| seen.is_empty()).unwrap_or(false)
+        sink.seen
+            .lock()
+            .map(|seen| seen.is_empty())
+            .unwrap_or(false)
     }
 
     #[tokio::test]
     async fn an_inactive_policy_never_calls_the_judge() {
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Block);
-        let executor = allowing(spy.clone()).with_auto_review(ReviewPolicy::default(), judge.clone());
-        let result = executor.execute(&context_with_box("box_mine"), &shell_call("c1")).await;
+        let executor =
+            allowing(spy.clone()).with_auto_review(ReviewPolicy::default(), judge.clone());
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
         assert!(result.ok, "{result:?}");
         assert_eq!(judge.calls(), 0, "nothing written ⇒ no judge call");
         assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
@@ -1532,7 +1575,9 @@ mod tests {
         let executor = allowing(spy.clone())
             .with_approved(["c1".to_string()])
             .with_auto_review(blocking_policy(), judge.clone());
-        let result = executor.execute(&context_with_box("box_mine"), &shell_call("c1")).await;
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
         assert!(result.ok, "{result:?}");
         assert_eq!(judge.calls(), 0, "a person already answered this call");
     }
@@ -1542,11 +1587,17 @@ mod tests {
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Block);
         let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge.clone());
-        let result = executor.execute(&context_with_box("box_mine"), &shell_call("c1")).await;
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
         assert!(!result.ok);
         assert!(!result.awaiting_approval);
         assert!(result.content.contains("never touch prod"), "{result:?}");
-        assert_eq!(spy.last_box(), None, "a blocked call must not reach the box");
+        assert_eq!(
+            spy.last_box(),
+            None,
+            "a blocked call must not reach the box"
+        );
         assert_eq!(judge.calls(), 1);
     }
 
@@ -1555,7 +1606,9 @@ mod tests {
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Ask);
         let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
-        let result = executor.execute(&context_with_box("box_mine"), &shell_call("c1")).await;
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
         assert!(result.awaiting_approval);
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert_eq!(spy.last_box(), None);
@@ -1566,7 +1619,9 @@ mod tests {
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Unavailable);
         let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
-        let result = executor.execute(&context_with_box("box_mine"), &shell_call("c1")).await;
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
         assert!(result.awaiting_approval);
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert!(result.content.contains("did not answer"), "{result:?}");
@@ -1583,7 +1638,11 @@ mod tests {
         let result = executor.execute(&no_box_context(), &machine_call()).await;
         assert!(!result.ok);
         assert!(result.content.contains("channel off"), "{result:?}");
-        assert_eq!(judge.calls(), 0, "no spend on a command the channel refused");
+        assert_eq!(
+            judge.calls(),
+            0,
+            "no spend on a command the channel refused"
+        );
         assert!(sink_saw_nothing(&sink));
     }
 
@@ -1611,7 +1670,10 @@ mod tests {
             .with_auto_review(blocking_policy(), judge);
         let result = executor.execute(&no_box_context(), &machine_call()).await;
         assert!(!result.ok);
-        assert!(!result.awaiting_approval, "a written rule outranks a pending click");
+        assert!(
+            !result.awaiting_approval,
+            "a written rule outranks a pending click"
+        );
         assert!(result.content.contains("never touch prod"), "{result:?}");
         assert!(sink_saw_nothing(&sink));
     }
@@ -1663,11 +1725,17 @@ mod tests {
             let result = executor
                 .execute(
                     &context,
-                    &call(&name, json!({"command": "ls", "path": "/tmp/a", "content": "x"})),
+                    &call(
+                        &name,
+                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                    ),
                 )
                 .await;
             assert!(!result.ok, "{name} slipped past the judge: {result:?}");
-            assert!(result.content.contains("auto-review blocked"), "{name}: {result:?}");
+            assert!(
+                result.content.contains("auto-review blocked"),
+                "{name}: {result:?}"
+            );
         }
         assert_eq!(spy.last_box(), None);
         assert!(sink_saw_nothing(&sink));
@@ -1687,7 +1755,15 @@ mod tests {
         assert_eq!(judge.calls(), 0, "the review answer stands");
         assert!(result.awaiting_approval);
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
-        let flags = sink.approved_flags.lock().map(|f| f.clone()).unwrap_or_default();
-        assert_eq!(flags, vec![false], "the sink must not be told the owner consented");
+        let flags = sink
+            .approved_flags
+            .lock()
+            .map(|f| f.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            flags,
+            vec![false],
+            "the sink must not be told the owner consented"
+        );
     }
 }

@@ -173,7 +173,11 @@ impl Resumption {
         }
     }
 
-    pub fn refused(call: opengrok_tools::ToolCall, message_seq: u32, why: impl Into<String>) -> Self {
+    pub fn refused(
+        call: opengrok_tools::ToolCall,
+        message_seq: u32,
+        why: impl Into<String>,
+    ) -> Self {
         Self {
             approved: call,
             message_seq,

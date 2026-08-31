@@ -12,8 +12,8 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// The outcome of one command, read off the daemon's result frame ([`super::wire`]). Carries both
 /// what the caller sees (stdout/stderr/detail) and what the audit records (the `case`, and an exit
@@ -196,7 +196,13 @@ impl LocalExecBroker {
     /// Accumulate a streaming-shell output chunk for a request. Ignored unless a waiter for this
     /// request exists and belongs to the posting machine — so a stray or cross-machine chunk is
     /// dropped rather than buffered forever.
-    pub async fn accumulate(&self, from_machine: &str, request_id: &str, is_stderr: bool, data: &str) {
+    pub async fn accumulate(
+        &self,
+        from_machine: &str,
+        request_id: &str,
+        is_stderr: bool,
+        data: &str,
+    ) {
         let mut inner = self.inner.lock().await;
         let ours = matches!(inner.waiters.get(request_id), Some((m, _)) if m == from_machine);
         if !ours {
@@ -290,7 +296,12 @@ mod tests {
         assert_eq!(welcome["kind"], "welcome");
 
         let rx = broker
-            .dispatch("mac_a", "req-1", "req-1", json!({ "shellArgs": { "command": "echo hi" } }))
+            .dispatch(
+                "mac_a",
+                "req-1",
+                "req-1",
+                json!({ "shellArgs": { "command": "echo hi" } }),
+            )
             .await
             .expect("dispatched");
 
@@ -348,7 +359,12 @@ mod tests {
         let mut stream = broker.connect("mac_a").await;
         let _ = stream.recv().await; // welcome
         let rx = broker
-            .dispatch("mac_a", "req-1", "req-1", json!({ "shellStreamArgs": { "command": "uname" } }))
+            .dispatch(
+                "mac_a",
+                "req-1",
+                "req-1",
+                json!({ "shellStreamArgs": { "command": "uname" } }),
+            )
             .await
             .expect("dispatched");
         let _ = stream.recv().await; // exec frame
@@ -356,7 +372,9 @@ mod tests {
         broker.accumulate("mac_a", "req-1", false, "Dar").await;
         broker.accumulate("mac_a", "req-1", false, "win\n").await;
         broker.accumulate("mac_a", "req-1", true, "").await;
-        broker.finish_stream("mac_a", "req-1", "success", Some(0), "").await;
+        broker
+            .finish_stream("mac_a", "req-1", "success", Some(0), "")
+            .await;
 
         let outcome = rx.await.expect("result");
         assert!(outcome.succeeded());
@@ -375,9 +393,13 @@ mod tests {
         let _ = a.recv().await;
         // A different machine cannot feed or finish this request.
         broker.accumulate("mac_evil", "req-1", false, "pwned").await;
-        broker.finish_stream("mac_evil", "req-1", "success", Some(0), "").await;
+        broker
+            .finish_stream("mac_evil", "req-1", "success", Some(0), "")
+            .await;
         // The real machine finishes it; the evil chunk never landed.
-        broker.finish_stream("mac_a", "req-1", "success", Some(0), "").await;
+        broker
+            .finish_stream("mac_a", "req-1", "success", Some(0), "")
+            .await;
         let outcome = rx.await.expect("result");
         assert_eq!(outcome.stdout, "");
     }

@@ -137,9 +137,9 @@ impl ModelDoor for MockDoor {
                 .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER))
         {
             let word = word.clone();
-            return Ok(Box::pin(stream::once(async move {
-                Ok(ModelDelta::Text(word))
-            })));
+            return Ok(Box::pin(stream::once(
+                async move { Ok(ModelDelta::Text(word)) },
+            )));
         }
         // Has this conversation already seen its tool result? The harness appends one as a user
         // message, so the conversation itself is the state.

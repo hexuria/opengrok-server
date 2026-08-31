@@ -95,7 +95,10 @@ fn pick<T>(
 /// Per field: coworker ?? global ?? default. Defaults are OFF and empty — auto-review is an
 /// opt-in the user switches on (unlike the exec channel, whose default is the closed `Never`:
 /// that gate guards reaching a machine at all; this one refines what a reachable coworker may do).
-pub fn resolve(global: Option<&AutoReviewRow>, coworker: Option<&AutoReviewRow>) -> EffectivePolicy {
+pub fn resolve(
+    global: Option<&AutoReviewRow>,
+    coworker: Option<&AutoReviewRow>,
+) -> EffectivePolicy {
     let tiers = [(DecidedBy::Coworker, coworker), (DecidedBy::Global, global)];
     let (enabled, enabled_by) = pick(&tiers, |row| row.enabled, false);
     let (allow_instructions, allow_by) =
@@ -263,8 +266,8 @@ async fn set_policy(
     }
     let allow = body.allow_instructions.as_deref().map(str::trim);
     let block = body.block_instructions.as_deref().map(str::trim);
-    let chars = allow.map_or(0, |text| text.chars().count())
-        + block.map_or(0, |text| text.chars().count());
+    let chars =
+        allow.map_or(0, |text| text.chars().count()) + block.map_or(0, |text| text.chars().count());
     if chars > MAX_INSTRUCTIONS_CHARS {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
