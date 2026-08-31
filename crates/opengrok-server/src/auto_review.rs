@@ -66,6 +66,15 @@ impl EffectivePolicy {
     pub fn is_active(&self) -> bool {
         self.enabled && !(self.allow_instructions.is_empty() && self.block_instructions.is_empty())
     }
+
+    /// What the executor carries — `Some` only when there is something to judge with, so an
+    /// inactive policy attaches nothing and costs nothing per call.
+    pub fn review_policy(&self) -> Option<opengrok_tools::ReviewPolicy> {
+        self.is_active().then(|| opengrok_tools::ReviewPolicy {
+            allow_instructions: self.allow_instructions.clone(),
+            block_instructions: self.block_instructions.clone(),
+        })
+    }
 }
 
 fn pick<T>(

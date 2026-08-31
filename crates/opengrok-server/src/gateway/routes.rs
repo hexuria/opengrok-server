@@ -323,6 +323,14 @@ async fn command(
                 body,
             )
         }
+        "resolveAutoReviewApproval" => {
+            let (code, body) =
+                super::conversation::resolve_auto_review_approval(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "stopAgentTurn" => {
             let (code, body) = super::conversation::stop_agent_turn(&state, &args, &caller).await;
             reply(
@@ -476,7 +484,7 @@ async fn command(
             .await,
         ),
         "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
-        "submitSecret" | "resolveAutoReviewApproval" | "appendConnectorCard" => {
+        "submitSecret" | "appendConnectorCard" => {
             reply(StatusCode::OK, Value::Null)
         }
 

@@ -854,6 +854,38 @@ pub struct ReverseExecSink {
 
 #[async_trait::async_trait]
 impl opengrok_tools::UserMachineSink for ReverseExecSink {
+    /// The gate's verdict with nothing queued — the executor consults auto-review between this
+    /// and `run`. A DENY is audited here, because a denied command never reaches `run`; an ask or
+    /// an allow is audited by `run` (`enqueue_and_wait`), which the executor still calls for both,
+    /// so every command that touched the channel has exactly one row.
+    async fn decide(
+        &self,
+        account_id: &opengrok_core::id::AccountId,
+        command: &str,
+    ) -> opengrok_tools::UserMachineVerdict {
+        let policy = load_policy(&self.auth.store, account_id.as_str(), &self.machine_id).await;
+        match decide(&policy, command) {
+            LocalExecDecision::Allow => opengrok_tools::UserMachineVerdict::Allow,
+            LocalExecDecision::Ask => opengrok_tools::UserMachineVerdict::Ask,
+            LocalExecDecision::Deny(why) => {
+                let _ = self
+                    .auth
+                    .store
+                    .audit_local_exec(
+                        &uuid::Uuid::now_v7().to_string(),
+                        account_id.as_str(),
+                        &self.machine_id,
+                        &Origin::Bot(self.coworker_id.clone()).label(),
+                        command,
+                        "deny",
+                        now_ms(),
+                    )
+                    .await;
+                opengrok_tools::UserMachineVerdict::Deny(why)
+            }
+        }
+    }
+
     async fn run(
         &self,
         account_id: &opengrok_core::id::AccountId,

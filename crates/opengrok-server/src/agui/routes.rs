@@ -41,6 +41,10 @@ pub struct AgUiState {
     /// a server-wide `ToolRunner` would carry one identity for everybody, which is precisely the
     /// confusion the identity rule exists to prevent.
     pub computer: Option<Arc<dyn opengrok_box::Computer>>,
+    /// The route the auto-review judge asks on — the deployment's own, never the coworker's: one
+    /// call per reviewed tool call must be cheap, the reviewer must not be the reviewed, and a
+    /// coworker-route outage must not become a wall of cards. `OG_AUTO_REVIEW_MODEL`.
+    pub auto_review_model: String,
     /// Seals connector credentials. `None` means no connector can be stored, which is a legitimate
     /// deployment — and must read as "connectors unavailable" rather than as a crash.
     pub vault: Option<Arc<opengrok_store::Vault>>,
@@ -76,6 +80,7 @@ pub(crate) async fn tools_for_coworker(
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     approved: &[String],
+    review_approved: &[String],
 ) -> Option<ToolRunner> {
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
@@ -132,7 +137,8 @@ pub(crate) async fn tools_for_coworker(
 
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
         .with_plugin_tools(sessions, tools)
-        .with_approved(approved.iter().cloned());
+        .with_approved(approved.iter().cloned())
+        .with_review_approved(review_approved.iter().cloned());
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -143,6 +149,26 @@ pub(crate) async fn tools_for_coworker(
             coworker_id: coworker_id.as_str().to_string(),
             machine_id,
         }));
+    }
+
+    // THE TIER WALK HAPPENS HERE, ONCE PER RUN (docs/AUTO-REVIEW.md §3). Per tool call the check
+    // is one in-memory test on the runner; a run that started before a PUT keeps the policy it
+    // started with, and a resumed run rebuilds its runner through this function and re-resolves.
+    // Nothing is attached when the policy is off or empty, so an unreviewed run costs nothing.
+    let effective = crate::auto_review::load_effective(
+        &state.auth.store,
+        account_id.as_str(),
+        Some(coworker_id.as_str()),
+    )
+    .await;
+    if let Some(policy) = effective.review_policy() {
+        executor = executor.with_auto_review(
+            policy,
+            Arc::new(opengrok_harness::ModelJudge::new(
+                state.door.clone(),
+                state.auto_review_model.clone(),
+            )),
+        );
     }
 
     Some(ToolRunner::new(executor, context))
@@ -842,7 +868,7 @@ pub async fn run(
 
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
-            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id, &[]).await,
+            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id, &[], &[]).await,
             None => None,
         },
         // No bearer, no identity, and therefore no tools: tools always run as somebody.
@@ -989,6 +1015,15 @@ async fn append_events(
                         .get("arguments")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null),
+                    // Absent on rows written before reasons existed ⇒ exec-consent, which is
+                    // what every such suspension meant.
+                    reason: opengrok_core::run::SuspendReason::from_stored(
+                        event
+                            .extra
+                            .get("reason")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                    ),
                     at_ms,
                 })
             {
@@ -1283,22 +1318,26 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no coworker, so it cannot continue");
         return;
     };
-    let Some(computer) = state.computer.clone() else {
-        return;
-    };
     let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
         return;
     };
-    let Ok(policy) = state.auth.store.policy_for(&account_id, &coworker_id).await else {
+
+    // The approved call, and only it — carried on the SAME runner every other path builds
+    // (plugins, the user's machine, auto-review). This path once built a bare executor of its
+    // own and so resumed with no plugins and no review: a resumed call slipped every gate but the
+    // grant's. Which yes it was decides which gate it releases.
+    let (gate_yes, review_yes): (&[String], &[String]) = match approved.reason {
+        opengrok_core::run::SuspendReason::AutoReview => {
+            (&[], std::slice::from_ref(&approved.call_id))
+        }
+        _ => (std::slice::from_ref(&approved.call_id), &[]),
+    };
+    let Some(runner) =
+        tools_for_coworker(&state, &account_id, &coworker_id, gate_yes, review_yes).await
+    else {
+        tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
-
-    // The approved call, and only it: the executor carries the id the person actually answered.
-    let runner = ToolRunner::new(
-        opengrok_tools::Executor::with_policy(computer, policy)
-            .with_approved([approved.call_id.clone()]),
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
-    );
 
     let journal = StoreJournal {
         state: state.clone(),
@@ -1331,6 +1370,7 @@ async fn continue_run(
                 arguments: approved.arguments,
             },
             message_seq: resumed_seq,
+            outcome: opengrok_harness::ResumeOutcome::Approved,
         },
     )
     .await;

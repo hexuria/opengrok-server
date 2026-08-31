@@ -110,6 +110,7 @@ fn app_with(store: PgStore, secret: &[u8]) -> axum::Router {
         auth,
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
         computer: None,
         vault: None,
         connectors: Connectors {

@@ -595,16 +595,19 @@ pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> 
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Find a reverse-exec tool suspension in a finished run's events: the `run-awaiting-approval`
-/// custom event for `user_machine_shell`, returning its (callId, command). `None` when the run did
-/// not pause on the user's-own-machine tool.
-fn find_user_machine_suspension(events: &[opengrok_wire::agui::Event]) -> Option<(String, String)> {
+/// The suspension a run's events carry, if any: which call is waiting, with what, and WHY. The
+/// reason picks the card — the tool name no longer can, since two cards can come from one tool.
+struct Suspension {
+    call_id: String,
+    tool: String,
+    arguments: Value,
+    reason: opengrok_core::run::SuspendReason,
+}
+
+fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
     for event in events {
         if event.event_type == opengrok_wire::agui::EventType::Custom
             && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
-            && event.extra.get("tool").and_then(Value::as_str)
-                == Some(opengrok_tools::USER_MACHINE_SHELL)
         {
             let call_id = event
                 .extra
@@ -612,19 +615,104 @@ fn find_user_machine_suspension(events: &[opengrok_wire::agui::Event]) -> Option
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let command = event
-                .extra
-                .get("arguments")
-                .and_then(|arguments| arguments.get("command"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if !call_id.is_empty() {
-                return Some((call_id, command));
+            if call_id.is_empty() {
+                continue;
             }
+            return Some(Suspension {
+                call_id,
+                tool: event
+                    .extra
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                arguments: event.extra.get("arguments").cloned().unwrap_or(Value::Null),
+                reason: opengrok_core::run::SuspendReason::from_stored(
+                    event
+                        .extra
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+            });
         }
     }
     None
+}
+
+/// The card for a suspension, or `None` when this kind of pause has no card yet. requestId =
+/// callId for both cards, threaded back onto the run when the card is answered so every gate
+/// converges on one id.
+fn card_for(suspension: &Suspension) -> Option<Value> {
+    use opengrok_core::run::SuspendReason;
+    match suspension.reason {
+        // The machine owner's consent: the four-button `local-tool-permission` card, byte-identical
+        // to what shipped before reasons existed.
+        SuspendReason::ExecConsent if suspension.tool == opengrok_tools::USER_MACHINE_SHELL => {
+            let command = suspension
+                .arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Some(json!({
+                "kind": "send-message",
+                "id": entry_id(),
+                "timestampMs": now_ms(),
+                "message": {
+                    "type": "local-tool-permission",
+                    "ask": {
+                        "requestId": suspension.call_id,
+                        "status": "pending",
+                        "action": "run-command",
+                        "target": command,
+                    },
+                },
+            }))
+        }
+        SuspendReason::AutoReview => Some(super::cards::auto_review_card(
+            &entry_id(),
+            &suspension.call_id,
+            "pending",
+            &suspension.tool,
+            &suspension.arguments,
+            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            now_ms(),
+        )),
+        // A policy-grant approval on a box tool has no card in the desktop client yet. Named and
+        // logged rather than invisible; the same emission point grows a card when one exists.
+        _ => None,
+    }
+}
+
+/// Append a suspension's card and pause the agent. `true` when a card went out; the caller then
+/// returns without finalising the turn as an answer.
+async fn emit_suspension(
+    state: &GatewayState,
+    coworker_id: &CoworkerId,
+    agent_id: &str,
+    suspension: &Suspension,
+) -> bool {
+    let Some(card) = card_for(suspension) else {
+        tracing::warn!(
+            tool = %suspension.tool,
+            reason = suspension.reason.as_str(),
+            "a run suspended for a reason that has no card yet; the turn ends as an answer"
+        );
+        return false;
+    };
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_gateway_entry(coworker_id, &card, now_ms())
+        .await
+    {
+        tracing::error!(%error, "could not append the suspension card entry");
+    }
+    live::emit_transcript(state, agent_id, "appended", card);
+    // The turn is paused, not running. It resumes when the card is answered.
+    live::set_running(state, agent_id, false, json!({})).await;
+    true
 }
 
 pub(crate) async fn run_turn(
@@ -652,7 +740,7 @@ pub(crate) async fn run_turn(
     };
 
     let tools =
-        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[]).await;
+        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[], &[]).await;
     // Whether this turn can actually reach the user's machine — read from the offered schemas so
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
@@ -723,11 +811,11 @@ pub(crate) async fn run_turn(
     // it as the four-button card), and hold the turn. The run aggregate is already suspended by the
     // journal, so resolveLocalToolPermission can resume it. requestId = callId, threaded onto the
     // exec frame when the run resumes so both gates converge on one id.
-    if let Some((call_id, command)) = find_user_machine_suspension(&events) {
+    if let Some(suspension) = find_suspension(&events) {
         let answer_entry = json!({
             "kind": "send-message",
-            "id": answer_id,
-            "message": { "type": "text", "content": text },
+            "id": answer_id.clone(),
+            "message": { "type": "text", "content": text.clone() },
             "timestampMs": now_ms(),
         });
         let _ = state
@@ -737,36 +825,10 @@ pub(crate) async fn run_turn(
             .update_gateway_entry(&coworker_id, answer_seq, &answer_entry)
             .await;
         live::emit_transcript(&state, &agent_id, "updated", answer_entry);
-
-        let card = json!({
-            "kind": "send-message",
-            "id": entry_id(),
-            "timestampMs": now_ms(),
-            "message": {
-                "type": "local-tool-permission",
-                "ask": {
-                    "requestId": call_id,
-                    "status": "pending",
-                    "action": "run-command",
-                    "target": command,
-                },
-            },
-        });
-        if let Err(error) = state
-            .agui
-            .auth
-            .store
-            .append_gateway_entry(&coworker_id, &card, now_ms())
-            .await
-        {
-            tracing::error!(%error, "could not append the local-tool-permission card entry");
+        if emit_suspension(&state, &coworker_id, &agent_id, &suspension).await {
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
         }
-        live::emit_transcript(&state, &agent_id, "appended", card);
-
-        // The turn is paused, not running. It resumes when the card is answered.
-        live::set_running(&state, &agent_id, false, json!({})).await;
-        finished.store(true, std::sync::atomic::Ordering::SeqCst);
-        return;
     }
 
     if text.is_empty() {
@@ -932,6 +994,34 @@ pub async fn acceptance_status(state: &GatewayState, args: &Value, caller: &str)
 // ---------------------------------------------------------------------------------------------
 
 /// `resolveLocalToolPermission` — `{ entryId, requestId(=callId), resolution, agentId }`.
+/// A card already settled — by an earlier press, or by another device — answers "already
+/// answered" rather than being healed to "expired". The run itself has left the awaiting list by
+/// then, so the card's own durable status is the only thing that can tell a double-click from a
+/// dead request. `path` is the card's status field: `ask` for the exec card, `approval` for the
+/// auto-review card.
+async fn card_already_settled(
+    state: &GatewayState,
+    coworker_id: &CoworkerId,
+    entry_id: &str,
+    path: &str,
+) -> bool {
+    if entry_id.is_empty() {
+        return false;
+    }
+    match state
+        .agui
+        .auth
+        .store
+        .find_gateway_entry(coworker_id, entry_id)
+        .await
+    {
+        Ok(Some((_, entry))) => entry["message"][path]["status"]
+            .as_str()
+            .is_some_and(|status| status != "pending"),
+        _ => false,
+    }
+}
+
 pub async fn resolve_local_tool_permission(
     state: &GatewayState,
     args: &Value,
@@ -983,12 +1073,21 @@ pub async fn resolve_local_tool_permission(
         if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
             && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
             && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
+            // The wrong verb must not settle the other card: this one answers the machine
+            // owner's consent, never an auto-review ask.
+            && run.pending.as_ref().map(|p| p.reason)
+                != Some(opengrok_core::run::SuspendReason::AutoReview)
         {
             found = Some((run_id, run, seq));
             break;
         }
     }
     let Some((run_id, mut run, seq)) = found else {
+        // A second press on a card that already settled — the run has left the awaiting list,
+        // which is exactly what an answered run does. Not a dead request; do not heal it.
+        if card_already_settled(state, &coworker_id, &entry_id, "ask").await {
+            return (200, json!({ "alreadyAnswered": true }));
+        }
         // The card names a request no run is waiting on — its run died (a crash, a sweep, a
         // restart) without ever answering. Left alone the card is a trap: every control on it
         // posts here, and a bare 404 leaves it rendered as answerable, eating presses forever.
@@ -1111,9 +1210,18 @@ pub async fn resolve_local_tool_permission(
         .await;
     live::emit_transcript(state, &agent_id, "updated", card);
 
-    // On approval, carry the turn on in the background: the resumed run dispatches the command and
-    // the model's own summary lands in the transcript.
-    if approved && let Some(pending) = pending {
+    // Carry the turn on in the background EITHER WAY: on approval the resumed run dispatches the
+    // command and the model's own summary lands in the transcript; on refusal the model is told
+    // the owner declined, as a result it can reason about (CLAUDE.md #8), rather than the run
+    // being left answered-but-silent.
+    if let Some(pending) = pending {
+        let outcome = if approved {
+            opengrok_harness::ResumeOutcome::Approved
+        } else {
+            opengrok_harness::ResumeOutcome::Refused(
+                "the machine's owner declined to run this command".to_string(),
+            )
+        };
         let state = state.clone();
         tokio::spawn(resume_gateway_run(
             state,
@@ -1123,6 +1231,163 @@ pub async fn resolve_local_tool_permission(
             agent_id,
             pending,
             resumed_seq,
+            outcome,
+        ));
+    }
+
+    (200, json!({ "ok": true }))
+}
+
+/// `resolveAutoReviewApproval {entryId, requestId, resolution, agentId}` — the auto-review card's
+/// answer. Mirrors `resolve_local_tool_permission` step for step; the differences are the card
+/// path it flips (`message.approval.status`), the suspension reason it will settle (ONLY
+/// auto-review), and that it writes no standing rule — the card's "Always" is client-side, which
+/// appends the proposed rule to the coworker tier through `PUT /auto-review/policy` and then
+/// sends `approved`.
+pub async fn resolve_auto_review_approval(
+    state: &GatewayState,
+    args: &Value,
+    caller: &str,
+) -> (u16, Value) {
+    let entry_id = args
+        .get("entryId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let request_id = args
+        .get("requestId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    // `resolution` on the wire; `status` accepted too (the transcription table records the
+    // answer as {requestId, status}) — one line, and it cannot break the contract.
+    let word = args
+        .get("resolution")
+        .or_else(|| args.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if request_id.is_empty() || word.is_empty() {
+        return (400, json!({ "error": "requestId and resolution are required" }));
+    }
+    let Some(agent_id) = agent_or_active(state, args) else {
+        return (400, json!({ "error": "no agent named and none active" }));
+    };
+    let coworker_id = CoworkerId::from_stored(agent_id.clone());
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
+        return (401, json!({ "error": "the gateway account does not exist yet" }));
+    };
+    let account_id = account.id;
+
+    let run_ids = state
+        .agui
+        .auth
+        .store
+        .awaiting_approval(&account_id)
+        .await
+        .unwrap_or_default();
+    let mut found = None;
+    for run_id in run_ids {
+        if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
+            && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
+            && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
+            && run.pending.as_ref().map(|p| p.reason)
+                == Some(opengrok_core::run::SuspendReason::AutoReview)
+        {
+            found = Some((run_id, run, seq));
+            break;
+        }
+    }
+    let Some((run_id, mut run, seq)) = found else {
+        if card_already_settled(state, &coworker_id, &entry_id, "approval").await {
+            return (200, json!({ "alreadyAnswered": true }));
+        }
+        // Same heal as the exec card: the press flips ONLY approval.status to "expired" and the
+        // client reads 410 as stale. Asks never expire on their own.
+        if !entry_id.is_empty()
+            && let Ok(Some(card)) = state
+                .agui
+                .auth
+                .store
+                .set_gateway_approval_status(&coworker_id, &entry_id, "expired")
+                .await
+        {
+            live::emit_transcript(state, &agent_id, "updated", card);
+        }
+        return (
+            410,
+            json!({ "error": "this request is no longer pending — ask the bot again" }),
+        );
+    };
+
+    let approved = matches!(word.as_str(), "approved" | "always" | "allow-once");
+    let pending = run.pending.clone();
+    let resumed_seq = run.emitted.len() as u32;
+
+    let at_ms = now_ms();
+    let events = match run.decide(opengrok_core::run::RunCommand::Answer {
+        call_id: request_id.clone(),
+        approved,
+        by: account_id.to_string(),
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(opengrok_core::run::RunError::AlreadyAnswered) => {
+            return (200, json!({ "alreadyAnswered": true }));
+        }
+        Err(error) => return (409, json!({ "error": error.to_string() })),
+    };
+    for event in &events {
+        run.apply(event);
+    }
+    let view = opengrok_core::run::RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_run(&run_id, seq, &events, &view, Some(&account_id))
+        .await
+    {
+        return (503, json!({ "error": error.to_string() }));
+    }
+
+    // Flip the card on the SAME entryId — the renderer dedups on requestId:status.
+    let status = if approved { "approved" } else { "denied" };
+    if !entry_id.is_empty()
+        && let Ok(Some(card)) = state
+            .agui
+            .auth
+            .store
+            .set_gateway_approval_status(&coworker_id, &entry_id, status)
+            .await
+    {
+        live::emit_transcript(state, &agent_id, "updated", card);
+    }
+
+    if let Some(pending) = pending {
+        let outcome = if approved {
+            opengrok_harness::ResumeOutcome::Approved
+        } else {
+            opengrok_harness::ResumeOutcome::Refused(
+                "the user declined this on the auto-review card".to_string(),
+            )
+        };
+        let state = state.clone();
+        tokio::spawn(resume_gateway_run(
+            state,
+            account_id,
+            run_id,
+            coworker_id,
+            agent_id,
+            pending,
+            resumed_seq,
+            outcome,
         ));
     }
 
@@ -1132,6 +1397,7 @@ pub async fn resolve_local_tool_permission(
 /// Resume an approved gateway run: re-run the conversation with the approved tool call (which makes
 /// `user_machine_shell` dispatch instead of re-asking), then land the model's summary in the
 /// transcript as an ordinary bot message.
+#[allow(clippy::too_many_arguments)]
 async fn resume_gateway_run(
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,
@@ -1140,6 +1406,7 @@ async fn resume_gateway_run(
     agent_id: String,
     pending: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
+    outcome: opengrok_harness::ResumeOutcome,
 ) {
     let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
         return;
@@ -1147,12 +1414,21 @@ async fn resume_gateway_run(
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
         return;
     };
-    // The runner carries the approved call id, so user_machine_shell dispatches on resume.
+    // The runner carries the answered call id — as a GATE approval (the machine owner's or the
+    // policy's card) or a REVIEW approval, by the suspension's reason. A review yes skips the
+    // judge and releases nothing else; a gate yes is what makes user_machine_shell dispatch.
+    let (gate_yes, review_yes): (&[String], &[String]) = match pending.reason {
+        opengrok_core::run::SuspendReason::AutoReview => {
+            (&[], std::slice::from_ref(&pending.call_id))
+        }
+        _ => (std::slice::from_ref(&pending.call_id), &[]),
+    };
     let Some(runner) = crate::agui::routes::tools_for_coworker(
         &state.agui,
         &account_id,
         &coworker_id,
-        std::slice::from_ref(&pending.call_id),
+        gate_yes,
+        review_yes,
     )
     .await
     else {
@@ -1185,6 +1461,7 @@ async fn resume_gateway_run(
                 arguments: pending.arguments,
             },
             message_seq: resumed_seq,
+            outcome,
         },
     )
     .await;
@@ -1201,7 +1478,7 @@ async fn resume_gateway_run(
         let answer = json!({
             "kind": "send-message",
             "id": entry_id(),
-            "message": { "type": "text", "content": text },
+            "message": { "type": "text", "content": text.clone() },
             "timestampMs": now_ms(),
         });
         if let Ok(_seq) = state
@@ -1213,6 +1490,13 @@ async fn resume_gateway_run(
         {
             live::emit_transcript(&state, &agent_id, "appended", answer);
         }
+    }
+    // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its
+    // card exactly like the first turn did; without this the run paused with nothing to press.
+    if let Some(suspension) = find_suspension(&events)
+        && emit_suspension(&state, &coworker_id, &agent_id, &suspension).await
+    {
+        return;
     }
 
     let preview: String = text.chars().take(120).collect();

@@ -95,6 +95,34 @@ impl PgStore {
         })
     }
 
+    /// The same surgical flip as `set_gateway_ask_status`, on the auto-review card's own path
+    /// (`message.approval.status`). Touching one field keeps the summary/reason/command/
+    /// proposedRule the user was shown intact — a whole-entry rewrite would need them back from a
+    /// caller that never had them.
+    pub async fn set_gateway_approval_status(
+        &self,
+        coworker: &CoworkerId,
+        entry_id: &str,
+        status: &str,
+    ) -> StoreResult<Option<Value>> {
+        let row = sqlx::query(
+            "update gateway_entry
+                set entry = jsonb_set(entry::jsonb, '{message,approval,status}', to_jsonb($3::text))::jsonb
+              where coworker_id = $1 and entry->>'id' = $2
+                and entry->'message'->'approval' is not null
+              returning entry",
+        )
+        .bind(coworker.as_str())
+        .bind(entry_id)
+        .bind(status)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(match row {
+            Some(row) => Some(row.try_get("entry")?),
+            None => None,
+        })
+    }
+
     pub async fn update_gateway_entry(
         &self,
         coworker: &CoworkerId,

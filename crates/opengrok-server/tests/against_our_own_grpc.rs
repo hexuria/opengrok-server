@@ -47,6 +47,7 @@ async fn state_with(secret: &[u8], database_url: &str) -> GatewayState {
         auth,
         door: Arc::new(opengrok_harness::MockDoor::echoing()),
         model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
         computer: None,
         vault: None,
         connectors: opengrok_server::connections::routes::Connectors {

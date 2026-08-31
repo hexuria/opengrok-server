@@ -1,9 +1,14 @@
 # Auto-review: two tiers, one gate
 
-Status (2026-08-31): §2, §3 and §6 are **implemented** (`crates/opengrok-store/src/auto_review.rs`,
-`crates/opengrok-server/src/auto_review.rs`, unit + Postgres-backed tests); §4 enforcement and the
-real `resolveAutoReviewApproval` in §5 are **still to build**. The audit of what existed before is
-§1. The consent model this sits inside is §0.
+Status (2026-08-31): **implemented end to end.** Storage/resolution/API (§2, §3, §6) in
+`crates/opengrok-store/src/auto_review.rs` + `crates/opengrok-server/src/auto_review.rs`; the
+judge at the tool seam (§4) in `crates/opengrok-tools/src/review.rs` (`combine`, the ladder) and
+`crates/opengrok-harness/src/review.rs` (`ModelJudge`, `parse_verdict`); the card and the real
+`resolveAutoReviewApproval` (§5) in `crates/opengrok-server/src/gateway/{cards,conversation}.rs`.
+Tests: unit (ladder, redaction, judge parsing, cards) and Postgres-backed (tiers, resolve verb).
+`OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask`
+cans the judge under a mock door. The audit of what existed before is §1; the consent model this
+sits inside is §0.
 
 ## 0. The consent model (one question per layer)
 

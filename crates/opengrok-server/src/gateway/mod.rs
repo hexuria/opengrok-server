@@ -15,6 +15,7 @@
 //! served — exactly `gateway-server.ts`'s posture, so a deployment that forgets the token fails
 //! closed instead of open.
 
+pub mod cards;
 pub mod conversation;
 pub mod lifecycle;
 pub mod live;

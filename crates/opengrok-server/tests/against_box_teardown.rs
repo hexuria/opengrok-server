@@ -76,6 +76,7 @@ async fn test_state(database_url: &str) -> AgUiState {
         auth,
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
         computer: None,
         // No vault ⇒ no org box key ⇒ the provider is a Local VM (server Docker).
         vault: None,
