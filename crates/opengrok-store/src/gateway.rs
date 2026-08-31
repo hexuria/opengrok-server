@@ -67,6 +67,34 @@ impl PgStore {
         Ok(())
     }
 
+    /// Flip ONLY `message.ask.status` on an approval-card entry, returning the updated entry —
+    /// for the path that heals an orphaned card. A whole-entry replace here would need the
+    /// original `target` back from the caller, and the caller (a resolve for a dead run) never
+    /// had it; touching one field keeps the command the user was shown intact.
+    pub async fn set_gateway_ask_status(
+        &self,
+        coworker: &CoworkerId,
+        entry_id: &str,
+        status: &str,
+    ) -> StoreResult<Option<Value>> {
+        let row = sqlx::query(
+            "update gateway_entry
+                set entry = jsonb_set(entry::jsonb, '{message,ask,status}', to_jsonb($3::text))::jsonb
+              where coworker_id = $1 and entry->>'id' = $2
+                and entry->'message'->'ask' is not null
+              returning entry",
+        )
+        .bind(coworker.as_str())
+        .bind(entry_id)
+        .bind(status)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(match row {
+            Some(row) => Some(row.try_get("entry")?),
+            None => None,
+        })
+    }
+
     pub async fn update_gateway_entry(
         &self,
         coworker: &CoworkerId,

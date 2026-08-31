@@ -925,7 +925,26 @@ pub async fn resolve_local_tool_permission(
         }
     }
     let Some((run_id, mut run, seq)) = found else {
-        return (404, json!({ "error": "no pending approval for that request" }));
+        // The card names a request no run is waiting on — its run died (a crash, a sweep, a
+        // restart) without ever answering. Left alone the card is a trap: every control on it
+        // posts here, and a bare 404 leaves it rendered as answerable, eating presses forever.
+        // Flip ONLY the entry's ask.status so the press itself heals the card (the command it
+        // showed stays intact), and say plainly what happened. Asks never expire on their own —
+        // this path is only for a request whose run is genuinely gone.
+        if !entry_id.is_empty()
+            && let Ok(Some(card)) = state
+                .agui
+                .auth
+                .store
+                .set_gateway_ask_status(&coworker_id, &entry_id, "expired")
+                .await
+        {
+            live::emit_transcript(state, &agent_id, "updated", card);
+        }
+        return (
+            410,
+            json!({ "error": "this request is no longer pending — ask the bot again" }),
+        );
     };
 
     // Allow once / always → approve; never / deny → refuse. (A client may downgrade a blocked
