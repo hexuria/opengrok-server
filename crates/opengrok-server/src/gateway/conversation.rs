@@ -560,6 +560,37 @@ pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Find a reverse-exec tool suspension in a finished run's events: the `run-awaiting-approval`
+/// custom event for `user_machine_shell`, returning its (callId, command). `None` when the run did
+/// not pause on the user's-own-machine tool.
+fn find_user_machine_suspension(events: &[opengrok_wire::agui::Event]) -> Option<(String, String)> {
+    for event in events {
+        if event.event_type == opengrok_wire::agui::EventType::Custom
+            && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
+            && event.extra.get("tool").and_then(Value::as_str)
+                == Some(opengrok_tools::USER_MACHINE_SHELL)
+        {
+            let call_id = event
+                .extra
+                .get("callId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let command = event
+                .extra
+                .get("arguments")
+                .and_then(|arguments| arguments.get("command"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            if !call_id.is_empty() {
+                return Some((call_id, command));
+            }
+        }
+    }
+    None
+}
+
 pub(crate) async fn run_turn(
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,
@@ -628,6 +659,58 @@ pub(crate) async fn run_turn(
             text.push_str(delta);
         }
     }
+    // A reverse-exec tool suspension: the run paused for the user to approve a command on their OWN
+    // machine. That is NOT "no answer" — it is the inline approval card. Finalise whatever text
+    // preceded the tool call, emit the pending `local-tool-permission` card entry (the client renders
+    // it as the four-button card), and hold the turn. The run aggregate is already suspended by the
+    // journal, so resolveLocalToolPermission can resume it. requestId = callId, threaded onto the
+    // exec frame when the run resumes so both gates converge on one id.
+    if let Some((call_id, command)) = find_user_machine_suspension(&events) {
+        let answer_entry = json!({
+            "kind": "send-message",
+            "id": answer_id,
+            "message": { "type": "text", "content": text },
+            "timestampMs": now_ms(),
+        });
+        let _ = state
+            .agui
+            .auth
+            .store
+            .update_gateway_entry(&coworker_id, answer_seq, &answer_entry)
+            .await;
+        live::emit_transcript(&state, &agent_id, "updated", answer_entry);
+
+        let card = json!({
+            "kind": "send-message",
+            "id": entry_id(),
+            "timestampMs": now_ms(),
+            "message": {
+                "type": "local-tool-permission",
+                "ask": {
+                    "requestId": call_id,
+                    "status": "pending",
+                    "action": "run-command",
+                    "target": command,
+                },
+            },
+        });
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(&coworker_id, &card, now_ms())
+            .await
+        {
+            tracing::error!(%error, "could not append the local-tool-permission card entry");
+        }
+        live::emit_transcript(&state, &agent_id, "appended", card);
+
+        // The turn is paused, not running. It resumes when the card is answered.
+        live::set_running(&state, &agent_id, false, json!({})).await;
+        finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        return;
+    }
+
     if text.is_empty() {
         text = "The turn produced no answer. Its run log has the reason.".to_string();
     }
