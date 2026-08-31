@@ -121,7 +121,7 @@ impl LocalExecBroker {
         let (tx, rx) = mpsc::unbounded_channel();
         // The first frame names the provider so the daemon can correlate — mirrors the client's
         // `welcome{providerId}`.
-        let _ = tx.send(json!({ "type": "welcome", "providerId": machine_id }));
+        let _ = tx.send(json!({ "kind": "welcome", "providerId": machine_id }));
         let mut inner = self.inner.lock().await;
         inner.providers.insert(machine_id.to_string(), tx);
         rx
@@ -151,8 +151,12 @@ impl LocalExecBroker {
             return Err(DispatchError::NoDaemon);
         };
         let frame = json!({
-            "type": "exec",
+            "kind": "exec",
             "requestId": request_id,
+            // Every command we dispatch has already passed the server gate, so it is approved; the
+            // approvalId is the daemon's local consent handle (a frame without one is refused on the
+            // machine when its local tools are set to "ask"). Same id as the request — it is unique.
+            "approvalId": request_id,
             "serverMessage": server_message,
         });
         if provider.send(frame).is_err() {
@@ -191,7 +195,7 @@ impl LocalExecBroker {
         let mut inner = self.inner.lock().await;
         inner.waiters.remove(request_id);
         if let Some(provider) = inner.providers.get(machine_id) {
-            let _ = provider.send(json!({ "type": "cancel", "requestId": request_id }));
+            let _ = provider.send(json!({ "kind": "cancel", "requestId": request_id }));
         }
     }
 }
@@ -226,7 +230,7 @@ mod tests {
 
         // First frame down the stream is the welcome.
         let welcome = stream.recv().await.expect("welcome");
-        assert_eq!(welcome["type"], "welcome");
+        assert_eq!(welcome["kind"], "welcome");
 
         let rx = broker
             .dispatch("mac_a", "req-1", json!({ "shellArgs": { "command": "echo hi" } }))
@@ -234,7 +238,7 @@ mod tests {
             .expect("dispatched");
 
         let frame = stream.recv().await.expect("exec frame");
-        assert_eq!(frame["type"], "exec");
+        assert_eq!(frame["kind"], "exec");
         assert_eq!(frame["requestId"], "req-1");
         assert_eq!(frame["serverMessage"]["shellArgs"]["command"], "echo hi");
 

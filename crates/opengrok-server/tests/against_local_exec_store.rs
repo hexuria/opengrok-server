@@ -176,7 +176,7 @@ async fn fake_daemon(state: &AuthState, machine: &str, reply: ExecOutcome) {
     let mut stream = broker.connect(&machine).await;
     tokio::spawn(async move {
         while let Some(frame) = stream.recv().await {
-            if frame["type"] == "exec" {
+            if frame["kind"] == "exec" {
                 let request_id = frame["requestId"].as_str().unwrap_or_default().to_string();
                 broker.resolve(&machine, &request_id, reply.clone()).await;
                 return;
