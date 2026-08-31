@@ -518,7 +518,7 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
     // machine exists, "my computer" will name two real machines; this wording keeps them apart.)
     match name {
         "shell" => Some((
-            "Run a shell command on THIS BOT'S OWN computer — a sandboxed Linux box on the server, \
+            "Run a shell command on THIS BOT'S OWN computer — a sandboxed box on the server, \
              not the user's own machine — and return its stdout, stderr and exit code.",
             serde_json::json!({
                 "type": "object",
@@ -548,7 +548,7 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         USER_MACHINE_SHELL => Some((
-            "Run a shell command on the USER'S OWN machine — their real computer (for example their              Mac), NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
+            "Run a shell command on the USER'S OWN machine — the real computer they enrolled,              NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
             serde_json::json!({
                 "type": "object",
                 "properties": { "command": { "type": "string", "description": "The shell command to run on the USER's own machine." } },

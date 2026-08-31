@@ -816,9 +816,12 @@ async fn post_responses(
 /// The account's first enrolled, enabled machine, if any — the target `user_machine_shell` binds to.
 /// `Never` (or revoked) machines are skipped, so the tool is offered ONLY when there is a live,
 /// consenting machine to reach. (v1 targets the first such machine; per-machine choice is later.)
-pub async fn enabled_machine(store: &opengrok_store::PgStore, account_id: &str) -> Option<String> {
+pub async fn enabled_machine(
+    store: &opengrok_store::PgStore,
+    account_id: &str,
+) -> Option<(String, String)> {
     let machines = store.list_daemons(account_id).await.ok()?;
-    for (machine_id, _label, _enrolled_at_ms, revoked) in machines {
+    for (machine_id, label, _enrolled_at_ms, revoked) in machines {
         if revoked {
             continue;
         }
@@ -830,7 +833,9 @@ pub async fn enabled_machine(store: &opengrok_store::PgStore, account_id: &str) 
             .map(|mode| LocalExecMode::from_stored(&mode))
             .unwrap_or_default();
         if mode != LocalExecMode::Never {
-            return Some(machine_id);
+            // The label rides along so prompts can name the ACTUAL enrolled computer
+            // ("Uriah's-MacBook-Pro.local") instead of guessing at an OS or hardware name.
+            return Some((machine_id, label));
         }
     }
     None

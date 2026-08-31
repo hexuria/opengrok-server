@@ -136,7 +136,7 @@ pub(crate) async fn tools_for_coworker(
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
-    if let Some(machine_id) = crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
+    if let Some((machine_id, _label)) = crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
     {
         executor = executor.with_user_machine(std::sync::Arc::new(crate::local_exec::ReverseExecSink {
             auth: state.auth.clone(),

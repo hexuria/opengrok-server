@@ -32,17 +32,53 @@ fn now_ms() -> i64 {
 /// bot must never present work done on its box as done on the user's computer. When it has no
 /// computer, it should say so rather than pretend. Written for the day a reverse channel makes "my
 /// computer" name two real machines — the distinction has to be in the model's head before then.
-fn computer_system_prompt(has_computer: bool) -> String {
+fn computer_system_prompt(
+    has_computer: bool,
+    reaches_user_machine: bool,
+    user_machine_label: Option<&str>,
+) -> String {
     if has_computer {
-        "You have your OWN computer: a sandboxed Linux box running on the server. It is a DIFFERENT \
-         machine from the user's own computer (for example their Mac). Your shell, read_file and \
+        // NO OS OR HARDWARE NAMES HERE. The box's runtime varies (Linux today; other kinds later)
+        // and the user's machine is whatever they enrolled — naming either ("Linux box", "their
+        // Mac") turns the prompt into a lie the day the fleet changes. The distinction that must
+        // survive is WHOSE machine, not what it runs.
+        let mut prompt = "You have your OWN computer: a sandboxed box running on the server. It is a DIFFERENT \
+         machine from the user's own computer. Your shell, read_file and \
          write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
-         Never describe work done on your box as done on the user's computer. If the user asks you \
-         to do something on THEIR computer, tell them you can only use your own box and cannot reach \
-         their machine, and offer to do it on your box instead."
-            .to_string()
+         Never describe work done on your box as done on the user's computer."
+            .to_string();
+        // The two halves of this prompt MUST track the tool list. The refusal wording below was
+        // shipped while `user_machine_shell` was being offered, and the model believed the prompt
+        // over the tool: it answered "I can't access your Mac" without ever calling it. A system
+        // prompt that contradicts the offering silently disables the tool.
+        if reaches_user_machine {
+            // The enrolled label (e.g. "Uriah's-MacBook-Pro.local") is the one name for the
+            // user's machine that stays TRUE whatever it runs — the daemon reported it at
+            // enrolment. Guessing an OS instead ("their Mac") becomes a lie the day a Windows
+            // or second machine enrolls. No label ⇒ stay generic, never invent one.
+            let machine = match user_machine_label {
+                Some(label) => format!("the computer they enrolled, \"{label}\""),
+                None => "the real computer they enrolled".to_string(),
+            };
+            prompt.push_str(&format!(
+                " You ALSO have the `user_machine_shell` tool, which runs a command on the USER'S \
+                 OWN machine — {machine} — with their consent: a command may \
+                 run, be refused, or wait for the user to approve it, and waiting is normal — the \
+                 user may answer minutes or hours later, so never retry or give up on a waiting \
+                 command. When the user asks you to do something on THEIR computer, use \
+                 `user_machine_shell` rather than telling them to do it themselves, and refer to \
+                 their machine by that name."
+            ));
+        } else {
+            prompt.push_str(
+                " If the user asks you to do something on THEIR computer, tell them you can only \
+                 use your own box and cannot reach their machine, and offer to do it on your box \
+                 instead.",
+            );
+        }
+        prompt
     } else {
         "You do NOT currently have a computer, so you cannot run shell commands or read or write \
          files anywhere. Do not claim to run commands or access any machine. If the user needs \
@@ -617,6 +653,24 @@ pub(crate) async fn run_turn(
 
     let tools =
         crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[]).await;
+    // Whether this turn can actually reach the user's machine — read from the offered schemas so
+    // the prompt can never contradict the tool list again. The enrolled label is decoration on top
+    // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
+    // just means the prompt speaks generically.
+    let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
+        runner
+            .tool_schemas()
+            .iter()
+            .any(|schema| schema["function"]["name"] == opengrok_tools::USER_MACHINE_SHELL)
+    });
+    let user_machine_label = if reaches_user_machine {
+        crate::local_exec::enabled_machine(&state.agui.auth.store, account_id.as_str())
+            .await
+            .map(|(_machine_id, label)| label)
+            .filter(|label| !label.trim().is_empty())
+    } else {
+        None
+    };
     let journal = StoreJournal {
         state: state.agui.clone(),
         thread_id: thread_id.clone(),
@@ -629,7 +683,11 @@ pub(crate) async fn run_turn(
         // these are different machines, so it would run a command on its box and call the box "your
         // computer" — the exact confusion a person hits when a file lands "on their machine" that is
         // really on the server. This says, plainly, whose machine the tools touch and to say so.
-        system: Some(computer_system_prompt(tools.is_some())),
+        system: Some(computer_system_prompt(
+            tools.is_some(),
+            reaches_user_machine,
+            user_machine_label.as_deref(),
+        )),
         messages,
         tools: Vec::new(),
     };
@@ -895,14 +953,20 @@ pub async fn resolve_local_tool_permission(
         .unwrap_or_default()
         .to_string();
     if request_id.is_empty() || resolution.is_empty() {
-        return (400, json!({ "error": "requestId and resolution are required" }));
+        return (
+            400,
+            json!({ "error": "requestId and resolution are required" }),
+        );
     }
     let Some(agent_id) = agent_or_active(state, args) else {
         return (400, json!({ "error": "no agent named and none active" }));
     };
     let coworker_id = CoworkerId::from_stored(agent_id.clone());
     let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
-        return (401, json!({ "error": "the gateway account does not exist yet" }));
+        return (
+            401,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
     };
     let account_id = account.id;
 
