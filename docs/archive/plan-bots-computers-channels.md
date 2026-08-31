@@ -1,5 +1,7 @@
 # Plan — Bots, their Computers, and Channels
 
+> **Archived 1 Sep 2026 — half executed.** Provisioning-on-create shipped (`41245b5`); the channels half is deliberately parked with P11 (ROADMAP "Later").
+
 **Status:** proposed. Spans the server (`opengrok-server`, mine) and the desktop client
 (`opengrok`, the peer's — frontend work relayed to that session).
 **Date:** 2026-08-30.

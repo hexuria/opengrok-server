@@ -1,5 +1,7 @@
 # Port blockers — measured, not guessed
 
+> **Archived 1 Sep 2026 — moot.** B1 still reproduces, but nothing leans on the env var any more: the client connects through its own OpenGrok server mode. `../verification/real-client/README.md` is the re-check record.
+
 ## B1 — `SAND_HOST_GATEWAY_URL` deadlocks the reconstructed app before its window (30 Aug 2026)
 
 **The repoint the whole port ladder leans on does not currently work in the reconstructed

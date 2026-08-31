@@ -1,5 +1,7 @@
 # Identity model — LOCKED 30 Aug 2026
 
+> **Archived 1 Sep 2026 — executed.** Shipped as ROADMAP slice 12 (`796bf61`); the deferred items live in ROADMAP 12.later.
+
 The desktop integration surfaced a need the port ladder never had: real accounts. This is the
 consolidated model from everything Uriah said this session, with the conflicts and blockers named
 rather than guessed. **No code until this is locked** — the model changed three times in one turn,

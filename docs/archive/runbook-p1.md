@@ -1,9 +1,11 @@
 # Standing P1 up
 
+> **Archived 1 Sep 2026.** P1-era procedure (port 1337, the seam-B mock, a smoke script that was never written under this name). Standing the server up today: `../setup/`.
+
 How to point the Grok Bot desktop client at a local OpenGrok and prove P1 is done. Written because
 the prerequisite chain is four separate things and none of them is guessable.
 
-**Read [`PLAN.md`](PLAN.md) §2 first** — especially the loopback trap. It is the failure that looks
+**Read [`PLAN.md`](../PLAN.md) §2 first** — especially the loopback trap. It is the failure that looks
 like a bug in your code and is not.
 
 ---

@@ -238,7 +238,8 @@ either and `listAgents` is never called. Then `listAgents` (array), the resync c
 `openAgentTail`. `opengrok-store` gets its first migrations alongside.
 
 **The full ordered table, the four environment variables, the Postgres setup and the acceptance
-script are in [`RUNBOOK.md`](RUNBOOK.md) — P1 is not startable without it.** The same list is
+script are in [`archive/runbook-p1.md`](archive/runbook-p1.md) — P1 was not startable without
+it (today: [`setup/`](setup/README.md)).** The same list is
 mirrored in `crates/opengrok-wire/src/command.rs` as `P1_COMMANDS`, so the plan and the code cannot drift.
 
 Watch for Trap 2: an *empty success* is the dangerous reply. `listAgents` returning `[]` is valid,

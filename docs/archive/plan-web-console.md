@@ -1,5 +1,7 @@
 # Plan — OpenGrok Web Console (Account + Admin dashboards)
 
+> **Archived 1 Sep 2026 — executed.** Shipped as ROADMAP slice 13; browser evidence in `../verification/web-console/`.
+
 **Status:** proposed, not started. Supersedes the Aug-29 Next.js scaffold in `web/`.
 **Owner:** this session (opengrok-server).
 **Date:** 2026-08-30.

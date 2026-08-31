@@ -27,7 +27,7 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 | Plugins / connectors | [Agent Plugins](https://agent-plugins.org/) format (`plugin.json` + `skills/` + `mcp.json`) for gmail, github, gdrive, mem0/OpenMemory. Connectors are MCP servers we connect to, not code we write. |
 | Sandboxed shell | `vercel-labs/just-bash` is TypeScript — usable only inside a Node sidecar or on the box itself, not in-process. Evaluate when the tool executor needs a no-box shell; do not block on it. |
 | Repo | [`hexuria/opengrok-server`](https://github.com/hexuria/opengrok-server), **private** (LEGAL #4). Checked out at `/Volumes/goldcoders/OSS/opengrok-server`. Renamed 29 Aug 2026 to free the name `opengrok` for another repo; **the crates did not change** — `opengrok-server` in `crates/` is the Axum crate and always was. |
-| The gate | `scripts/gate.sh` runs everything the workflow runs; `--smoke` adds all five smoke scripts. **GitHub Actions is currently blocked on account billing** ("recent account payments have failed or your spending limit needs to be increased"), so the local gate is the gate until that is settled. Publishing to get free minutes is not an option the rights review has cleared. |
+| The gate | `scripts/gate.sh` runs everything the workflow runs; `--smoke` adds the 19 smoke scripts (`docs/setup/gate.md`). **GitHub Actions is currently blocked on account billing** ("recent account payments have failed or your spending limit needs to be increased"), so the local gate is the gate until that is settled. Publishing to get free minutes is not an option the rights review has cleared. |
 
 ### Evaluated and deferred
 
