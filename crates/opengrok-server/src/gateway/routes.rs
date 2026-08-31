@@ -547,18 +547,54 @@ async fn command(
         // With no computer provider configured, null is the well-formed truth the validator
         // accepts; the lifecycle verbs are accepted no-ops so a UI click is not an error banner.
         "getCloudAgentInfo" => reply(StatusCode::OK, Value::Null),
-        "ensureForeverBox" | "resetForeverBox" | "updateForeverBox" | "handBackForeverBox" => {
-            if state.agui.computer.is_none() {
-                reply(StatusCode::OK, Value::Null)
-            } else {
-                // A provider exists: the coworker's box is assigned at hire/run time by slice 4's
-                // machinery; this surface reports rather than re-plumbs it.
-                let agent = args.get("agentId").and_then(Value::as_str).unwrap_or("");
-                reply(
-                    StatusCode::OK,
-                    json!({ "agentId": agent, "state": "running", "vncUrl": null }),
-                )
-            }
+        // The box-control verbs, for real (no "running" stub): each acts on the caller's agent's box
+        // and answers with its true resulting state. updateForeverBox has no image-update mechanism
+        // for our boxes, so it reports the current status honestly rather than faking an update.
+        "ensureForeverBox" => {
+            let (code, body) = super::conversation::box_control(
+                &state,
+                &args,
+                &caller,
+                super::conversation::BoxAction::Ensure,
+            )
+            .await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "handBackForeverBox" => {
+            let (code, body) = super::conversation::box_control(
+                &state,
+                &args,
+                &caller,
+                super::conversation::BoxAction::HandBack,
+            )
+            .await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "resetForeverBox" => {
+            let (code, body) = super::conversation::box_control(
+                &state,
+                &args,
+                &caller,
+                super::conversation::BoxAction::Reset,
+            )
+            .await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "updateForeverBox" => {
+            let (code, body) = super::conversation::box_status(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
         }
         "autoUpdateBoxNow"
         | "snapshotBoxStoreNow"
