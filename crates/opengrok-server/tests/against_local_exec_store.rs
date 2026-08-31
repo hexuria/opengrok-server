@@ -209,7 +209,7 @@ async fn a_bot_allowlisted_command_runs_and_audits_success() {
     fake_daemon(&state, &machine, success()).await;
     let result = enqueue_and_wait(
         &state, &account, &machine, "echo hi", &["echo hi".to_string()],
-        Origin::Bot("cw_1".to_string()),
+        Origin::Bot("cw_1".to_string()), "appr", false,
     ).await;
     assert!(matches!(&result, EnqueueResult::Ran(o) if o.succeeded()));
 
@@ -232,7 +232,7 @@ async fn a_bot_unlisted_command_needs_approval_and_never_dispatches() {
     // No daemon connected — if this dispatched it would refuse; instead it must suspend for a person.
     let result = enqueue_and_wait(
         &state, &account, &machine, "curl example.com", &["curl example.com".to_string()],
-        Origin::Bot("cw_1".to_string()),
+        Origin::Bot("cw_1".to_string()), "appr", false,
     ).await;
     assert!(matches!(result, EnqueueResult::NeedsApproval));
     let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
@@ -252,7 +252,7 @@ async fn a_user_direct_command_skips_ask_and_runs() {
 
     fake_daemon(&state, &machine, success()).await;
     let result = enqueue_and_wait(
-        &state, &account, &machine, "whoami", &["whoami".to_string()], Origin::User,
+        &state, &account, &machine, "whoami", &["whoami".to_string()], Origin::User, "appr", false,
     ).await;
     assert!(matches!(result, EnqueueResult::Ran(_)));
     let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
@@ -272,7 +272,7 @@ async fn a_denylisted_command_is_refused_for_the_user_too() {
     state.store.add_local_exec_rule(&account, &machine, "deny", "rm", 2).await.expect("deny");
 
     let result = enqueue_and_wait(
-        &state, &account, &machine, "rm -rf /", &["rm -rf /".to_string()], Origin::User,
+        &state, &account, &machine, "rm -rf /", &["rm -rf /".to_string()], Origin::User, "appr", false,
     ).await;
     assert!(matches!(result, EnqueueResult::Refused(_)));
     let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");
@@ -290,7 +290,7 @@ async fn an_allowed_command_with_no_daemon_is_refused_not_hung() {
 
     // Bypass allows it, but nothing is connected: refuse crisply rather than wait forever.
     let result = enqueue_and_wait(
-        &state, &account, &machine, "echo hi", &["echo hi".to_string()], Origin::User,
+        &state, &account, &machine, "echo hi", &["echo hi".to_string()], Origin::User, "appr", false,
     ).await;
     assert!(matches!(&result, EnqueueResult::Refused(reason) if reason.contains("not connected")));
     let log = state.store.local_exec_audit_log(&account, 10).await.expect("log");

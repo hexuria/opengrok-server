@@ -315,6 +315,14 @@ async fn command(
                 body,
             )
         }
+        "resolveLocalToolPermission" => {
+            let (code, body) =
+                super::conversation::resolve_local_tool_permission(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "stopAgentTurn" => {
             let (code, body) = super::conversation::stop_agent_turn(&state, &args, &caller).await;
             reply(
@@ -468,10 +476,9 @@ async fn command(
             .await,
         ),
         "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
-        "submitSecret"
-        | "resolveAutoReviewApproval"
-        | "resolveLocalToolPermission"
-        | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
+        "submitSecret" | "resolveAutoReviewApproval" | "appendConnectorCard" => {
+            reply(StatusCode::OK, Value::Null)
+        }
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
         "getAgentAutomations" | "listAllAutomations" => {

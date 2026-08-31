@@ -126,8 +126,16 @@ pub enum UserMachineReply {
 #[async_trait::async_trait]
 pub trait UserMachineSink: Send + Sync {
     /// Enqueue `command` on this account holder's own machine through the gate, and wait for the
-    /// outcome. The server picks the machine, runs the gate, and writes the audit row.
-    async fn run(&self, account_id: &AccountId, command: &str) -> UserMachineReply;
+    /// outcome. The server picks the machine, runs the gate, and writes the audit row. `call_id` is
+    /// the tool call id — the stable approval id the inline card uses; `approved` is true on resume
+    /// (the card said yes), so the Ask gate dispatches instead of suspending again.
+    async fn run(
+        &self,
+        account_id: &AccountId,
+        command: &str,
+        call_id: &str,
+        approved: bool,
+    ) -> UserMachineReply;
 }
 
 /// The arguments `shell` accepts. `box_id` is deliberately absent — see the module note.
@@ -345,8 +353,9 @@ impl Executor {
                     "no machine of yours is connected, so nothing can run there",
                 );
             };
+            let approved = self.approved_calls.contains(&call.id);
             return match serde_json::from_value::<ShellArgs>(call.arguments.clone()) {
-                Ok(args) => match sink.run(&context.account_id, &args.command).await {
+                Ok(args) => match sink.run(&context.account_id, &args.command, &call.id, approved).await {
                     UserMachineReply::Ran(text) => ToolResult::ok(&call.id, text),
                     UserMachineReply::Refused(why) => ToolResult::refused(&call.id, why),
                     UserMachineReply::NeedsApproval => ToolResult::awaiting(
@@ -1160,7 +1169,13 @@ mod tests {
     }
     #[async_trait]
     impl UserMachineSink for FakeSink {
-        async fn run(&self, _account_id: &AccountId, command: &str) -> UserMachineReply {
+        async fn run(
+            &self,
+            _account_id: &AccountId,
+            command: &str,
+            _call_id: &str,
+            _approved: bool,
+        ) -> UserMachineReply {
             if let Ok(mut seen) = self.seen.lock() {
                 seen.push(command.to_string());
             }

@@ -146,6 +146,7 @@ impl LocalExecBroker {
         &self,
         machine_id: &str,
         request_id: &str,
+        approval_id: &str,
         server_message: Value,
     ) -> Result<oneshot::Receiver<ExecOutcome>, DispatchError> {
         let (tx, rx) = oneshot::channel();
@@ -156,10 +157,10 @@ impl LocalExecBroker {
         let frame = json!({
             "kind": "exec",
             "requestId": request_id,
-            // Every command we dispatch has already passed the server gate, so it is approved; the
-            // approvalId is the daemon's local consent handle (a frame without one is refused on the
-            // machine when its local tools are set to "ask"). Same id as the request — it is unique.
-            "approvalId": request_id,
+            // The approvalId is the daemon's local consent handle: the id the inline card recorded
+            // the local approval under (= the tool call id for a bot), so the daemon's own gate finds
+            // it and does not re-prompt. Distinct from requestId, which only correlates the result.
+            "approvalId": approval_id,
             "serverMessage": server_message,
         });
         if provider.send(frame).is_err() {
@@ -272,7 +273,7 @@ mod tests {
     async fn dispatch_refuses_when_no_daemon_is_connected() {
         let broker = LocalExecBroker::new();
         let result = broker
-            .dispatch("mac_a", "req-1", json!({ "shellArgs": {} }))
+            .dispatch("mac_a", "req-1", "req-1", json!({ "shellArgs": {} }))
             .await;
         assert_eq!(result.unwrap_err(), DispatchError::NoDaemon);
     }
@@ -287,7 +288,7 @@ mod tests {
         assert_eq!(welcome["kind"], "welcome");
 
         let rx = broker
-            .dispatch("mac_a", "req-1", json!({ "shellArgs": { "command": "echo hi" } }))
+            .dispatch("mac_a", "req-1", "req-1", json!({ "shellArgs": { "command": "echo hi" } }))
             .await
             .expect("dispatched");
 
@@ -311,7 +312,7 @@ mod tests {
         let _ = second.recv().await; // welcome
 
         broker
-            .dispatch("mac_a", "req-1", json!({ "shellArgs": {} }))
+            .dispatch("mac_a", "req-1", "req-1", json!({ "shellArgs": {} }))
             .await
             .expect("dispatched to the live stream");
         // The exec frame goes to the NEW stream, not the retired one.
@@ -345,7 +346,7 @@ mod tests {
         let mut stream = broker.connect("mac_a").await;
         let _ = stream.recv().await; // welcome
         let rx = broker
-            .dispatch("mac_a", "req-1", json!({ "shellStreamArgs": { "command": "uname" } }))
+            .dispatch("mac_a", "req-1", "req-1", json!({ "shellStreamArgs": { "command": "uname" } }))
             .await
             .expect("dispatched");
         let _ = stream.recv().await; // exec frame
@@ -366,7 +367,7 @@ mod tests {
         let mut a = broker.connect("mac_a").await;
         let _ = a.recv().await;
         let rx = broker
-            .dispatch("mac_a", "req-1", json!({ "shellStreamArgs": {} }))
+            .dispatch("mac_a", "req-1", "req-1", json!({ "shellStreamArgs": {} }))
             .await
             .expect("dispatched");
         let _ = a.recv().await;

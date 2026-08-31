@@ -46,6 +46,27 @@ impl PgStore {
     }
 
     /// Replace the entry at a known sequence — how a streamed answer becomes its final self.
+    /// Update a transcript entry by its `id` (the entry's own `"id"` field), not its seq — for
+    /// re-emitting an entry whose seq the caller did not keep (e.g. the approval card, flipped from
+    /// pending to its outcome status).
+    pub async fn update_gateway_entry_by_id(
+        &self,
+        coworker: &CoworkerId,
+        entry_id: &str,
+        entry: &Value,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update gateway_entry set entry = $3
+              where coworker_id = $1 and entry->>'id' = $2",
+        )
+        .bind(coworker.as_str())
+        .bind(entry_id)
+        .bind(entry)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn update_gateway_entry(
         &self,
         coworker: &CoworkerId,

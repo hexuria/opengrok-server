@@ -75,6 +75,7 @@ pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    approved: &[String],
 ) -> Option<ToolRunner> {
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
@@ -129,8 +130,9 @@ pub(crate) async fn tools_for_coworker(
         opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id.clone(), &coworker);
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
-    let mut executor =
-        opengrok_tools::Executor::with_policy(computer, policy).with_plugin_tools(sessions, tools);
+    let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_plugin_tools(sessions, tools)
+        .with_approved(approved.iter().cloned());
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -840,7 +842,7 @@ pub async fn run(
 
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
-            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id).await,
+            Some(coworker_id) => tools_for_coworker(&state, account_id, coworker_id, &[]).await,
             None => None,
         },
         // No bearer, no identity, and therefore no tools: tools always run as somebody.
@@ -1220,7 +1222,7 @@ pub async fn answer_run(
 /// The log is the only record of a run that outlives the request that started it, so a resumed run
 /// has to read its own history rather than being handed one. Text the assistant said and results
 /// its tools returned are what the model needs to carry on; the framing events are not.
-fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
+pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
     let mut assistant = String::new();
 

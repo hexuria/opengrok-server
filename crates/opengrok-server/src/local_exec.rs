@@ -522,6 +522,7 @@ pub enum EnqueueResult {
 /// THE enqueue path. Judges `command` through the gate for this `machine`, and — only if allowed —
 /// dispatches it to the machine's daemon and waits for the result. The one server-side choke point:
 /// nothing reaches a Mac without passing `decide` and writing an audit row here.
+#[allow(clippy::too_many_arguments)]
 pub async fn enqueue_and_wait(
     state: &AuthState,
     account_id: &str,
@@ -529,6 +530,8 @@ pub async fn enqueue_and_wait(
     command: &str,
     simple_commands: &[String],
     origin: Origin,
+    approval_id: &str,
+    pre_approved: bool,
 ) -> EnqueueResult {
     let policy = load_policy(&state.store, account_id, machine_id).await;
     let decision = decide(&policy, command);
@@ -560,14 +563,24 @@ pub async fn enqueue_and_wait(
             audit("deny").await;
             EnqueueResult::Refused(reason)
         }
-        LocalExecDecision::Ask if !origin.is_user() => {
+        // A bot's Ask: suspend for the card — UNLESS the card already approved it (pre_approved on
+        // resume), in which case dispatch with the approvalId the card recorded the machine-side
+        // consent under.
+        LocalExecDecision::Ask if !origin.is_user() && !pre_approved => {
             audit("ask").await;
             EnqueueResult::NeedsApproval
         }
-        // Allow, Bypass, or a user's own Ask-skipped command: run it.
+        // Allow, Bypass, a user's own Ask-skipped command, or a bot's Ask that the card approved.
         _ => {
-            audit(if user_skipped_ask { "allow-user" } else { "allow" }).await;
-            run_on_machine(state, machine_id, &request_id, command, simple_commands).await
+            let word = if user_skipped_ask {
+                "allow-user"
+            } else if pre_approved {
+                "allow-approved"
+            } else {
+                "allow"
+            };
+            audit(word).await;
+            run_on_machine(state, machine_id, &request_id, approval_id, command, simple_commands).await
         }
     }
 }
@@ -578,6 +591,7 @@ async fn run_on_machine(
     state: &AuthState,
     machine_id: &str,
     request_id: &str,
+    approval_id: &str,
     command: &str,
     simple_commands: &[String],
 ) -> EnqueueResult {
@@ -590,7 +604,7 @@ async fn run_on_machine(
     );
     let rx = match state
         .local_exec
-        .dispatch(machine_id, request_id, server_message)
+        .dispatch(machine_id, request_id, approval_id, server_message)
         .await
     {
         Ok(rx) => rx,
@@ -649,6 +663,7 @@ async fn run_direct(
     } else {
         body.simple_commands
     };
+    let approval_id = uuid::Uuid::now_v7().to_string();
     match enqueue_and_wait(
         &state,
         account_id.as_str(),
@@ -656,6 +671,8 @@ async fn run_direct(
         command,
         &simple,
         Origin::User,
+        &approval_id,
+        false,
     )
     .await
     {
@@ -836,7 +853,12 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
         &self,
         account_id: &opengrok_core::id::AccountId,
         command: &str,
+        call_id: &str,
+        approved: bool,
     ) -> opengrok_tools::UserMachineReply {
+        // The approvalId IS the tool call id — stable across suspend/resume, and the id the inline
+        // card records the machine-side approval under. `approved` is true on resume (the card said
+        // yes), so the Ask gate dispatches instead of suspending again.
         match enqueue_and_wait(
             &self.auth,
             account_id.as_str(),
@@ -844,6 +866,8 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
             command,
             &[command.to_string()],
             Origin::Bot(self.coworker_id.clone()),
+            call_id,
+            approved,
         )
         .await
         {

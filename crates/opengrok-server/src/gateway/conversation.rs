@@ -616,7 +616,7 @@ pub(crate) async fn run_turn(
     };
 
     let tools =
-        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id).await;
+        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[]).await;
     let journal = StoreJournal {
         state: state.agui.clone(),
         thread_id: thread_id.clone(),
@@ -863,4 +863,257 @@ pub async fn acceptance_status(state: &GatewayState, args: &Value, caller: &str)
             (500, json!({ "error": "acceptance ledger unavailable" }))
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The inline approval card's answer (reverse-exec increment B). The card the bot posted on Ask is
+// answered here: allow → resume the turn so the command dispatches (with approvalId = callId, which
+// the card already recorded the machine-side approval under) and the bot's own summary lands in the
+// transcript; deny → cancel. Either way the card entry is re-emitted with its outcome status, which
+// flips the client's four buttons into the outcome line.
+// ---------------------------------------------------------------------------------------------
+
+/// `resolveLocalToolPermission` — `{ entryId, requestId(=callId), resolution, agentId }`.
+pub async fn resolve_local_tool_permission(
+    state: &GatewayState,
+    args: &Value,
+    caller: &str,
+) -> (u16, Value) {
+    let entry_id = args
+        .get("entryId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let request_id = args
+        .get("requestId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let resolution = args
+        .get("resolution")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if request_id.is_empty() || resolution.is_empty() {
+        return (400, json!({ "error": "requestId and resolution are required" }));
+    }
+    let Some(agent_id) = agent_or_active(state, args) else {
+        return (400, json!({ "error": "no agent named and none active" }));
+    };
+    let coworker_id = CoworkerId::from_stored(agent_id.clone());
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
+        return (401, json!({ "error": "the gateway account does not exist yet" }));
+    };
+    let account_id = account.id;
+
+    // Find the suspended run whose pending call is this requestId (= the tool call id).
+    let run_ids = state
+        .agui
+        .auth
+        .store
+        .awaiting_approval(&account_id)
+        .await
+        .unwrap_or_default();
+    let mut found = None;
+    for run_id in run_ids {
+        if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
+            && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
+            && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
+        {
+            found = Some((run_id, run, seq));
+            break;
+        }
+    }
+    let Some((run_id, mut run, seq)) = found else {
+        return (404, json!({ "error": "no pending approval for that request" }));
+    };
+
+    // Allow once / always → approve; never / deny → refuse. (A client may downgrade a blocked
+    // "always" to "allow-once" before it reaches here — both approve, so no special case.)
+    let approved = matches!(resolution.as_str(), "always" | "allow-once");
+    let pending = run.pending.clone();
+    let command = pending
+        .as_ref()
+        .and_then(|p| p.arguments.get("command"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let resumed_seq = run.emitted.len() as u32;
+
+    // Answer the run aggregate — exactly once; a second click is refused by the aggregate.
+    let at_ms = now_ms();
+    let events = match run.decide(opengrok_core::run::RunCommand::Answer {
+        call_id: request_id.clone(),
+        approved,
+        by: account_id.to_string(),
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(opengrok_core::run::RunError::AlreadyAnswered) => {
+            return (200, json!({ "alreadyAnswered": true }));
+        }
+        Err(error) => return (409, json!({ "error": error.to_string() })),
+    };
+    for event in &events {
+        run.apply(event);
+    }
+    let view = opengrok_core::run::RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_run(&run_id, seq, &events, &view, Some(&account_id))
+        .await
+    {
+        return (503, json!({ "error": error.to_string() }));
+    }
+
+    // Flip the card to its outcome status — same entry id, new ask.status, so the client re-renders
+    // the row from buttons to the outcome line.
+    let status = match resolution.as_str() {
+        "always" => "always",
+        "allow-once" => "allow-once",
+        "never" => "never",
+        _ => "denied",
+    };
+    let card = json!({
+        "kind": "send-message",
+        "id": entry_id,
+        "timestampMs": now_ms(),
+        "message": {
+            "type": "local-tool-permission",
+            "ask": {
+                "requestId": request_id,
+                "status": status,
+                "action": "run-command",
+                "target": command,
+            },
+        },
+    });
+    let _ = state
+        .agui
+        .auth
+        .store
+        .update_gateway_entry_by_id(&coworker_id, &entry_id, &card)
+        .await;
+    live::emit_transcript(state, &agent_id, "updated", card);
+
+    // On approval, carry the turn on in the background: the resumed run dispatches the command and
+    // the model's own summary lands in the transcript.
+    if approved && let Some(pending) = pending {
+        let state = state.clone();
+        tokio::spawn(resume_gateway_run(
+            state,
+            account_id,
+            run_id,
+            coworker_id,
+            agent_id,
+            pending,
+            resumed_seq,
+        ));
+    }
+
+    (200, json!({ "ok": true }))
+}
+
+/// Resume an approved gateway run: re-run the conversation with the approved tool call (which makes
+/// `user_machine_shell` dispatch instead of re-asking), then land the model's summary in the
+/// transcript as an ordinary bot message.
+async fn resume_gateway_run(
+    state: GatewayState,
+    account_id: opengrok_core::id::AccountId,
+    run_id: RunId,
+    coworker_id: CoworkerId,
+    agent_id: String,
+    pending: opengrok_core::run::PendingApproval,
+    resumed_seq: u32,
+) {
+    let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        return;
+    };
+    let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
+        return;
+    };
+    // The runner carries the approved call id, so user_machine_shell dispatches on resume.
+    let Some(runner) = crate::agui::routes::tools_for_coworker(
+        &state.agui,
+        &account_id,
+        &coworker_id,
+        std::slice::from_ref(&pending.call_id),
+    )
+    .await
+    else {
+        return;
+    };
+    let journal = crate::agui::routes::StoreJournal {
+        state: state.agui.clone(),
+        thread_id: run.thread_id.clone(),
+        account_id: Some(account_id.clone()),
+        coworker_id: Some(coworker_id.clone()),
+    };
+    let request = ModelRequest {
+        model: coworker.model.clone(),
+        system: None,
+        messages: crate::agui::routes::conversation_from(&run),
+        tools: Vec::new(),
+    };
+
+    live::set_running(&state, &agent_id, true, json!({})).await;
+    let events = opengrok_harness::resume_conversation(
+        state.agui.door.as_ref(),
+        &runner,
+        &journal,
+        request,
+        opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
+        opengrok_harness::Resumption {
+            approved: opengrok_tools::ToolCall {
+                id: pending.call_id,
+                name: pending.tool,
+                arguments: pending.arguments,
+            },
+            message_seq: resumed_seq,
+        },
+    )
+    .await;
+
+    let mut text = String::new();
+    for event in &events {
+        if event.event_type == opengrok_wire::agui::EventType::TextMessageContent
+            && let Some(delta) = event.extra.get("delta").and_then(Value::as_str)
+        {
+            text.push_str(delta);
+        }
+    }
+    if !text.is_empty() {
+        let answer = json!({
+            "kind": "send-message",
+            "id": entry_id(),
+            "message": { "type": "text", "content": text },
+            "timestampMs": now_ms(),
+        });
+        if let Ok(_seq) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(&coworker_id, &answer, now_ms())
+            .await
+        {
+            live::emit_transcript(&state, &agent_id, "appended", answer);
+        }
+    }
+
+    let preview: String = text.chars().take(120).collect();
+    live::set_running(
+        &state,
+        &agent_id,
+        false,
+        json!({ "lastMessagePreview": preview, "lastEntry": { "kind": "text", "text": preview } }),
+    )
+    .await;
 }
