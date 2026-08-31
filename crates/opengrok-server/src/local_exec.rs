@@ -730,15 +730,33 @@ async fn post_responses(
     // resolved against THIS machine (the broker rejects a mismatch), not the untrusted `providerId`.
     if let Some(frames) = body.get("frames").and_then(|value| value.as_array()) {
         for frame in frames {
-            if frame.get("kind").and_then(|value| value.as_str()) == Some("client")
-                && let Some(request_id) = frame.get("requestId").and_then(|value| value.as_str())
-                && let Some(message) = frame.get("message")
-            {
-                let outcome = wire::outcome_from_client_message(message);
-                state
-                    .local_exec
-                    .resolve(&machine_id, request_id, outcome)
-                    .await;
+            let kind = frame.get("kind").and_then(|value| value.as_str());
+            let request_id = frame.get("requestId").and_then(|value| value.as_str());
+            let message = frame.get("message");
+            match (kind, request_id, message) {
+                // A command's result.
+                (Some("client"), Some(request_id), Some(message)) => {
+                    let outcome = wire::outcome_from_client_message(message);
+                    state.local_exec.resolve(&machine_id, request_id, outcome).await;
+                }
+                // A control frame: a `throw` means the machine refused or errored the command
+                // (e.g. its local tools are on "ask" and there was no matching local approval).
+                // resolve the waiter with that reason instead of letting it hang to the timeout.
+                (Some("control"), Some(request_id), Some(message)) => {
+                    if let Some(thrown) = message.get("throw") {
+                        let reason = thrown
+                            .get("error")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("the machine refused or errored the command");
+                        state
+                            .local_exec
+                            .resolve(&machine_id, request_id, ExecOutcome::malformed(reason))
+                            .await;
+                    }
+                    // streamClose / heartbeat carry no result — nothing to resolve.
+                }
+                // hello / ping / file / messages-* — acknowledged, nothing to resolve.
+                _ => {}
             }
         }
     }
