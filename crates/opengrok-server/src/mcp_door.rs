@@ -17,8 +17,9 @@
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, InitializeResult,
-    JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    InitializeResult, JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
+    ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -122,8 +123,16 @@ impl ServerHandler for McpDoor {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        // ttlMs 0 + private, required by protocol 2026-07-28 (SEP-2549) and chosen, not
+        // defaulted: this list is policy-filtered per bot key, and policy is enforced on every
+        // action — a cached listing must not outlive a policy change or leak across keys.
+        let uncacheable = |tools| {
+            ListToolsResult::with_all_items(tools)
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Private)
+        };
         let Some(runner) = self.runner_for(&context).await? else {
-            return Ok(ListToolsResult::with_all_items(Vec::new()));
+            return Ok(uncacheable(Vec::new()));
         };
         let tools = runner
             .tool_schemas()
@@ -147,7 +156,7 @@ impl ServerHandler for McpDoor {
                 Some(Tool::new(name, description, parameters))
             })
             .collect();
-        Ok(ListToolsResult::with_all_items(tools))
+        Ok(uncacheable(tools))
     }
 
     async fn call_tool(
