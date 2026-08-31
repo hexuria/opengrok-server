@@ -301,8 +301,12 @@ impl Executor {
                 }));
             }
         }
+        // The reverse-exec tool is NOT gated by the per-coworker tool grant: its authorization is
+        // the account's local-exec policy (enrolled machine + never/ask/bypass) and the machine's
+        // own consent, applied per command inside the sink. Gating it behind the grant would deny
+        // every existing coworker (whose grant lists only the box tools) a capability the account
+        // explicitly enabled. Offered whenever a machine is attached.
         if self.user_machine.is_some()
-            && permitted(USER_MACHINE_SHELL)
             && let Some((description, parameters)) = builtin_tool_spec(USER_MACHINE_SHELL)
         {
             schemas.push(serde_json::json!({
@@ -330,6 +334,30 @@ impl Executor {
     /// Run one call. Never returns `Err` for a *tool* failure: the model gets a result either way,
     /// and only the caller's own bugs propagate.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
+        // The reverse-exec tool is authorized by the LOCAL-EXEC policy (its sink runs its own
+        // never/ask/bypass gate on the command), NOT the per-coworker tool grant — so it is handled
+        // before the opengrok_policy gate, which would otherwise Deny it for any coworker whose
+        // grant lists only the box tools. It runs on the USER'S machine, so it needs no box.
+        if call.name == USER_MACHINE_SHELL {
+            let Some(sink) = self.user_machine.as_ref() else {
+                return ToolResult::refused(
+                    &call.id,
+                    "no machine of yours is connected, so nothing can run there",
+                );
+            };
+            return match serde_json::from_value::<ShellArgs>(call.arguments.clone()) {
+                Ok(args) => match sink.run(&context.account_id, &args.command).await {
+                    UserMachineReply::Ran(text) => ToolResult::ok(&call.id, text),
+                    UserMachineReply::Refused(why) => ToolResult::refused(&call.id, why),
+                    UserMachineReply::NeedsApproval => ToolResult::awaiting(
+                        &call.id,
+                        "your machine's owner must approve this command",
+                    ),
+                },
+                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
+            };
+        }
+
         // The identity rule, applied once, before anything reads an argument. Whatever the model
         // wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
@@ -357,29 +385,6 @@ impl Executor {
             if let Some(reason) = decision.reason() {
                 return ToolResult::refused(&call.id, reason);
             }
-        }
-
-        // The reverse-exec tool runs on the USER'S machine, not the bot's box, so it is handled
-        // before the box gate. The server's sink runs its OWN gate on the command; a `NeedsApproval`
-        // here suspends the run exactly as a policy approval does.
-        if call.name == USER_MACHINE_SHELL {
-            let Some(sink) = self.user_machine.as_ref() else {
-                return ToolResult::refused(
-                    &call.id,
-                    "no machine of yours is connected, so nothing can run there",
-                );
-            };
-            return match serde_json::from_value::<ShellArgs>(arguments) {
-                Ok(args) => match sink.run(&context.account_id, &args.command).await {
-                    UserMachineReply::Ran(text) => ToolResult::ok(&call.id, text),
-                    UserMachineReply::Refused(why) => ToolResult::refused(&call.id, why),
-                    UserMachineReply::NeedsApproval => ToolResult::awaiting(
-                        &call.id,
-                        "your machine's owner must approve this command",
-                    ),
-                },
-                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
-            };
         }
 
         let Some(box_id) = context.box_id.as_ref() else {
@@ -1189,6 +1194,45 @@ mod tests {
             &CoworkerId::from_stored("cw_1"),
         );
         assert!(schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL));
+    }
+
+    #[tokio::test]
+    async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
+        // The real bug: a coworker's grant lists only the box tools, so the per-coworker policy would
+        // DENY "user_machine_shell". The reverse-exec tool must be authorized by the local-exec
+        // policy (the sink), not the grant — so it is still offered AND still runs.
+        let restrictive = opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: AccountId::from_stored("acct_1"),
+                coworker: CoworkerId::from_stored("cw_1"),
+                profile: opengrok_policy::ToolSet::only(["read_file", "shell", "write_file"]),
+                needs_approval: opengrok_policy::ToolSet::None,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_1"),
+                tools: opengrok_policy::ToolSet::only(["read_file", "shell", "write_file"]),
+            }),
+        };
+        let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+        let executor = Executor::with_policy(Arc::new(SpyComputer::default()), restrictive)
+            .with_user_machine(sink.clone());
+
+        // Offered despite the grant omitting it.
+        let schemas = executor.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        assert!(
+            schemas.iter().any(|s| s["function"]["name"] == USER_MACHINE_SHELL),
+            "reverse-exec tool must be offered even when the grant lists only box tools"
+        );
+        // And it RUNS (routes to the sink) rather than being refused by the grant.
+        let result = executor
+            .execute(&no_box_context(), &call(USER_MACHINE_SHELL, json!({"command": "mkdir ~/Code/x"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(sink.seen.lock().unwrap().as_slice(), &["mkdir ~/Code/x".to_string()]);
     }
 
     #[tokio::test]
