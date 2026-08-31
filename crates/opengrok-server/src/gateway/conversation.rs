@@ -238,10 +238,11 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
 
     live::set_running(state, &agent_id, true, json!({})).await;
 
-    // The turn, off this request's clock. `accepted` means accepted, not answered.
+    // The turn, off this request's clock. `accepted` means accepted, not answered. Keep the task's
+    // abort handle so stopAgentTurn can cancel it; run_turn removes itself when it ends.
     let task_state = state.clone();
     let history = history_for(state, &coworker_id).await;
-    tokio::spawn(run_turn(
+    let handle = tokio::spawn(run_turn(
         task_state,
         account.id,
         coworker_id,
@@ -250,8 +251,33 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         answer_id,
         answer_seq,
     ));
+    if let Ok(mut cancels) = state.cancels.lock() {
+        cancels.insert(agent_id.clone(), handle.abort_handle());
+    }
 
     (200, json!({ "accepted": true }))
+}
+
+/// `stopAgentTurn` — end an in-flight turn for an agent, or clear a phantom "working" flag. Aborts
+/// the running task if there is one (its drop-guard then clears the flag), and force-clears the
+/// `running` flag + emits a roster update either way. SAFE and idempotent when nothing is running:
+/// that is exactly the way out of a stale flag with no turn behind it. Never an error.
+pub async fn stop_agent_turn(state: &GatewayState, args: &Value, _caller: &str) -> (u16, Value) {
+    let Some(agent_id) = agent_or_active(state, args) else {
+        return (200, Value::Null);
+    };
+    // Abort the live turn, if any. The drop-guard inside run_turn clears the flag on the way down;
+    // we also clear it directly below so a PHANTOM flag (no task) is resolved too.
+    if let Some(handle) = state
+        .cancels
+        .lock()
+        .ok()
+        .and_then(|mut cancels| cancels.remove(&agent_id))
+    {
+        handle.abort();
+    }
+    live::set_running(state, &agent_id, false, json!({})).await;
+    (200, json!({ "agentId": agent_id, "isRunning": false }))
 }
 
 /// `getForeverBoxStatus` — the caller's agent's LIVE box health, in the client's `BoxStatus` shape
@@ -547,6 +573,17 @@ pub(crate) async fn run_turn(
     let run_id = RunId::new();
     let thread_id = format!("gateway-{agent_id}");
 
+    // The happy path clears `running` at the end. This guard clears it on EVERY other way out —
+    // a panic, an error return, or a stopAgentTurn abort — so a turn that dies before its final line
+    // can never leave the bot wedged "working" with no run behind it. `finished` is set true once the
+    // clean clear has run, so the guard doesn't clear twice.
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _turn_guard = TurnGuard {
+        state: state.clone(),
+        agent_id: agent_id.clone(),
+        finished: finished.clone(),
+    };
+
     let tools =
         crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id).await;
     let journal = StoreJournal {
@@ -623,6 +660,31 @@ pub(crate) async fn run_turn(
         }),
     )
     .await;
+    // The clean clear ran; tell the guard not to clear again.
+    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Clears an agent's `running` flag on any abnormal exit of `run_turn` (panic, error, or a
+/// stopAgentTurn abort) and drops the turn's cancel handle. See the note where it is constructed.
+struct TurnGuard {
+    state: GatewayState,
+    agent_id: String,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut cancels) = self.state.cancels.lock() {
+            cancels.remove(&self.agent_id);
+        }
+        if !self.finished.load(std::sync::atomic::Ordering::SeqCst) {
+            let state = self.state.clone();
+            let agent_id = self.agent_id.clone();
+            tokio::spawn(async move {
+                live::set_running(&state, &agent_id, false, json!({})).await;
+            });
+        }
+    }
 }
 
 /// `openAgentTail` / `getAgentTranscriptTail` / windows / pages — every read is the same tail

@@ -315,6 +315,13 @@ async fn command(
                 body,
             )
         }
+        "stopAgentTurn" => {
+            let (code, body) = super::conversation::stop_agent_turn(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "promptAcceptanceStatus" => {
             let (code, body) = super::conversation::acceptance_status(&state, &args, &caller).await;
             reply(

@@ -95,6 +95,10 @@ pub struct GatewayState {
     pub active_agent: Arc<Mutex<Option<String>>>,
     /// Coworkers with a turn in flight right now — the roster's `isRunning`.
     pub running: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The abort handle of each in-flight turn, keyed by agent id, so `stopAgentTurn` can cancel a
+    /// running turn. Inserted when a turn is spawned, removed when it ends; a bot with a phantom
+    /// `running` flag simply has no entry here, and stopping it just clears the flag.
+    pub cancels: Arc<Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 impl GatewayState {
@@ -116,6 +120,7 @@ impl GatewayState {
             seqs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_agent: Arc::new(Mutex::new(None)),
             running: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
