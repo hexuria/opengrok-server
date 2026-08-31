@@ -401,7 +401,12 @@ impl PgStore {
     /// same list and run somebody's work twice.
     ///
     /// A run with no lease at all is claimable: it predates leases, or its holder died before
-    /// writing one.
+    /// writing one. BUT NOT A NEWBORN. The first journal batch inserts the row with no lease, and
+    /// the holder's first renewal is an UPDATE that raced it — so for a moment every fresh run
+    /// looks abandoned. A sweep that ticked in that window claimed a live run and failed it two
+    /// seconds after birth (it ate a user_machine_shell suspension in production). A run whose
+    /// last write is younger than the lease period has a process behind it; only silence that
+    /// outlives a lease is abandonment.
     pub async fn claim_abandoned_runs(
         &self,
         now_ms: i64,
@@ -415,6 +420,7 @@ impl PgStore {
                     select id from run_view
                      where status = 'running'
                        and (leased_until_ms is null or leased_until_ms < $1)
+                       and updated_at_ms < $1 - $2
                      order by updated_at_ms
                      limit $3
                      for update skip locked
