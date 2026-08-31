@@ -146,6 +146,7 @@ mod tests {
         ModelRequest {
             model: "mock".to_string(),
             system: None,
+            tools: Vec::new(),
             messages: vec![crate::model::ChatMessage {
                 role: "user".to_string(),
                 content: text.to_string(),

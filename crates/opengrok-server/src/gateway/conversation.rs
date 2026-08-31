@@ -525,6 +525,7 @@ pub(crate) async fn run_turn(
         model,
         system: None,
         messages,
+        tools: Vec::new(),
     };
 
     let _lease =

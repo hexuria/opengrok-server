@@ -56,13 +56,18 @@ pub const MAX_ROUNDS: usize = 8;
 pub async fn run_turn_with_tools(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
-    request: ModelRequest,
+    mut request: ModelRequest,
     thread_id: &str,
     run_id: &str,
     at_ms: i64,
 ) -> Vec<Event> {
     let mut projection = Projection::new(thread_id, run_id, at_ms);
     let mut events = projection.start();
+
+    // Offer the tools to the model — see the note in `converse`.
+    if let Some(runner) = tools {
+        request.tools = runner.tool_schemas();
+    }
 
     let mut stream = match door.stream(request).await {
         Ok(stream) => stream,
@@ -208,6 +213,13 @@ async fn converse(
     run_id: &str,
 ) -> Vec<Event> {
     let mut all = Vec::new();
+
+    // Advertise the run's tools to the model — the offering half of tool use. Set once; every round
+    // clones this request, so a bot that CAN run a shell command is now told it can, instead of
+    // answering "I can't run commands" with a computer sitting right there.
+    if let Some(runner) = tools {
+        request.tools = runner.tool_schemas();
+    }
 
     let mut opening = projection.start();
     if let Err(error) = journal.record(run_id, &opening).await {
@@ -380,6 +392,7 @@ mod tests {
         ModelRequest {
             model: "mock".to_string(),
             system: None,
+            tools: Vec::new(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: text.to_string(),

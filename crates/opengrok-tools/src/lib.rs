@@ -228,6 +228,51 @@ impl Executor {
             .collect()
     }
 
+    /// The OpenAI function-calling tool definitions this coworker is OFFERED for a request: built-ins
+    /// the policy permits (Allow or NeedsApproval — a `Deny` is never advertised, so the model is not
+    /// told about a dead end it would keep trying) plus its plugin tools. This is the OFFERING half
+    /// that must pair with `run`; without it the model is never told the tools exist and answers "I
+    /// can't run commands" even with a computer attached. Empty when the coworker may run nothing.
+    pub fn tool_schemas(&self, account_id: &AccountId, coworker_id: &CoworkerId) -> Vec<Value> {
+        let permitted = |name: &str| {
+            !matches!(
+                opengrok_policy::decide(
+                    account_id,
+                    coworker_id,
+                    opengrok_policy::Action::RunTool(name),
+                    &self.policy,
+                ),
+                opengrok_policy::Decision::Deny(_)
+            )
+        };
+        let mut schemas = Vec::new();
+        for name in Self::builtin_tool_names() {
+            if permitted(name)
+                && let Some((description, parameters)) = builtin_tool_spec(name)
+            {
+                schemas.push(serde_json::json!({
+                    "type": "function",
+                    "function": { "name": name, "description": description, "parameters": parameters },
+                }));
+            }
+        }
+        for tool in &self.plugin_tools {
+            if permitted(&tool.qualified_name) {
+                schemas.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.qualified_name,
+                        "description": tool.description.clone().unwrap_or_default(),
+                        // The MCP server validates the real arguments; we advertise an open object so
+                        // the model can call it, rather than a schema we do not have here.
+                        "parameters": { "type": "object" },
+                    },
+                }));
+            }
+        }
+        schemas
+    }
+
     /// Run one call. Never returns `Err` for a *tool* failure: the model gets a result either way,
     /// and only the caller's own bugs propagate.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
@@ -372,6 +417,42 @@ impl Executor {
 /// Additive on purpose: a key the model did not send is still set, so a tool cannot be reached
 /// with an absent identity either. The list is small and explicit — a new identity-bearing
 /// argument must be added here, and the test below is what notices when one is not.
+/// The description and JSON-Schema parameters a builtin tool is advertised to the model with, or
+/// `None` if the name is not a builtin. `box_id` is deliberately ABSENT from every schema — the
+/// computer is not the model's to choose; `overwrite_identity` injects it server-side.
+fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
+    match name {
+        "shell" => Some((
+            "Run a shell command on this coworker's own computer and return its stdout, stderr and exit code.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string", "description": "The shell command to run." } },
+                "required": ["command"],
+            }),
+        )),
+        "read_file" => Some((
+            "Read a file from this coworker's computer and return its contents.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Absolute path of the file to read." } },
+                "required": ["path"],
+            }),
+        )),
+        "write_file" => Some((
+            "Create or overwrite a file on this coworker's computer.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the file to write." },
+                    "content": { "type": "string", "description": "The file's full new contents." },
+                },
+                "required": ["path", "content"],
+            }),
+        )),
+        _ => None,
+    }
+}
+
 pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     let mut object = match arguments {
         Value::Object(map) => map.clone(),

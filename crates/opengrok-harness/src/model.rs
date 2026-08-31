@@ -41,12 +41,17 @@ pub enum ModelDelta {
 }
 
 /// What we ask the door for.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelRequest {
     /// A catalogue id the gateway understands (`xai/grok-4.6`, `oag/cheap`). A *route*, not a key.
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub system: Option<String>,
+    /// The tools the model is OFFERED this turn, as OpenAI function-calling defs (`{type, function}`).
+    /// Filled by the harness from the run's `ToolRunner` before each door call — the model cannot ask
+    /// for a tool it was never told about, so an empty list here is why a bot says "I can't run
+    /// commands" even with a computer attached. Empty when the run has no tools.
+    pub tools: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -71,6 +71,7 @@ pub(crate) async fn fire(
         // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
         model: coworker.model.clone(),
         system: None,
+        tools: Vec::new(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: prompt,

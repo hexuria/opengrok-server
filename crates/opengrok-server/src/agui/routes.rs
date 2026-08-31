@@ -121,9 +121,17 @@ pub(crate) async fn tools_for_coworker(
     // The plugins this coworker may use, connected with its own credentials.
     let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
+    // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
+    // reset or re-provision changes the account's box while the aggregate id stays put — and this is
+    // the same box we just resumed above, so exec must run on it, or a reset would leave the bot
+    // executing against a destroyed box.
+    let mut context =
+        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker);
+    context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
+
     Some(ToolRunner::new(
         opengrok_tools::Executor::with_policy(computer, policy).with_plugin_tools(sessions, tools),
-        opengrok_tools::ToolContext::from_coworker(account_id.clone(), coworker_id, &coworker),
+        context,
     ))
 }
 
@@ -816,6 +824,7 @@ pub async fn run(
         model,
         system: None,
         messages: to_chat_messages(&input),
+        tools: Vec::new(),
     };
 
     let tools = match &account_id {
@@ -1291,6 +1300,7 @@ async fn continue_run(
         model: coworker.model.clone(),
         system: None,
         messages: conversation_from(&run),
+        tools: Vec::new(),
     };
 
     // The run keeps its id, so everything the resumption emits lands in the same log and a client

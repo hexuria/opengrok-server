@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use opengrok_box::Computer;
-use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerEvent};
+use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 
 use serde_json::{Value, json};
@@ -270,6 +270,21 @@ pub async fn ensure_computer_for(
                 .await;
             Provisioned {
                 events,
+                box_id: Some(box_id),
+                error: None,
+            }
+        }
+        // A coworker that ALREADY has a box (a re-provision after reset) cannot be re-assigned — the
+        // aggregate forbids it so a previous box is never silently stranded. That is not a failure
+        // here: the scope's box was just (re)created and recorded, and the run path binds the SCOPE's
+        // live box, not this frozen aggregate id, so the coworker follows the new box regardless. Keep
+        // the existing assignment, report success with the scope's box.
+        Err(CoworkerError::AlreadyHasComputer) => {
+            let _ = store
+                .clear_account_computer_error(account_id.as_str())
+                .await;
+            Provisioned {
+                events: Vec::new(),
                 box_id: Some(box_id),
                 error: None,
             }
