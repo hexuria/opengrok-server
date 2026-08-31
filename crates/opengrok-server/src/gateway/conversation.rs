@@ -1057,6 +1057,30 @@ pub async fn resolve_local_tool_permission(
         return (503, json!({ "error": error.to_string() }));
     }
 
+    // "Always" and "never" are standing decisions, not one-offs: persist them as policy rules so
+    // THE GATE answers this command itself next time — allow-once/denied stay per-call. The rule
+    // pattern is the exact command (word-boundary prefix match in `decide`), so it can only cover
+    // this command and its argument extensions, never a lookalike that shares a prefix. Written
+    // only after the answer is durably recorded, and best-effort: a failed write just means the
+    // gate asks again next time, which is the narrower outcome.
+    let standing = match resolution.as_str() {
+        "always" => Some("allow"),
+        "never" => Some("deny"),
+        _ => None,
+    };
+    if let Some(kind) = standing
+        && !command.is_empty()
+        && let Some((machine_id, _label)) =
+            crate::local_exec::enabled_machine(&state.agui.auth.store, account_id.as_str()).await
+    {
+        let _ = state
+            .agui
+            .auth
+            .store
+            .add_local_exec_rule(account_id.as_str(), &machine_id, kind, &command, at_ms)
+            .await;
+    }
+
     // Flip the card to its outcome status — same entry id, new ask.status, so the client re-renders
     // the row from buttons to the outcome line.
     let status = match resolution.as_str() {
