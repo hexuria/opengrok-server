@@ -633,7 +633,11 @@ async fn grok_bot(
             connect_ok(json!({
                 "computers": computers,
                 "computerError": crate::agui::provision::error_json(&account_error),
+                // `mode` is the historical name; `sharingMode` is the same value under the name the
+                // client reads, so the desktop can place a reset control by mode (and refuse to offer
+                // per-org reset, which would destroy a box the whole org shares).
                 "mode": mode,
+                "sharingMode": mode,
                 "activeKind": active_kind,
             }))
         }
