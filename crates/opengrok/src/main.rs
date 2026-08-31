@@ -148,9 +148,9 @@ async fn main() -> anyhow::Result<()> {
     let state = AgUiState {
         auth,
         door,
-        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
+        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string()),
         auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL").unwrap_or_else(|_| {
-            std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string())
+            std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string())
         }),
         computer,
         vault,

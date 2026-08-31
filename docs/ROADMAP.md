@@ -219,5 +219,5 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 - [ ] GitHub Actions CI — billing. `scripts/gate.sh --smoke` is the gate meanwhile.
 - [ ] Rights review → publication (LEGAL.md; the repo stays private until then).
-- [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); terra/5.5/5.4-mini
+- [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway.

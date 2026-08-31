@@ -92,6 +92,7 @@ Every knob, so nothing has to be invented. Copy `.env.example` to `.env`.
 | `SAND_GATEWAY_TOKEN` | — | the shared secret with the client |
 | `OG_GATEWAY_URL` | `http://127.0.0.1:29080` | open-ai-gateway's inference listener |
 | `OG_GATEWAY_TOKEN` | — | an `oag_live_…` key. **Never a provider key** |
+| `OG_MODEL` | `gpt-5.6-luna` | route a new coworker is hired on; also the roster description fallback |
 | `OG_BOX_API_KEY` | — | box.ascii.dev (`box_…`). P3; unset is fine before then |
 | `RUST_LOG` | `opengrok=debug,opengrok_server=debug` | tracing |
 
