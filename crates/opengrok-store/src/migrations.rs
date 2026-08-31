@@ -385,6 +385,27 @@ create index if not exists local_exec_audit_acct_idx
 -- spawnError / permissionDenied), distinct from `decision` (the gate's verdict at enqueue). A
 -- refusal is a case, not a non-zero exit, so the two are recorded separately.
 alter table local_exec_audit add column if not exists outcome text;
+
+-- Registered devices for the passkey step-up (reverse-exec slice 7). Each row is ONE WebAuthn
+-- credential a person registered from an authenticated session; a step-up on a dangerous control
+-- (enrol a machine, enable the channel, set bypass) is honored only for a credential that lives
+-- here and is not revoked. The public key + sign_count are the RP's verification state; the private
+-- key never leaves the authenticator. No credential material is secret enough to need the vault (a
+-- public key is public), but the row is per-account and revocable — the whole point of the registry.
+create table if not exists webauthn_credential (
+    account_id      text   not null,
+    credential_id   text   not null,   -- base64url, the authenticator's credential id
+    public_key      text   not null,   -- serialized RP-side credential (webauthn-rs Passkey JSON)
+    sign_count      bigint not null default 0,
+    label           text   not null default '',
+    created_at_ms    bigint not null,
+    last_used_at_ms  bigint,
+    revoked          boolean not null default false,
+    primary key (account_id, credential_id)
+);
+
+create index if not exists webauthn_credential_acct_idx
+    on webauthn_credential (account_id) where not revoked;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
