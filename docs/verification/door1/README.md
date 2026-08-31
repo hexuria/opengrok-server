@@ -50,5 +50,47 @@ lists the ladder (`oag/auto`…`oag/frontier`), `openai/gpt-5.5`, and every id d
 - Budgets were not exercised here beyond existing gate coverage in the oag repo; per-key
   `quota_usd` and per-principal monthly budgets ship with the gateway.
 
-Slice 16 (the `/mcp` door on opengrok-server) is the other half of Door 1; its evidence lands
-below when built.
+## Slice 16 — the MCP door, validated on Claude Code itself
+
+Built and verified 1 Sep 2026. The door is `POST /mcp` on opengrok-server: the bearer is a
+slice-10 bot key naming the coworker, and every call runs through the same executor as a run.
+
+**The full Door 1 loop, on the real client.** In one Claude Code invocation with both doors
+configured — `ANTHROPIC_BASE_URL` → open-ai-gateway, plus
+`claude mcp add --transport http opengrok http://192.168.100.24:<port>/mcp --header
+"Authorization: Bearer <bot key>"` — the model answered through the gateway and called
+`mcp__opengrok__shell`; the tool ran on the coworker's own Docker computer and Claude Code
+repeated the output back:
+
+```
+door-one-complete
+b70153ff2aa0        ← the hostname the tool printed IS the coworker's container id
+```
+
+`docker exec b70153ff2aa0 cat /tmp/cc-was-here` → `door-one-complete` — the marker is on the
+coworker's box, nowhere else.
+
+**Found live, fixed live:** Claude Code negotiates MCP protocol 2026-07-28 and rejected our
+first `tools/list` — SEP-2549 makes `ttlMs`/`cacheScope` required, and rmcp leaves them unset.
+The door now declares every listing `ttlMs: 0, cacheScope: "private"` (chosen, not defaulted:
+the list is policy-filtered per key and policy is enforced on every action). `claude mcp list`
+then reports the live `:1447` door **✔ Connected**.
+
+**The rest of the acceptance is held by tests and the gate:**
+- `tests/against_the_mcp_door.rs` — a HAND-WRITTEN JSON-RPC client (never rmcp-to-rmcp):
+  handshake, empty toolbox for a computerless coworker, failed-closed call, person-token
+  guidance, revoked-key refusal.
+- `scripts/slice20-mcp-door-smoke.sh` (in the gate) — real Docker box: policy-filtered list, a
+  command landing on the coworker's OWN computer with a foreign `coworkerId` argument
+  overwritten (the slice-7 attack replayed through MCP), an ungranted tool refused naming the
+  rule ("coworker … may never run gmail.workspace.send").
+
+## Found while validating: the live deployment's box key is sealed under the lost KEK
+
+On the live `:1447` server, every ascii-kind toolbox lists empty: the org's box.ascii.dev key
+(`secret_store` id `org-computer:org_01a0551e-…:ascii`) was sealed under the KEK that was lost
+in the 1 Sep reboot and regenerated — `open_credential` fails, so `provider_for` yields no
+provider and `tools_for_coworker` yields no tools. **This affects live runs too, not just the
+door.** The fix is operator action, not code: re-enter the box API key (org admin surface /
+app) so it reseals under the current `OG_CREDENTIAL_KEK`, or switch the deployment's computers
+to local Docker.
