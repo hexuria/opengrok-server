@@ -76,9 +76,11 @@ in the bundle) — its "always" appends to the local `autoReviewInstructions` st
 General-tab mirror writes to the **global** tier. The server sends `proposedRule` exactly as
 transcribed; the pinned client ignores it. The per-agent widget on the agent-settings screen
 writes the coworker tier correctly (verified). Rerouting the card's Always needs a surgical patch
-of the minified card, which the peer declined to attempt blind. **Open product decision for the
-user:** accept global-scoped card-Always for v1 (the widget covers per-agent), or schedule the
-card patch. Nothing on the server changes either way.
+of the minified card, which the peer declined to attempt blind. **Accepted for v1** (the user's
+decision, relayed through the client session): it is the user's own allow rule landing on their
+own global tier, so nothing runs that they did not allow, and the agent-settings widget is the
+per-agent path. Deliberate scope, not a defect; no card patch scheduled. Nothing on the server
+changes either way.
 
 The window was closed afterwards: `:1447` relaunched on the real judge; global auto-review reset
 to off/empty and the coworker row deleted.
