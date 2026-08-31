@@ -73,6 +73,69 @@ Six points, all load-bearing:
 6. **The naming prerequisite is done.** A reverse-exec request must be unambiguous
    about Mac-vs-box; the model already distinguishes them and says which it acted on.
 
+7. **A REGISTERED DEVICE, proven by a passkey, or no remote control — period.** (Uriah,
+   31 Aug.) On top of the per-machine daemon token, the CONTROL plane requires a
+   WebAuthn passkey: a phishing-resistant, hardware-bound credential unlocked by
+   biometric/PIN at the moment of the action. An UNREGISTERED device cannot remote-
+   control at all — the request is refused before anything else, the same fail-closed
+   default as `never`. A stolen account bearer token cannot produce a passkey assertion,
+   so it cannot arm or drive the channel. The daemon token (point 1) is the MACHINE's
+   identity for the data stream; the passkey is the PERSON-on-a-known-device's proof for
+   the control plane — the two are complementary and both are required.
+
+## Passkeys & devices (the control-plane identity)
+
+A per-account registry of **registered devices**, each a WebAuthn credential. Only a
+registered device may perform any reverse-exec control action; an unregistered one is
+refused, full stop.
+
+- **The registry.** Per account, N devices (the phone, each desktop on its own machine):
+  `webauthn_credential(account_id, credential_id, public_key, sign_count, label,
+  created_at_ms, last_used_at_ms)`. The private key never leaves the device's secure
+  enclave; the server keeps only the public key + a monotonic sign-count (replay guard).
+- **Register a device** = a WebAuthn *registration* ceremony from an already-authenticated
+  session, on the web dashboard OR on the device's own app. That is how a new phone or a
+  new desktop becomes an authorized controller. Nothing else adds a device.
+- **Step-up = a WebAuthn *assertion*.** The high-risk control actions — enrolling a
+  machine's daemon, turning the channel on, switching to `bypass`, and (per the user's
+  choice) approving a command from the phone — issue a challenge the registered device
+  signs; the server verifies origin, signature and sign-count before proceeding. No valid
+  assertion ⇒ the action is refused.
+- **Manage from BOTH the web dashboard AND the device.** List devices (label, created,
+  last used), add a device (registration), and REVOKE one — from the console, or from any
+  device's own app (a desktop can revoke a lost phone, and vice versa). Revoking a device
+  removes its credential immediately; it can no longer satisfy step-up.
+- **Multiple machines.** Several desktops on different machines each register their own
+  passkey; the phone registers its own. Each is independent; each is independently
+  revocable — distinct from the per-machine *daemon* tokens, which live on the Mac side.
+- **Fail closed, and no backdoor.** With no registered device, the channel's control
+  plane does nothing — you cannot enrol, enable, or drive anything until a device is
+  registered. Losing every passkey disables the reverse-exec channel only (never the
+  account, which is opt-in and non-essential); you re-register from an authenticated
+  session. There is deliberately no recovery bypass — a bypass would defeat the passkey.
+- **This is a NEW capability — the original WebAuthn does NOT do it** (client session
+  read the source, 31 Aug). The shipped `webauthnProxyEnabled` / `/webauthn/*` is a
+  security-key PROXY pointing the OTHER way: it relays a WebAuthn ceremony that
+  ORIGINATED elsewhere (a web origin — a browser on the bot's box) to the machine where
+  the user's authenticator is physically plugged in, so a headless box can borrow the
+  person's local key. It is PER-CEREMONY (a `grant` stage then a `sign` stage, each with
+  a requestId, 120s timeout), with NO credential registry and NO device-trust model. It
+  never gated the daemon channel — the daemon just shares the transport.
+- **What we take from it: the delivery primitive, not a registry.** The proxy is a
+  working way to REACH the person's authenticator on demand — exactly what a step-up
+  needs. Everything else is ours to build server-side: OpenGrok is the WebAuthn Relying
+  Party (it issues the challenge, stores the public key, verifies the signature and the
+  sign-count), and the DEVICE REGISTRY (point above) is new. For registration and for a
+  step-up assertion, the server issues the ceremony and delivers it through the SAME
+  proxy transport the client already speaks — which we must now SERVE (it 404s today,
+  like `/local-exec/*`):
+  `GET /webauthn/requests` (SSE, server pushes `welcome` / `ceremony{requestId,
+  ceremony:{kind, origin, …opaque}}` / `cancel`); `POST /webauthn/responses` (daemon
+  sends `hello` / `ping` / `stage{requestId, grant|sign, ok|declined|failed}` /
+  `result{requestId, credentialJson}` / `error`). The server verifies the returned
+  `credentialJson` as the RP; a step-up is honored only on a `grant`+`sign` success for a
+  registered credential. Client half is real, darwin/win32, off by setting today.
+
 ## The transport — the REAL contract (read from the client's source, 31 Aug)
 
 Corrected after the client session sent the actual daemon protocol; the earlier
