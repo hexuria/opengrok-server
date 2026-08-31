@@ -300,10 +300,7 @@ async fn only_a_live_bot_key_opens_the_door() {
 
     // A revoked key answers revoked — never a silent downgrade to anonymous.
     let (bot_key, jti) = mint_bot_key(&base, &access, &coworker).await;
-    store
-        .revoke_bot_key(&account, &jti)
-        .await
-        .expect("revoke");
+    store.revoke_bot_key(&account, &jti).await.expect("revoke");
     let revoked = rpc(&base, Some(&bot_key), 3, "tools/list", json!({})).await;
     let message = revoked["error"]["message"].as_str().unwrap_or("");
     assert!(

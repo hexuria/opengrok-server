@@ -27,17 +27,21 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
 use crate::AgUiState;
-use opengrok_core::id::AccountId;
+use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
 use opengrok_core::CoworkerId;
+use opengrok_core::id::AccountId;
 use opengrok_harness::tools::ToolRunner;
 use opengrok_tools::ToolCall;
 
 /// The tower service the router nests at `/mcp`.
 pub fn service(state: AgUiState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
     StreamableHttpService::new(
-        move || Ok(McpDoor { state: state.clone() }),
+        move || {
+            Ok(McpDoor {
+                state: state.clone(),
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         // The default host allowlist admits only loopback, and this door is used from the LAN
         // (the desktop and Claude Code reach the server on a non-loopback address by design).
@@ -79,9 +83,7 @@ impl McpDoor {
         };
         let principal = principal_from_bearer(&self.state, &parts.headers)
             .await
-            .map_err(|_| {
-                McpError::invalid_request("this bot key has been revoked", None)
-            })?;
+            .map_err(|_| McpError::invalid_request("this bot key has been revoked", None))?;
         match principal {
             Some((account, Some(coworker))) => Ok((account, coworker)),
             Some((_, None)) => Err(McpError::invalid_request(
