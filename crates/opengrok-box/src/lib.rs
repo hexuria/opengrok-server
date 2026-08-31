@@ -112,6 +112,14 @@ pub trait Computer: Send + Sync {
     /// poll. Never errors on a missing box — that is `"absent"`, not a failure.
     async fn state(&self, box_id: &str) -> BoxResult<String>;
 
+    /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
+    /// is the default, because most of our computers are headless (shell + files, no desktop). A
+    /// provider that can surface a graphical desktop (box.ascii.dev) overrides this; the client draws
+    /// the screen when it is `Some`, and says "no screen" when it is `None`, so we never invent one.
+    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+        Ok(None)
+    }
+
     /// Which kind of computer this is, for advertising the options to a client:
     /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
     /// local-docker; the ascii provider overrides it.

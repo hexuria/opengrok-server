@@ -372,25 +372,73 @@ impl Computer for AsciiBoxes {
     }
 
     async fn state(&self, box_id: &str) -> BoxResult<String> {
-        // box.ascii.dev's verified surface (see the module note) has NO status endpoint, and this
-        // crate refuses to guess an API. So liveness is PROBED over the verified GET /files path
-        // rather than a made-up /status route: a running box answers the read, a released box is 404
-        // ⇒ "absent", and a stopped box (disk kept, not serving) refuses ⇒ "stopped". This is the
-        // honest signal available today; a real status endpoint would replace it verbatim.
+        // GET /boxes/{id} returns box.info with the real `state` (confirmed against the live API):
+        // "idle"/"running"/"busy" mean up, and 404 means the box is gone. An earlier version probed a
+        // file read, but ascii restricts reads to /home/user and /tmp, so it 400'd on any system path
+        // and reported EVERY running box as "stopped". Read the actual state instead.
         let response = self
             .http
-            .get(self.url(&format!("/boxes/{box_id}/files")))
+            .get(self.url(&format!("/boxes/{box_id}")))
             .bearer_auth(&self.api_key)
-            .query(&[("path", "/")])
             .send()
             .await
             .map_err(|error| BoxError::Unreachable(error.to_string()))?;
-        Ok(match response.status() {
-            status if status.is_success() => "running".to_string(),
-            reqwest::StatusCode::NOT_FOUND => "absent".to_string(),
-            _ => "stopped".to_string(),
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok("absent".to_string());
+        }
+        if !response.status().is_success() {
+            return Ok("stopped".to_string());
+        }
+        let info: BoxInfo = self.json(response).await?;
+        // Normalise the up states to "running" (what the client reads as live); pass anything else
+        // through verbatim ("stopped", "paused", "starting", …) so a not-up box says what it is.
+        Ok(match info.box_.state.as_str() {
+            "idle" | "running" | "busy" | "ready" | "active" => "running".to_string(),
+            "" => "running".to_string(),
+            other => other.to_string(),
         })
     }
+
+    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        // POST /boxes/{id}/desktop?vnc=1 provisions (first call) then returns a noVNC URL
+        // (`desktopUrl`) once ready — confirmed live. Idempotent: polling returns the same URL, so a
+        // status poll can call it. While it is still provisioning there is no URL yet ⇒ `None`, and
+        // the client shows "preparing" until a later poll carries the link.
+        let response = self
+            .http
+            .post(self.url(&format!("/boxes/{box_id}/desktop")))
+            .bearer_auth(&self.api_key)
+            .query(&[("vnc", "1")])
+            .send()
+            .await
+            .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let desktop: DesktopReply = self.json(response).await?;
+        Ok(desktop.desktop_url.filter(|url| !url.is_empty()))
+    }
+}
+
+/// `GET /boxes/{id}` — `{ box: { state } }`; only the state is read, the rest of box.info ignored.
+#[derive(Deserialize)]
+struct BoxInfo {
+    #[serde(rename = "box")]
+    box_: BoxInner,
+}
+
+#[derive(Deserialize)]
+struct BoxInner {
+    #[serde(default)]
+    state: String,
+}
+
+/// `POST /boxes/{id}/desktop` — the noVNC URL, absent while the desktop is still provisioning.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopReply {
+    #[serde(default)]
+    desktop_url: Option<String>,
 }
 
 #[cfg(test)]

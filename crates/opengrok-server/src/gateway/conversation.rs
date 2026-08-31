@@ -299,25 +299,34 @@ pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u1
         return (200, absent());
     };
 
-    // A box we ourselves paused (idle-stop) is authoritatively "stopped" — no need to probe, and it
-    // avoids a race where the provider has not yet reflected the stop. Otherwise ask the provider for
-    // the box's real word; a provider we cannot build (e.g. the org key was cleared) means the box is
-    // effectively unreachable, which reads as "absent".
-    let live_state = if stopped {
-        "stopped".to_string()
+    // Ask the provider for the box's REAL state rather than trusting our stopped flag: the flag is
+    // idle-stop's bookkeeping and can lag reality (a turn resumes the box), and a stale flag once
+    // reported a running box as "stopped" for the whole computer panel. `_stopped` stays only as a
+    // hint. A provider we cannot build (org key cleared) means the box is unreachable ⇒ "absent".
+    let _ = stopped;
+    let Some(provider) = provision::provider_for(&state.agui, org_id.as_deref(), &kind).await
+    else {
+        return (200, absent());
+    };
+    let live_state = provider
+        .state(&box_id)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+    // A running box may have a screen (box.ascii.dev provisions a noVNC desktop); headless boxes and
+    // not-running ones have none. Only ask when it is up, so a poll of a stopped box costs nothing.
+    let vnc_url = if live_state == "running" {
+        provider.screen_url(&box_id).await.ok().flatten()
     } else {
-        match provision::provider_for(&state.agui, org_id.as_deref(), &kind).await {
-            Some(provider) => provider
-                .state(&box_id)
-                .await
-                .unwrap_or_else(|_| "unknown".to_string()),
-            None => "absent".to_string(),
-        }
+        None
     };
 
     (
         200,
-        json!({ "agentId": agent_id, "state": live_state, "vncUrl": Value::Null }),
+        json!({
+            "agentId": agent_id,
+            "state": live_state,
+            "vncUrl": vnc_url,
+        }),
     )
 }
 
