@@ -256,6 +256,8 @@ impl LocalExecBroker {
 }
 
 #[cfg(test)]
+// Test-only: a failed `expect` here IS the assertion; the workspace-wide deny targets shipped code.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

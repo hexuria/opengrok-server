@@ -466,13 +466,13 @@ mod tests {
         let started: super::ProcessStatus = serde_json::from_str(
             r#"{"type":"command.started","processId":15182,"running":true}"#,
         )
-        .expect("a numeric processId must deserialize");
+        .unwrap();
         assert_eq!(started.process_id, "15182");
         assert!(started.running);
 
         // A string processId still works.
         let s: super::ProcessStatus =
-            serde_json::from_str(r#"{"processId":"proc_abc","running":false}"#).expect("string id");
+            serde_json::from_str(r#"{"processId":"proc_abc","running":false}"#).unwrap();
         assert_eq!(s.process_id, "proc_abc");
     }
     use super::*;
