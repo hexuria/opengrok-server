@@ -1,5 +1,7 @@
 # Design — Reverse-exec channel (a bot, or the user's phone, drives the user's own Mac)
 
+> **Archived 1 Sep 2026 — built and merged** (PR #1, `12748f0`), with the consent surfaces reworked along the way; the final model is `../AUTO-REVIEW.md`. The passkey step-up (scope 3) is parked in ROADMAP "Later". The "NOT approved to build" status below is the 31 Aug snapshot.
+
 **Status:** design for review. NOT approved to build. Uriah chose "design doc first,
 build later"; nothing here ships until he approves this document.
 **Date:** 2026-08-31. Spans `opengrok-server` (the transport — this doc's owner) and

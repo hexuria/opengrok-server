@@ -7,27 +7,30 @@ Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
 **Picking this up cold? Start with [`docs/HANDOVER.md`](docs/HANDOVER.md)** — the state of play,
 what is already decided, and your first task.
 
-**New here? Read in this order:** [`docs/GOAL.md`](docs/GOAL.md) (the mission, the stack, the
-slice order) → [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
+**New here? Read in this order:** [`docs/GOAL.md`](docs/GOAL.md) (the mission and the stack)
+→ [`docs/DIAGRAMS.md`](docs/DIAGRAMS.md) №1 (five minutes, pictures)
 → [`docs/WHY.md`](docs/WHY.md) (what we built before, and why a working app wasn't enough)
-→ [`docs/PLAN.md`](docs/PLAN.md) → [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (how to actually stand P1
-up: the env vars, the Postgres, the acceptance script) → [`docs/LEGAL.md`](docs/LEGAL.md) → the
-reference doc for whatever you are about to touch, in `docs/research/`.
+→ [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is done, with commits, and what is left)
+→ [`docs/setup/`](docs/setup/README.md) (how to actually stand it up)
+→ [`docs/LEGAL.md`](docs/LEGAL.md) → the reference doc for whatever you are about to touch,
+in `docs/research/`.
 
 ## Three facts that each cost a day if you learn them the hard way
 
-1. **The client refuses a loopback gateway.** `SAND_HOST_GATEWAY_URL` is the repoint, but the
-   connector **throws if the resolved host starts with `127.0.0.1` or `localhost`** unless the box
-   runtime is `local-docker` (which ignores the variable entirely). Serve on a non-loopback
-   hostname. `docs/research/client-grok-bot.md`, and the callout in `docs/PLAN.md` §2.
+1. **The client refuses a loopback gateway, and the env-var repoint is dead.** The desktop app
+   connects through its own OpenGrok server mode (`boxRuntime: "opengrok"` + the
+   `openGrokGatewayUrl` setting); launching it with `SAND_HOST_GATEWAY_URL` deadlocks it before
+   the window opens. Either way it **throws if the gateway host starts with `127.0.0.1` or
+   `localhost`** — serve on a non-loopback address. `docs/setup/desktop-client.md`.
 2. **The gateway is embeddable — `oag_server::public_router()` returns a wired Axum router.** But if
    you skip `oag_server::serve()` you must spawn the catalogue refresh yourself, or a replica
    serves a **stale catalogue while reporting healthy**. `docs/research/gateway-open-ai-gateway.md` §8.
 3. **An empty success is the dangerous reply.** `listAgents` returning `[]` is *valid* — the client
    paints an empty sidebar and the person blames the app. Reply shapes matter as much as replies:
    `countAgents` must be a number, `getTrays` an array, or the renderer diverts or throws.
-   `docs/RUNBOOK.md` §4. And if the roster silently stops updating, check the client's
-   `inferenceProvider` setting before suspecting us — `docs/RUNBOOK.md` §6.
+   And if the roster silently stops updating, check the client's `inferenceProvider` setting —
+   and its persisted gateway address against the machine's current LAN address — before
+   suspecting us. `docs/setup/desktop-client.md`.
 
 ---
 
@@ -95,6 +98,8 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 cargo check --workspace          # must stay clean
 cargo clippy --workspace --all-targets
 cargo test --workspace
+scripts/serve.sh                 # build + (re)start the dev server from .env
+scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/setup/gate.md
 ```
 
 ## Writing style in this repo

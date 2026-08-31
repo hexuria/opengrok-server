@@ -27,7 +27,7 @@ vendored** (`LEGAL.md`), and this repo stays private until a rights review clear
 | Plugins / connectors | [Agent Plugins](https://agent-plugins.org/) format (`plugin.json` + `skills/` + `mcp.json`) for gmail, github, gdrive, mem0/OpenMemory. Connectors are MCP servers we connect to, not code we write. |
 | Sandboxed shell | `vercel-labs/just-bash` is TypeScript — usable only inside a Node sidecar or on the box itself, not in-process. Evaluate when the tool executor needs a no-box shell; do not block on it. |
 | Repo | [`hexuria/opengrok-server`](https://github.com/hexuria/opengrok-server), **private** (LEGAL #4). Checked out at `/Volumes/goldcoders/OSS/opengrok-server`. Renamed 29 Aug 2026 to free the name `opengrok` for another repo; **the crates did not change** — `opengrok-server` in `crates/` is the Axum crate and always was. |
-| The gate | `scripts/gate.sh` runs everything the workflow runs; `--smoke` adds all five smoke scripts. **GitHub Actions is currently blocked on account billing** ("recent account payments have failed or your spending limit needs to be increased"), so the local gate is the gate until that is settled. Publishing to get free minutes is not an option the rights review has cleared. |
+| The gate | `scripts/gate.sh` runs everything the workflow runs; `--smoke` adds the 19 smoke scripts (`docs/setup/gate.md`). **GitHub Actions is currently blocked on account billing** ("recent account payments have failed or your spending limit needs to be increased"), so the local gate is the gate until that is settled. Publishing to get free minutes is not an option the rights review has cleared. |
 
 ### Evaluated and deferred
 
@@ -69,136 +69,23 @@ the record of how a real client behaves, and they are what a Grok Bot compatibil
 built from. But grok-bot is no longer the thing we are racing to satisfy, and it is the reason this
 repo cannot be published (`LEGAL.md`). Treat it as a second, optional client.
 
+> **Superseded in practice, 30 Aug 2026.** The port plan (`PORT-PRIORITY.md`, an operator
+> decision) inverted this: the reconstructed desktop client became the driving client — the
+> strongest smoke test we can have — and slices 7–14 were built and verified against it, through
+> its own OpenGrok server mode. openbot remains a supported AG-UI client (`POST /ag-ui` is live);
+> the paragraph above stands as the record of the 29 Aug framing.
+
 ### `web/` is ours, and stays
 
-The Next.js app in `web/` is a development harness, not the product: it proves a slice from a
-browser in seconds without standing up openbot. Keep it small.
+The web console (`web/`, a Bun/Vite/React SPA the server hosts at `/console`) started as a
+development harness and grew into the account + admin dashboards (ROADMAP slice 13). Keep it
+small.
 
-## Slices, in order — one at a time, tested, verified
+## Slices
 
-Done means: implemented, tested, exercised against the Next.js client, and green in CI.
-
-1. ✅ **Auth — replace Cursor's OAuth.** *Done 29 Aug 2026 (`582521f`).* Two endpoints, our own
-   JWTs, event-sourced accounts, `scripts/slice1-auth-smoke.sh` green against real Postgres.
-   Original scope, kept for reference: `SAND_BACKEND_URL` points the client's whole auth backend at
-   us (`cursor-token.ts:39`). A non-default backend makes `isDevAuthBackend` true, which unlocks
-   `GET /auth/cursor_dev_session_token?plan=&trial=&email=` — no browser flow needed for the first
-   pass. Serve that plus `POST /oauth/token` (refresh grant → `{access_token, refresh_token}`) and
-   the profile fetch (`cursor-profile.ts`), minting our own JWTs. `logged-in` is just "both tokens
-   present" (`cursor-session-policy.ts:cursorSessionPresent`). Full browser flow
-   (`/loginDeepControl` + `/auth/poll`, PKCE-style challenge/verifier) is the follow-up.
-2. **AG-UI endpoint** — `POST /ag-ui` streaming the 32 event types of `@ag-ui/core` 0.0.57 over
-   SSE, so openbot can add OpenGrok as a Bot and get a reply. This is now the spine: everything
-   after it is reached through this endpoint.
-3. ✅ **Say something and be answered** — *Done 29 Aug 2026.* The harness, the projection and two
-   doors (gateway + mock); `scripts/slice3-harness-smoke.sh` green. **Not yet durable** — a run is
-   not written to the event log, so it does not survive a restart. That moves into slice 4, where
-   it belongs with the boxes. Original scope: the harness loop on Rig, out through open-ai-gateway,
-   streamed back as AG-UI `TEXT_MESSAGE_*` / `TOOL_CALL_*`; runs and transcripts as events in the
-   store. Durable: a run survives the client disconnecting.
-4. **Durability, then the computer.** Two halves of the same promise.
-   - ✅ *Durable runs — done 29 Aug 2026.* Every event is appended to the log **before** the client
-     sees it, and `GET /ag-ui/runs/{id}` replays a run without asking a model again.
-     `scripts/slice4-durability-smoke.sh` SIGKILLs the server mid-run and proves the work survived.
-     `PgStore::interrupted_runs` makes a run orphaned by a restart findable rather than merely
-     absent — nothing consumes it yet; resumption starts there.
-   - ✅ *The computer — done 29 Aug 2026.* `AsciiBoxes` implements `Computer` over box.ascii.dev's
-     REST API, with 15 integration tests driving it against a stand-in server (paths, bearer token,
-     request bodies, error mapping). **Unverified against the live service** — needs a `box_` key,
-     and two shapes the vendor's reference leaves unpinned are marked in `ascii.rs`.
-   - ✅ *Assignment and tools — done 29 Aug 2026.* The `coworker` aggregate owns the box (assigned,
-     never requested; dedicated or shared), and `opengrok-tools::Executor` runs shell/read/write on
-     the coworker's own box with identity arguments **overwritten, not validated**.
-   - ✅ *The chain joins — done 29 Aug 2026.* `run_turn_with_tools` reassembles tool calls from the
-     stream, runs them on the coworker's own box, and emits `TOOL_CALL_RESULT`. The end-to-end test
-     has a model ask for another coworker's box and get its own.
-   - ✅ *The durable loop — done 29 Aug 2026.* `run_conversation` runs model → tools → model, with
-     each round's events reaching the journal **before** the next model call. `RunJournal` carries
-     that ordering as a seam; the test asserting it was verified by breaking the rule and watching
-     it fail. `MAX_ROUNDS` bounds a model that never stops, ending the run as a readable error.
-   - ✅ *The roster — done 29 Aug 2026.* `POST /coworkers` hires (optionally with a computer),
-     `GET /coworkers` returns the roster as an array scoped to the bearer's account, and tools are
-     built **per request** from the coworker named in AG-UI's `forwardedProps`.
-     `scripts/slice5-roster-smoke.sh` includes the first tenancy check: a coworker does not appear
-     on another account's roster.
-   - ✅ *A computer with no signup — done 29 Aug 2026.* `DockerComputer` makes a local container a
-     `Computer`, chosen automatically without a box key, so the headline works on a laptop today.
-     Three tests drive a real daemon; `scripts/slice6-computer-smoke.sh` is the goal in one script.
-   - ✅ *Policy — done 29 Aug 2026.* `opengrok-policy` answers PLAN §4.5's layers 1–3: a grant per
-     principal-and-coworker, a ceiling per coworker, combined by **intersection, never union**.
-     Checked on every turn and before every tool call, never once at sign-in. Every unknown denies.
-     `scripts/slice7-policy-smoke.sh` is the attack itself: one account naming another's coworker.
-   - ✅ *Layer 4 — done 29 Aug 2026.* A run carries its owner and only they may replay it; both
-     "no such run" and "not yours" answer 404 so an id reveals nothing. This closed a real hole:
-     `GET /ag-ui/runs/{id}` had returned any conversation to anyone who named the id.
-   - ✅ *Layer 5 — done 29 Aug 2026.* A tool can need a human yes; the run suspends rather than
-     ending, stays `running` in the log, and `POST /coworkers/{id}/approvals` sets the list.
-     `scripts/slice8-approval-smoke.sh` proves it suspends, that waiting does not read as success,
-     and that withdrawing the requirement lets the same tool run.
-   - ✅ *Answering — done 29 Aug 2026.* `POST /ag-ui/runs/{id}/answer` settles a suspended call
-     **exactly once**: the aggregate refuses every later answer and the store's sequence check
-     covers the concurrent case. A retry reports the settled state rather than failing, because an
-     answer unsafe to resend is a decision a flaky network loses. `GET /ag-ui/approvals` lists what
-     is waiting, with the arguments, since approving `shell` unseen is approving nothing.
-   - ✅ *Continuing — done 29 Aug 2026.* The server resumes an answered run itself, in the
-     background, and **runs the call that was approved** rather than re-prompting: the person
-     approved that command, and a second prompt could produce a different one. Approval is per
-     call, never per tool. `scripts/slice8-approval-smoke.sh` sends no further request and watches
-     the run finish on its own, then checks the approved command's marker on the box.
-
-   - ✅ *Recovery — done 29 Aug 2026.* A sweep claims runs abandoned by a restart and ends them,
-     told apart from live ones by a **lease** the run endpoint holds while serving. Claiming is one
-     `update … returning`, so two replicas cannot take the same run. A run interrupted between a
-     tool call and its result is **not** re-run: the outcome is genuinely unknown, and the failure
-     says so rather than repeating whatever the command did. `scripts/slice9-recovery-smoke.sh`.
-
-**PLAN §4.5 layers 1–5 are all enforced, and every run reaches an ending.** The arc runs unattended:
-sign in → hire → a computer of its own → talk → policy every turn → tools on its own box → a risky
-call waits for a person → one answer settles it → the server resumes itself → durable throughout →
-and a run whose process dies is picked up rather than left hanging.
-5. **Plugins** — *in progress.*
-   - ✅ *The bundle format* — `opengrok-plugins` reads `plugin.json` + `skills/` + `mcp.json`,
-     transcribed from the published 1.0.0 schemas. A plugin is a **bundle**; MCP is the protocol one
-     of its servers speaks; `rmcp` is a client for that protocol — three layers, not one.
-   - ✅ *Curation, not authorship.* We do not write Gmail or GitHub — we keep a list we have read.
-     `Trust::Unverified` is not a badge: its tools arrive needing a human yes, via slice 4b's
-     approval machinery. `Policy::CuratedOnly` (the default) refuses the rest outright.
-   - ✅ *Connections* — `opengrok-core::connection`. Three scopes (**global / user / bot**) and the
-     lend: a person authenticates once and lends the connection to as many coworkers as they like,
-     rather than each one signing in again. Resolution is most-specific-first, so a bot's own
-     account beats one lent to it.
-   - ✅ *The credential vault* — `opengrok-store::vault`, ChaCha20-Poly1305 keyed by
-     `OG_CREDENTIAL_KEK`, with the row id as associated data so a blob moved between rows stops
-     opening. Connections persist through the usual aggregate pattern; loans are their own table.
-   - ✅ *OAuth 2.0* — signed `state` (CSRF), authorize/callback/refresh, and the four provider
-     habits written down as tests: Google's once-only refresh token, GitHub's form-encoded reply
-     and absent expiry, and byte-exact `redirect_uri`. Verified against a stand-in provider in
-     `crates/opengrok-server/tests/against_a_stand_in_provider.rs`; **live Google/GitHub needs the
-     operator's app registrations**.
-   - ✅ *MCP over HTTP* — `opengrok-tools::mcp`, streamable-http and sse via `rmcp`, credential
-     injected into headers at connect time, tools namespaced `<plugin>.<server>.<tool>`. `stdio` is
-     refused with a reason and the plugin still loads.
-   - ✅ *Plugin tools on the executor* — `tool_names()` is dynamic, plugin tools dispatch after the
-     policy check (so a connector is governed exactly like `shell`), and identity keys are stripped
-     before arguments reach a remote server. Hiring sets the ceiling to built-ins only, so granting
-     a plugin to a coworker stays a second, separate decision.
-   - ✅ *Wired end to end — done 30 Aug 2026.* `/connections/{c}/authorize` → provider → `/callback`
-     (state verified, token sealed) → `/connections/{id}/lend` → the coworker's next turn is offered
-     that connector's tools. Provider config from `OG_CONNECTORS`, plugins from `OG_PLUGINS_DIR`.
-   - ✅ *Refresh before use — done 30 Aug 2026.* A connection records its expiry; an expiring token
-     is refreshed **before** the call, with a 60s leeway so it cannot die mid-flight. A token with
-     no expiry is never refreshed, and `invalid_grant` disconnects rather than retrying forever.
-   - ✅ *MCP round trip proven* — `crates/opengrok-tools/tests/against_a_stand_in_mcp_server.rs`
-     drives our client against a **hand-written** MCP server (rmcp-to-rmcp would only prove the two
-     halves share an interpretation). It found a real bug on its first run: `Bearer Bearer …`,
-     because rmcp's `auth_header` wants the bare token.
-
-**Slice 5 is complete.** A person authenticates a provider, lends the connection to a coworker, and
-that coworker's next turn is offered the connector's tools — governed by the same policy, approval
-and identity rules as `shell`.
-6. **Grok Bot compatibility (optional)** — the P1 command table and SSE from `RUNBOOK.md`, plus the
-   remaining seam-B Connect services in `opengrok-proto`. Blocked on the rights review for
-   publication, not for local work.
+The slice log that used to live here (slices 1–6, frozen mid-2026) has moved: **`ROADMAP.md` is
+the single tracker** — what is done carries its commit, what is left is an unticked box. This
+file keeps only the mission and the stack decisions.
 
 ## The mock door — test without spending a token
 
@@ -240,15 +127,3 @@ What is already decided by the shape of the rest:
 - **Provenance for later:** the desktop client already models this — `user-attachment` entries carry
   `file_path`/`file_name`/`byteSize` (`opengrok-wire/src/transcript.rs`) and it fetches avatars from
   `/avatars/<id>`. AG-UI carries files as message content. Both consume the same store.
-
-## Provenance for slice 1 (read before implementing)
-
-- `opengrok/source/electron-main/account/cursor-auth.ts` — the whole client-side flow: login URL
-  construction (:115-118), poll (:121-130), dev session token (:311-314), refresh (:340-347),
-  token body shape (:160-166).
-- `opengrok/source/shared/node/cursor-token.ts` — backend resolution (:39), client id / dev
-  detection (:42-50).
-- `opengrok/source/shared/cursor-session-policy.ts` — what "signed in" means, and that Cursor
-  sessions survive provider switches.
-- `opengrok/source/electron-main/account/cursor-profile.ts` — the profile endpoint the slice must
-  also serve.

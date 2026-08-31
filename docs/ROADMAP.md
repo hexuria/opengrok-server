@@ -75,11 +75,11 @@ after — the real, unmodified client is the strongest smoke test we can have.
 - [x] **7.3** The trap, honoured: serve on a **non-loopback** host — verified live on
   `http://192.168.100.21:1447` with the pinned bearer (`OG_GATEWAY_BEARER`), 401 without it.
   *(this commit)*
-- [ ] **7.v** Launch the shipped app with `SAND_HOST_GATEWAY_URL` pointed at us and see a
-  populated sidebar. **Blocked in the client, not here:** setting that env var deadlocks the
-  reconstructed app before its window opens — isolated and written up in
-  `docs/port-blockers.md` B1. The wire contract is held by `slice11-gateway-smoke.sh`
-  meanwhile.
+- [x] **7.v** The packaged app boots against us and shows a populated sidebar — via the
+  client's **OpenGrok server mode** (`boxRuntime: "opengrok"` + the `openGrokGatewayUrl`
+  setting), not the `SAND_HOST_GATEWAY_URL` env var, which still deadlocks the app and is a
+  dead path now (B1 re-checked 1 Sep). Evidence: `docs/verification/real-client/README.md`
+  and the 31 Aug acceptance run it cites. (`0ae194e`)
 
 ## Slice 8 — A conversation from the real app (P4)
 
@@ -94,9 +94,11 @@ The milestone that proves the port; everything after it is breadth, not risk.
   echo carrying `clientNonce`, streaming placeholder, final update) and `agent-upserted` pulsing
   `isRunning` — every frame stamped `ordered: {replicaKey, epoch, sequence}`, plus an `agents`
   snapshot on every `/events` connect. *(this commit)*
-- [ ] **8.v** Send a message from the real, unmodified app and watch the answer stream back.
-  Blocked by the same client bug as 7.v (`docs/port-blockers.md` B1); the choreography is held by
-  `slice12-conversation-smoke.sh` meanwhile.
+- [x] **8.v** A message sent from the packaged app runs on this server and the answer streams
+  back — the 31 Aug acceptance flows (real-judge refusal, auto-review cards) each began with a
+  prompt typed in the app and ended with its reply rendered there. Evidence:
+  `docs/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
+  (streams `run_01a057f0-…`, `run_01a057f5-…`). (`0ae194e`)
 
 ## Slice 9 — Seam B: identity and the mint (P0 + P1)
 
@@ -124,9 +126,11 @@ tonic gRPC server cannot answer the client.
   file, codegen into target/ never the tree), both services on an opt-in `OG_GRPC_BIND`
   listener, proven by a real tonic client in `against_our_own_grpc.rs` — unauthenticated
   refusal, GetMe, the mint. *(this commit)*
-- [ ] **9.v** Remove `SAND_HOST_GATEWAY_URL`; the client mints its own connection through us
-  (`SAND_BACKEND_URL` pointed here). Blocked behind port-blockers B1 with 7.v/8.v; the contract
-  is held by `slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
+- [ ] **9.v** The client mints its own connection through us: switch the packaged app into
+  OpenGrok server mode, sign in at `/loginDeepControl`, and watch `EnsureSandBox` hand back
+  `OG_PUBLIC_GATEWAY_URL` + the bearer. (The old "remove `SAND_HOST_GATEWAY_URL`" framing is
+  obsolete — the env var is a dead path; see `docs/verification/real-client/README.md`.) The
+  contract is held by `slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
 
@@ -167,7 +171,9 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
 - [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
   password reset via Resend; an in-app admin surface for invites/enable (CLI-only in v1).
 
-- [x] **13 Web console** — the account + admin dashboards as a Bun/Vite/React/TanStack SPA the
+## Slice 13 — Web console
+
+- [x] **13** The account + admin dashboards as a Bun/Vite/React/TanStack SPA the
   server hosts at `/console` (Axum `ServeDir`-style handler, SPA deep-links 200 via index). Browser
   auth is httpOnly cookies (`/auth/login|logout|refresh`; no token in JS), `caller()` accepts the
   cookie or the Bearer header. Account self-service (name, avatar data-URL, password; email fixed)
@@ -175,7 +181,34 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   `isAdmin`-gated in the client, enforced on the API. Guards: an admin cannot self-disable (409);
   login no longer clobbers the account projection. `slice19-web-console-smoke.sh` +
   `tests/against_the_web_console.rs`; browser-verified in `docs/verification/web-console/`.
-  (this commit)
+  (merged in `12748f0`)
+
+## Slice 14 — One consent model (merged 31 Aug, PR #1 `12748f0`)
+
+Running a bot command on the user's own Mac had four overlapping controls grown slice by slice.
+Collapsed, with the user's review, to one model: the Mac switch is a local on/off kill switch;
+the server's per-machine policy (off/ask/always + visible, deletable standing rules) decides;
+the inline card is the ONE consent surface and never expires; card Always/Never write a server
+standing rule and nothing else. Design: `docs/AUTO-REVIEW.md`.
+
+- [x] **14.1** `SuspendReason` on suspend/answer/pending (`#[serde(default)]` so old rows keep
+  their meaning); cards chosen by reason, not tool name.
+- [x] **14.2** Auto-review, two tiers (global → per-coworker, per-field inheritance,
+  `''` = explicit none): store rows, `/auto-review/policy` + `/effective`, machine tier removed
+  and legacy rows purged idempotently.
+- [x] **14.3** Enforcement at the executor seam: identity overwrite for every tool, primary gate,
+  ONE judge call site (`ModelJudge` — own route via `OG_AUTO_REVIEW_MODEL`, empty tools, 8 s
+  timeout, strict one-word verdict, failure ⇒ ask, never a silent allow), pure
+  `combine(gate, review, approved)` ladder — a block refuses naming the instruction; at most one
+  card per call; a review approval never releases the machine's own consent.
+- [x] **14.4** `resolveAutoReviewApproval` for real: same-entry status flip, exactly-once answers,
+  heal-on-press to `expired`+410 for dead runs, deny resumes the run with a refusal result the
+  bot explains. `tests/against_auto_review_gate.rs` drives it through the real router.
+- [x] **14.v** End-to-end on the shipped path: real judge refusing `brew install jq` with the
+  rule named in the bot's reply; mock window raising exactly one card that flips in place.
+  Paired evidence `docs/verification/auto-review/README.md` + the client repo's
+  `docs/consent-model-B5-acceptance.md`. Known, accepted v1 scope: the pinned 0.18 card's
+  "Always" writes the global tier (client-side; the per-agent widget writes the coworker tier).
 
 ## Slice 11+ — breadth (P5 → P10, in order)
 
@@ -208,6 +241,12 @@ Listing them as pending would make this tracker lie about how far away done is.
 ## Later — unordered, deliberately
 
 - [ ] Commands: `goal`, `plan`, `review`.
+- [ ] Per-coworker model pins — investigated, not implemented; the dialect/default/surfaces
+  decision is written up in `plan-coworker-model-pins.md` and awaits an adversarial pass.
+- [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
+  `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
+- [ ] Channels / multi-party rooms (phases 3–4 of `archive/plan-bots-computers-channels.md`) —
+  the provisioning half shipped (`41245b5`); the rooms half deliberately waits with P11.
 - [ ] mem0 (exists only as a catalogue entry today).
 - [ ] Artifacts/uploads — parked on purpose; lands with or after the harness produces files worth
   storing (design notes in GOAL.md).

@@ -1,5 +1,11 @@
 # OpenGrok — build plan
 
+> **Status (1 Sep 2026): the founding plan, kept as reference.** The seams (§4), the client
+> contract (§2) and the embedding notes (§3) are still authoritative. The phase table (§5) and
+> the open questions (§7) are historical — progress is tracked in [`ROADMAP.md`](ROADMAP.md),
+> and the phases were superseded first by `GOAL.md`'s slices, then by `PORT-PRIORITY.md`'s
+> port ladder.
+
 **The one-line idea.** The coworkers move out of the browser tab and into a server of their own: one
 Rust service that owns the harness, the tools, the computers and the policy, shipped together with
 open-ai-gateway as a single AI infrastructure. Clients — the Grok Bot desktop app first, then web
@@ -232,7 +238,8 @@ either and `listAgents` is never called. Then `listAgents` (array), the resync c
 `openAgentTail`. `opengrok-store` gets its first migrations alongside.
 
 **The full ordered table, the four environment variables, the Postgres setup and the acceptance
-script are in [`RUNBOOK.md`](RUNBOOK.md) — P1 is not startable without it.** The same list is
+script are in [`archive/runbook-p1.md`](archive/runbook-p1.md) — P1 was not startable without
+it (today: [`setup/`](setup/README.md)).** The same list is
 mirrored in `crates/opengrok-wire/src/command.rs` as `P1_COMMANDS`, so the plan and the code cannot drift.
 
 Watch for Trap 2: an *empty success* is the dangerous reply. `listAgents` returning `[]` is valid,
