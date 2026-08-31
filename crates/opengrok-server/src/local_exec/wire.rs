@@ -2,24 +2,24 @@
 //! result frame is read back into a plain outcome.
 //!
 //! Isolated on purpose. The gate and the audit deal in a human-readable command STRING; the wire
-//! carries an opaque protobuf-JSON message that the server constructs and the daemon replays. The
-//! exact encoding is the one thing still to be confirmed byte-for-byte against the client's daemon
-//! (`⚠ CONFIRM` below), so it lives behind two functions and nothing else in the server touches the
-//! shape. If the daemon disagrees on a field name, this file is the only edit.
+//! carries an opaque protobuf-JSON message the server constructs and the daemon replays, so it lives
+//! behind two functions and nothing else in the server touches the shape.
 //!
-//! Schema, from `source/packages/proto/generated/agent/v1/{exec_pb.ts,shell_exec_pb.ts}`:
+//! Schema confirmed against the client daemon (`production-executor.ts`,
+//! `source/packages/proto/generated/agent/v1/{exec_pb.ts,shell_exec_pb.ts}`):
 //! - **server→daemon** `serverMessage` = `ExecServerMessage`, protobuf-JSON. A protobuf oneof is
-//!   FLATTENED in JSON (that is how `@bufbuild/protobuf` `fromJson` reads it), so the shell case is
-//!   the top-level key `shellArgs`, not a `{case, value}` wrapper:
-//!   `{ "id": <u32>, "execId": <string>, "shellArgs": ShellArgs }`.
+//!   FLATTENED in JSON (`ExecServerMessage.fromJson` with `ignoreUnknownFields`), so the shell case
+//!   is the top-level key `shellArgs`, not a `{case, value}` wrapper:
+//!   `{ "id": <u32>, "shellArgs": ShellArgs }`. There is NO `execId` field — the request is
+//!   correlated by the ENVELOPE `requestId`, not anything inside the message.
 //!   `ShellArgs` carries `command` (the readable command), `simpleCommands` (the app's OWN parse —
 //!   the gate already matched against THIS list, never a re-parse here), `workingDirectory`,
 //!   `timeout`, `toolCallId`, and `skipApproval` — which the server ALWAYS sets to `false`: a
 //!   caller does not get to wave a command past the gate.
-//! - **daemon→server** result = `ExecClientMessage`, protobuf-JSON:
-//!   `{ "id", "execId", "shellResult": ShellResult }` where `ShellResult` is ITSELF a oneof —
-//!   flattened to one of `success | failure | timeout | rejected | spawnError | permissionDenied`.
-//!   A refusal is its own case, not a non-zero exit, which is why the audit records the CASE.
+//! - **daemon→server** result = `ExecClientMessage`, protobuf-JSON `{ "id", "shellResult": ShellResult }`
+//!   where `ShellResult` is ITSELF a oneof — flattened to one of
+//!   `success | failure | timeout | rejected | spawnError | permissionDenied`. A refusal is its own
+//!   case, not a non-zero exit, which is why the audit records the CASE.
 
 use serde_json::{json, Value};
 
@@ -36,11 +36,13 @@ pub fn shell_server_message(
     working_directory: &str,
     timeout_ms: u64,
 ) -> Value {
+    // Confirmed against the client daemon (production-executor.ts: `ExecServerMessage.fromJson`,
+    // `ignoreUnknownFields`): flattened protobuf-JSON, oneof member `shellArgs` at the top level.
+    // The message's own field is `id` (a uint32) — there is NO `execId` on `ExecServerMessage`, so
+    // we do not send one; the request is correlated by the ENVELOPE `requestId`, which the daemon
+    // echoes back. `toolCallId` (a real ShellArgs field) still carries our id for the daemon's logs.
     json!({
         "id": 0,
-        "execId": exec_id,
-        // ⚠ CONFIRM with the client daemon: flattened oneof member `shellArgs` (protobuf-JSON), not
-        // a `{ case, value }` wrapper. Change here only if their `fromJson` expects otherwise.
         "shellArgs": {
             "command": command,
             "simpleCommands": simple_commands,
@@ -114,7 +116,7 @@ mod tests {
         let msg = shell_server_message("req-1", "git status", &["git status".into()], "/repo", 5000);
         assert_eq!(msg["shellArgs"]["skipApproval"], json!(false));
         assert_eq!(msg["shellArgs"]["command"], "git status");
-        assert_eq!(msg["execId"], "req-1");
+        assert!(msg.get("execId").is_none(), "ExecServerMessage has no execId field");
         assert_eq!(msg["shellArgs"]["simpleCommands"][0], "git status");
     }
 

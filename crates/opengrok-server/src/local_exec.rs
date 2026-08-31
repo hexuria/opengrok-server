@@ -686,15 +686,19 @@ async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Re
     let Some((_account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
         return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
     };
+    use futures::StreamExt as _;
     let rx = state.local_exec.connect(&machine_id).await;
+    // The reconnect hint goes first, before any frame (mirrors the gateway `/events` stream and what
+    // the daemon's SSE reader expects).
+    let opening = futures::stream::once(async { Ok::<_, Infallible>("retry: 1000\n\n".to_string()) });
     let frames = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
             .await
             .map(|frame| (Ok::<_, Infallible>(format!("data: {frame}\n\n")), rx))
     });
-    // Keepalives so a proxy does not close an idle stream; the daemon ignores comment lines.
+    // Keepalives so a proxy does not close an idle stream; they are SSE comments the reader skips.
     let pings = futures::stream::unfold((), |()| async {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(15)).await;
         Some((Ok::<_, Infallible>(":ping\n\n".to_string()), ()))
     });
     (
@@ -702,7 +706,7 @@ async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Re
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::body::Body::from_stream(futures::stream::select(frames, pings)),
+        axum::body::Body::from_stream(opening.chain(futures::stream::select(frames, pings))),
     )
         .into_response()
 }
@@ -719,15 +723,24 @@ async fn post_responses(
     let Some((_account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
         return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
     };
-    if body.get("type").and_then(|value| value.as_str()) == Some("client")
-        && let Some(request_id) = body.get("requestId").and_then(|value| value.as_str())
-        && let Some(message) = body.get("message")
-    {
-        let outcome = wire::outcome_from_client_message(message);
-        state
-            .local_exec
-            .resolve(&machine_id, request_id, outcome)
-            .await;
+    // The daemon POSTs a BATCH (local-exec-provider.ts flushes an outbox): a top-level `providerId`
+    // and a `frames` array, each frame discriminated by `kind` (hello/ping/client/control/…). One
+    // POST can carry several results, and a backlog after a retry. A `client` frame carries one
+    // command's `ExecClientMessage` in `message`; everything else is acknowledged. The result is
+    // resolved against THIS machine (the broker rejects a mismatch), not the untrusted `providerId`.
+    if let Some(frames) = body.get("frames").and_then(|value| value.as_array()) {
+        for frame in frames {
+            if frame.get("kind").and_then(|value| value.as_str()) == Some("client")
+                && let Some(request_id) = frame.get("requestId").and_then(|value| value.as_str())
+                && let Some(message) = frame.get("message")
+            {
+                let outcome = wire::outcome_from_client_message(message);
+                state
+                    .local_exec
+                    .resolve(&machine_id, request_id, outcome)
+                    .await;
+            }
+        }
     }
     StatusCode::NO_CONTENT.into_response()
 }
