@@ -81,13 +81,13 @@ async fn main() -> anyhow::Result<()> {
     let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
         Ok("mock") => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
-            Arc::new(MockDoor::echoing())
+            Arc::new(with_mock_verdict(MockDoor::echoing()))
         }
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
         Ok("mock-tools") => {
             tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
-            Arc::new(MockDoor::asking_for_a_tool())
+            Arc::new(with_mock_verdict(MockDoor::asking_for_a_tool()))
         }
         door => {
             let url = std::env::var("OG_GATEWAY_URL")
@@ -149,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
         auth,
         door,
         model: std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string()),
+        auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL")
+            .unwrap_or_else(|_| std::env::var("OG_MODEL").unwrap_or_else(|_| "oag/cheap".to_string())),
         computer,
         vault,
         connectors,
@@ -341,5 +343,17 @@ async fn shutdown_signal() {
     tokio::select! {
         () = interrupt => tracing::info!("interrupted; shutting down"),
         () = terminate => tracing::info!("terminated; shutting down"),
+    }
+}
+
+/// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask` makes a mock door answer the auto-review judge
+/// with that word, so the card and the refusal can be driven in the real app with no provider.
+fn with_mock_verdict(door: MockDoor) -> MockDoor {
+    match std::env::var("OG_AUTO_REVIEW_MOCK_VERDICT") {
+        Ok(word) if !word.trim().is_empty() => {
+            tracing::warn!(%word, "OG_AUTO_REVIEW_MOCK_VERDICT — the auto-review judge is canned");
+            door.with_judge_verdict(word.trim().to_string())
+        }
+        _ => door,
     }
 }

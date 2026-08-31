@@ -29,9 +29,21 @@ pub struct MockDoor {
     /// would silently skip that path. That is exactly the bug this comment exists to prevent a
     /// second time: state that belongs to a conversation must be read from the conversation.
     once_then_answer: bool,
+    /// The one word to answer an auto-review judge request with (a request whose system prompt
+    /// starts with `JUDGE_MARKER`). Ordinary requests are unaffected, so a mock-driven turn can
+    /// reach every rung of the ladder with no provider and no spend.
+    judge_verdict: Option<String>,
 }
 
 impl MockDoor {
+    /// Answer judge requests with this word ("allow" | "block" | "ask"); anything else parses to
+    /// `Unavailable`, which is also a rung worth reaching.
+    #[must_use]
+    pub fn with_judge_verdict(mut self, word: impl Into<String>) -> Self {
+        self.judge_verdict = Some(word.into());
+        self
+    }
+
     /// The default script: word-by-word, so a client's streaming is visibly exercised rather than
     /// arriving as one indivisible blob that would also pass a non-streaming implementation.
     pub fn echoing() -> Self {
@@ -43,6 +55,7 @@ impl MockDoor {
             script,
             fail_with: None,
             once_then_answer: false,
+            judge_verdict: None,
         }
     }
 
@@ -73,6 +86,7 @@ impl MockDoor {
             fail_with: None,
             // Asks once, then answers — like a turn that actually ends.
             once_then_answer: true,
+            judge_verdict: None,
         }
     }
 
@@ -81,6 +95,7 @@ impl MockDoor {
             script: Vec::new(),
             fail_with: Some(message.into()),
             once_then_answer: false,
+            judge_verdict: None,
         }
     }
 
@@ -114,6 +129,17 @@ impl ModelDoor for MockDoor {
         if let Some(message) = &self.fail_with {
             let error = ModelError::Stream(message.clone());
             return Ok(Box::pin(stream::once(async move { Err(error) })));
+        }
+        if let Some(word) = &self.judge_verdict
+            && request
+                .system
+                .as_deref()
+                .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER))
+        {
+            let word = word.clone();
+            return Ok(Box::pin(stream::once(async move {
+                Ok(ModelDelta::Text(word))
+            })));
         }
         // Has this conversation already seen its tool result? The harness appends one as a user
         // message, so the conversation itself is the state.
