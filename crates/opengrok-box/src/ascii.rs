@@ -158,10 +158,25 @@ impl From<FinishedCommand> for CommandOutput {
     }
 }
 
+/// Read an id that the API may send as a JSON string OR a number (a pid) into a `String`. Anything
+/// else (null, missing handled by `default`) reads as empty rather than failing the whole reply.
+fn de_id_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        _ => Ok(String::new()),
+    }
+}
+
 /// `{type:"command.started", …}` and the poll reply share enough shape to read as one.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProcessStatus {
-    #[serde(default, rename = "processId")]
+    // The API returns `processId` as an INTEGER pid, not a string, so accept either — a fixed
+    // `String` here fails the whole reply with "invalid type: integer, expected a string".
+    #[serde(default, rename = "processId", deserialize_with = "de_id_string")]
     pub process_id: String,
     #[serde(default)]
     pub running: bool,
@@ -444,6 +459,22 @@ struct DesktopReply {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+
+    // A detached-start reply whose processId is a NUMBER (a pid) must parse, not fail the reply.
+    #[test]
+    fn process_status_accepts_a_numeric_process_id() {
+        let started: super::ProcessStatus = serde_json::from_str(
+            r#"{"type":"command.started","processId":15182,"running":true}"#,
+        )
+        .expect("a numeric processId must deserialize");
+        assert_eq!(started.process_id, "15182");
+        assert!(started.running);
+
+        // A string processId still works.
+        let s: super::ProcessStatus =
+            serde_json::from_str(r#"{"processId":"proc_abc","running":false}"#).expect("string id");
+        assert_eq!(s.process_id, "proc_abc");
+    }
     use super::*;
 
     /// The id field is not pinned, so every plausible spelling must be read.
