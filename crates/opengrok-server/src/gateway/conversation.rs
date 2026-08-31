@@ -27,6 +27,31 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// The system prompt that keeps a coworker honest about WHOSE computer it is using. A bot has its
+/// OWN box (sandboxed, on the server); the user has their own machine; these are different, and a
+/// bot must never present work done on its box as done on the user's computer. When it has no
+/// computer, it should say so rather than pretend. Written for the day a reverse channel makes "my
+/// computer" name two real machines — the distinction has to be in the model's head before then.
+fn computer_system_prompt(has_computer: bool) -> String {
+    if has_computer {
+        "You have your OWN computer: a sandboxed Linux box running on the server. It is a DIFFERENT \
+         machine from the user's own computer (for example their Mac). Your shell, read_file and \
+         write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
+         run a command or create, read or change a file, it happens on YOUR box, and you must say so \
+         plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
+         Never describe work done on your box as done on the user's computer. If the user asks you \
+         to do something on THEIR computer, tell them you can only use your own box and cannot reach \
+         their machine, and offer to do it on your box instead."
+            .to_string()
+    } else {
+        "You do NOT currently have a computer, so you cannot run shell commands or read or write \
+         files anywhere. Do not claim to run commands or access any machine. If the user needs \
+         something run, explain that your computer is not available yet and, where useful, give them \
+         the exact command to run themselves."
+            .to_string()
+    }
+}
+
 fn entry_id() -> String {
     format!("e_{}", uuid::Uuid::now_v7())
 }
@@ -523,7 +548,11 @@ pub(crate) async fn run_turn(
     };
     let request = ModelRequest {
         model,
-        system: None,
+        // A coworker gets a computer of its own, and the user has theirs. Nothing else told the model
+        // these are different machines, so it would run a command on its box and call the box "your
+        // computer" — the exact confusion a person hits when a file lands "on their machine" that is
+        // really on the server. This says, plainly, whose machine the tools touch and to say so.
+        system: Some(computer_system_prompt(tools.is_some())),
         messages,
         tools: Vec::new(),
     };

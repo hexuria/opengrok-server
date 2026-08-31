@@ -421,29 +421,36 @@ impl Executor {
 /// `None` if the name is not a builtin. `box_id` is deliberately ABSENT from every schema — the
 /// computer is not the model's to choose; `overwrite_identity` injects it server-side.
 fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
+    // Every description names the target unambiguously: THIS BOT'S OWN sandboxed box on the server,
+    // which is NOT the user's own machine. A bot that runs `write_file` has written to its box, and
+    // must never describe that as touching the user's computer. (When a reverse channel to the user's
+    // machine exists, "my computer" will name two real machines; this wording keeps them apart.)
     match name {
         "shell" => Some((
-            "Run a shell command on this coworker's own computer and return its stdout, stderr and exit code.",
+            "Run a shell command on THIS BOT'S OWN computer — a sandboxed Linux box on the server, \
+             not the user's own machine — and return its stdout, stderr and exit code.",
             serde_json::json!({
                 "type": "object",
-                "properties": { "command": { "type": "string", "description": "The shell command to run." } },
+                "properties": { "command": { "type": "string", "description": "The shell command to run on the bot's own box." } },
                 "required": ["command"],
             }),
         )),
         "read_file" => Some((
-            "Read a file from this coworker's computer and return its contents.",
+            "Read a file from THIS BOT'S OWN computer (the sandboxed box on the server, not the \
+             user's machine) and return its contents.",
             serde_json::json!({
                 "type": "object",
-                "properties": { "path": { "type": "string", "description": "Absolute path of the file to read." } },
+                "properties": { "path": { "type": "string", "description": "Absolute path on the bot's own box." } },
                 "required": ["path"],
             }),
         )),
         "write_file" => Some((
-            "Create or overwrite a file on this coworker's computer.",
+            "Create or overwrite a file on THIS BOT'S OWN computer (the sandboxed box on the server, \
+             not the user's machine).",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path of the file to write." },
+                    "path": { "type": "string", "description": "Absolute path on the bot's own box." },
                     "content": { "type": "string", "description": "The file's full new contents." },
                 },
                 "required": ["path", "content"],
