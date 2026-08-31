@@ -1,5 +1,11 @@
 # OpenGrok — build plan
 
+> **Status (1 Sep 2026): the founding plan, kept as reference.** The seams (§4), the client
+> contract (§2) and the embedding notes (§3) are still authoritative. The phase table (§5) and
+> the open questions (§7) are historical — progress is tracked in [`ROADMAP.md`](ROADMAP.md),
+> and the phases were superseded first by `GOAL.md`'s slices, then by `PORT-PRIORITY.md`'s
+> port ladder.
+
 **The one-line idea.** The coworkers move out of the browser tab and into a server of their own: one
 Rust service that owns the harness, the tools, the computers and the policy, shipped together with
 open-ai-gateway as a single AI infrastructure. Clients — the Grok Bot desktop app first, then web

@@ -1,138 +1,65 @@
 # Handover
 
-You are picking up OpenGrok in a fresh session. This page is the state of play; everything else is
-reference. Written 29 Aug 2026, at commit `59b377f`.
+You are picking up OpenGrok in a fresh session. This page is the state of play; everything else
+is reference. Rewritten 1 Sep 2026, at merge `12748f0` — the previous, P0-era version is at
+[`archive/handover-2026-08-29.md`](archive/handover-2026-08-29.md).
 
 **Read [`../CLAUDE.md`](../CLAUDE.md) first** (it loads automatically), then this, then act.
 
----
-
 ## Where this stands, in one paragraph
 
-The project is **P0 complete and nothing serves yet**. Nine Rust crates exist and compile; `opengrok-wire`
-(the desktop client's contract) and `opengrok-box` (the coworker's computer) have real types with their
-constraints written into them and seven tests holding the two invariants that matter; every other
-crate is a one-line placeholder. The *thinking* is done and written down — five reference documents
-totalling ~3,300 lines, produced by reading the actual source of the client, the gateway, the prior
-product, and two external services. **Your job is P1: make the desktop client boot against this
-server.** [`RUNBOOK.md`](RUNBOOK.md) is the procedure; it is not optional reading.
+The server is **real and serving**. Slices 1–14 are done: auth and our own OAuth, the AG-UI
+endpoint, the durable harness, computers (local Docker + box.ascii.dev), connectors with a
+credential vault, the scheduler/monitor autonomy pair, the gateway port that boots the packaged
+desktop client (P2–P10 breadth), seam B transcribed, bot-keys, orgs/invites/credential accounts,
+the web console at `/console`, and the consent model (per-machine policy, never-expiring cards,
+two-tier auto-review with a model judge). A dev instance runs on `:1447` against the real judge.
+[`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
+true — and its unticked boxes are the work: 9.v (the client minting its own connection in server
+mode), 10.3 (one browser send from barok-works), 12.later, and the "Later" bucket.
 
-## The four commits
+## How to stand it up
 
-| | |
-|---|---|
-| `5365080` | the workspace: nine crates, lints, ids, the first `opengrok-wire`/`opengrok-box` shapes |
-| `798046c` | the documentation set — everything a cold session needs |
-| `039aac6` | `WHY.md` (the founding narrative) and three findings that changed P1 |
-| `59b377f` | an adversarial pass: fixed two scaffold bugs, corrected four counts, wrote the runbook |
-
-`cargo check --workspace`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`
-(7 tests) are all clean. There is no CI yet — that is a P0 leftover.
-
----
+[`setup/`](setup/README.md), in order: prerequisites → postgres → environment → running → gate
+→ desktop-client. `scripts/serve.sh` builds and (re)starts the dev server from `.env`;
+`scripts/gate.sh --smoke` is the merge gate (CI is red from a billing hole and is not a signal).
 
 ## Decisions already made — do not relitigate
 
-Each is recorded with its reasoning where it belongs. Overturn any of them deliberately, with the
-operator, not by drift in a commit.
+Recorded with their reasoning where they belong; overturn deliberately with the operator, never
+by drift.
 
-| Decision | Where | Why, in one line |
-|---|---|---|
-| Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern | `PLAN.md` §3 | matches open-ai-gateway exactly so the two can ship as one binary |
-| **Rig** for provider abstraction, **our own loop** for durability | `PLAN.md` §4.2 | no Rust framework offers a loop that survives the process, and that suspension *is* the product |
-| The client contract is **transcribed, never invented** | `CLAUDE.md` #1, `LEGAL.md` | a tidier field name breaks a client we do not compile |
-| box.ascii.dev first, behind a `Computer` **trait** | `PLAN.md` §4.3 | hosted-only and EU-only, so the seam must survive replacing it |
-| `run` and `watch` are separate methods | `opengrok-box/src/lib.rs` | the sandbox has no live stdout socket; a `Stream` would hide the latency |
-| open-connector as a **Node sidecar** in v1 | `PLAN.md` §4.4 | its executors' routing is implicit in TypeScript; extraction is a follow-up, per provider |
-| Local Docker `Computer` lands **after** P3 | `PLAN.md` §7 | additive by construction |
-| One Postgres instance, OpenGrok's own database, in-process migrations under an advisory lock | `RUNBOOK.md` §2 | one database server for a developer; matches the gateway's pattern |
-| Repo stays **private** until a rights review | `LEGAL.md` | `opengrok/NOTICE.md` requires it; nothing in the plan depends on publishing |
+| Decision | Where |
+|---|---|
+| Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
+| Rig for providers, our own loop for durability — the suspension is the product | `PLAN.md` §4.2 |
+| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, `LEGAL.md` |
+| Every model call exits through open-ai-gateway; a pin is a route, not a key | `CLAUDE.md` #4 |
+| Port from the client's own mock (2 services, 18 methods), never the proto inventory | `PORT-PRIORITY.md` §3 |
+| One consent model: the server decides, cards never expire, judge failure = ask | `AUTO-REVIEW.md` §0 |
+| Repo stays private until a rights review clears it | `LEGAL.md` |
+| Redis only after a measured hot query; artifacts land with the harness's first real files | `ROADMAP.md` Later |
 
-## What is genuinely open — needs the operator, not you
+## Blocked on the operator, not on code
 
-1. 🔴 **Single-tenant or multi-tenant.** Blocks *P1*, not P5, because it shapes the first
-   migrations. **A default is recorded so you are not stalled:** every scoped table carries
-   `workspace_id NOT NULL` referencing one seeded workspace row — cheap, keeps the door open, and is
-   explicitly *not* the tenancy decision (enforcement is still P5's). Proceed on it unless told
-   otherwise. `PLAN.md` §7.
-2. 🟡 **The product name.** "OpenGrok" contains "Grok", which `LEGAL.md` forbids in product
-   surfaces. Fine as a directory and codename; a public name is a rights-review decision. Do not
-   rename anything on your own initiative. `LEGAL.md` #3.
-
----
-
-## Your first task
-
-**P1 — "the client says hello".** Done when the desktop app lists a coworker that exists only in our
-Postgres, *and* `scripts/p1-smoke.sh` exits 0.
-
-Order of work:
-
-1. **Read [`RUNBOOK.md`](RUNBOOK.md) end to end.** §0 is a go/no-go — the client's renderer is
-   git-ignored and needs a DMG the operator must possess. If it is not hydrated, say so immediately
-   rather than discovering it after building the server.
-2. Stand up Postgres and write the first migrations in `crates/opengrok-store/migrations/`
-   (`workspace_id`, `coworkers`, and whatever the roster row needs — the ~30-field summary is at
-   `research/client-grok-bot.md` §8.1; note `updatedAt` is the client's sort key).
-3. Implement in `opengrok-server`, in the client's own call order (the table in `RUNBOOK.md` §4):
-   `GET /health` → `GET /events` (SSE, `retry: 1000`, `:ping` ≤15 s) → `listAgents` → the resync
-   chain's `setHostSettings`/`getHostSettings` → `countAgents` → `getTrays` →
-   `isAgentNetworkEnabled` → `isGlobalSearchEnabled` → `getForeverBoxStatus` → `openAgentTail`.
-   The same list is `P1_COMMANDS` in `crates/opengrok-wire/src/command.rs` — keep them in step.
-4. Write `scripts/p1-smoke.sh` (the assertions are drafted in `RUNBOOK.md` §5) and make it pass.
-5. Seed **one** coworker. An empty array is a valid reply that renders as a working app with no
-   coworkers, and it will read as your bug.
-
-**Not P1:** `sendPrompt`, any model call, any box call, any policy. Those are P2/P3/P5.
-
-## The traps that cost a day each
-
-1. **The client refuses a loopback gateway host** — it throws if the resolved host starts with
-   `127.0.0.1`/`localhost` unless the box runtime is `local-docker` (which then ignores your env var
-   entirely). You need a hosts alias; the sudo step is the operator's. `RUNBOOK.md` §1.
-2. **The renderer will not call `listAgents` until the account is `logged-in`** — which comes from
-   seam B (`api2.cursor.sh`), *not* from us. Point it at grok-bot's own mock. `RUNBOOK.md` §1.
-3. **Reply shapes throw.** `countAgents` must be a number, `getTrays` an array,
-   `getForeverBoxStatus` `null`-or-record. `RUNBOOK.md` §4.
-4. **If the roster silently stops updating**, check the client's persisted `inferenceProvider`
-   before suspecting your code. `RUNBOOK.md` §6.
-5. **The gateway's catalogue refresh** — if you ever embed OAG and skip `oag_server::serve()`, spawn
-   it yourself or serve a stale catalogue while reporting healthy. Not P1, but it will bite in P2.
-
----
+GitHub Actions billing (the local gate is the gate), the rights review before publication, and
+the gpt-5.6-luna upstream spending limit. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
 
 ## The map
 
 | Read this | For |
 |---|---|
-| [`../CLAUDE.md`](../CLAUDE.md) | the ten invariants; loads automatically |
+| [`GOAL.md`](GOAL.md) | the mission and the stack decisions |
 | [`DIAGRAMS.md`](DIAGRAMS.md) №1 | the idea in five minutes of pictures |
 | [`WHY.md`](WHY.md) | what we built before and why a working app wasn't enough |
-| [`PLAN.md`](PLAN.md) | seams, phases, decisions, the open question |
-| [`RUNBOOK.md`](RUNBOOK.md) | **how to stand P1 up and prove it** |
+| [`ROADMAP.md`](ROADMAP.md) | what is done (with commits) and what is left |
+| [`setup/`](setup/README.md) | standing the server up, end to end |
+| [`AUTO-REVIEW.md`](AUTO-REVIEW.md) | the consent model and the judge |
 | [`LEGAL.md`](LEGAL.md) | the line, before touching the client contract |
-| [`research/client-grok-bot.md`](research/client-grok-bot.md) | 123 commands, transcript kinds, 12 card types, SSE channels, the roster row, 12 traps |
-| [`research/gateway-open-ai-gateway.md`](research/gateway-open-ai-gateway.md) | the model door, and how to embed it |
-| [`research/lessons-opensesame.md`](research/lessons-opensesame.md) | eight lessons the prior product paid for |
-| [`research/sandbox-box-ascii-dev.md`](research/sandbox-box-ascii-dev.md) | the computer (P3) |
-| [`research/connectors-open-connector.md`](research/connectors-open-connector.md) | connectors (P6) |
+| [`research/`](research/README.md) | the client, the gateway, the sandbox, connectors, the prior product |
+| [`verification/`](verification/) | the evidence behind the ticked boxes |
 
-Neighbouring repositories, all local, all read-only from here:
-
-- `/Volumes/goldcoders/OSS/opengrok` — the client we serve
-- `/Volumes/goldcoders/OSS/open-ai-gateway` — the model door, at `fa87b6a`, serving on `:29080`
-- `/Volumes/goldcoders/projects/opensesame/opensesame` — the prior product
-
----
-
-## The parallel track
-
-OpenSesame continues in its own session as a separate line of work — it is the prior product, a
-candidate second client, and the source of the lessons in `research/lessons-opensesame.md`. **It is
-not a dependency of OpenGrok and does not block you.** Its state as of this handover: `main` green
-and pushed, with one finished-but-unmerged branch (`feat/mentions-notify`, people-mentions with
-notification, 2,185 tests passing).
-
-If a lesson in the research doc contradicts what that repo does today, the repo is newer — check
-`git log` there before trusting the document, and fix the document in the same commit as whatever
-you learned.
+Neighbouring repositories, all local: `/Volumes/goldcoders/OSS/opengrok` (the client we serve),
+`/Volumes/goldcoders/OSS/open-ai-gateway` (the model door), and
+`/Volumes/goldcoders/projects/opensesame/opensesame` (the prior product; if a lesson doc
+contradicts that repo, the repo is newer).
