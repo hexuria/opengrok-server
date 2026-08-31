@@ -1224,6 +1224,171 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- Reverse-exec: enrolled machine daemons (token id only) and the audit log. ----
+
+    /// Enrol (or re-enrol) a machine's daemon: store its token id, clear any prior revocation.
+    pub async fn enrol_daemon(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        label: &str,
+        jti: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_daemon (account_id, machine_id, label, jti, enrolled_at_ms, revoked)
+             values ($1, $2, $3, $4, $5, false)
+             on conflict (account_id, machine_id) do update set
+               label = excluded.label, jti = excluded.jti,
+               enrolled_at_ms = excluded.enrolled_at_ms, revoked = false",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(label)
+        .bind(jti)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The daemon's current token id and whether it is revoked, for verifying a presented token.
+    pub async fn daemon_jti(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+    ) -> StoreResult<Option<(String, bool)>> {
+        let row = sqlx::query(
+            "select jti, revoked from local_exec_daemon where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("jti")?,
+                row.try_get::<bool, _>("revoked")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn revoke_daemon(&self, account_id: &str, machine_id: &str) -> StoreResult<()> {
+        sqlx::query(
+            "update local_exec_daemon set revoked = true where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's enrolled machines: (machine_id, label, enrolled_at_ms, revoked).
+    #[allow(clippy::type_complexity)]
+    pub async fn list_daemons(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Vec<(String, String, i64, bool)>> {
+        let rows = sqlx::query(
+            "select machine_id, label, enrolled_at_ms, revoked from local_exec_daemon
+             where account_id = $1 order by enrolled_at_ms desc",
+        )
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("machine_id")?,
+                    row.try_get::<String, _>("label")?,
+                    row.try_get::<i64, _>("enrolled_at_ms")?,
+                    row.try_get::<bool, _>("revoked")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Write an audit row at enqueue time (before the command runs).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn audit_local_exec(
+        &self,
+        id: &str,
+        account_id: &str,
+        machine_id: &str,
+        origin: &str,
+        command: &str,
+        decision: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_audit
+               (id, account_id, machine_id, origin, command, decision, requested_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(origin)
+        .bind(command)
+        .bind(decision)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record a command's result on its audit row.
+    pub async fn finish_local_exec_audit(
+        &self,
+        id: &str,
+        exit_code: i32,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update local_exec_audit set exit_code = $2, finished_at_ms = $3 where id = $1",
+        )
+        .bind(id)
+        .bind(exit_code)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The account's recent audit rows, newest first (all machines).
+    pub async fn local_exec_audit_log(
+        &self,
+        account_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<serde_json::Value>> {
+        let rows = sqlx::query(
+            "select id, machine_id, origin, command, decision, requested_at_ms, exit_code,
+                    finished_at_ms
+             from local_exec_audit where account_id = $1
+             order by requested_at_ms desc limit $2",
+        )
+        .bind(account_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(serde_json::json!({
+                    "id": row.try_get::<String, _>("id")?,
+                    "machineId": row.try_get::<String, _>("machine_id")?,
+                    "origin": row.try_get::<String, _>("origin")?,
+                    "command": row.try_get::<String, _>("command")?,
+                    "decision": row.try_get::<String, _>("decision")?,
+                    "requestedAtMs": row.try_get::<i64, _>("requested_at_ms")?,
+                    "exitCode": row.try_get::<Option<i32>, _>("exit_code")?,
+                    "finishedAtMs": row.try_get::<Option<i64>, _>("finished_at_ms")?,
+                }))
+            })
+            .collect()
+    }
+
     // ---- A computer keyed by the scope that shares it (org / account / bot) ----
 
     pub async fn scoped_computer(

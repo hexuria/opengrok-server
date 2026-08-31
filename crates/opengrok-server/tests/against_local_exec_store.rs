@@ -90,3 +90,57 @@ async fn a_stored_policy_loads_and_the_gate_judges_it() {
         LocalExecDecision::Ask
     );
 }
+
+#[tokio::test]
+async fn daemon_enrolment_and_audit_round_trip() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
+    let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
+
+    // Enrol → the jti is current and not revoked.
+    store
+        .enrol_daemon(&account, &machine, "Test Mac", "jti-1", 1)
+        .await
+        .expect("enrol");
+    assert_eq!(
+        store.daemon_jti(&account, &machine).await.expect("jti"),
+        Some(("jti-1".to_string(), false))
+    );
+    // Re-enrol rotates the jti and clears revocation.
+    store
+        .enrol_daemon(&account, &machine, "Test Mac", "jti-2", 2)
+        .await
+        .expect("re-enrol");
+    assert_eq!(
+        store.daemon_jti(&account, &machine).await.expect("jti"),
+        Some(("jti-2".to_string(), false))
+    );
+    // Revoke → the row says revoked (the poll gate refuses it).
+    store
+        .revoke_daemon(&account, &machine)
+        .await
+        .expect("revoke");
+    assert_eq!(
+        store.daemon_jti(&account, &machine).await.expect("jti"),
+        Some(("jti-2".to_string(), true))
+    );
+    assert_eq!(store.list_daemons(&account).await.expect("list").len(), 1);
+
+    // Audit: a row at enqueue, then its result.
+    store
+        .audit_local_exec(
+            "ax-1", &account, &machine, "bot cw_x", "uptime", "allow", 10,
+        )
+        .await
+        .expect("audit");
+    store
+        .finish_local_exec_audit("ax-1", 0, 20)
+        .await
+        .expect("finish");
+    let log = store.local_exec_audit_log(&account, 50).await.expect("log");
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0]["command"], "uptime");
+    assert_eq!(log[0]["decision"], "allow");
+    assert_eq!(log[0]["exitCode"], 0);
+}

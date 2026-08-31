@@ -167,7 +167,171 @@ pub fn router(state: AuthState) -> Router {
             "/local-exec/policy/rule",
             post(add_rule).delete(remove_rule),
         )
+        .route("/local-exec/daemon", post(enrol_daemon).get(list_daemons))
+        .route(
+            "/local-exec/daemon/{machine_id}",
+            axum::routing::delete(revoke_daemon),
+        )
+        .route("/local-exec/audit", get(audit_log))
         .with_state(state)
+}
+
+/// A daemon token's claims — signed like everything else, `use: "daemon"` so a stolen access token
+/// cannot pass here, `sub` the account and `machine` the enrolled machine. Long-lived on purpose:
+/// its real lifecycle is the revocable `local_exec_daemon` row (checked by `jti`), not `exp`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DaemonClaims {
+    #[serde(rename = "use")]
+    purpose: String,
+    sub: String,
+    machine: String,
+    jti: String,
+    exp: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnrolBody {
+    label: String,
+    /// Re-enrol an existing machine (rotates its token) when present; otherwise a new machine id.
+    machine_id: Option<String>,
+}
+
+/// `POST /local-exec/daemon` — enrol this account's machine and mint its daemon token (shown ONCE).
+async fn enrol_daemon(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<EnrolBody>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let machine_id = body
+        .machine_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("mac_{}", uuid::Uuid::now_v7().simple()));
+    let jti = uuid::Uuid::now_v7().to_string();
+    let claims = DaemonClaims {
+        purpose: "daemon".to_string(),
+        sub: account_id.as_str().to_string(),
+        machine: machine_id.clone(),
+        jti: jti.clone(),
+        // Ten years — revocation is the row, not the clock.
+        exp: now_ms() / 1000 + 10 * 365 * 24 * 60 * 60,
+    };
+    let Ok(token) = state.minter.mint_claims(&claims) else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not mint the daemon token",
+        )
+            .into_response();
+    };
+    if state
+        .store
+        .enrol_daemon(
+            account_id.as_str(),
+            &machine_id,
+            body.label.trim(),
+            &jti,
+            now_ms(),
+        )
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not enrol the machine",
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({ "machineId": machine_id, "token": token })).into_response()
+}
+
+/// `DELETE /local-exec/daemon/{machine_id}` — revoke a machine's daemon token. Sign-in is untouched.
+async fn revoke_daemon(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    axum::extract::Path(machine_id): axum::extract::Path<String>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    match state
+        .store
+        .revoke_daemon(account_id.as_str(), &machine_id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not revoke").into_response(),
+    }
+}
+
+/// `GET /local-exec/daemon` — the account's enrolled machines.
+async fn list_daemons(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let machines = state
+        .store
+        .list_daemons(account_id.as_str())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(machine_id, label, enrolled_at_ms, revoked)| {
+            serde_json::json!({
+                "machineId": machine_id,
+                "label": label,
+                "enrolledAtMs": enrolled_at_ms,
+                "revoked": revoked,
+            })
+        })
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({ "machines": machines })).into_response()
+}
+
+/// `GET /local-exec/audit` — the account's recent reverse-exec commands and outcomes.
+async fn audit_log(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let entries = state
+        .store
+        .local_exec_audit_log(account_id.as_str(), 200)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({ "entries": entries })).into_response()
+}
+
+/// Resolve the (account, machine) of a presented DAEMON token, or `None`. Verifies the signature and
+/// `use: "daemon"`, then that the enrolment row still holds this token's `jti` and is not revoked —
+/// so a revoked or superseded daemon token authorises nothing. This gates ONLY the poll endpoints
+/// (a later slice); it is the daemon's identity, never an account's.
+#[allow(dead_code)] // wired to the daemon poll endpoints in a later slice
+pub(crate) async fn daemon_from_bearer(
+    state: &AuthState,
+    headers: &HeaderMap,
+) -> Option<(String, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))?;
+    let claims = state.minter.verify_claims::<DaemonClaims>(token).ok()?;
+    if claims.purpose != "daemon" {
+        return None;
+    }
+    let (jti, revoked) = state
+        .store
+        .daemon_jti(&claims.sub, &claims.machine)
+        .await
+        .ok()??;
+    if revoked || jti != claims.jti {
+        return None;
+    }
+    Some((claims.sub, claims.machine))
 }
 
 #[derive(serde::Deserialize)]

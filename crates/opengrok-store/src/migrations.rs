@@ -350,6 +350,36 @@ create table if not exists local_exec_rule (
     added_at_ms bigint not null,
     primary key (account_id, machine_id, kind, pattern)
 );
+
+-- An enrolled machine's daemon. The token is NOT stored — only its `jti` (the token's id), so a
+-- token can be verified as still-current and revoked without the token ever being at rest here.
+-- One active daemon per (account, machine); re-enrolment replaces the jti, revoke flips `revoked`.
+create table if not exists local_exec_daemon (
+    account_id    text    not null,
+    machine_id    text    not null,
+    label         text    not null,
+    jti           text    not null,
+    enrolled_at_ms bigint not null,
+    revoked       boolean not null default false,
+    primary key (account_id, machine_id)
+);
+
+-- Every reverse-exec command and its outcome — the record the user can read afterward. Written at
+-- enqueue (decision), updated when the daemon returns a result. `origin` names the bot, or the user.
+create table if not exists local_exec_audit (
+    id             text   not null primary key,
+    account_id     text   not null,
+    machine_id     text   not null,
+    origin         text   not null,
+    command        text   not null,
+    decision       text   not null,
+    requested_at_ms bigint not null,
+    exit_code      integer,
+    finished_at_ms bigint
+);
+
+create index if not exists local_exec_audit_acct_idx
+    on local_exec_audit (account_id, machine_id, requested_at_ms desc);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
