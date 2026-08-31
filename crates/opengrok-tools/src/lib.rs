@@ -1013,7 +1013,7 @@ mod tests {
             "accountId": "acct_2",
             "query": "hello",
         }));
-        let object = stripped.as_object().expect("object");
+        let object = stripped.as_object().unwrap();
         for key in [
             "coworker_id",
             "coworkerId",

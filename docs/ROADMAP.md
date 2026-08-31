@@ -235,6 +235,15 @@ the proof, not construction.
   rmcp-to-rmcp) + `scripts/slice20-mcp-door-smoke.sh` in the gate: the slice-7 attack replayed
   through MCP (foreign coworkerId overwritten), ungranted tool refused naming the rule,
   person-token pointed at the bot-key mint, revoked key refused. (`46a353c`)
+- [x] **16.r** Peer review (two reviewer agents on the diff) closed one real security bug and
+  hardened the door: `overwrite_identity`/`strip_identity` in `opengrok-tools` missed the
+  camelCase identity aliases (`coworkerId`/`boxId`) they were supposed to strip, so a plugin
+  call could forward an attacker-chosen coworker id to a connector — the exact confused-deputy
+  #7 prevents; now every alias from one shared list is stripped. Door: auth + browser-origin
+  refusal moved to a transport-edge layer (real 401/403, `initialize` gated), an unreachable
+  computer is an error not an empty toolbox, reverse-exec excluded from MCP, the ask reply no
+  longer promises a nonexistent card, serverInfo names OpenGrok, concurrent calls serialized
+  per coworker. (`3980be2`)
 - [x] **16.v** Validated on Claude Code itself: `claude mcp list` shows the live door
   connected, and one invocation with both doors configured answered via the gateway, called
   `mcp__opengrok__shell`, and ran it on the coworker's own container — the tool's hostname
