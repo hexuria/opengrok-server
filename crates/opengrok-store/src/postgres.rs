@@ -1116,6 +1116,114 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- Reverse-exec consent, per (account, machine). Raw pieces only — the server assembles the
+    //      LocalExecPolicy and runs the gate; this crate stays free of that logic. ----
+
+    /// The stored mode for a machine, or `None` when unset (the gate reads that as the default,
+    /// `never` — the channel is off).
+    pub async fn local_exec_mode(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+    ) -> StoreResult<Option<String>> {
+        let row = sqlx::query(
+            "select mode from local_exec_policy where account_id = $1 and machine_id = $2",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .map(|row| row.try_get::<String, _>("mode"))
+            .transpose()?)
+    }
+
+    pub async fn set_local_exec_mode(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        mode: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_policy (account_id, machine_id, mode, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (account_id, machine_id) do update set
+               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(mode)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The allow or deny patterns for a machine (`kind` = "allow" | "deny").
+    pub async fn local_exec_rules(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+    ) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "select pattern from local_exec_rule
+             where account_id = $1 and machine_id = $2 and kind = $3 order by added_at_ms",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(row.try_get::<String, _>("pattern")?))
+            .collect()
+    }
+
+    pub async fn add_local_exec_rule(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+        pattern: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into local_exec_rule (account_id, machine_id, kind, pattern, added_at_ms)
+             values ($1, $2, $3, $4, $5)
+             on conflict (account_id, machine_id, kind, pattern) do nothing",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .bind(pattern)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_local_exec_rule(
+        &self,
+        account_id: &str,
+        machine_id: &str,
+        kind: &str,
+        pattern: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "delete from local_exec_rule
+             where account_id = $1 and machine_id = $2 and kind = $3 and pattern = $4",
+        )
+        .bind(account_id)
+        .bind(machine_id)
+        .bind(kind)
+        .bind(pattern)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ---- A computer keyed by the scope that shares it (org / account / bot) ----
 
     pub async fn scoped_computer(

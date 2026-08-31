@@ -94,6 +94,208 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     }
 }
 
+impl LocalExecMode {
+    /// From the stored word; anything unrecognised (or absent) is the closed default, `Never`.
+    pub fn from_stored(mode: &str) -> Self {
+        match mode {
+            "ask" => Self::Ask,
+            "bypass" => Self::Bypass,
+            _ => Self::Never,
+        }
+    }
+
+    pub fn as_stored(&self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Ask => "ask",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
+/// Assemble a machine's policy from the store — its mode (the closed default `Never` when unset)
+/// plus its allow and deny lists. The single place the persisted pieces become a `LocalExecPolicy`
+/// the gate can judge; a store error reads as "no policy", which is `Never`, i.e. closed.
+pub async fn load_policy(
+    store: &opengrok_store::PgStore,
+    account_id: &str,
+    machine_id: &str,
+) -> LocalExecPolicy {
+    let mode = store
+        .local_exec_mode(account_id, machine_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mode| LocalExecMode::from_stored(&mode))
+        .unwrap_or_default();
+    let allow = store
+        .local_exec_rules(account_id, machine_id, "allow")
+        .await
+        .unwrap_or_default();
+    let deny = store
+        .local_exec_rules(account_id, machine_id, "deny")
+        .await
+        .unwrap_or_default();
+    LocalExecPolicy { mode, allow, deny }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The account-facing management API: a person sets their own machines' mode and allow/deny rules.
+// (The daemon poll endpoints and the enqueue path are separate, later slices.) Account-authed via
+// the same Bearer-or-cookie check the rest of the account API uses.
+// ---------------------------------------------------------------------------------------------
+
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+
+use crate::AuthState;
+
+const VALID_MODES: &[&str] = &["never", "ask", "bypass"];
+const VALID_KINDS: &[&str] = &["allow", "deny"];
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+pub fn router(state: AuthState) -> Router {
+    Router::new()
+        .route("/local-exec/policy", get(get_policy).put(set_mode))
+        .route(
+            "/local-exec/policy/rule",
+            post(add_rule).delete(remove_rule),
+        )
+        .with_state(state)
+}
+
+#[derive(serde::Deserialize)]
+struct MachineQuery {
+    machine: String,
+}
+
+/// `GET /local-exec/policy?machine=<id>` — this machine's mode and rule lists, for the caller.
+async fn get_policy(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<MachineQuery>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let policy = load_policy(&state.store, account_id.as_str(), &query.machine).await;
+    Json(serde_json::json!({
+        "machineId": query.machine,
+        "mode": policy.mode.as_stored(),
+        "allow": policy.allow,
+        "deny": policy.deny,
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMode {
+    machine_id: String,
+    mode: String,
+}
+
+/// `PUT /local-exec/policy` — set a machine's consent mode (never | ask | bypass).
+async fn set_mode(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<SetMode>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    if !VALID_MODES.contains(&body.mode.as_str()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown mode").into_response();
+    }
+    match state
+        .store
+        .set_local_exec_mode(account_id.as_str(), &body.machine_id, &body.mode, now_ms())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not set the mode").into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuleBody {
+    machine_id: String,
+    kind: String,
+    pattern: String,
+}
+
+/// `POST /local-exec/policy/rule` — add an allow or deny rule ("always allow/deny this").
+async fn add_rule(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<RuleBody>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let pattern = body.pattern.trim();
+    if !VALID_KINDS.contains(&body.kind.as_str()) || pattern.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "kind must be allow|deny and pattern non-empty",
+        )
+            .into_response();
+    }
+    match state
+        .store
+        .add_local_exec_rule(
+            account_id.as_str(),
+            &body.machine_id,
+            &body.kind,
+            pattern,
+            now_ms(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not add the rule").into_response(),
+    }
+}
+
+/// `DELETE /local-exec/policy/rule` — remove an allow or deny rule.
+async fn remove_rule(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<RuleBody>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    match state
+        .store
+        .remove_local_exec_rule(
+            account_id.as_str(),
+            &body.machine_id,
+            &body.kind,
+            &body.pattern,
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not remove the rule",
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

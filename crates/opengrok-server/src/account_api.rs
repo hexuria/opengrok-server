@@ -40,7 +40,7 @@ pub fn router(state: AuthState) -> Router {
 }
 
 /// The caller's account, from the bearer, loaded — the shared front of every handler here.
-async fn caller(
+pub(crate) async fn caller(
     state: &AuthState,
     headers: &axum::http::HeaderMap,
 ) -> Result<(AccountId, Account, i64), Response> {

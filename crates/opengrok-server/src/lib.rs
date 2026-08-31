@@ -34,6 +34,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
+        .merge(local_exec::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);

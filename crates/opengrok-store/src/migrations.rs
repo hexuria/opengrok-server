@@ -329,6 +329,27 @@ create table if not exists gateway_nonce (
     at_ms        bigint not null,
     primary key (account_slot, nonce)
 );
+
+-- Reverse-exec consent, per (account, machine). `mode` is 'never' (default, the channel off) |
+-- 'ask' | 'bypass'. Absent ⇒ never — the channel does nothing until the user turns it on.
+create table if not exists local_exec_policy (
+    account_id    text   not null,
+    machine_id    text   not null,
+    mode          text   not null,
+    updated_at_ms bigint not null,
+    primary key (account_id, machine_id)
+);
+
+-- On-demand allow/deny rules for a machine's reverse-exec channel. `kind` is 'allow' | 'deny';
+-- `pattern` is a command prefix matched on a word boundary. Deny beats allow (enforced in the gate).
+create table if not exists local_exec_rule (
+    account_id text   not null,
+    machine_id text   not null,
+    kind       text   not null,
+    pattern    text   not null,
+    added_at_ms bigint not null,
+    primary key (account_id, machine_id, kind, pattern)
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
