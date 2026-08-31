@@ -73,25 +73,48 @@ Six points, all load-bearing:
 6. **The naming prerequisite is done.** A reverse-exec request must be unambiguous
    about Mac-vs-box; the model already distinguishes them and says which it acted on.
 
-## The transport (server side — the part that is ours)
+## The transport — the REAL contract (read from the client's source, 31 Aug)
 
-The client already runs a local-exec daemon that polls two endpoints (hence today's
-`/local-exec/*` 404s). The server side is a small, auditable queue with a strict
-gate. Proposed shape (names to be reconciled with the client's existing calls before
-building):
+Corrected after the client session sent the actual daemon protocol; the earlier
+"long-poll + {id, command}" sketch was wrong and would never have matched. The truth:
 
-- **Daemon enrolment.** `POST /local-exec/daemon` (authenticated as the account) mints
-  a **daemon token** bound to `{account_id, machine_id, machine_label}`, shown once,
-  stored hashed. `DELETE /local-exec/daemon/{machine_id}` revokes it. A daemon token
-  is a new credential kind in `auth::token`, distinct from access/refresh/bot keys, and
-  it authorises ONLY the two poll endpoints below — nothing else on the server.
+- **`/local-exec/requests` is an SSE STREAM, not a poll** (same shape as `/events`).
+  The daemon opens it once; the server REGISTERS it as a provider and PUSHES
+  newline-delimited JSON frames down it (`gateway-server.ts` `handleBridgeRequests` →
+  `openSseStream(... bridge.registerProvider(frame => write(...)))`).
+- **The command is an opaque message, not a shell string.** Server→daemon frames
+  (`local-exec-provider.ts`): `welcome{providerId}`, `retire-approval{approvalId}`,
+  `exec{requestId, approvalId?, serverMessage}`, `upload/download/messages-op{requestId,
+  approvalId?, …}`, `cancel{requestId}`. Daemon→server (POST `/local-exec/responses`):
+  `hello{localRoot, terminalsFolder, computerId, label, …}`, `ping`,
+  `client|control{requestId, message}`, `file/file-error/messages-result/messages-error`.
+  It is `requestId` (a string), and the exec payload rides `serverMessage` as an opaque
+  `JsonValue`; results come back as `client`/`control` frames carrying an opaque
+  `message`. The daemon speaks a MESSAGE protocol — it does not take a shell string and
+  return an exit code.
+- **Consequences for the gate + audit:** the gate matches on a COMMAND STRING, but the
+  wire carries an opaque `serverMessage`. So the server must CONSTRUCT the exec frame
+  (and derive the human-readable command for the gate + audit) at the point it builds
+  the request — we own that shape, we do not read it back. This needs the exec
+  `serverMessage` schema, agreed with the client, before slices 4–5 are built.
+- **Enrolment moment:** the daemon sends `hello` on connect with `computerId` + `label`;
+  and the APP (not the coordinator) enrols via `POST /local-exec/daemon` when the user
+  turns the channel on, storing the returned token in the secrets store and handing it
+  to the daemon through the same connection descriptor the gateway token travels in.
+- **Approval already has a home on the wire:** `approvalId` is on every actionable
+  frame and there is a `retire-approval` frame and a `cancel` frame — the ask/approve
+  and cancel machinery should ride THOSE, not a parallel invention.
+- **Auth today** is the shared gateway bearer (`isAuthorized`, timing-safe compare); the
+  per-machine daemon token (slice 3, built) is the agreed addition that replaces it for
+  this channel.
 
-- **Daemon poll (long-poll), daemon-authenticated.**
-  `GET /local-exec/requests` returns the next approved command for THIS machine, or
-  waits. The server only ever enqueues a command here after the consent gate said yes;
-  the daemon never sees a command the gate refused.
-  `POST /local-exec/responses` returns a command's stdout/stderr/exit, which the server
-  writes to the audit log and hands back to the caller (the bot's turn, or the phone).
+Slices 4–5 must be built to THIS, and they are additionally gated on the client
+session's own owner approving the client half — server-side approval here does not carry
+to that session. So the transport waits on: (a) the client owner's go, and (b) the exec
+`serverMessage` schema settled together.
+
+### The earlier (superseded) enqueue/gate sketch, still directionally right
+The gate/consent flow below still holds; only the wire shape above changed.
 
 - **Enqueue (a bot tool call, or the phone), account-authenticated.** A request to run
   something on the user's Mac hits the gate:
