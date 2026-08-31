@@ -11,6 +11,10 @@
 //! to an automatic yes is an explicit allowlist rule under `Ask`, or the deliberately-enabled
 //! `Bypass`. See `docs/reverse-exec-design.md`.
 
+pub mod broker;
+mod wire;
+pub use broker::LocalExecBroker;
+
 use serde::{Deserialize, Serialize};
 
 /// The consent mode for ONE machine's reverse-exec channel.
@@ -173,6 +177,14 @@ pub fn router(state: AuthState) -> Router {
             axum::routing::delete(revoke_daemon),
         )
         .route("/local-exec/audit", get(audit_log))
+        // User-direct enqueue (account-authed): the person runs a command on their OWN machine from
+        // another device. Enqueuing IS their approval, so `Ask` is skipped — only `Never` and the
+        // denylist still stop them.
+        .route("/local-exec/run", post(run_direct))
+        // The daemon's two endpoints (daemon-token authed): it holds `requests` open as an SSE
+        // stream and POSTs results to `responses`. These are the ONLY path a command reaches the Mac.
+        .route("/local-exec/requests", get(poll_requests))
+        .route("/local-exec/responses", post(post_responses))
         .with_state(state)
 }
 
@@ -310,7 +322,6 @@ async fn audit_log(State(state): State<AuthState>, headers: HeaderMap) -> Respon
 /// `use: "daemon"`, then that the enrolment row still holds this token's `jti` and is not revoked —
 /// so a revoked or superseded daemon token authorises nothing. This gates ONLY the poll endpoints
 /// (a later slice); it is the daemon's identity, never an account's.
-#[allow(dead_code)] // wired to the daemon poll endpoints in a later slice
 pub(crate) async fn daemon_from_bearer(
     state: &AuthState,
     headers: &HeaderMap,
@@ -458,6 +469,267 @@ async fn remove_rule(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The enqueue path + the two daemon endpoints (slices 4–5). A command is judged by THE GATE here,
+// on the server, before anything is dispatched; only an allowed command ever reaches the broker,
+// and every command — allowed, denied, or awaiting a person — writes an audit row.
+// ---------------------------------------------------------------------------------------------
+
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::http::header;
+use broker::{DispatchError, ExecOutcome};
+
+/// End-to-end budget for one reverse-exec command: dispatch, run on the Mac, result back. Past
+/// this the caller is told it timed out and the daemon is asked to cancel.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Who enqueued a command — recorded on the audit row, and the reason `Ask` is or is not honored.
+pub enum Origin {
+    /// The account holder acting directly (their phone, the console). Enqueuing IS their approval,
+    /// so `Ask` is skipped for them — only `Never` and a denylist match still refuse.
+    User,
+    /// A bot acting on the account's behalf (the coworker id). The full gate applies: `Ask` means a
+    /// person must decide, so the run suspends rather than proceeding.
+    Bot(String),
+}
+
+impl Origin {
+    fn label(&self) -> String {
+        match self {
+            Origin::User => "user".to_string(),
+            Origin::Bot(coworker) => format!("bot {coworker}"),
+        }
+    }
+    fn is_user(&self) -> bool {
+        matches!(self, Origin::User)
+    }
+}
+
+/// What became of an enqueue attempt.
+pub enum EnqueueResult {
+    /// The command ran on the Mac; here is its outcome.
+    Ran(ExecOutcome),
+    /// The gate refused it (mode off, a deny rule, or no daemon connected) — never ran.
+    Refused(String),
+    /// A bot hit `Ask`: a person must approve. The caller (a bot run) suspends; nothing ran.
+    NeedsApproval,
+}
+
+/// THE enqueue path. Judges `command` through the gate for this `machine`, and — only if allowed —
+/// dispatches it to the machine's daemon and waits for the result. The one server-side choke point:
+/// nothing reaches a Mac without passing `decide` and writing an audit row here.
+pub async fn enqueue_and_wait(
+    state: &AuthState,
+    account_id: &str,
+    machine_id: &str,
+    command: &str,
+    simple_commands: &[String],
+    origin: Origin,
+) -> EnqueueResult {
+    let policy = load_policy(&state.store, account_id, machine_id).await;
+    let decision = decide(&policy, command);
+    let request_id = uuid::Uuid::now_v7().to_string();
+    let origin_label = origin.label();
+
+    // The gate's verdict, mapped to what actually happens for THIS origin: a user's own command
+    // skips `Ask` (their enqueue is the approval); a bot's `Ask` suspends the run.
+    let user_skipped_ask = origin.is_user() && matches!(decision, LocalExecDecision::Ask);
+    let audit = |decision_word: &str| {
+        let store = state.store.clone();
+        let (id, acct, mach, org, cmd) = (
+            request_id.clone(),
+            account_id.to_string(),
+            machine_id.to_string(),
+            origin_label.clone(),
+            command.to_string(),
+        );
+        let decision_word = decision_word.to_string();
+        async move {
+            let _ = store
+                .audit_local_exec(&id, &acct, &mach, &org, &cmd, &decision_word, now_ms())
+                .await;
+        }
+    };
+
+    match decision {
+        LocalExecDecision::Deny(reason) => {
+            audit("deny").await;
+            EnqueueResult::Refused(reason)
+        }
+        LocalExecDecision::Ask if !origin.is_user() => {
+            audit("ask").await;
+            EnqueueResult::NeedsApproval
+        }
+        // Allow, Bypass, or a user's own Ask-skipped command: run it.
+        _ => {
+            audit(if user_skipped_ask { "allow-user" } else { "allow" }).await;
+            run_on_machine(state, machine_id, &request_id, command, simple_commands).await
+        }
+    }
+}
+
+/// Dispatch an approved command to a machine's daemon and wait for its result, finishing the audit
+/// row with the outcome case. Assumes the gate already said yes and the row already exists.
+async fn run_on_machine(
+    state: &AuthState,
+    machine_id: &str,
+    request_id: &str,
+    command: &str,
+    simple_commands: &[String],
+) -> EnqueueResult {
+    let server_message = wire::shell_server_message(
+        request_id,
+        command,
+        simple_commands,
+        "",
+        EXEC_TIMEOUT.as_millis() as u64,
+    );
+    let rx = match state
+        .local_exec
+        .dispatch(machine_id, request_id, server_message)
+        .await
+    {
+        Ok(rx) => rx,
+        Err(DispatchError::NoDaemon) => {
+            let out = ExecOutcome::malformed("the daemon for this machine is not connected");
+            let _ = state
+                .store
+                .finish_local_exec_audit(request_id, &out.case, out.exit_code, now_ms())
+                .await;
+            return EnqueueResult::Refused(out.detail);
+        }
+    };
+    let outcome = match tokio::time::timeout(EXEC_TIMEOUT, rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => ExecOutcome::malformed("the request was dropped before a result arrived"),
+        Err(_) => {
+            state.local_exec.cancel(machine_id, request_id).await;
+            ExecOutcome::timed_out("no result within the command timeout")
+        }
+    };
+    let _ = state
+        .store
+        .finish_local_exec_audit(request_id, &outcome.case, outcome.exit_code, now_ms())
+        .await;
+    EnqueueResult::Ran(outcome)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunBody {
+    machine_id: String,
+    command: String,
+    /// The app's own parse of `command`, if the caller has one. Absent ⇒ the whole command as a
+    /// single simple command — the gate still matches on the readable string either way.
+    #[serde(default)]
+    simple_commands: Vec<String>,
+}
+
+/// `POST /local-exec/run` — the user runs a command on their OWN machine from another device. The
+/// account holder is the approver, so `Ask` is skipped; `Never` and the denylist still refuse.
+async fn run_direct(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<RunBody>,
+) -> Response {
+    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
+        Ok(caller) => caller,
+        Err(refusal) => return refusal,
+    };
+    let command = body.command.trim();
+    if command.is_empty() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "command is required").into_response();
+    }
+    let simple = if body.simple_commands.is_empty() {
+        vec![command.to_string()]
+    } else {
+        body.simple_commands
+    };
+    match enqueue_and_wait(
+        &state,
+        account_id.as_str(),
+        &body.machine_id,
+        command,
+        &simple,
+        Origin::User,
+    )
+    .await
+    {
+        EnqueueResult::Ran(outcome) => Json(serde_json::json!({
+            "outcome": outcome.case,
+            "exitCode": outcome.exit_code,
+            "stdout": outcome.stdout,
+            "stderr": outcome.stderr,
+            "detail": outcome.detail,
+            "text": outcome.render(),
+        }))
+        .into_response(),
+        EnqueueResult::Refused(reason) => (StatusCode::FORBIDDEN, reason).into_response(),
+        // A user's own command never hits `Ask`; treat an unexpected one as a server fault.
+        EnqueueResult::NeedsApproval => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a direct command unexpectedly needed approval",
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /local-exec/requests` — the daemon opens this ONCE and holds it. The server registers the
+/// stream as this machine's provider and pushes newline-delimited JSON frames (`welcome`, `exec`,
+/// `cancel`) down it. Daemon-token authed: the token names the machine, and only that machine's
+/// commands ever come down this stream.
+async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Response {
+    let Some((_account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
+    };
+    let rx = state.local_exec.connect(&machine_id).await;
+    let frames = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|frame| (Ok::<_, Infallible>(format!("data: {frame}\n\n")), rx))
+    });
+    // Keepalives so a proxy does not close an idle stream; the daemon ignores comment lines.
+    let pings = futures::stream::unfold((), |()| async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Some((Ok::<_, Infallible>(":ping\n\n".to_string()), ()))
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        axum::body::Body::from_stream(futures::stream::select(frames, pings)),
+    )
+        .into_response()
+}
+
+/// `POST /local-exec/responses` — the daemon posts back on this. A `client` frame carries one
+/// command's `ExecClientMessage` result, which resolves the waiting caller; `hello`/`ping` and any
+/// other frame are acknowledged. Daemon-token authed, and a result is only accepted for a command
+/// dispatched to THIS machine (the broker enforces that).
+async fn post_responses(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some((_account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
+    };
+    if body.get("type").and_then(|value| value.as_str()) == Some("client")
+        && let Some(request_id) = body.get("requestId").and_then(|value| value.as_str())
+        && let Some(message) = body.get("message")
+    {
+        let outcome = wire::outcome_from_client_message(message);
+        state
+            .local_exec
+            .resolve(&machine_id, request_id, outcome)
+            .await;
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[cfg(test)]

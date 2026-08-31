@@ -1339,17 +1339,23 @@ impl PgStore {
         Ok(())
     }
 
-    /// Record a command's result on its audit row.
+    /// Record a command's result on its audit row: the ShellResult `outcome` case (success /
+    /// failure / timeout / rejected / spawnError / permissionDenied) and, when there is one, the
+    /// process exit code. A refusal is a case with no exit code, not a non-zero exit.
     pub async fn finish_local_exec_audit(
         &self,
         id: &str,
-        exit_code: i32,
+        outcome: &str,
+        exit_code: Option<i32>,
         at_ms: i64,
     ) -> StoreResult<()> {
         sqlx::query(
-            "update local_exec_audit set exit_code = $2, finished_at_ms = $3 where id = $1",
+            "update local_exec_audit
+                set outcome = $2, exit_code = $3, finished_at_ms = $4
+              where id = $1",
         )
         .bind(id)
+        .bind(outcome)
         .bind(exit_code)
         .bind(at_ms)
         .execute(&self.pool)
@@ -1364,8 +1370,8 @@ impl PgStore {
         limit: i64,
     ) -> StoreResult<Vec<serde_json::Value>> {
         let rows = sqlx::query(
-            "select id, machine_id, origin, command, decision, requested_at_ms, exit_code,
-                    finished_at_ms
+            "select id, machine_id, origin, command, decision, requested_at_ms, outcome,
+                    exit_code, finished_at_ms
              from local_exec_audit where account_id = $1
              order by requested_at_ms desc limit $2",
         )
@@ -1382,6 +1388,7 @@ impl PgStore {
                     "command": row.try_get::<String, _>("command")?,
                     "decision": row.try_get::<String, _>("decision")?,
                     "requestedAtMs": row.try_get::<i64, _>("requested_at_ms")?,
+                    "outcome": row.try_get::<Option<String>, _>("outcome")?,
                     "exitCode": row.try_get::<Option<i32>, _>("exit_code")?,
                     "finishedAtMs": row.try_get::<Option<i64>, _>("finished_at_ms")?,
                 }))

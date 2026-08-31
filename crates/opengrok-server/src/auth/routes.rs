@@ -63,6 +63,10 @@ pub struct AuthState {
     pub public_url: String,
     /// uuid → the challenge waiting to be completed. Guarded, swept on each poll.
     logins: Arc<Mutex<HashMap<String, PendingLogin>>>,
+    /// The reverse-exec transport broker — the live meeting point of a machine's daemon stream and
+    /// a caller waiting for one command's result. One per replica, shared by the `/local-exec/*`
+    /// routes.
+    pub local_exec: Arc<crate::local_exec::LocalExecBroker>,
 }
 
 impl AuthState {
@@ -74,6 +78,7 @@ impl AuthState {
             resend_api_key: None,
             public_url: String::new(),
             logins: Arc::new(Mutex::new(HashMap::new())),
+            local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
         }
     }
 

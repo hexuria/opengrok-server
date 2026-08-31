@@ -380,6 +380,11 @@ create table if not exists local_exec_audit (
 
 create index if not exists local_exec_audit_acct_idx
     on local_exec_audit (account_id, machine_id, requested_at_ms desc);
+
+-- The command's OUTCOME (the ShellResult oneof case: success / failure / timeout / rejected /
+-- spawnError / permissionDenied), distinct from `decision` (the gate's verdict at enqueue). A
+-- refusal is a case, not a non-zero exit, so the two are recorded separately.
+alter table local_exec_audit add column if not exists outcome text;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
