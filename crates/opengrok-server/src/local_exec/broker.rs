@@ -100,6 +100,9 @@ struct Inner {
     /// machine is kept so a result is only ever accepted from the SAME machine — a daemon for one
     /// machine cannot resolve another machine's command.
     waiters: HashMap<String, (String, oneshot::Sender<ExecOutcome>)>,
+    /// request_id → accumulated (stdout, stderr) for the STREAMING shell, which sends chunks across
+    /// several frames before a terminal exit. Dropped when the request resolves.
+    streams: HashMap<String, (String, String)>,
 }
 
 /// The broker. Cheap to clone through an `Arc`; all state is behind one mutex held only for the
@@ -189,11 +192,62 @@ impl LocalExecBroker {
         }
     }
 
+    /// Accumulate a streaming-shell output chunk for a request. Ignored unless a waiter for this
+    /// request exists and belongs to the posting machine — so a stray or cross-machine chunk is
+    /// dropped rather than buffered forever.
+    pub async fn accumulate(&self, from_machine: &str, request_id: &str, is_stderr: bool, data: &str) {
+        let mut inner = self.inner.lock().await;
+        let ours = matches!(inner.waiters.get(request_id), Some((m, _)) if m == from_machine);
+        if !ours {
+            return;
+        }
+        let (out, err) = inner.streams.entry(request_id.to_string()).or_default();
+        if is_stderr {
+            err.push_str(data);
+        } else {
+            out.push_str(data);
+        }
+    }
+
+    /// Terminal for a streaming-shell request: combine the accumulated stdout/stderr with a final
+    /// `case` (success/failure/rejected/…), optional exit code, and reason, then resolve the caller
+    /// and drop the buffers. Machine-guarded like `resolve`.
+    pub async fn finish_stream(
+        &self,
+        from_machine: &str,
+        request_id: &str,
+        case: &str,
+        exit_code: Option<i32>,
+        detail: &str,
+    ) {
+        let (waiter, buffers) = {
+            let mut inner = self.inner.lock().await;
+            let ours = matches!(inner.waiters.get(request_id), Some((m, _)) if m == from_machine);
+            if !ours {
+                (None, (String::new(), String::new()))
+            } else {
+                let waiter = inner.waiters.remove(request_id).map(|(_, tx)| tx);
+                let buffers = inner.streams.remove(request_id).unwrap_or_default();
+                (waiter, buffers)
+            }
+        };
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(ExecOutcome {
+                case: case.to_string(),
+                exit_code,
+                stdout: buffers.0,
+                stderr: buffers.1,
+                detail: detail.to_string(),
+            });
+        }
+    }
+
     /// Abandon a request: drop its waiter and tell the daemon to cancel it if we still can. Used
     /// when the caller times out.
     pub async fn cancel(&self, machine_id: &str, request_id: &str) {
         let mut inner = self.inner.lock().await;
         inner.waiters.remove(request_id);
+        inner.streams.remove(request_id);
         if let Some(provider) = inner.providers.get(machine_id) {
             let _ = provider.send(json!({ "kind": "cancel", "requestId": request_id }));
         }
@@ -283,5 +337,45 @@ mod tests {
             detail: "not permitted".to_string(),
         };
         assert_eq!(denied.render(), "permissionDenied: not permitted");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_shell_accumulates_chunks_and_resolves_on_exit() {
+        let broker = LocalExecBroker::new();
+        let mut stream = broker.connect("mac_a").await;
+        let _ = stream.recv().await; // welcome
+        let rx = broker
+            .dispatch("mac_a", "req-1", json!({ "shellStreamArgs": { "command": "uname" } }))
+            .await
+            .expect("dispatched");
+        let _ = stream.recv().await; // exec frame
+
+        broker.accumulate("mac_a", "req-1", false, "Dar").await;
+        broker.accumulate("mac_a", "req-1", false, "win\n").await;
+        broker.accumulate("mac_a", "req-1", true, "").await;
+        broker.finish_stream("mac_a", "req-1", "success", Some(0), "").await;
+
+        let outcome = rx.await.expect("result");
+        assert!(outcome.succeeded());
+        assert_eq!(outcome.stdout, "Darwin\n");
+    }
+
+    #[tokio::test]
+    async fn a_stream_chunk_from_the_wrong_machine_is_dropped() {
+        let broker = LocalExecBroker::new();
+        let mut a = broker.connect("mac_a").await;
+        let _ = a.recv().await;
+        let rx = broker
+            .dispatch("mac_a", "req-1", json!({ "shellStreamArgs": {} }))
+            .await
+            .expect("dispatched");
+        let _ = a.recv().await;
+        // A different machine cannot feed or finish this request.
+        broker.accumulate("mac_evil", "req-1", false, "pwned").await;
+        broker.finish_stream("mac_evil", "req-1", "success", Some(0), "").await;
+        // The real machine finishes it; the evil chunk never landed.
+        broker.finish_stream("mac_a", "req-1", "success", Some(0), "").await;
+        let outcome = rx.await.expect("result");
+        assert_eq!(outcome.stdout, "");
     }
 }

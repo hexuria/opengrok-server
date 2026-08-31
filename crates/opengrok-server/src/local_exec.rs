@@ -734,10 +734,37 @@ async fn post_responses(
             let request_id = frame.get("requestId").and_then(|value| value.as_str());
             let message = frame.get("message");
             match (kind, request_id, message) {
-                // A command's result.
+                // A command's result. The STREAMING shell sends `shellStream` chunks then a
+                // terminal event; a non-streaming `shellResult` is handled directly.
                 (Some("client"), Some(request_id), Some(message)) => {
-                    let outcome = wire::outcome_from_client_message(message);
-                    state.local_exec.resolve(&machine_id, request_id, outcome).await;
+                    if message.get("shellResult").is_some() {
+                        let outcome = wire::outcome_from_client_message(message);
+                        state.local_exec.resolve(&machine_id, request_id, outcome).await;
+                    } else if let Some(action) = wire::stream_action(message) {
+                        use wire::StreamAction;
+                        match action {
+                            StreamAction::Stdout(chunk) => {
+                                state.local_exec.accumulate(&machine_id, request_id, false, &chunk).await;
+                            }
+                            StreamAction::Stderr(chunk) => {
+                                state.local_exec.accumulate(&machine_id, request_id, true, &chunk).await;
+                            }
+                            StreamAction::Exit(code) => {
+                                let case = if code == 0 { "success" } else { "failure" };
+                                state
+                                    .local_exec
+                                    .finish_stream(&machine_id, request_id, case, Some(code), "")
+                                    .await;
+                            }
+                            StreamAction::Terminal { case, detail } => {
+                                state
+                                    .local_exec
+                                    .finish_stream(&machine_id, request_id, &case, None, &detail)
+                                    .await;
+                            }
+                            StreamAction::Ignore => {}
+                        }
+                    }
                 }
                 // A control frame: a `throw` means the machine refused or errored the command
                 // (e.g. its local tools are on "ask" and there was no matching local approval).
