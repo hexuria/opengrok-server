@@ -39,7 +39,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
-        .nest_service("/mcp", mcp_door::service(state.clone()))
+        .nest("/mcp", mcp_door::router(state.clone()))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
     // Opt-in request trace (OG_TRACE_REQUESTS=1): one INFO line per request with method, path,

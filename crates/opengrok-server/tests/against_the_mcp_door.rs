@@ -158,10 +158,17 @@ async fn spawn(app: axum::Router) -> String {
     format!("http://127.0.0.1:{}", addr.port())
 }
 
-/// The hand-written client: one JSON-RPC request over plain POST, no SDK. Accepts either a
-/// plain-JSON reply or an SSE-framed one, because the transport may pick either and a client
-/// must not care.
-async fn rpc(base: &str, bearer: Option<&str>, id: i64, method: &str, params: Value) -> Value {
+/// The hand-written client: one JSON-RPC request over plain POST, no SDK. Returns the HTTP status
+/// AND the parsed body — auth is enforced at the transport edge now, so the status is the point of
+/// the auth tests, not a JSON-RPC error. Accepts either a plain-JSON reply or an SSE-framed one,
+/// because the transport may pick either and a client must not care.
+async fn rpc(
+    base: &str,
+    bearer: Option<&str>,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> (u16, Value) {
     let mut request = reqwest::Client::new()
         .post(format!("{base}/mcp"))
         .header("Accept", "application/json, text/event-stream")
@@ -171,6 +178,7 @@ async fn rpc(base: &str, bearer: Option<&str>, id: i64, method: &str, params: Va
         request = request.header("Authorization", format!("Bearer {token}"));
     }
     let response = request.send().await.expect("request");
+    let status = response.status().as_u16();
     let content_type = response
         .headers()
         .get("content-type")
@@ -178,17 +186,19 @@ async fn rpc(base: &str, bearer: Option<&str>, id: i64, method: &str, params: Va
         .unwrap_or_default()
         .to_string();
     let body = response.text().await.expect("body");
-    if content_type.starts_with("text/event-stream") {
-        // The last data: line carries the response message.
+    // A non-2xx from the guard is plain text, not JSON — keep it as a string so a test can assert
+    // on both the status and the message.
+    let value = if content_type.starts_with("text/event-stream") {
         let data = body
             .lines()
             .filter_map(|line| line.strip_prefix("data:"))
             .next_back()
             .unwrap_or("null");
-        serde_json::from_str(data.trim()).expect("sse json")
+        serde_json::from_str(data.trim()).unwrap_or(Value::Null)
     } else {
-        serde_json::from_str(&body).unwrap_or(Value::Null)
-    }
+        serde_json::from_str(&body).unwrap_or(Value::String(body))
+    };
+    (status, value)
 }
 
 fn mint_access_for(state: &AgUiState, account: &AccountId, email: &str) -> String {
@@ -241,13 +251,18 @@ async fn a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolb
     let access = mint_access_for(&state, &account, &host_email);
     let (bot_key, _) = mint_bot_key(&base, &access, &coworker).await;
 
-    let init = rpc(&base, Some(&bot_key), 1, "initialize", initialize_params()).await;
+    let (status, init) = rpc(&base, Some(&bot_key), 1, "initialize", initialize_params()).await;
+    assert_eq!(status, 200, "a live bot key initializes: {init}");
     assert!(
         init["result"]["capabilities"]["tools"].is_object(),
         "tools capability advertised: {init}"
     );
+    assert_eq!(
+        init["result"]["serverInfo"]["name"], "opengrok",
+        "the handshake identifies OpenGrok, not the SDK: {init}"
+    );
 
-    let list = rpc(&base, Some(&bot_key), 2, "tools/list", json!({})).await;
+    let (_, list) = rpc(&base, Some(&bot_key), 2, "tools/list", json!({})).await;
     let tools = list["result"]["tools"].as_array().expect("tools array");
     assert!(
         tools.is_empty(),
@@ -255,7 +270,7 @@ async fn a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolb
     );
 
     // A call still fails CLOSED, with a reason, not a hang or a success.
-    let call = rpc(
+    let (_, call) = rpc(
         &base,
         Some(&bot_key),
         3,
@@ -282,29 +297,54 @@ async fn only_a_live_bot_key_opens_the_door() {
     let base = spawn(app).await;
     let access = mint_access_for(&state, &account, &host_email);
 
-    // No bearer at all: refused with guidance, not a panic and not a listing.
-    let anonymous = rpc(&base, None, 1, "tools/list", json!({})).await;
-    let message = anonymous["error"]["message"].as_str().unwrap_or("");
+    // The refusals are at the transport edge now: a real 401, so an OAuth-capable client can
+    // discover it must authenticate, and the body names the fix. The message rides through as a
+    // plain string (the guard does not answer JSON).
+    let message_of = |value: &Value| value.as_str().unwrap_or_default().to_string();
+
+    // No bearer at all: 401, refused with guidance, not a panic and not a listing.
+    let (status, anonymous) = rpc(&base, None, 1, "tools/list", json!({})).await;
+    assert_eq!(status, 401, "no bearer is unauthorized: {anonymous}");
     assert!(
-        message.contains("bot key"),
+        message_of(&anonymous).contains("bot key"),
         "the refusal says what credential to use: {anonymous}"
     );
 
-    // An account access token is a person, not a coworker: told how to mint the right thing.
-    let person = rpc(&base, Some(&access), 2, "tools/list", json!({})).await;
-    let message = person["error"]["message"].as_str().unwrap_or("");
+    // An account access token is a person, not a coworker: 401, told how to mint the right thing.
+    let (status, person) = rpc(&base, Some(&access), 2, "tools/list", json!({})).await;
+    assert_eq!(status, 401, "a person's token is unauthorized: {person}");
+    let person = message_of(&person);
     assert!(
-        message.contains("bot key") && message.contains("/coworkers/"),
+        person.contains("bot key") && person.contains("/coworkers/"),
         "a person is pointed at the mint, not guessed a coworker for: {person}"
     );
 
-    // A revoked key answers revoked — never a silent downgrade to anonymous.
+    // Even initialize is gated — an anonymous scanner cannot confirm the door or read its SDK.
+    let (status, _) = rpc(&base, None, 3, "initialize", initialize_params()).await;
+    assert_eq!(status, 401, "initialize itself requires a bot key");
+
+    // A browser origin is refused outright, with or without a token.
+    let origin_refused = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .header("Origin", "https://evil.example")
+        .header("Content-Type", "application/json")
+        .json(&json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {} }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        origin_refused.status().as_u16(),
+        403,
+        "a browser origin is refused"
+    );
+
+    // A revoked key answers revoked (401) — never a silent downgrade to anonymous.
     let (bot_key, jti) = mint_bot_key(&base, &access, &coworker).await;
     store.revoke_bot_key(&account, &jti).await.expect("revoke");
-    let revoked = rpc(&base, Some(&bot_key), 3, "tools/list", json!({})).await;
-    let message = revoked["error"]["message"].as_str().unwrap_or("");
+    let (status, revoked) = rpc(&base, Some(&bot_key), 4, "tools/list", json!({})).await;
+    assert_eq!(status, 401, "a revoked key is unauthorized: {revoked}");
     assert!(
-        message.contains("revoked"),
+        message_of(&revoked).contains("revoked"),
         "a revoked key is named revoked: {revoked}"
     );
 }
