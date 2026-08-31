@@ -396,3 +396,27 @@ async fn eager_scope_box_creates_once_and_is_idempotent() {
             .await;
     }
 }
+
+/// The provider's live `state` word — what getForeverBoxStatus reports so a box says whether it is
+/// up, down, or gone instead of spinning "Booting up" forever. A fresh box is "running"; once
+/// destroyed it is "absent".
+#[tokio::test]
+async fn box_state_reports_running_then_absent() {
+    if !docker_available() {
+        eprintln!("skipping: no Docker daemon");
+        return;
+    }
+    let docker = opengrok_box::DockerComputer::new();
+    let box_id = docker.create(Some(120)).await.expect("create");
+    assert_eq!(
+        docker.state(&box_id).await.expect("state"),
+        "running",
+        "a fresh box is running"
+    );
+    docker.destroy(&box_id).await.expect("destroy");
+    assert_eq!(
+        docker.state(&box_id).await.expect("state"),
+        "absent",
+        "a destroyed box is absent, not an error"
+    );
+}

@@ -291,7 +291,13 @@ async fn command(
         "setBoxSecrets" | "setWindowFocused" => reply(StatusCode::OK, Value::Null),
 
         // ---- computer status: null is the well-formed "no forever box" answer ----
-        "getForeverBoxStatus" => reply(StatusCode::OK, Value::Null),
+        "getForeverBoxStatus" => {
+            let (code, body) = super::conversation::box_status(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "getHostStatus" => reply(
             StatusCode::OK,
             json!({

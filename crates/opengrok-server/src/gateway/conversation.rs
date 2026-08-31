@@ -229,6 +229,73 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     (200, json!({ "accepted": true }))
 }
 
+/// `getForeverBoxStatus` — the caller's agent's LIVE box health, in the client's `BoxStatus` shape
+/// (`{agentId, state, vncUrl}`). This is the signal that stops the app spinning "Booting up the
+/// computer" forever: a running box says `running`, a released one `absent`, and a dead one its real
+/// word (`exited`/`stopped`/…), so a box that died says it died instead of pretending to boot.
+///
+/// `vncUrl` is ALWAYS null: our boxes are headless (shell + files, no screen). The client renders a
+/// running-but-headless box honestly on its side; we never invent a screen URL that does not exist.
+pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    use crate::agui::provision;
+
+    let Some(agent_id) = agent_or_active(state, args) else {
+        // No agent named and none active — nothing to report. Null is a shape the client accepts.
+        return (200, Value::Null);
+    };
+    let absent = || json!({ "agentId": agent_id, "state": "absent", "vncUrl": Value::Null });
+    // A box is reported per SCOPE (per-account shares one box across the account's agents), so
+    // resolve the scope's box for the caller — but only for an agent that actually exists. An
+    // unknown id replays to a default (empty-named) coworker; that is no coworker, so `absent`,
+    // rather than borrowing the account's shared box.
+    match state
+        .agui
+        .auth
+        .store
+        .load_coworker(&CoworkerId::from_stored(agent_id.clone()))
+        .await
+    {
+        Ok((coworker, _)) if !coworker.name.is_empty() => {}
+        _ => return (200, absent()),
+    }
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
+        return (200, absent());
+    };
+    let (mode, org_id) = provision::resolve_mode(&state.agui, &account.id).await;
+    let (scope, scope_id, _) =
+        provision::scope_for(&mode, account.id.as_str(), org_id.as_deref(), &agent_id);
+    let Ok(Some((box_id, kind, stopped))) = state
+        .agui
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+    else {
+        return (200, absent());
+    };
+
+    // A box we ourselves paused (idle-stop) is authoritatively "stopped" — no need to probe, and it
+    // avoids a race where the provider has not yet reflected the stop. Otherwise ask the provider for
+    // the box's real word; a provider we cannot build (e.g. the org key was cleared) means the box is
+    // effectively unreachable, which reads as "absent".
+    let live_state = if stopped {
+        "stopped".to_string()
+    } else {
+        match provision::provider_for(&state.agui, org_id.as_deref(), &kind).await {
+            Some(provider) => provider
+                .state(&box_id)
+                .await
+                .unwrap_or_else(|_| "unknown".to_string()),
+            None => "absent".to_string(),
+        }
+    };
+
+    (
+        200,
+        json!({ "agentId": agent_id, "state": live_state, "vncUrl": Value::Null }),
+    )
+}
+
 /// The transcript so far, as chat messages — so a coworker remembers its own conversation
 /// rather than greeting every message as its first.
 pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> Vec<ChatMessage> {

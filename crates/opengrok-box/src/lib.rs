@@ -104,6 +104,14 @@ pub trait Computer: Send + Sync {
     /// Permanent. The disk goes with it.
     async fn destroy(&self, box_id: &str) -> BoxResult<()>;
 
+    /// The box's live run-state, as a lowercase word the boot UI can render honestly:
+    /// `"running"` (up and serving), `"absent"` (no such box — released or never created), or the
+    /// provider's own word for anything in between (`"exited"`, `"stopped"`, `"created"`, …). The
+    /// client treats every non-`"running"` value as "no live screen" and reports it, so this is the
+    /// signal that lets a dead box say it is dead instead of spinning "Booting up" forever. Cheap to
+    /// poll. Never errors on a missing box — that is `"absent"`, not a failure.
+    async fn state(&self, box_id: &str) -> BoxResult<String>;
+
     /// Which kind of computer this is, for advertising the options to a client:
     /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
     /// local-docker; the ascii provider overrides it.

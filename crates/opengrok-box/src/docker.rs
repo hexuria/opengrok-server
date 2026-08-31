@@ -73,9 +73,11 @@ impl DockerComputer {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // Docker says "No such container" for a box that is gone; a caller retries a refusal but
-        // not a missing box, so the two must not be conflated.
-        if stderr.contains("No such container") || stderr.contains("no such container") {
+        // Docker says "No such container" for a box that is gone — and `docker inspect` says "No
+        // such object" for the same thing. A caller retries a refusal but not a missing box, so the
+        // two must not be conflated; match both wordings, case-insensitively.
+        let lowered = stderr.to_lowercase();
+        if lowered.contains("no such container") || lowered.contains("no such object") {
             return Err(BoxError::NoSuchBox);
         }
         Err(BoxError::Refused {
@@ -319,6 +321,21 @@ impl Computer for DockerComputer {
 
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
         self.docker(&["rm", "-f", box_id]).await.map(|_| ())
+    }
+
+    async fn state(&self, box_id: &str) -> BoxResult<String> {
+        // `docker inspect` prints the container's own status word: running, exited, created, paused,
+        // restarting, removing, dead. A container that is gone is `NoSuchBox` here, which is `absent`
+        // to the caller — a missing box is a fact, not a failure.
+        match self
+            .docker(&["inspect", "-f", "{{.State.Status}}", box_id])
+            .await
+        {
+            Ok(status) if !status.is_empty() => Ok(status),
+            Ok(_) => Ok("absent".to_string()),
+            Err(BoxError::NoSuchBox) => Ok("absent".to_string()),
+            Err(other) => Err(other),
+        }
     }
 }
 

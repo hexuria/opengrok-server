@@ -370,6 +370,27 @@ impl Computer for AsciiBoxes {
         let _: serde_json::Value = self.json(response).await?;
         Ok(())
     }
+
+    async fn state(&self, box_id: &str) -> BoxResult<String> {
+        // box.ascii.dev's verified surface (see the module note) has NO status endpoint, and this
+        // crate refuses to guess an API. So liveness is PROBED over the verified GET /files path
+        // rather than a made-up /status route: a running box answers the read, a released box is 404
+        // ⇒ "absent", and a stopped box (disk kept, not serving) refuses ⇒ "stopped". This is the
+        // honest signal available today; a real status endpoint would replace it verbatim.
+        let response = self
+            .http
+            .get(self.url(&format!("/boxes/{box_id}/files")))
+            .bearer_auth(&self.api_key)
+            .query(&[("path", "/")])
+            .send()
+            .await
+            .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+        Ok(match response.status() {
+            status if status.is_success() => "running".to_string(),
+            reqwest::StatusCode::NOT_FOUND => "absent".to_string(),
+            _ => "stopped".to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
