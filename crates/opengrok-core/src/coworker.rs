@@ -37,6 +37,14 @@ pub enum CoworkerEvent {
         name: String,
         at_ms: i64,
     },
+    /// The route this coworker thinks through changed. A pin is an operating fact about the
+    /// coworker, not the deployment's — hiring one model and answering on another is the bug
+    /// this whole aggregate's model field exists to prevent.
+    Repinned {
+        /// A route through the gateway (`openai/gpt-5.5`), never a key.
+        model: String,
+        at_ms: i64,
+    },
     /// A computer became this coworker's.
     ComputerAssigned {
         box_id: BoxId,
@@ -57,6 +65,7 @@ impl CoworkerEvent {
         match self {
             Self::Hired { .. } => "coworker-hired",
             Self::Renamed { .. } => "coworker-renamed",
+            Self::Repinned { .. } => "coworker-repinned",
             Self::ComputerAssigned { .. } => "computer-assigned",
             Self::ComputerReleased { .. } => "computer-released",
             Self::Retired { .. } => "coworker-retired",
@@ -86,6 +95,11 @@ pub enum CoworkerError {
     NoComputer,
     #[error("a shared computer is not one coworker's to release")]
     SharedComputer,
+    /// A blank model reaches the gateway as `"model": ""`, which it answers with a refusal
+    /// nobody can act on. Hire accepted one until slice 18 — the 400 arms its callers already
+    /// wrote were unreachable, so the invalid value simply got stored.
+    #[error("a coworker needs a model to think with")]
+    EmptyModel,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +111,12 @@ pub enum CoworkerCommand {
     },
     Rename {
         name: String,
+        at_ms: i64,
+    },
+    /// Point this coworker at a different route. Deliberately its own command: renaming and
+    /// repinning are different decisions, and a caller that means one must not do the other.
+    Repin {
+        model: String,
         at_ms: i64,
     },
     AssignComputer {
@@ -129,6 +149,7 @@ impl Coworker {
                 self.model = model.clone();
             }
             CoworkerEvent::Renamed { name, .. } => self.name = name.clone(),
+            CoworkerEvent::Repinned { model, .. } => self.model = model.clone(),
             CoworkerEvent::ComputerAssigned { box_id, mode, .. } => {
                 self.box_id = Some(box_id.clone());
                 self.box_mode = Some(*mode);
@@ -151,6 +172,16 @@ impl Coworker {
         self.box_mode
     }
 
+    /// A model must be a route somebody could actually be served on. Trimmed, because a pin of
+    /// spaces is the same lie as an empty one.
+    fn non_blank(model: String) -> Result<String, CoworkerError> {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            return Err(CoworkerError::EmptyModel);
+        }
+        Ok(trimmed.to_string())
+    }
+
     fn alive(&self) -> Result<(), CoworkerError> {
         if !self.hired {
             return Err(CoworkerError::NotHired);
@@ -164,7 +195,17 @@ impl Coworker {
     pub fn decide(&self, command: CoworkerCommand) -> Result<Vec<CoworkerEvent>, CoworkerError> {
         match command {
             CoworkerCommand::Hire { name, model, at_ms } => {
+                // Validated at last. Every caller already had a 400 arm for this; none of them
+                // could ever be reached, so `model: ""` was stored and later asked of the
+                // gateway verbatim.
+                let model = Self::non_blank(model)?;
                 Ok(vec![CoworkerEvent::Hired { name, model, at_ms }])
+            }
+
+            CoworkerCommand::Repin { model, at_ms } => {
+                self.alive()?;
+                let model = Self::non_blank(model)?;
+                Ok(vec![CoworkerEvent::Repinned { model, at_ms }])
             }
 
             CoworkerCommand::Rename { name, at_ms } => {
@@ -372,6 +413,96 @@ mod tests {
         assert_eq!(coworker.name, "Grace");
         assert_eq!(coworker.computer(), Some(&BoxId::from_stored("box_1")));
         assert_eq!(coworker.box_mode, Some(BoxMode::Dedicated));
+    }
+
+    fn repin(coworker: &mut Coworker, model: &str) -> Result<(), CoworkerError> {
+        for event in coworker.decide(CoworkerCommand::Repin {
+            model: model.to_string(),
+            at_ms: 9,
+        })? {
+            coworker.apply(&event);
+        }
+        Ok(())
+    }
+
+    /// The point of the slice: a pin is changeable, and changing it changes nothing else.
+    #[test]
+    fn repinning_changes_the_model_and_only_the_model() {
+        let mut coworker = with_computer(BoxMode::Dedicated);
+        repin(&mut coworker, "openai/gpt-5.5").unwrap();
+        assert_eq!(coworker.model, "openai/gpt-5.5");
+        assert_eq!(coworker.name, "Ada", "repinning is not renaming");
+        assert_eq!(
+            coworker.computer(),
+            Some(&BoxId::from_stored("box_1")),
+            "repinning does not disturb the computer"
+        );
+        assert!(!coworker.retired);
+    }
+
+    /// Renaming and repinning are different decisions; neither may do the other's work.
+    #[test]
+    fn renaming_does_not_disturb_the_pin() {
+        let mut coworker = hired();
+        for event in coworker
+            .decide(CoworkerCommand::Rename {
+                name: "Grace".to_string(),
+                at_ms: 3,
+            })
+            .unwrap()
+        {
+            coworker.apply(&event);
+        }
+        assert_eq!(coworker.model, "xai/grok-4.6");
+    }
+
+    /// A retired coworker takes no more decisions — the same guard every other command uses.
+    #[test]
+    fn a_retired_coworker_cannot_be_repinned() {
+        let mut coworker = hired();
+        for event in coworker
+            .decide(CoworkerCommand::Retire { at_ms: 4 })
+            .unwrap()
+        {
+            coworker.apply(&event);
+        }
+        assert_eq!(
+            repin(&mut coworker, "openai/gpt-5.5"),
+            Err(CoworkerError::Retired)
+        );
+    }
+
+    /// A blank pin reaches the gateway as `"model": ""`. Refused at the only place that can
+    /// refuse it once, for every caller — this was storable until slice 18.
+    #[test]
+    fn a_blank_model_is_refused_on_hire_and_on_repin() {
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                Coworker::default().decide(CoworkerCommand::Hire {
+                    name: "Ada".to_string(),
+                    model: blank.to_string(),
+                    at_ms: 1,
+                }),
+                Err(CoworkerError::EmptyModel),
+                "hire accepted a blank pin: {blank:?}"
+            );
+            let mut coworker = hired();
+            assert_eq!(
+                repin(&mut coworker, blank),
+                Err(CoworkerError::EmptyModel),
+                "repin accepted a blank pin: {blank:?}"
+            );
+            assert_eq!(coworker.model, "xai/grok-4.6", "the old pin survived");
+        }
+    }
+
+    /// Surrounding space is not part of a route name; storing it would ask the gateway for a
+    /// model that differs from the one a person typed.
+    #[test]
+    fn a_pin_is_stored_trimmed() {
+        let mut coworker = hired();
+        repin(&mut coworker, "  openai/gpt-5.5  ").unwrap();
+        assert_eq!(coworker.model, "openai/gpt-5.5");
     }
 
     /// The computer survives a rename, because it is a different fact about the same coworker.
