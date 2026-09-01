@@ -18,7 +18,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 |---|---|---|
 | `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** | where everything listens: the Sand gateway, AG-UI, auth, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server) |
 | `OG_GRPC_BIND` | unset (off) | opt-in tonic listener for seam-B gRPC. Unset means no gRPC socket — an unused open port is a liability |
-| `OG_PUBLIC_GATEWAY_URL` | unset | the **non-loopback** address `EnsureSandBox` mints to clients (e.g. `http://192.168.100.24:1447`). The client refuses a loopback gateway host, so the mint is refused outright when this is loopback or unset |
+| `OG_PUBLIC_GATEWAY_URL` | unset | the address `EnsureSandBox` mints to clients (e.g. `http://192.168.100.24:1447`). Unset ⇒ the mint refuses. Must be non-loopback because the *client* refuses a loopback host — the mint itself does not check that (`seamb.rs`; `slice13-seamb-smoke.sh` is the loopback assertion) |
 | `OG_GATEWAY_BEARER` | unset | the shared bearer the desktop client presents on every gateway call. The client-side counterpart is the token field beside its OpenGrok gateway URL setting |
 | `OG_COOKIE_SECURE` | unset | `1` marks the console's auth cookies `Secure` — set it behind HTTPS |
 
