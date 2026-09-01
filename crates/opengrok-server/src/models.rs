@@ -9,12 +9,56 @@
 //! An empty catalogue is `[]` **with a reason**, never a bare 200 — "there are no models in the
 //! world" is exactly the empty success that reads as a working page and is not (CLAUDE.md §3).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// How long a listing is considered fresh. A picker showing a slightly stale catalogue is a much
 /// smaller problem than one that re-asks the gateway on every keystroke.
 const FRESH_FOR: Duration = Duration::from_secs(60);
+
+/// The smallest gap between two probes from one account. A probe is a REAL, billed completion on
+/// the deployment's own key, so an unbounded one is somebody else's money in a loop. One every few
+/// seconds is far more than a person clicking Test needs and far less than a script wants.
+const PROBE_EVERY: Duration = Duration::from_secs(3);
+
+/// The longest gateway sentence worth passing on. Long enough for a real explanation, short enough
+/// that a gateway echoing a whole request cannot dump it into a browser.
+const DETAIL_CLIP: usize = 300;
+
+/// Scrub anything key-shaped out of a string the GATEWAY produced before it reaches a caller.
+///
+/// `list()` solves this by never passing a body on at all. `probe()` cannot: its whole value is
+/// the gateway's own sentence ("no credential available for provider anthropic on this route"),
+/// which is what tells a person why a pin they can see advertised will not serve them. So the
+/// sentence travels, and anything that looks like a credential in it does not — because the one
+/// thing this module must never do is hand a browser the key it holds, and a gateway that echoes
+/// the failed request would otherwise do exactly that through us.
+fn redact_secrets(detail: &str) -> String {
+    let mut out = String::with_capacity(detail.len());
+    for word in detail.split_inclusive(char::is_whitespace) {
+        let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-');
+        let secretish = bare.len() >= 16
+            && (bare.starts_with("oag_")
+                || bare.starts_with("sk-")
+                || bare.starts_with("Bearer")
+                || bare.starts_with("bearer")
+                || bare
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        if secretish {
+            out.push_str("«redacted» ");
+        } else {
+            out.push_str(word);
+        }
+    }
+    let out = out.trim().to_string();
+    if out.chars().count() > DETAIL_CLIP {
+        let clipped: String = out.chars().take(DETAIL_CLIP).collect();
+        return format!("{clipped}… (clipped)");
+    }
+    out
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
@@ -33,6 +77,8 @@ pub struct ModelCatalogue {
     key: String,
     http: reqwest::Client,
     cached: Mutex<Option<(Instant, Vec<Model>)>>,
+    /// When each account last spent the deployment's money on a probe.
+    probed: Mutex<HashMap<String, Instant>>,
 }
 
 impl std::fmt::Debug for ModelCatalogue {
@@ -54,7 +100,23 @@ impl ModelCatalogue {
             key: key.into(),
             http: reqwest::Client::new(),
             cached: Mutex::new(None),
+            probed: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// May this account probe right now? Records the attempt when it may.
+    pub fn may_probe(&self, account: &str) -> bool {
+        let mut probed = match self.probed.lock() {
+            Ok(probed) => probed,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(last) = probed.get(account)
+            && last.elapsed() < PROBE_EVERY
+        {
+            return false;
+        }
+        probed.insert(account.to_string(), Instant::now());
+        true
     }
 
     /// The same two variables the model door is built from, so the picker can never advertise a
@@ -106,7 +168,9 @@ impl ModelCatalogue {
             Err(error) => {
                 return Catalogue {
                     models: Vec::new(),
-                    note: Some(format!("the gateway could not be reached: {error}")),
+                    note: Some(redact_secrets(&format!(
+                        "the gateway could not be reached: {error}"
+                    ))),
                 };
             }
         };
@@ -153,7 +217,9 @@ impl ModelCatalogue {
             }))
             .send()
             .await
-            .map_err(|error| format!("the gateway could not be reached: {error}"))?;
+            .map_err(|error| {
+                redact_secrets(&format!("the gateway could not be reached: {error}"))
+            })?;
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         let parsed: serde_json::Value =
@@ -161,11 +227,13 @@ impl ModelCatalogue {
         if !status.is_success() {
             // The gateway's own sentence names the real problem ("no credential available for
             // provider anthropic on this route"), which is worth far more than our paraphrase.
+            // Only the message STRING, never the whole error object (which could carry
+            // structured echoes of the request), and scrubbed on the way out.
             let detail = parsed
                 .get("error")
-                .and_then(|error| error.get("message").or(Some(error)))
-                .and_then(|message| message.as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("the gateway answered {status}"));
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map_or_else(|| format!("the gateway answered {status}"), redact_secrets);
             return Err(detail);
         }
         let served = parsed
@@ -214,6 +282,57 @@ mod tests {
         assert!(parse_models("not json").is_empty());
         assert!(parse_models(r#"{"error":"nope"}"#).is_empty());
         assert!(parse_models(r#"{"data":"not an array"}"#).is_empty());
+    }
+
+    /// The reason `probe` may pass a gateway sentence on at all: anything key-shaped in it does
+    /// not travel. A gateway that echoes the failed request would otherwise leak our credential
+    /// through us — the one thing this module exists to prevent.
+    #[test]
+    fn a_gateway_sentence_travels_but_a_credential_in_it_does_not() {
+        let leaked = redact_secrets(
+            "invalid Authorization header: Bearer oag_live_deadbeefdeadbeefdeadbeef",
+        );
+        assert!(
+            !leaked.contains("oag_live_deadbeefdeadbeefdeadbeef"),
+            "{leaked}"
+        );
+        assert!(leaked.contains("«redacted»"), "{leaked}");
+        assert!(leaked.contains("invalid Authorization header"), "{leaked}");
+
+        // Built rather than written: a key-shaped literal in source trips secret scanners, and a
+        // test about redaction should not be the thing that looks like a leak.
+        let openai_shaped = format!("sk-{}", "abcdefghijklmnopqrstuv");
+        let scrubbed = redact_secrets(&format!("key {openai_shaped}"));
+        assert!(!scrubbed.contains(&openai_shaped), "{scrubbed}");
+
+        // The useful case is untouched — this is the sentence the whole feature turns on.
+        let real = "no credential available for provider anthropic on this route";
+        assert_eq!(redact_secrets(real), real);
+    }
+
+    /// A gateway that dumps a whole request cannot dump it into a browser.
+    #[test]
+    fn an_enormous_detail_is_clipped() {
+        let flood = "word ".repeat(400);
+        let scrubbed = redact_secrets(&flood);
+        assert!(
+            scrubbed.chars().count() <= DETAIL_CLIP + 16,
+            "{}",
+            scrubbed.len()
+        );
+        assert!(scrubbed.ends_with("(clipped)"));
+    }
+
+    /// One person clicking Test is fine; a loop spending the deployment's money is not.
+    #[test]
+    fn an_account_cannot_probe_in_a_loop() {
+        let catalogue = ModelCatalogue::new("http://gateway.local", "oag_live_x");
+        assert!(catalogue.may_probe("acct_1"), "the first probe is allowed");
+        assert!(!catalogue.may_probe("acct_1"), "an immediate second is not");
+        assert!(
+            catalogue.may_probe("acct_2"),
+            "one account's limit is not another's"
+        );
     }
 
     #[test]

@@ -318,7 +318,18 @@ REST ignored a requested model and stored the deployment default. Investigation:
   coworker hired on `openai/gpt-5.5` answered a real turn; repinned to `oag/auto`, the **next**
   turn failed with the gateway's own sentence rather than quietly using the deployment model.
   Evidence: `docs/verification/model-pins/README.md`. *(this commit)*
-- [ ] **18.later** The roster's `description = model` habit (a blank-agent defence in the desktop
+- [x] **18.r** Peer review (two reviewer agents) closed three real ones: `update_agent` swallowed
+  a REFUSED repin — folding `decide` into an `if let` chain made a rejection indistinguishable
+  from "no model sent", so a caller asking to think with nothing got a 200 and no change (the
+  sibling PATCH already answered 400); `probe` forwarded the gateway's error body verbatim while
+  its neighbour `list` deliberately discards bodies precisely because one "could echo the request,
+  and the request carried the key" — the sentence now travels scrubbed and clipped, with a test
+  driving a gateway that echoes our key; and `POST /models/probe` was an unbounded real-money
+  amplifier, now one probe per account per few seconds. *(this commit)*
+- [ ] **18.later** A run resumed after an approval picks up the coworker's CURRENT pin rather than
+  the one its turn started on (a straight-through turn is stable); carrying the starting pin means
+  storing it on the suspension. Seam B's `UpdateGrokBotAgent` has no repin path. The roster's
+  `description = model` habit (a blank-agent defence in the desktop
   client, not a statement of choice — the console shows the pin as its own field); the desktop
   app's own create/update model field + picker; `auto_review_model` is a second deployment model
   a pin deliberately does not move; per-coworker spend caps (the gateway has no per-day cap, and

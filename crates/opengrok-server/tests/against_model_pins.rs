@@ -86,6 +86,16 @@ async fn spawn_stand_in_gateway(probes: Arc<Mutex<Vec<String>>>) -> String {
                                 "no credential available for provider anthropic on this route"}})),
                         );
                     }
+                    // A HOSTILE (or merely careless) gateway: one that echoes the failed request,
+                    // credential and all, in its error. Ours must not pass that on.
+                    if model == "echo/the-request" {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            Json(json!({"error": {"message": format!(
+                                "rejected request with Authorization: Bearer {GATEWAY_KEY}"
+                            )}})),
+                        );
+                    }
                     (
                         axum::http::StatusCode::OK,
                         Json(json!({
@@ -424,11 +434,16 @@ async fn the_catalogue_lists_the_gateways_routes_and_never_its_key() {
         "the gateway's own sentence survives: {refused}"
     );
 
+    // A SECOND account for the second probe: one account may not probe twice in a moment (that
+    // limit has its own test), and this one is about what a probe answers, not how often.
+    let other_email = format!("cat2-{}@og.local", uuid::Uuid::now_v7().simple());
+    let other_account = seed_account(&store, &other_email).await;
+    let other_token = token_for(&state, &other_account, &other_email);
     let (_, served) = call(
         &base,
         reqwest::Method::POST,
         "/models/probe",
-        &token,
+        &other_token,
         Some(json!({ "model": "openai/gpt-5.5" })),
     )
     .await;
@@ -440,5 +455,81 @@ async fn the_catalogue_lists_the_gateways_routes_and_never_its_key() {
         *probes.lock().unwrap(),
         vec!["oag/auto".to_string(), "openai/gpt-5.5".to_string()],
         "the probe asked the gateway for exactly the candidate pins"
+    );
+}
+
+/// THE SHIP-BLOCKER, from the other side: a gateway that echoes our credential in its refusal must
+/// not leak it through us. `list()` never passes a body on at all; `probe()` must pass the
+/// gateway's sentence on, so the sentence is scrubbed instead.
+#[tokio::test]
+async fn a_gateway_that_echoes_our_key_does_not_leak_it_through_the_probe() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let email = format!("echo-{}@og.local", uuid::Uuid::now_v7().simple());
+    let account = seed_account(&store, &email).await;
+    let probes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let gateway = spawn_stand_in_gateway(probes.clone()).await;
+    let (app, state) = app_with(store.clone(), &email, &gateway);
+    let base = spawn(app).await;
+    let token = token_for(&state, &account, &email);
+
+    let (status, echoed) = call(
+        &base,
+        reqwest::Method::POST,
+        "/models/probe",
+        &token,
+        Some(json!({ "model": "echo/the-request" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{echoed}");
+    assert_eq!(echoed["ok"], json!(false));
+    let body = echoed.to_string();
+    assert!(
+        !body.contains(GATEWAY_KEY),
+        "the gateway's echo carried our key to the browser: {body}"
+    );
+    assert!(
+        !body.contains("oag_live_"),
+        "an oag_live_ token reached the browser: {body}"
+    );
+    // ...while the part that explains the problem survives.
+    assert!(
+        echoed["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rejected request"),
+        "the gateway's explanation was lost entirely: {echoed}"
+    );
+}
+
+/// A probe is real money; a loop of them is somebody else's.
+#[tokio::test]
+async fn probing_in_a_loop_is_refused() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let email = format!("loop-{}@og.local", uuid::Uuid::now_v7().simple());
+    let account = seed_account(&store, &email).await;
+    let probes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let gateway = spawn_stand_in_gateway(probes.clone()).await;
+    let (app, state) = app_with(store.clone(), &email, &gateway);
+    let base = spawn(app).await;
+    let token = token_for(&state, &account, &email);
+
+    let body = Some(json!({ "model": "openai/gpt-5.5" }));
+    let (first, _) = call(
+        &base,
+        reqwest::Method::POST,
+        "/models/probe",
+        &token,
+        body.clone(),
+    )
+    .await;
+    assert_eq!(first, 200);
+    let (second, _) = call(&base, reqwest::Method::POST, "/models/probe", &token, body).await;
+    assert_eq!(second, 429, "a second immediate probe is refused");
+    assert_eq!(
+        probes.lock().unwrap().len(),
+        1,
+        "the refused probe never reached the gateway, so it cost nothing"
     );
 }

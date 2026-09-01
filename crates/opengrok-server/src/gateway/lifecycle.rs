@@ -287,14 +287,22 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
 
     // A pin can be changed the same way a name can. Its own command, so a client that sends only
     // a model does not have to restate the name (and cannot rename by accident).
+    //
+    // A REFUSED repin is answered, not swallowed. Folding `decide` into the `if let` chain made a
+    // rejection indistinguishable from "no model sent": the block simply did not match and the
+    // caller got a 200 describing an agent whose pin had not changed. Asking to think with nothing
+    // is a mistake worth being told about (CLAUDE.md #8).
     if let Some(model) = profile_args.get("model").and_then(Value::as_str)
         && let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await
         && model.trim() != loaded.model
-        && let Ok(events) = loaded.decide(CoworkerCommand::Repin {
+    {
+        let events = match loaded.decide(CoworkerCommand::Repin {
             model: model.to_string(),
             at_ms: now_ms(),
-        })
-    {
+        }) {
+            Ok(events) => events,
+            Err(reason) => return (400, json!({ "error": reason.to_string() })),
+        };
         let mut after = loaded.clone();
         for event in &events {
             after.apply(event);

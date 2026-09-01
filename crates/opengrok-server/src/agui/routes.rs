@@ -472,9 +472,9 @@ pub async fn probe_model(
     headers: axum::http::HeaderMap,
     Json(request): Json<ProbeRequest>,
 ) -> Response {
-    if account_from_bearer(&state, &headers).is_none() {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    }
+    };
     let model = request.model.trim();
     if model.is_empty() {
         return (StatusCode::BAD_REQUEST, "a model is required").into_response();
@@ -486,6 +486,15 @@ pub async fn probe_model(
         }))
         .into_response();
     };
+    // A probe is a REAL, billed completion on the deployment's own key. One person clicking Test
+    // needs a handful; a loop wants thousands of somebody else's money.
+    if !catalogue.may_probe(account_id.as_str()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "wait a moment before testing another route",
+        )
+            .into_response();
+    }
     match catalogue.probe(model).await {
         Ok(served) => Json(serde_json::json!({ "ok": true, "served": served })).into_response(),
         // The gateway's own words. A paraphrase would lose the part that says what to do.

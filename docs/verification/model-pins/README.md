@@ -69,6 +69,22 @@ written to catch in the first place.
   for, so: the pin reaches the door, the **next** turn after a repin reaches it on the new route,
   and a run with no coworker still answers on the deployment's model (slice5's invariant, held).
 
+## Two limits worth knowing, found in review
+
+**A resumed run picks up the CURRENT pin, not the one its turn started on.** A straight-through
+turn is pin-stable — `run()` and `send_prompt` capture the model once and thread it through. But a
+turn that suspends on an approval card and is answered later re-loads the coworker at resume, so
+if it was repinned in between, the continuation answers on the new route. That is defensible (a
+pin from days ago may no longer be servable, and the coworker's configuration is what it is *now*)
+but it is not what "in-flight is stable" would suggest, so it is written down rather than implied.
+Making resumption carry the starting pin means storing it on the suspension — tracked as
+`ROADMAP 18.later`, not done here.
+
+**Seam B has no repin path.** `UpdateGrokBotAgent` handles rename and profile only. Repinning is
+reachable from REST `PATCH /coworkers/{id}` and the gateway's `updateAgent`; a seam-B client that
+sent a model today would be silently ignored. Deliberate scope, recorded so it is not mistaken for
+an oversight.
+
 ## Deliberately not changed
 
 A run that NAMES a coworker it cannot load still answers on the deployment model. That behaviour
