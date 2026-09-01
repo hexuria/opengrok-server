@@ -1353,6 +1353,17 @@ pub async fn resolve_auto_review_approval(
     let approved = matches!(word.as_str(), "approved" | "always" | "allow-once");
     let pending = run.pending.clone();
     let resumed_seq = run.emitted.len() as u32;
+    // Hold the MCP per-coworker lock across Answer/remember/Finish so a retry cannot
+    // take-or-run between those steps and leave a leftover yes.
+    let mcp_lock = run
+        .thread_id
+        .starts_with("mcp-")
+        .then(|| crate::mcp_door::coworker_lock(&coworker_id));
+    let _mcp_guard = if let Some(lock) = mcp_lock.as_ref() {
+        Some(lock.lock().await)
+    } else {
+        None
+    };
 
     let at_ms = now_ms();
     let events = match run.decide(opengrok_core::run::RunCommand::Answer {
@@ -1432,7 +1443,9 @@ pub async fn resolve_auto_review_approval(
                 .append_run(&run_id, seq, &finished, &view, Some(&account_id))
                 .await
             {
-                return (503, json!({ "error": error.to_string() }));
+                // Answer and the card already landed; 503 here would leave the card
+                // approved and the retry token set, with a press that never retries Finish.
+                tracing::error!(%error, "mcp ask: could not finish the synthesized run");
             }
         }
         return (200, json!({ "ok": true }));

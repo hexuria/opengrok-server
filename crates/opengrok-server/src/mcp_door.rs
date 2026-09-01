@@ -195,7 +195,9 @@ impl McpDoor {
 /// Serialize tool calls per coworker: the executor runs one call, but concurrent MCP requests would
 /// race on the same box (a `write_file` and the `shell` that reads it arriving together). `run_all`
 /// serializes a run's calls for exactly this reason; the door has no run, so it holds the line here.
-fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
+/// Per-coworker mutex shared with `resolveAutoReviewApproval` so remember/take/execute
+/// cannot interleave a leftover yes.
+pub fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     let mut map = match LOCKS.lock() {
@@ -380,11 +382,37 @@ impl ServerHandler for McpDoor {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
         };
-        // An allow-once on an MCP card must release the retry: the next call of the SAME
-        // tool+args reuses the answered call id so the judge skip (keyed on call.id) fires.
+        // Take, pending-card check, execute, persist, and remember all sit under this lock
+        // so a retry cannot run while a card is pending, and an Approve cannot interleave
+        // a leftover yes.
+        let lock = coworker_lock(&principal.coworker);
+        let _guard = lock.lock().await;
         let once_id = take_mcp_allow_once(&principal.coworker, &call.name, &call.arguments);
         if let Some(id) = once_id.as_ref() {
             call.id = id.clone();
+        } else {
+            match existing_mcp_ask(&self.state, &principal.account, &principal.coworker, &call)
+                .await
+            {
+                Ok(Some(request_id)) => {
+                    return Ok(
+                        CallToolResult::error(vec![ContentBlock::text(ask_waiting_text(
+                            "waiting for approval",
+                            &request_id,
+                        ))])
+                        .into(),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "mcp door: could not look up a pending ask");
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        "approval is needed, but the card could not be raised; grant this \
+                         tool to the coworker in the OpenGrok app or console, or retry.",
+                    )])
+                    .into());
+                }
+            }
         }
         let review_yes: Vec<String> = once_id.iter().cloned().collect();
         let runner = match self.toolbox_for(&principal, &review_yes).await {
@@ -408,29 +436,28 @@ impl ServerHandler for McpDoor {
                 ));
             }
         };
-        // Hold the per-coworker lock through persist: two overlapping Asks of the same
-        // tool+args must not insert two awaiting runs, and take/remember must not race.
-        let result = {
-            let lock = coworker_lock(&principal.coworker);
-            let _guard = lock.lock().await;
-            let result = runner.run_one(&call).await;
-            if result.awaiting_approval {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    reply_to_ask(
-                        &self.state,
-                        &principal.account,
-                        &principal.coworker,
-                        &call,
-                        &result,
-                    )
-                    .await,
-                )])
-                .into());
-            }
-            result
-        };
+        let result = runner.run_one(&call).await;
+        if result.awaiting_approval {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                reply_to_ask(
+                    &self.state,
+                    &principal.account,
+                    &principal.coworker,
+                    &call,
+                    &result,
+                )
+                .await,
+            )])
+            .into());
+        }
+        if !result.ok
+            && let Some(id) = once_id
+        {
+            // A failed execute must not spend the yes — the client will retry.
+            remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
+        }
         // Allowed calls still have no durable audit (see the module note). An Ask is persisted
-        // below. Arguments are redacted the way the judge redacts them: identity stripped, secrets masked.
+        // above, under the lock. Arguments are redacted the way the judge redacts them.
         tracing::info!(
             coworker = %principal.coworker.as_str(),
             tool = %call.name,
@@ -450,6 +477,13 @@ impl ServerHandler for McpDoor {
     }
 }
 
+fn ask_waiting_text(content: &str, request_id: &str) -> String {
+    format!(
+        "{content} — a card is waiting in the OpenGrok app (requestId: {request_id}). \
+         Answer it there, then retry this call."
+    )
+}
+
 /// An MCP Ask: raise a card when we have one, fail closed when we do not, never wait.
 /// Returns the error text the door sends the MCP client. Public so the door test can drive
 /// this path without a Ready toolbox (a computer) — `run_one` only Asks after that.
@@ -463,11 +497,7 @@ pub async fn reply_to_ask(
     match result.awaiting_reason {
         Some(AwaitingReason::AutoReview) => {
             match persist_mcp_ask(state, account, coworker, call).await {
-                Ok(request_id) => format!(
-                    "{} — a card is waiting in the OpenGrok app (requestId: {request_id}). \
-                     Answer it there, then retry this call.",
-                    result.content
-                ),
+                Ok(request_id) => ask_waiting_text(&result.content, &request_id),
                 Err(error) => {
                     tracing::error!(%error, "mcp door: could not raise an approval card");
                     format!(
@@ -612,8 +642,9 @@ async fn existing_mcp_ask(
 ) -> Result<Option<String>, opengrok_store::StoreError> {
     let waiting = state.agui.auth.store.awaiting_approval(account).await?;
     for run_id in waiting {
-        let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
-            continue;
+        let (run, seq) = match state.agui.auth.store.load_run(&run_id).await {
+            Ok(pair) => pair,
+            Err(error) => return Err(error),
         };
         if run.thread_id != format!("mcp-{}", coworker.as_str()) {
             continue;
@@ -633,7 +664,7 @@ async fn existing_mcp_ask(
         // there, and Fail would leave the original press hitting 410.
         match card_pending_for(state, coworker, &pending.call_id).await {
             Ok(true) => return Ok(Some(pending.call_id.clone())),
-            Ok(false) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await,
+            Ok(false) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await?,
             Err(error) => return Err(error),
         }
     }
@@ -659,14 +690,14 @@ async fn fail_stuck_mcp_run(
     run_id: &RunId,
     mut run: Run,
     seq: i64,
-) {
+) -> Result<(), opengrok_store::StoreError> {
     let at_ms = chrono::Utc::now().timestamp_millis();
-    let Ok(failed) = run.decide(RunCommand::Fail {
-        reason: "the approval card was never written".to_string(),
-        at_ms,
-    }) else {
-        return;
-    };
+    let failed = run
+        .decide(RunCommand::Fail {
+            reason: "the approval card was never written".to_string(),
+            at_ms,
+        })
+        .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
     for event in &failed {
         run.apply(event);
     }
@@ -677,10 +708,11 @@ async fn fail_stuck_mcp_run(
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    let _ = state
+    state
         .agui
         .auth
         .store
         .append_run(run_id, seq, &failed, &view, Some(account))
-        .await;
+        .await?;
+    Ok(())
 }
