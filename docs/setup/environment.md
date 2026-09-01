@@ -52,6 +52,15 @@ literals), and a variable that exists in code but not here is a documentation bu
 | `OG_LOGIN_EMAIL` | `OG_GATEWAY_EMAIL`, then `host@opengrok.local` | the host account the desktop roster and sign-in bind to on a single-user deployment |
 | `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
 | `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
+
+No variable configures DNS: domain-ownership proof (`/admin/domains/{d}/verify`) resolves the
+`_opengrok-verify.<domain>` TXT record through hickory-resolver using the box's own resolver
+configuration (`/etc/resolv.conf`). A box with none logs it at boot and that one endpoint answers
+503 until it is fixed; nothing else is affected. Password reset needs the Resend key above —
+without it `/forgot-password` says so and the operator resets with
+`opengrok admin account password --email <email>`. Run the smoke gate with the Resend key UNSET:
+`slice17-identity-smoke.sh` asserts the no-mailer path, and a set key sends real mail to the
+throwaway signup addresses.
 | `OG_WEB_CONSOLE_DIR` | unset (no console route) | directory holding the built SPA's `index.html`, normally `web/dist`; served at `/console` |
 
 ## Connectors and plugins

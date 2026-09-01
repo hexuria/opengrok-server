@@ -98,7 +98,8 @@ pub fn login(challenge: &str, uuid: &str, error: Option<&str>) -> Response {
   <label for=password>Password</label>
   <input id=password name=password type=password autocomplete=current-password required>
   <button type=submit>Sign in <span aria-hidden=true>&rarr;</span></button>
-</form>"##,
+</form>
+<p class=foot><a href="/forgot-password">Forgot your password?</a></p>"##,
         challenge = escape(challenge),
         uuid = escape(uuid),
     );
@@ -139,6 +140,57 @@ pub fn signup(code: Option<&str>, error: Option<&str>) -> Response {
     html(
         StatusCode::OK,
         shell("Sign up", "Join your organization on Open Grok.", &body),
+    )
+}
+
+/// The "send me a reset link" card. `mailer` false ⇒ this server cannot email, and the card says
+/// so instead of pretending a link is on its way — the operator resets from the shell instead.
+pub fn forgot_password(mailer: bool, error: Option<&str>) -> Response {
+    let err = error
+        .map(|message| format!("<p class=err>{}</p>", escape(message)))
+        .unwrap_or_default();
+    let body = if mailer {
+        format!(
+            r##"<form method=post action="/forgot-password">
+  {err}
+  <label for=email>Email</label>
+  <input id=email name=email type=email autocomplete=username required autofocus>
+  <button type=submit>Send reset link <span aria-hidden=true>&rarr;</span></button>
+</form>
+<p class=foot>We will email a link that works once and expires in an hour.</p>"##
+        )
+    } else {
+        r##"<p class=msg>This server is not set up to send email, so it cannot mail a reset link.
+Ask your administrator to reset your password — they can do it from the server's shell.</p>"##
+            .to_string()
+    };
+    html(
+        StatusCode::OK,
+        shell("Forgot password", "Reset your Open Grok password.", &body),
+    )
+}
+
+/// The "choose a new password" card the emailed link opens. The token rides as a hidden field so
+/// the POST carries it without the browser ever needing script.
+pub fn reset_password(token: &str, error: Option<&str>) -> Response {
+    let err = error
+        .map(|message| format!("<p class=err>{}</p>", escape(message)))
+        .unwrap_or_default();
+    let body = format!(
+        r##"<form method=post action="/reset-password">
+  <input type=hidden name=token value="{token}">
+  {err}
+  <label for=password>New password</label>
+  <input id=password name=password type=password autocomplete=new-password minlength=8 required autofocus>
+  <label for=confirm>Confirm new password</label>
+  <input id=confirm name=confirm type=password autocomplete=new-password minlength=8 required>
+  <button type=submit>Set password <span aria-hidden=true>&rarr;</span></button>
+</form>"##,
+        token = escape(token),
+    );
+    html(
+        StatusCode::OK,
+        shell("Reset password", "Choose a new password.", &body),
     )
 }
 

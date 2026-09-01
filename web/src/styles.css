@@ -79,6 +79,9 @@ button.wide { width: 100%; margin-top: 1.4rem; }
 .spread { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .stack > * + * { margin-top: 1.25rem; }
 .muted { color: var(--muted); }
+.foot { margin-top: 1.25rem; font-size: 0.85rem; color: var(--muted); text-align: center; }
+.foot a { color: var(--link, #a9b2ff); text-decoration: none; }
+.foot a:hover { text-decoration: underline; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
 
 .avatar { width: 72px; height: 72px; border-radius: 999px; object-fit: cover;

@@ -7,6 +7,7 @@ pub mod cookies;
 pub mod identity;
 pub mod pages;
 pub mod password;
+pub mod password_reset;
 pub mod resend;
 pub mod routes;
 pub mod token;

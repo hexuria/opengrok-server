@@ -74,6 +74,19 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .or_else(|| std::env::var("RESEND_API").ok()),
         public_url,
+    )
+    .with_dns(
+        match opengrok_server::domain_proof::SystemDns::from_system() {
+            Ok(resolver) => Arc::new(resolver),
+            Err(reason) => {
+                // Domain verification answers 503 until this is fixed; everything else is unaffected.
+                tracing::warn!(
+                    reason,
+                    "no system DNS resolver; domain-ownership proof is unavailable"
+                );
+                Arc::new(opengrok_server::domain_proof::NoResolver)
+            }
+        },
     );
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also

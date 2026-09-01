@@ -5,10 +5,14 @@
 //! (`docs/identity-model.md`). Both gates, not either — a code alone would let a stranger's gmail
 //! in, a domain alone would let anyone at the company in unbidden. The org is where both live.
 //!
-//! DOMAIN MATCHING IS HERE; DOMAIN OWNERSHIP IS NOT. This aggregate records the domains an org
-//! claims and checks an email against them. Whether the org actually *controls* a domain (a DNS
-//! proof) is a later slice — v1 takes the admin's word at `org create`, because the admin has
-//! shell on the server and is not adversarial to their own deployment.
+//! TWO WAYS A DOMAIN GETS IN, ONE MEANING ONCE IT IS. `domains` is the list that admits signups.
+//! The operator's shell puts a domain there directly (`Created`, `DomainAdded`): whoever can run
+//! `opengrok admin` on the box already owns the deployment, so their word is the proof. An org
+//! admin at the web console has no shell and is not the operator — they may CLAIM a domain
+//! (`DomainClaimed`), which gates nothing, and it reaches `domains` only when a DNS TXT record
+//! carrying the claim's token resolves (`DomainVerified`). Without that split a console admin
+//! could claim `gmail.com` and invite the world. The lookup itself is I/O and lives in the server;
+//! this aggregate only knows whether a claim is outstanding and what token would settle it.
 //!
 //! INVITES LIVE ON THE ORG, not in their own aggregate: an invite has no life apart from the org
 //! that issued it, and "which invites are outstanding" is exactly the org's concern.
@@ -29,7 +33,25 @@ pub enum OrgEvent {
         domains: Vec<String>,
         at_ms: i64,
     },
+    /// The operator vouched for a domain from the shell. Admits signups at once.
     DomainAdded {
+        domain: String,
+        at_ms: i64,
+    },
+    /// An org admin claimed a domain over HTTP. Admits nothing until `DomainVerified`: the token
+    /// must first appear in a TXT record under the domain (`challenge_record_name`).
+    DomainClaimed {
+        domain: String,
+        token: String,
+        at_ms: i64,
+    },
+    /// The TXT challenge resolved. From here the domain admits signups like a vouched one.
+    DomainVerified {
+        domain: String,
+        at_ms: i64,
+    },
+    /// A pending claim withdrawn before it verified — a typo, or a domain the org gave up on.
+    DomainClaimWithdrawn {
         domain: String,
         at_ms: i64,
     },
@@ -61,6 +83,9 @@ impl OrgEvent {
         match self {
             Self::Created { .. } => "org-created",
             Self::DomainAdded { .. } => "org-domain-added",
+            Self::DomainClaimed { .. } => "org-domain-claimed",
+            Self::DomainVerified { .. } => "org-domain-verified",
+            Self::DomainClaimWithdrawn { .. } => "org-domain-claim-withdrawn",
             Self::InviteIssued { .. } => "org-invite-issued",
             Self::InviteRedeemed { .. } => "org-invite-redeemed",
             Self::InviteRevoked { .. } => "org-invite-revoked",
@@ -81,7 +106,11 @@ pub struct Org {
     pub created: bool,
     pub name: String,
     pub admin: Option<AccountId>,
+    /// The domains that admit signups — vouched by the operator or proven by DNS. Nothing else.
     pub domains: Vec<String>,
+    /// Claims awaiting their TXT record: domain → the token that must appear. A domain is never
+    /// in both lists; verifying moves it, withdrawing drops it.
+    pub pending_domains: BTreeMap<String, String>,
     pub invites: BTreeMap<String, InviteState>,
     pub members: Vec<AccountId>,
 }
@@ -106,6 +135,14 @@ pub enum OrgError {
     InviteRevoked,
     #[error("this email's domain is not one this organization has registered")]
     DomainNotAllowed,
+    #[error("that is not a domain name")]
+    InvalidDomain,
+    #[error("that domain is already verified for this organization")]
+    DomainAlreadyVerified,
+    #[error("that domain is already claimed and waiting for its DNS record")]
+    DomainAlreadyClaimed,
+    #[error("that domain has not been claimed")]
+    DomainNotClaimed,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +153,25 @@ pub enum OrgCommand {
         domains: Vec<String>,
         at_ms: i64,
     },
+    /// The operator's shell vouches for a domain. No proof step.
     AddDomain {
+        domain: String,
+        at_ms: i64,
+    },
+    /// A console admin claims a domain. `token` is minted by the caller (the aggregate has no
+    /// randomness) and becomes the TXT challenge.
+    ClaimDomain {
+        domain: String,
+        token: String,
+        at_ms: i64,
+    },
+    /// The caller has SEEN the TXT record resolve (`challenge_satisfied`) and now records it.
+    /// The aggregate does not re-check — it cannot — so nothing but the DNS path may send this.
+    VerifyDomain {
+        domain: String,
+        at_ms: i64,
+    },
+    WithdrawDomainClaim {
         domain: String,
         at_ms: i64,
     },
@@ -148,6 +203,45 @@ pub fn email_domain(email: &str) -> Option<String> {
         .map(|(_, domain)| normalize_domain(domain))
 }
 
+/// Is this (already normalized) string shaped like a registrable domain? Two or more labels of
+/// letters, digits and inner hyphens. Deliberately strict: a claim on something that is not a
+/// domain could never verify and would sit pending forever, so refuse it up front.
+pub fn is_domain_name(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return false;
+    }
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
+/// Where the challenge is published: a TXT record on `_opengrok-verify.<domain>`. Our own
+/// contract, modelled on how every hosted product proves domain ownership; the underscore label
+/// keeps it out of the way of real hosts.
+pub fn challenge_record_name(domain: &str) -> String {
+    format!("_opengrok-verify.{domain}")
+}
+
+/// What the TXT record must say, verbatim.
+pub fn challenge_record_value(token: &str) -> String {
+    format!("opengrok-verify={token}")
+}
+
+/// Does any resolved TXT value carry the token? Exact match after trimming — a record that says
+/// something adjacent is not proof.
+pub fn challenge_satisfied(token: &str, txt_values: &[String]) -> bool {
+    let expected = challenge_record_value(token);
+    txt_values
+        .iter()
+        .any(|value| value.trim().trim_matches('"') == expected)
+}
+
 impl Org {
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a OrgEvent>) -> Self {
         let mut state = Self::default();
@@ -170,11 +264,19 @@ impl Org {
                 self.admin = Some(admin.clone());
                 self.domains = domains.iter().map(|d| normalize_domain(d)).collect();
             }
-            OrgEvent::DomainAdded { domain, .. } => {
+            OrgEvent::DomainAdded { domain, .. } | OrgEvent::DomainVerified { domain, .. } => {
                 let domain = normalize_domain(domain);
+                self.pending_domains.remove(&domain);
                 if !self.domains.contains(&domain) {
                     self.domains.push(domain);
                 }
+            }
+            OrgEvent::DomainClaimed { domain, token, .. } => {
+                self.pending_domains
+                    .insert(normalize_domain(domain), token.clone());
+            }
+            OrgEvent::DomainClaimWithdrawn { domain, .. } => {
+                self.pending_domains.remove(&normalize_domain(domain));
             }
             OrgEvent::InviteIssued { code, .. } => {
                 self.invites.insert(code.clone(), InviteState::Open);
@@ -231,6 +333,11 @@ impl Org {
                 if domains.is_empty() {
                     return Err(OrgError::NoDomains);
                 }
+                // The shell vouches for these, but a typo is still a typo: refuse it loudly at
+                // bootstrap rather than store a domain no email can ever match.
+                if domains.iter().any(|d| !is_domain_name(d)) {
+                    return Err(OrgError::InvalidDomain);
+                }
                 Ok(vec![OrgEvent::Created {
                     name,
                     admin,
@@ -240,7 +347,52 @@ impl Org {
             }
             OrgCommand::AddDomain { domain, at_ms } => {
                 self.alive()?;
+                let domain = normalize_domain(&domain);
+                if !is_domain_name(&domain) {
+                    return Err(OrgError::InvalidDomain);
+                }
                 Ok(vec![OrgEvent::DomainAdded { domain, at_ms }])
+            }
+            OrgCommand::ClaimDomain {
+                domain,
+                token,
+                at_ms,
+            } => {
+                self.alive()?;
+                let domain = normalize_domain(&domain);
+                if !is_domain_name(&domain) {
+                    return Err(OrgError::InvalidDomain);
+                }
+                if self.domains.contains(&domain) {
+                    return Err(OrgError::DomainAlreadyVerified);
+                }
+                if self.pending_domains.contains_key(&domain) {
+                    return Err(OrgError::DomainAlreadyClaimed);
+                }
+                Ok(vec![OrgEvent::DomainClaimed {
+                    domain,
+                    token,
+                    at_ms,
+                }])
+            }
+            OrgCommand::VerifyDomain { domain, at_ms } => {
+                self.alive()?;
+                let domain = normalize_domain(&domain);
+                if self.domains.contains(&domain) {
+                    return Err(OrgError::DomainAlreadyVerified);
+                }
+                if !self.pending_domains.contains_key(&domain) {
+                    return Err(OrgError::DomainNotClaimed);
+                }
+                Ok(vec![OrgEvent::DomainVerified { domain, at_ms }])
+            }
+            OrgCommand::WithdrawDomainClaim { domain, at_ms } => {
+                self.alive()?;
+                let domain = normalize_domain(&domain);
+                if !self.pending_domains.contains_key(&domain) {
+                    return Err(OrgError::DomainNotClaimed);
+                }
+                Ok(vec![OrgEvent::DomainClaimWithdrawn { domain, at_ms }])
             }
             OrgCommand::IssueInvite { code, at_ms } => {
                 self.alive()?;
@@ -295,7 +447,11 @@ pub struct OrgView {
     pub id: OrgId,
     pub name: String,
     pub admin: AccountId,
+    /// Verified (or operator-vouched) domains only — the ones that admit signups.
     pub domains: Vec<String>,
+    /// Claims still waiting for their TXT record: domain → token.
+    #[serde(default)]
+    pub pending_domains: BTreeMap<String, String>,
     pub updated_at_ms: i64,
 }
 
@@ -322,6 +478,147 @@ mod tests {
         assert!(org.allows_email("jo@acme.io"));
         assert!(!org.allows_email("jo@gmail.com"));
         assert!(!org.allows_email("no-at-sign"));
+    }
+
+    fn apply_all(org: &mut Org, events: Vec<OrgEvent>) {
+        for event in &events {
+            org.apply(event);
+        }
+    }
+
+    #[test]
+    fn a_claimed_domain_admits_nobody_until_dns_proves_it() {
+        let mut org = org();
+        let events = org
+            .decide(OrgCommand::ClaimDomain {
+                domain: "Acme.dev".to_string(),
+                token: "dv_abc".to_string(),
+                at_ms: 2,
+            })
+            .expect("claim");
+        apply_all(&mut org, events);
+        assert_eq!(
+            org.pending_domains.get("acme.dev").map(String::as_str),
+            Some("dv_abc")
+        );
+        assert!(!org.allows_email("jo@acme.dev"), "a claim is not a proof");
+
+        // Claiming again while pending, or claiming a domain already in, is refused distinctly.
+        assert!(matches!(
+            org.decide(OrgCommand::ClaimDomain {
+                domain: "acme.dev".to_string(),
+                token: "dv_other".to_string(),
+                at_ms: 3,
+            }),
+            Err(OrgError::DomainAlreadyClaimed)
+        ));
+        assert!(matches!(
+            org.decide(OrgCommand::ClaimDomain {
+                domain: "acme.com".to_string(),
+                token: "dv_other".to_string(),
+                at_ms: 3,
+            }),
+            Err(OrgError::DomainAlreadyVerified)
+        ));
+
+        let events = org
+            .decide(OrgCommand::VerifyDomain {
+                domain: "acme.dev".to_string(),
+                at_ms: 4,
+            })
+            .expect("verify");
+        apply_all(&mut org, events);
+        assert!(org.pending_domains.is_empty());
+        assert!(org.allows_email("jo@acme.dev"));
+
+        // Verifying what is not pending is refused — the DNS path is the only way in.
+        assert!(matches!(
+            org.decide(OrgCommand::VerifyDomain {
+                domain: "nobody.example".to_string(),
+                at_ms: 5,
+            }),
+            Err(OrgError::DomainNotClaimed)
+        ));
+    }
+
+    #[test]
+    fn a_withdrawn_claim_is_gone_and_a_bad_domain_is_never_claimed() {
+        let mut org = org();
+        for bad in [
+            "",
+            "acme",
+            "-acme.com",
+            "acme..com",
+            "acme .com",
+            "ac_me.com",
+        ] {
+            assert!(
+                matches!(
+                    org.decide(OrgCommand::ClaimDomain {
+                        domain: bad.to_string(),
+                        token: "dv_x".to_string(),
+                        at_ms: 2,
+                    }),
+                    Err(OrgError::InvalidDomain)
+                ),
+                "{bad:?} should not be claimable"
+            );
+        }
+        let events = org
+            .decide(OrgCommand::ClaimDomain {
+                domain: "typo.example".to_string(),
+                token: "dv_x".to_string(),
+                at_ms: 2,
+            })
+            .expect("claim");
+        apply_all(&mut org, events);
+        let events = org
+            .decide(OrgCommand::WithdrawDomainClaim {
+                domain: "typo.example".to_string(),
+                at_ms: 3,
+            })
+            .expect("withdraw");
+        apply_all(&mut org, events);
+        assert!(org.pending_domains.is_empty());
+        assert!(matches!(
+            org.decide(OrgCommand::VerifyDomain {
+                domain: "typo.example".to_string(),
+                at_ms: 4,
+            }),
+            Err(OrgError::DomainNotClaimed)
+        ));
+    }
+
+    #[test]
+    fn creating_an_org_refuses_a_domain_that_is_not_one() {
+        assert!(matches!(
+            Org::default().decide(OrgCommand::Create {
+                name: "Acme".to_string(),
+                admin: AccountId::from_stored("acct_admin"),
+                domains: vec!["acme.com".to_string(), "not a domain".to_string()],
+                at_ms: 1,
+            }),
+            Err(OrgError::InvalidDomain)
+        ));
+    }
+
+    #[test]
+    fn the_challenge_record_is_matched_exactly() {
+        assert_eq!(
+            challenge_record_name("acme.dev"),
+            "_opengrok-verify.acme.dev"
+        );
+        assert_eq!(challenge_record_value("dv_abc"), "opengrok-verify=dv_abc");
+        let found = vec![
+            "v=spf1 -all".to_string(),
+            "\"opengrok-verify=dv_abc\"".to_string(),
+        ];
+        assert!(challenge_satisfied("dv_abc", &found));
+        assert!(!challenge_satisfied(
+            "dv_abc",
+            &["opengrok-verify=dv_abcd".to_string()]
+        ));
+        assert!(!challenge_satisfied("dv_abc", &[]));
     }
 
     #[test]

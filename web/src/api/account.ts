@@ -1,5 +1,5 @@
 // The account self-service surface — the JSON the server already speaks (account_api.rs).
-import { getJson, postJson } from "./client";
+import { ApiError, getJson, postJson } from "./client";
 
 /** The signed-in person's profile. camelCase exactly as the server sends it. */
 export interface Account {
@@ -34,6 +34,20 @@ export function updateProfile(update: ProfileUpdate): Promise<Account> {
 
 export function changePassword(currentPassword: string, newPassword: string): Promise<void> {
   return postJson<void>("/account/password", { currentPassword, newPassword });
+}
+
+/**
+ * Ask for a reset link. Always 202: the answer never says whether the address is known. `mailer`
+ * false means this server cannot send email at all — the page tells the person to ask their admin.
+ */
+export async function forgotPassword(email: string): Promise<{ accepted: boolean; mailer: boolean }> {
+  const res = await fetch("/auth/password/forgot", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new ApiError(res.status, "could not request a reset");
+  return (await res.json()) as { accepted: boolean; mailer: boolean };
 }
 
 export function login(email: string, password: string): Promise<{ email: string }> {

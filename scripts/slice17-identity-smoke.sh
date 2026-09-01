@@ -128,5 +128,62 @@ page3=$(curl -s -X POST "$BASE/loginDeepControl" \
 echo "$page3" | grep -qi "signed in" || fail "the CLI-minted account cannot log in"
 ok "a second identity logs in — multi-account is real and testable"
 
+echo "10. the operator vouches for a second domain from the shell — no DNS proof, it admits at once"
+EXTRA="extra$STAMP.com"
+# Captured, not piped: `grep -q` would close the pipe mid-print and pipefail would call that a failure.
+added=$(admin org domain add --org "$org" --domain "$EXTRA")
+echo "$added" | grep -q "operator-vouched" || fail "domain add: $added"
+code2=$(admin invite --org "$org" | awk '/invite code:/{print $3}')
+r10=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/signup" -H 'content-type: application/json' \
+  -d "{\"email\":\"kai@$EXTRA\",\"password\":\"password1\",\"code\":\"$code2\"}")
+[ "$r10" = "201" ] || fail "a signup under the vouched domain got $r10, expected 201"
+ok "kai@$EXTRA signed up under the shell-vouched domain"
+
+echo "11. a console admin's claim admits nobody until DNS proves it"
+login=$(curl -s -D - -o /dev/null -X POST "$BASE/auth/login" -H 'content-type: application/json' \
+  -d "{\"email\":\"boss@$DOMAIN\",\"password\":\"bosspass1\"}")
+access=$(echo "$login" | awk 'tolower($1)=="set-cookie:" && $2 ~ /^og_access=/ {sub(/;.*/,"",$2); print $2}')
+[ -n "$access" ] || fail "no og_access cookie from /auth/login"
+CLAIM="claim$STAMP.test"
+claim=$(curl -s -X POST "$BASE/admin/domains" -H "cookie: $access" -H 'content-type: application/json' \
+  -d "{\"domain\":\"$CLAIM\"}")
+echo "$claim" | jq -e ".status == \"pending\" and .record.name == \"_opengrok-verify.$CLAIM\"" >/dev/null \
+  || fail "claim did not come back pending with its record: $claim"
+# .test is reserved (RFC 6761): a real resolver answers NXDOMAIN → 409 with the reason. A box with
+# no usable resolver answers 503 — an outage is not a wrong record — and that is also acceptable
+# here, but the smoke says which it saw.
+vcode=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/admin/domains/$CLAIM/verify" -H "cookie: $access")
+case "$vcode" in
+  409) ok "verify refused: no TXT record at _opengrok-verify.$CLAIM (409)";;
+  503) ok "verify unavailable: this box has no usable resolver (503) — the claim still admits nobody";;
+  *) fail "verify of an unpublished claim got $vcode, expected 409 (or 503 with no resolver)";;
+esac
+code3=$(admin invite --org "$org" | awk '/invite code:/{print $3}')
+r11=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/signup" -H 'content-type: application/json' \
+  -d "{\"email\":\"zed@$CLAIM\",\"password\":\"password1\",\"code\":\"$code3\"}")
+[ "$r11" = "403" ] || fail "a signup under an unproven claim got $r11, expected 403"
+curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/admin/domains/$CLAIM" -H "cookie: $access" | grep -q 204 \
+  || fail "could not withdraw the claim"
+ok "zed@$CLAIM refused (403) while the claim was pending; claim withdrawn"
+
+echo "12. password reset: no mailer ⇒ the page says so, and the operator resets from the shell"
+curl -s "$BASE/forgot-password" | grep -qi "not set up to send email" || fail "forgot page did not say the mailer is unset"
+fj=$(curl -s -X POST "$BASE/auth/password/forgot" -H 'content-type: application/json' -d "{\"email\":\"jo@$DOMAIN\"}")
+echo "$fj" | jq -e '.accepted == true and .mailer == false' >/dev/null || fail "forgot json: $fj"
+reset=$(admin account password --email "jo@$DOMAIN" --password "newpass123")
+echo "$reset" | grep -q "password set" || fail "account password: $reset"
+U4="u4-$STAMP"; V4="verifier4-$STAMP"; C4=$(pkce_challenge "$V4")
+curl -s "$BASE/loginDeepControl?challenge=$C4&uuid=$U4&mode=login&redirectTarget=cli" >/dev/null
+page4=$(curl -s -X POST "$BASE/loginDeepControl" \
+  --data-urlencode "challenge=$C4" --data-urlencode "uuid=$U4" \
+  --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=newpass123")
+echo "$page4" | grep -qi "signed in" || fail "the shell-reset password does not sign in"
+old4=$(curl -s -X POST "$BASE/loginDeepControl" \
+  --data-urlencode "challenge=$C4" --data-urlencode "uuid=old-$STAMP" \
+  --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=password1")
+echo "$old4" | grep -qi "wrong email or password" || fail "the old password still signs in"
+ok "forgot is honest with no mailer; shell reset moved the login"
+
 echo
-echo "PASS — slice 17: org + invite + domain-gated signup + verification + enablement + credential login."
+echo "PASS — slice 17: org + invite + domain-gated signup + verification + enablement + credential login,"
+echo "        plus 12.later: shell-vouched vs DNS-proven domains, and password reset."

@@ -27,6 +27,41 @@ export function issueInvite(): Promise<{ code: string; link: string }> {
   return postJson<{ code: string; link: string }>("/admin/invites");
 }
 
+// ---- Domains: claim, publish the TXT record, verify ----
+//
+// A verified domain admits signups; a pending one admits nobody until the record we hand back
+// resolves. The server does the lookup on `verifyDomain` and says exactly why it failed (409) or
+// that it could not look at all (503) — the card shows that sentence rather than a generic "no".
+
+export interface DomainRecord {
+  name: string;
+  type: "TXT";
+  value: string;
+}
+
+export interface OrgDomain {
+  domain: string;
+  status: "verified" | "pending";
+  record?: DomainRecord;
+}
+
+export function listDomains(): Promise<{ domains: OrgDomain[] }> {
+  return getJson<{ domains: OrgDomain[] }>("/admin/domains");
+}
+
+export function claimDomain(domain: string): Promise<OrgDomain> {
+  return postJson<OrgDomain>("/admin/domains", { domain });
+}
+
+export function verifyDomain(domain: string): Promise<OrgDomain> {
+  return postJson<OrgDomain>(`/admin/domains/${encodeURIComponent(domain)}/verify`);
+}
+
+export async function withdrawDomain(domain: string): Promise<void> {
+  const res = await request(`/admin/domains/${encodeURIComponent(domain)}`, { method: "DELETE" });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
 // ---- Org computer credentials (admin dashboard) ----
 
 export interface OrgComputer {

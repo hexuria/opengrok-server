@@ -76,6 +76,10 @@ pub struct AuthState {
     /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
     /// there is no gateway to ask and the picker says so.
     pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
+    /// The TXT lookup behind domain-ownership proof. A seam, not a resolver: production binds the
+    /// system resolver at boot, tests answer from a map. The default refuses every lookup with a
+    /// reason, so a state that was never given one answers 503 rather than "not verified".
+    pub dns: Arc<dyn crate::domain_proof::TxtLookup>,
 }
 
 impl AuthState {
@@ -90,7 +94,15 @@ impl AuthState {
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
+            dns: Arc::new(crate::domain_proof::NoResolver),
         }
+    }
+
+    /// Bind the TXT lookup domain proof uses — the system resolver in production, a map in tests.
+    #[must_use]
+    pub fn with_dns(mut self, dns: Arc<dyn crate::domain_proof::TxtLookup>) -> Self {
+        self.dns = dns;
+        self
     }
 
     pub fn with_resend(mut self, key: Option<String>, public_url: String) -> Self {
@@ -140,6 +152,20 @@ pub fn router(state: AuthState) -> Router {
         .route(
             "/signup",
             get(super::identity::signup_page).post(super::identity::signup_form),
+        )
+        // Password reset (12.later): the styled pages a person reaches from the sign-in card, and
+        // the JSON the console's own login page calls. Both go through the same start_reset.
+        .route(
+            "/forgot-password",
+            get(super::password_reset::forgot_page).post(super::password_reset::forgot_form),
+        )
+        .route(
+            "/auth/password/forgot",
+            post(super::password_reset::forgot_json),
+        )
+        .route(
+            "/reset-password",
+            get(super::password_reset::reset_page).post(super::password_reset::reset_form),
         )
         .with_state(state)
 }
