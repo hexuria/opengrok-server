@@ -1,5 +1,10 @@
-# The gate every slice must pass. Mirrors the local commands exactly — if these diverge, the local
-# ritual stops predicting CI and people stop trusting either.
+# The gate every slice must pass.
+#
+# CI runs `scripts/gate.sh --smoke` — the SAME script a developer runs, not a copy of its steps.
+# The previous version listed the commands again and drifted: it still built the Next.js scaffold
+# that slice 13 replaced with a Bun/Vite SPA, and ran six of what are now twenty-one smokes. A gate
+# that lists its own steps is a gate that will disagree with the local one; calling the script is
+# how the two stay honest.
 name: ci
 on:
   push:
@@ -18,51 +23,37 @@ jobs:
         env:
           POSTGRES_USER: oag
           POSTGRES_PASSWORD: oag
-          POSTGRES_DB: opengrok
+          POSTGRES_DB: opengrok_gate
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The gate owns this database, and the Postgres-backed tests read the same variable — so
+      # `cargo test --workspace` actually RUNS them here instead of skipping loudly.
+      OG_DATABASE_URL: postgres://oag:oag@127.0.0.1:5432/opengrok_gate
+      PGPASSWORD: oag
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo check --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      # The streaming path, end to end over a real socket, with no provider and no key. This is
-      # what the mock door is for — without it this path would only ever be tested by hand.
-      - name: smoke the ag-ui endpoint against the mock door
-        env:
-          PGPASSWORD: oag
+      # `opengrok-proto`'s build script compiles our own transcribed .proto with prost-build, which
+      # shells out to protoc. Without this the workspace does not build at all.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Four smokes are handed their own database so they cannot race the shared one; the gate
+      # derives the names and expects them to exist.
+      - name: create the databases the gate expects
         run: |
-          OG_BIND=127.0.0.1:1337 \
-          OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
-          OG_TOKEN_SECRET=$(openssl rand -hex 32) \
-          OG_MODEL_DOOR=mock \
-          cargo run --quiet &
-          for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:1337/health >/dev/null 2>&1 && break
-            sleep 1
+          for db in opengrok_s17_gate opengrok_s18_gate opengrok_s19_gate opengrok_s21_gate; do
+            psql "postgres://oag:oag@127.0.0.1:5432/postgres" -c "create database $db" || true
           done
-          scripts/slice3-harness-smoke.sh
-          scripts/slice2-agui-smoke.sh
-          scripts/slice1-auth-smoke.sh
-          scripts/slice5-roster-smoke.sh
-          scripts/slice6-computer-smoke.sh
-          scripts/slice7-policy-smoke.sh
-      # The founding promise, checked: kill the server mid-run and the work is still there.
-      # This one starts and kills its own servers, so it must not run against the one above.
-      - name: prove a run survives the process
-        run: |
-          pkill -f 'target/debug/opengrok' || true
-          sleep 1
-          OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
-          scripts/slice4-durability-smoke.sh
-          OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5432/opengrok \
-          scripts/slice9-recovery-smoke.sh
+      # The gate does not build; a stale binary is the classic way to test yesterday's code.
+      - name: build the server the smokes run
+        run: cargo build -p opengrok
+      - name: scripts/gate.sh --smoke
+        run: scripts/gate.sh --smoke
 
   web:
     runs-on: ubuntu-latest
@@ -71,16 +62,12 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Bun, not npm: the console is a Bun/Vite/React SPA with a bun.lock and no package-lock.json,
+      # which is why the old npm cache step could not resolve its dependency path.
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-      # Next 16 generates the global route types (LayoutProps, PageProps) that the app's own files
-      # reference. Without this, tsc fails in CI on types that exist locally only because a dev
-      # server happened to have written them.
-      - run: npx next typegen
-      - run: npx tsc --noEmit
-      - run: npm run lint
-      - run: npm run build
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
