@@ -159,6 +159,15 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
     });
 }
 
+/// A frame that carries NO ordering stamp, on a channel no replica tracks (`agents-automation`:
+/// the coordinator maps it to the renderer's `automations` family, whose own emitter posts
+/// `{agentId, automations}` with no stamp — `routed-automations.ts:180`). Minting a sequence for
+/// such a frame on a replica key would be a gap for that replica on every send, the class #14
+/// removed; this is the deliberate way to say "not ordered".
+pub fn emit_unstamped(state: &GatewayState, channel: &str, payload: Value) {
+    let _ = state.events_tx.send((channel.to_string(), payload));
+}
+
 /// A transcript frame for one agent — `appended` or `updated`, stamped on that agent's replica.
 pub fn emit_transcript(state: &GatewayState, agent_id: &str, kind: &str, entry: Value) {
     emit_ordered(

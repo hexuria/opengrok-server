@@ -194,6 +194,9 @@ alter table run_view add column if not exists account_id text;
 -- expires, which is the only signal that survives a SIGKILL. Without this, one replica would
 -- "recover" runs another replica is actively serving.
 alter table run_view add column if not exists leased_until_ms bigint;
+-- When the run began: set on the first append and never moved, so a routine's run list can say
+-- when each run started without replaying it.
+alter table run_view add column if not exists started_at_ms bigint;
 
 create index if not exists run_view_lease_idx on run_view (status, leased_until_ms);
 
@@ -228,6 +231,13 @@ create table if not exists schedule_view (
 );
 create index if not exists schedule_due_idx on schedule_view (next_due_ms) where active;
 create index if not exists schedule_account_idx on schedule_view (account_id);
+
+-- Routines (P9 wired to the desktop's pane): the name the person gave it, when it was made, and
+-- when it last fired. Explicit ALTERs, because `create table if not exists` does not evolve a
+-- table that already exists.
+alter table schedule_view add column if not exists name text not null default '';
+alter table schedule_view add column if not exists created_at_ms bigint;
+alter table schedule_view add column if not exists last_fired_ms bigint;
 
 create table if not exists monitor_view (
     id            text        primary key,

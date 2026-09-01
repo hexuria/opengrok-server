@@ -551,11 +551,19 @@ async fn command(
         "getAgentAutomations" | "listAllAutomations" => {
             wrap(super::lifecycle::get_automations(&state, &args).await)
         }
-        "createAgentAutomation" | "updateAgentAutomation" => {
-            wrap(super::lifecycle::create_automation(&state, &args).await)
-        }
+        "createAgentAutomation" => wrap(super::lifecycle::create_automation(&state, &args).await),
+        // An edit UPDATES the row. This verb used to be routed to create, so every edit in the
+        // desktop's Routines pane made a second schedule.
+        "updateAgentAutomation" => wrap(super::lifecycle::update_automation(&state, &args).await),
         "setAgentAutomationEnabled" => {
-            let action = if args.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+            // `isEnabled` is the desktop's spelling (routines/controller.ts:54); `enabled` the
+            // smoke's. Absent means enable, as before.
+            let action = if args
+                .get("isEnabled")
+                .or_else(|| args.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
                 "enable"
             } else {
                 "disable"

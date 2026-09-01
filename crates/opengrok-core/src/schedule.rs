@@ -32,6 +32,18 @@ pub fn normalized_cron(expression: &str) -> String {
     }
 }
 
+/// The inverse for the wire: the desktop's routine editor writes and re-reads the 5-field form,
+/// so a stored `0 0 9 * * 1` goes back out as `0 9 * * 1`. A 6-field expression whose seconds are
+/// not `0` (tests scheduling in seconds) is returned as it is — there is no 5-field form for it.
+pub fn display_cron(normalized: &str) -> String {
+    let fields: Vec<&str> = normalized.split_whitespace().collect();
+    if fields.len() == 6 && fields[0] == "0" {
+        fields[1..].join(" ")
+    } else {
+        normalized.to_string()
+    }
+}
+
 /// When a schedule next fires after `after_ms`, in epoch milliseconds. `None` for an expression
 /// with no future occurrence (a fixed date already past) — and the caller must treat that as "done
 /// firing", not as an error.
@@ -53,6 +65,19 @@ pub enum ScheduleEvent {
         cron: String,
         /// The user message every firing opens its run with.
         prompt: String,
+        /// What the person called it — the desktop's Routines pane lists by name. Absent on rows
+        /// written before names existed, which replay as unnamed rather than as corrupt.
+        #[serde(default)]
+        name: String,
+        at_ms: i64,
+    },
+    /// The person edited the routine in place. An edit is not delete-and-create: the schedule
+    /// keeps its id, its history and its runs.
+    Updated {
+        name: String,
+        /// Already normalized, re-validated in `decide`.
+        cron: String,
+        prompt: String,
         at_ms: i64,
     },
     Paused {
@@ -68,6 +93,10 @@ pub enum ScheduleEvent {
     /// exists*.
     Fired {
         run_id: RunId,
+        /// `true` when a person pressed "run now" rather than the clock firing it. The Routines
+        /// pane shows the two differently; absent on rows written before the distinction existed.
+        #[serde(default)]
+        manual: bool,
         at_ms: i64,
     },
 }
@@ -76,6 +105,7 @@ impl ScheduleEvent {
     pub fn event_type(&self) -> &'static str {
         match self {
             Self::Created { .. } => "schedule-created",
+            Self::Updated { .. } => "schedule-updated",
             Self::Paused { .. } => "schedule-paused",
             Self::Resumed { .. } => "schedule-resumed",
             Self::Deleted { .. } => "schedule-deleted",
@@ -92,6 +122,9 @@ pub struct Schedule {
     pub coworker_id: Option<CoworkerId>,
     pub cron: String,
     pub prompt: String,
+    pub name: String,
+    /// Runs a person started with "run now", by id — so a listing can label them `manual`.
+    pub manual_runs: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -118,6 +151,13 @@ pub enum ScheduleCommand {
         coworker_id: CoworkerId,
         cron: String,
         prompt: String,
+        name: String,
+        at_ms: i64,
+    },
+    Update {
+        name: String,
+        cron: String,
+        prompt: String,
         at_ms: i64,
     },
     Pause {
@@ -131,6 +171,7 @@ pub enum ScheduleCommand {
     },
     Fire {
         run_id: RunId,
+        manual: bool,
         at_ms: i64,
     },
 }
@@ -150,17 +191,30 @@ impl Schedule {
                 coworker_id,
                 cron,
                 prompt,
+                name,
                 ..
             } => {
                 self.created = true;
                 self.coworker_id = Some(coworker_id.clone());
                 self.cron = cron.clone();
                 self.prompt = prompt.clone();
+                self.name = name.clone();
+            }
+            ScheduleEvent::Updated {
+                name, cron, prompt, ..
+            } => {
+                self.name = name.clone();
+                self.cron = cron.clone();
+                self.prompt = prompt.clone();
             }
             ScheduleEvent::Paused { .. } => self.paused = true,
             ScheduleEvent::Resumed { .. } => self.paused = false,
             ScheduleEvent::Deleted { .. } => self.deleted = true,
-            ScheduleEvent::Fired { .. } => {}
+            ScheduleEvent::Fired { run_id, manual, .. } => {
+                if *manual {
+                    self.manual_runs.insert(run_id.as_str().to_string());
+                }
+            }
         }
     }
 
@@ -180,6 +234,7 @@ impl Schedule {
                 coworker_id,
                 cron,
                 prompt,
+                name,
                 at_ms,
             } => {
                 let cron = normalized_cron(&cron);
@@ -193,6 +248,29 @@ impl Schedule {
                 }
                 Ok(vec![ScheduleEvent::Created {
                     coworker_id,
+                    cron,
+                    prompt,
+                    name: name.trim().to_string(),
+                    at_ms,
+                }])
+            }
+
+            ScheduleCommand::Update {
+                name,
+                cron,
+                prompt,
+                at_ms,
+            } => {
+                self.alive()?;
+                let cron = normalized_cron(&cron);
+                if next_fire_ms(&cron, at_ms).is_none() {
+                    return Err(ScheduleError::BadCron(cron));
+                }
+                if prompt.trim().is_empty() {
+                    return Err(ScheduleError::EmptyPrompt);
+                }
+                Ok(vec![ScheduleEvent::Updated {
+                    name: name.trim().to_string(),
                     cron,
                     prompt,
                     at_ms,
@@ -220,15 +298,24 @@ impl Schedule {
                 Ok(vec![ScheduleEvent::Deleted { at_ms }])
             }
 
-            ScheduleCommand::Fire { run_id, at_ms } => {
+            ScheduleCommand::Fire {
+                run_id,
+                manual,
+                at_ms,
+            } => {
                 self.alive()?;
                 // A paused schedule refusing to fire is the whole point of pause. The sweep should
                 // never ask (paused rows are not claimed), so this firing twice as a guard is
-                // deliberate: the projection being wrong must not be enough to fire a run.
-                if self.paused {
+                // deliberate: the projection being wrong must not be enough to fire a run. A
+                // person's "run now" is the one exception: they asked, paused or not.
+                if self.paused && !manual {
                     return Err(ScheduleError::Paused);
                 }
-                Ok(vec![ScheduleEvent::Fired { run_id, at_ms }])
+                Ok(vec![ScheduleEvent::Fired {
+                    run_id,
+                    manual,
+                    at_ms,
+                }])
             }
         }
     }
@@ -241,8 +328,12 @@ pub struct ScheduleView {
     pub coworker_id: CoworkerId,
     pub cron: String,
     pub prompt: String,
+    pub name: String,
     pub active: bool,
     pub next_due_ms: Option<i64>,
+    pub created_at_ms: i64,
+    /// When it last fired (clock or "run now"); `None` until it has.
+    pub last_fired_ms: Option<i64>,
 }
 
 #[cfg(test)]
@@ -256,6 +347,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             cron: "0 */5 * * * *".to_string(),
             prompt: "check the queue".to_string(),
+            name: "queue check".to_string(),
             at_ms: 1_000,
         }])
     }
@@ -264,6 +356,36 @@ mod tests {
     fn five_field_cron_is_promoted_and_six_field_is_kept() {
         assert_eq!(normalized_cron("*/5 * * * *"), "0 */5 * * * *");
         assert_eq!(normalized_cron("*/2 * * * * *"), "*/2 * * * * *");
+    }
+
+    #[test]
+    fn an_update_keeps_the_id_and_revalidates_the_cron() {
+        let mut schedule = created();
+        assert!(matches!(
+            schedule.decide(ScheduleCommand::Update {
+                name: "x".to_string(),
+                cron: "not cron".to_string(),
+                prompt: "y".to_string(),
+                at_ms: 2,
+            }),
+            Err(ScheduleError::BadCron(_))
+        ));
+        let events = schedule
+            .decide(ScheduleCommand::Update {
+                name: "Monday report".to_string(),
+                cron: "0 9 * * 1".to_string(),
+                prompt: "write the weekly report".to_string(),
+                at_ms: 2,
+            })
+            .expect("update");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert_eq!(schedule.name, "Monday report");
+        assert_eq!(schedule.cron, "0 0 9 * * 1");
+        assert_eq!(display_cron(&schedule.cron), "0 9 * * 1");
+        assert_eq!(display_cron("*/2 * * * * *"), "*/2 * * * * *");
+        assert_eq!(schedule.prompt, "write the weekly report");
     }
 
     #[test]
@@ -283,6 +405,7 @@ mod tests {
                 coworker_id: CoworkerId::from_stored("cw_1"),
                 cron: "every tuesday probably".to_string(),
                 prompt: "hi".to_string(),
+                name: String::new(),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -296,6 +419,7 @@ mod tests {
                 coworker_id: CoworkerId::from_stored("cw_1"),
                 cron: "*/2 * * * * *".to_string(),
                 prompt: "   ".to_string(),
+                name: String::new(),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -309,9 +433,22 @@ mod tests {
         let error = schedule
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
+                manual: false,
                 at_ms: 3_000,
             })
             .expect_err("paused must not fire");
+        // A person's "run now" is the exception: they asked.
+        let events = schedule
+            .decide(ScheduleCommand::Fire {
+                run_id: RunId::from_stored("run_manual"),
+                manual: true,
+                at_ms: 3_000,
+            })
+            .expect("a manual fire on a paused schedule");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert!(schedule.manual_runs.contains("run_manual"));
         assert!(matches!(error, ScheduleError::Paused));
     }
 
@@ -328,6 +465,7 @@ mod tests {
         schedule
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
+                manual: false,
                 at_ms: 4,
             })
             .expect("a resumed schedule fires");
@@ -340,6 +478,7 @@ mod tests {
         assert!(matches!(
             schedule.decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
+                manual: false,
                 at_ms: 3,
             }),
             Err(ScheduleError::Deleted)

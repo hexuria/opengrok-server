@@ -32,10 +32,12 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Fire due schedules forever. Started by the binary; stops when the process does.
-pub async fn schedules_forever(state: AgUiState) {
+/// Fire due schedules forever. Started by the binary; stops when the process does. Takes the
+/// gateway rather than the bare AG-UI state because a routine's finished run is posted into the
+/// coworker's chat, and the chat's live stream belongs to the gateway.
+pub async fn schedules_forever(gateway: crate::gateway::GatewayState) {
     loop {
-        if let Err(error) = schedule_tick(&state).await {
+        if let Err(error) = schedule_tick(&gateway).await {
             // Same stance as recovery: a failed tick is a warning, not an outage. The schedules
             // stay due and the next tick tries again.
             tracing::warn!(%error, "a schedule tick failed; will try again");
@@ -44,7 +46,10 @@ pub async fn schedules_forever(state: AgUiState) {
     }
 }
 
-pub async fn schedule_tick(state: &AgUiState) -> Result<usize, opengrok_store::StoreError> {
+pub async fn schedule_tick(
+    gateway: &crate::gateway::GatewayState,
+) -> Result<usize, opengrok_store::StoreError> {
+    let state: &AgUiState = &gateway.agui;
     let due = state
         .auth
         .store
@@ -60,6 +65,7 @@ pub async fn schedule_tick(state: &AgUiState) -> Result<usize, opengrok_store::S
         let (loaded, seq) = state.auth.store.load_schedule(&schedule.id).await?;
         let events = match loaded.decide(ScheduleCommand::Fire {
             run_id: run_id.clone(),
+            manual: false,
             at_ms: now_ms(),
         }) {
             Ok(events) => events,
@@ -84,14 +90,20 @@ pub async fn schedule_tick(state: &AgUiState) -> Result<usize, opengrok_store::S
         // The run itself takes as long as a model takes; it must not hold up the other firings.
         tokio::spawn(crate::autonomy::fire(
             state.clone(),
-            format!("schedule {}", schedule.id),
-            schedule.account_id.clone(),
-            schedule.coworker_id.clone(),
-            schedule.prompt.clone(),
-            // Every firing of one schedule shares a thread, so its history reads as one
-            // continuing conversation rather than a pile of orphans.
-            schedule.id.as_str().to_string(),
-            run_id,
+            crate::autonomy::Firing {
+                origin: format!("schedule {}", schedule.id),
+                account_id: schedule.account_id.clone(),
+                coworker_id: schedule.coworker_id.clone(),
+                prompt: schedule.prompt.clone(),
+                // Every firing of one schedule shares a thread, so its history reads as one
+                // continuing conversation rather than a pile of orphans.
+                thread_id: schedule.id.as_str().to_string(),
+                run_id,
+                announce: Some(crate::autonomy::Announce {
+                    gateway: gateway.clone(),
+                    name: schedule.name.clone(),
+                }),
+            },
         ));
         fired += 1;
     }
@@ -166,12 +178,16 @@ pub async fn monitor_tick(state: &AgUiState) -> Result<usize, opengrok_store::St
             );
             tokio::spawn(crate::autonomy::fire(
                 state.clone(),
-                format!("monitor {monitor_id}"),
-                account_id.clone(),
-                coworker_id.clone(),
-                prompt,
-                monitor_id.as_str().to_string(),
-                run_id,
+                crate::autonomy::Firing {
+                    origin: format!("monitor {monitor_id}"),
+                    account_id: account_id.clone(),
+                    coworker_id: coworker_id.clone(),
+                    prompt,
+                    thread_id: monitor_id.as_str().to_string(),
+                    run_id,
+                    // Monitors predate the Routines pane; nothing renders their runs yet.
+                    announce: None,
+                },
             ));
             fired += 1;
         }

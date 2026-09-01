@@ -176,10 +176,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(opengrok_server::recovery::sweep_forever(state.clone()));
 
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
-    // the half of the mission that does not wait for a request.
-    tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
-        state.clone(),
-    ));
+    // the half of the mission that does not wait for a request. The schedule sweep is started
+    // below, after the gateway exists: a routine's finished run is posted into the coworker's
+    // chat through the gateway's live stream.
     tokio::spawn(opengrok_server::autonomy::sweep::monitors_forever(
         state.clone(),
     ));
@@ -206,6 +205,9 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|url| !url.is_empty()),
     );
+    tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
+        gateway.clone(),
+    ));
 
     // The tonic listener — internal gRPC on the transcribed seam-B contract. Opt-in: absent
     // means no listener, because nothing internal dials it yet and an unused open port is a
