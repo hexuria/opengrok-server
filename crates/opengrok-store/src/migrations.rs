@@ -328,6 +328,10 @@ create table if not exists org_invite (
 );
 create index if not exists org_invite_org_idx on org_invite (org_id);
 
+-- 12.later: domain claims awaiting their DNS TXT proof (domain → token). `domains` stays the
+-- list that admits signups, so nothing that reads it needs to learn about pending state.
+alter table org_view add column if not exists pending_domains jsonb not null default '{}'::jsonb;
+
 -- Credential accounts: the login lookup reads password/verified/enabled/name without replaying
 -- the whole account log. account_view stays the identity-agnostic projection; this augments it.
 alter table account_view add column if not exists password_hash text;

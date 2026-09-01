@@ -36,6 +36,11 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/users/{id}/enable", post(enable_user))
         .route("/admin/users/{id}/disable", post(disable_user))
         .route("/admin/invites", get(list_invites).post(issue_invite))
+        // Domain ownership (12.later): a console admin claims a domain, publishes the TXT record
+        // we hand back, and asks us to check it. Only a verified domain admits signups.
+        .route("/admin/domains", get(list_domains).post(claim_domain))
+        .route("/admin/domains/{domain}", delete(withdraw_domain))
+        .route("/admin/domains/{domain}/verify", post(verify_domain))
         // One identity, two doors: gateway keys for the org's members. See `gateway_admin`.
         .route(
             "/admin/gateway/keys",
@@ -262,7 +267,7 @@ async fn change_password(
 }
 
 /// Apply events to the account, project, and store — the write half every self-service edit shares.
-async fn persist(
+pub(crate) async fn persist(
     state: &AuthState,
     id: &AccountId,
     account: Account,
@@ -479,6 +484,210 @@ async fn list_invites(State(state): State<AuthState>, headers: axum::http::Heade
         })
         .collect();
     Json(json!({ "invites": invites })).into_response()
+}
+
+// ── Domain ownership: claim, publish, verify ──────────────────────────────────────────────────
+//
+// The org aggregate holds the claim and decides what admits a signup; this surface is the only
+// thing that turns "the TXT record resolved" into `VerifyDomain`. The check is a live lookup on
+// every verify click — there is no background poller, because the admin is sitting there and a
+// button that says exactly why it failed beats a status that changes on its own.
+
+fn domain_json(domain: &str, pending_token: Option<&str>) -> Value {
+    match pending_token {
+        None => json!({ "domain": domain, "status": "verified" }),
+        Some(token) => json!({
+            "domain": domain,
+            "status": "pending",
+            "record": {
+                "name": opengrok_core::org::challenge_record_name(domain),
+                "type": "TXT",
+                "value": opengrok_core::org::challenge_record_value(token),
+            },
+        }),
+    }
+}
+
+/// Decide against the org, apply, and append at its current seq. Reloads for the seq the same
+/// way `issue_invite` does — `admin_org` proves authority, this proves ordering.
+async fn append_org_events(
+    state: &AuthState,
+    org_id: &OrgId,
+    org: opengrok_core::org::Org,
+    events: &[opengrok_core::org::OrgEvent],
+) -> Result<opengrok_core::org::Org, Response> {
+    let mut after = org;
+    for event in events {
+        after.apply(event);
+    }
+    let Ok((_, org_seq)) = state.store.load_org(org_id).await else {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "org unavailable").into_response());
+    };
+    state
+        .store
+        .append_org(org_id, org_seq, events, &after, now_ms())
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "could not persist an org change");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        })?;
+    Ok(after)
+}
+
+/// `GET /admin/domains` — verified domains and pending claims, each pending one with the exact
+/// TXT record to publish.
+async fn list_domains(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
+    let (_, org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let mut domains: Vec<Value> = org
+        .domains
+        .iter()
+        .map(|domain| domain_json(domain, None))
+        .collect();
+    domains.extend(
+        org.pending_domains
+            .iter()
+            .map(|(domain, token)| domain_json(domain, Some(token))),
+    );
+    Json(json!({ "domains": domains })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct DomainClaim {
+    domain: String,
+}
+
+/// `POST /admin/domains` — claim a domain. Answers with the record to publish; admits nothing yet.
+async fn claim_domain(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(claim): Json<DomainClaim>,
+) -> Response {
+    let (org_id, org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let token = {
+        use rand::RngExt;
+        let bytes: [u8; 16] = rand::rng().random();
+        format!(
+            "dv_{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
+    };
+    let domain = opengrok_core::org::normalize_domain(&claim.domain);
+    let events = match org.decide(OrgCommand::ClaimDomain {
+        domain: domain.clone(),
+        token: token.clone(),
+        at_ms: now_ms(),
+    }) {
+        Ok(events) => events,
+        Err(reason) => {
+            let status = match reason {
+                opengrok_core::org::OrgError::InvalidDomain => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::CONFLICT,
+            };
+            return (status, Json(json!({ "error": reason.to_string() }))).into_response();
+        }
+    };
+    match append_org_events(&state, &org_id, org, &events).await {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(domain_json(&domain, Some(&token))),
+        )
+            .into_response(),
+        Err(refusal) => refusal,
+    }
+}
+
+/// `POST /admin/domains/{domain}/verify` — look the record up now. 200 verified, 409 with the
+/// reason it is not, 503 when the resolver itself could not answer.
+async fn verify_domain(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(domain): Path<String>,
+) -> Response {
+    let (org_id, org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let domain = opengrok_core::org::normalize_domain(&domain);
+    if org.domains.contains(&domain) {
+        return Json(domain_json(&domain, None)).into_response();
+    }
+    let Some(token) = org.pending_domains.get(&domain).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": opengrok_core::org::OrgError::DomainNotClaimed.to_string() })),
+        )
+            .into_response();
+    };
+    use crate::domain_proof::ProofOutcome;
+    match crate::domain_proof::check(&state.dns, &domain, &token).await {
+        ProofOutcome::Proven => {}
+        ProofOutcome::NotFound(reason) => {
+            return (StatusCode::CONFLICT, Json(json!({ "error": reason }))).into_response();
+        }
+        ProofOutcome::Unavailable(reason) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": reason })),
+            )
+                .into_response();
+        }
+    }
+    let events = match org.decide(OrgCommand::VerifyDomain {
+        domain: domain.clone(),
+        at_ms: now_ms(),
+    }) {
+        Ok(events) => events,
+        Err(reason) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": reason.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    match append_org_events(&state, &org_id, org, &events).await {
+        Ok(_) => {
+            tracing::info!(org = %org_id, domain, "domain ownership proven by DNS");
+            Json(domain_json(&domain, None)).into_response()
+        }
+        Err(refusal) => refusal,
+    }
+}
+
+/// `DELETE /admin/domains/{domain}` — withdraw a PENDING claim. A verified domain is not
+/// removable here: that would lock members out of their own sign-in, and is the operator's call.
+async fn withdraw_domain(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(domain): Path<String>,
+) -> Response {
+    let (org_id, org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let events = match org.decide(OrgCommand::WithdrawDomainClaim {
+        domain,
+        at_ms: now_ms(),
+    }) {
+        Ok(events) => events,
+        Err(reason) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": reason.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    match append_org_events(&state, &org_id, org, &events).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(refusal) => refusal,
+    }
 }
 
 // ── Gateway keys: one identity, two doors ─────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { login } from "../api/account";
+import { forgotPassword, login } from "../api/account";
 import { ApiError } from "../api/client";
 import { CenterCard } from "../components/shell";
 
@@ -21,6 +21,16 @@ export function LoginPage() {
   });
 
   const error = signIn.error instanceof ApiError ? signIn.error.message : signIn.error ? "Could not sign in." : null;
+
+  // Forgot-password rides on the same email field: one click, one honest sentence back.
+  const forgot = useMutation({ mutationFn: () => forgotPassword(email) });
+  const forgotNote = forgot.data
+    ? forgot.data.mailer
+      ? "If that address has an account here, a reset link is on its way. It works once and expires in an hour."
+      : "This server is not set up to send email. Ask your administrator to reset your password."
+    : forgot.error
+      ? "Could not request a reset."
+      : null;
 
   return (
     <CenterCard subtitle="Sign in to your console.">
@@ -54,6 +64,19 @@ export function LoginPage() {
           {signIn.isPending ? "Signing in…" : "Sign in →"}
         </button>
       </form>
+      {forgotNote ? <p className="note">{forgotNote}</p> : null}
+      <p className="foot">
+        <a
+          href="/forgot-password"
+          onClick={(e) => {
+            if (!email.trim()) return; // No address typed: fall through to the server's page.
+            e.preventDefault();
+            forgot.mutate();
+          }}
+        >
+          Forgot your password?
+        </a>
+      </p>
     </CenterCard>
   );
 }

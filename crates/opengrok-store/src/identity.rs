@@ -102,19 +102,23 @@ impl PgStore {
         if let (Some(admin), false) = (state.admin.as_ref(), state.domains.is_empty()) {
             let domains = serde_json::to_value(&state.domains)
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            let pending = serde_json::to_value(&state.pending_domains)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             sqlx::query(
-                "insert into org_view (id, name, admin_id, domains, updated_at_ms)
-                 values ($1, $2, $3, $4, $5)
+                "insert into org_view (id, name, admin_id, domains, pending_domains, updated_at_ms)
+                 values ($1, $2, $3, $4, $5, $6)
                  on conflict (id) do update set
                    name = excluded.name,
                    admin_id = excluded.admin_id,
                    domains = excluded.domains,
+                   pending_domains = excluded.pending_domains,
                    updated_at_ms = excluded.updated_at_ms",
             )
             .bind(id.as_str())
             .bind(&state.name)
             .bind(admin.as_str())
             .bind(domains)
+            .bind(pending)
             .bind(at_ms)
             .execute(&mut *tx)
             .await?;
@@ -139,7 +143,8 @@ impl PgStore {
     /// An org's projection — for the admin surfaces and tests.
     pub async fn org_view(&self, id: &OrgId) -> StoreResult<Option<OrgView>> {
         let row = sqlx::query(
-            "select id, name, admin_id, domains, updated_at_ms from org_view where id = $1",
+            "select id, name, admin_id, domains, pending_domains, updated_at_ms
+             from org_view where id = $1",
         )
         .bind(id.as_str())
         .fetch_optional(self.pool())
@@ -150,6 +155,8 @@ impl PgStore {
                 name: row.try_get("name")?,
                 admin: AccountId::from_stored(row.try_get::<String, _>("admin_id")?),
                 domains: serde_json::from_value(row.try_get("domains")?)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                pending_domains: serde_json::from_value(row.try_get("pending_domains")?)
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                 updated_at_ms: row.try_get("updated_at_ms")?,
             })

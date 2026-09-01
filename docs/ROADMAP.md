@@ -168,8 +168,21 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   set ⇒ send + require verification, unset ⇒ auto-verify.
 - [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
   verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
-- [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
-  password reset via Resend. The in-app admin surface for invites/enable shipped in slice 13.
+- [x] **12.later** Domain OWNERSHIP proof + password reset. Two ways a domain gets in, one meaning
+  once it is: the operator's shell vouches (`org create`, new `org domain add`) and a console admin
+  CLAIMS (`POST /admin/domains`), is handed a TXT record (`_opengrok-verify.<domain>` =
+  `opengrok-verify=<token>`), and asks for a live lookup (`POST /admin/domains/{d}/verify` — 200,
+  409 with the exact reason, 503 when the resolver itself failed: an outage is never "your record
+  is wrong"). Only `org.domains` admits signups; a claim admits nobody. hickory-resolver from the
+  system config behind a `TxtLookup` seam; a `StaticDns` double drives
+  `tests/against_domain_proof.rs` end to end (claim → refused signup → publish → verify → admitted
+  signup), and the ignored `domain_proof` unit test is the live-resolver evidence (example.com TXT
+  read, NXDOMAIN ⇒ empty; 2 Sep 2026). Password reset: `/forgot-password` and
+  `POST /auth/password/forgot` (202 either way; discloses only whether a mailer exists),
+  `/reset-password?token=` — a signed one-hour claim that fingerprints the current hash, so a link
+  works once with no spent-token table. No mailer ⇒ the page says so and the operator runs
+  `opengrok admin account password`. Console: Domains card; "Forgot your password?" on both
+  sign-in cards. `slice17-identity-smoke.sh` steps 10–12. *(this commit)*
 
 ## Slice 13 — Web console
 

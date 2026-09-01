@@ -9,7 +9,7 @@ is reference. Rewritten 2 Sep 2026 — previous versions:
 
 ## Where this stands, in one paragraph
 
-The server is **real and serving**. Slices 1–18 are done: auth and our own OAuth, the AG-UI
+The server is **real and serving**. Slices 1–18 are done (12.later included): auth and our own OAuth, the AG-UI
 endpoint, the durable harness, computers (local Docker + box.ascii.dev), connectors with a
 credential vault, the scheduler/monitor autonomy pair, the gateway port that boots the packaged
 desktop client (P2–P10 breadth), seam B transcribed, bot-keys, orgs/invites/credential accounts,
@@ -18,7 +18,9 @@ two-tier auto-review with a model judge), Claude Code through both doors (model 
 card-driven AutoReview Ask), org gateway keys from the console, and per-coworker model pins
 that survive a resume. A typed Box Public API v1 client (`opengrok_box::ascii::Client`, shapes
 from [`box/`](box/README.md)) replaced the old single-file ASCII driver; `AsciiBoxes` is still
-the `Computer` adapter. Hexuria's right-sidebar screen paints a live noVNC desktop from
+the `Computer` adapter. Domain ownership is proven, not assumed: a console admin's claim admits
+nobody until its `_opengrok-verify` TXT record resolves, while the operator's shell still vouches
+directly; password reset rides Resend with a one-shot signed link (12.later). Hexuria's right-sidebar screen paints a live noVNC desktop from
 `getForeverBoxStatus.vncUrl`. A dev instance runs on `:1447` against the real judge.
 [`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
 true. Unticked work is the `*.later` boxes and the Later bucket, not a missing slice.
@@ -46,17 +48,17 @@ by drift.
 | Redis only after a measured hot query; artifacts land with the harness's first real files | `ROADMAP.md` Later |
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
+| The shell vouches, the console proves: a domain from `opengrok admin` admits signups at once; a console claim admits nothing until DNS says so. Verify is a live lookup on click, no poller | `opengrok-core/src/org.rs` module doc, `opengrok-server/src/domain_proof.rs` |
 
 ## What's left (do not relitigate "are we done")
 
 In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
 
-1. **`12.later`** — DNS *ownership* proof (matching already works); password reset via Resend. Console admin for invites/enable shipped in slice 13.
-2. **`16.later`** — OAuth 2.1 metadata on `/mcp`. PolicyApproval still has no transcribed desktop card (AutoReview Ask does — `16.cards`). Reverse-exec stays excluded from MCP.
-3. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation; mint idempotency; reconcile console listing vs gateway after a failed revoke; per-key admin scopes so a partner credential is not a full gateway admin. Per-member model pins are gateway-member pins, not coworker pins (those are slice 18).
-4. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field + picker (console already has one). Roster `description = model` habit. `auto_review_model` is a separate deployment pin. Per-coworker spend caps.
-5. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode` (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; rooms (provisioning shipped); mem0; artifacts; stdio MCP inside the box; graph harness; Redis after a measured hot query. ASCII endpoints not in the client yet (snapshots, environments, webhooks, ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) wait until a coworker path needs them.
-6. **P11 is not unfinished work** — sharing, teach recording, memories sit on no path a user takes; upstream deleted adjacent features in 0.30.
+1. **`16.later`** — OAuth 2.1 metadata on `/mcp`. PolicyApproval still has no transcribed desktop card (AutoReview Ask does — `16.cards`). Reverse-exec stays excluded from MCP.
+2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation; mint idempotency; reconcile console listing vs gateway after a failed revoke; per-key admin scopes so a partner credential is not a full gateway admin. Per-member model pins are gateway-member pins, not coworker pins (those are slice 18).
+3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field + picker (console already has one). Roster `description = model` habit. `auto_review_model` is a separate deployment pin. Per-coworker spend caps.
+4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode` (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; rooms (provisioning shipped); mem0; artifacts; stdio MCP inside the box; graph harness; Redis after a measured hot query. ASCII endpoints not in the client yet (snapshots, environments, webhooks, ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) wait until a coworker path needs them.
+5. **P11 is not unfinished work** — sharing, teach recording, memories sit on no path a user takes; upstream deleted adjacent features in 0.30.
 
 The desktop app you verify against is **`/Applications/Open Grok.app`** (`bot.opengrok.app`). Do not run `just install` in the client repo — that justfile still writes `/Applications/Grok-0.27.app`. Install in place: `rsync -a --delete "dist/Open Grok.app/" "/Applications/Open Grok.app/"`. `setup/desktop-client.md`.
 

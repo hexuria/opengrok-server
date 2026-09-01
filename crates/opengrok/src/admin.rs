@@ -197,6 +197,37 @@ async fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
 
+        // The operator's shell vouches for a domain: no DNS proof, because whoever runs this
+        // already owns the deployment. A console admin has to prove theirs (`/admin/domains`).
+        Some("org")
+            if args.get(1).map(String::as_str) == Some("domain")
+                && args.get(2).map(String::as_str) == Some("add") =>
+        {
+            let flags = parse_flags(&args[3..], &["org", "domain"])?;
+            let org_id = OrgId::from_stored(flags.get("org").ok_or("--org is required")?.clone());
+            let domain = flags.get("domain").ok_or("--domain is required")?.clone();
+            let store = store().await?;
+            let (org, seq) = store.load_org(&org_id).await.map_err(|e| e.to_string())?;
+            let at_ms = now_ms();
+            let events = org
+                .decide(OrgCommand::AddDomain {
+                    domain: domain.clone(),
+                    at_ms,
+                })
+                .map_err(|e| e.to_string())?;
+            let mut after = org;
+            for event in &events {
+                after.apply(event);
+            }
+            store
+                .append_org(&org_id, seq, &events, &after, at_ms)
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("domain added (operator-vouched): {}", opengrok_core::org::normalize_domain(&domain));
+            println!("  domains: {}", after.domains.join(", "));
+            Ok(())
+        }
+
         Some("invite") => {
             let flags = parse_flags(&args[1..], &["org"])?;
             let org_id = OrgId::from_stored(flags.get("org").ok_or("--org is required")?.clone());
@@ -238,6 +269,63 @@ async fn run(args: &[String]) -> Result<(), String> {
             println!("  email: {email}");
             if !flags.contains_key("password") {
                 println!("  password: {password}   (generated — save it)");
+            }
+            Ok(())
+        }
+
+        // The no-mailer reset path: a person who forgot their password asks the operator, who
+        // sets a new one here. Sessions already issued stay valid — the same as a self-service
+        // change, and the account's own sign-out is the remedy.
+        Some("account") if args.get(1).map(String::as_str) == Some("password") => {
+            let flags = parse_flags(&args[2..], &["email", "password"])?;
+            let email = flags.get("email").ok_or("--email is required")?;
+            let password = flags
+                .get("password")
+                .cloned()
+                .unwrap_or_else(|| random_token("pw_"));
+            if password.len() < 8 {
+                return Err("the password must be at least 8 characters".to_string());
+            }
+            let store = store().await?;
+            let view = store
+                .account_by_email(email)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no account with email {email}"))?;
+            let (account, seq) = store.load_account(&view.id).await.map_err(|e| e.to_string())?;
+            let hash = opengrok_server::auth::password::hash_password(&password)?;
+            let at_ms = now_ms();
+            let events = account
+                .decide(AccountCommand::ChangePassword {
+                    password_hash: hash,
+                    at_ms,
+                })
+                .map_err(|e| e.to_string())?;
+            let mut after = account;
+            for event in &events {
+                after.apply(event);
+            }
+            let updated = AccountView {
+                id: view.id.clone(),
+                email: after.email.clone(),
+                plan: after.plan.unwrap_or(Plan::Ultra),
+                trial: after.trial,
+                updated_at_ms: at_ms,
+                password_hash: after.password_hash.clone(),
+                first_name: after.first_name.clone(),
+                last_name: after.last_name.clone(),
+                org_id: after.org_id.clone(),
+                verified: after.verified,
+                enabled: after.enabled,
+                avatar_url: after.avatar_url.clone(),
+            };
+            store
+                .append_account(&view.id, seq, &events, &updated)
+                .await
+                .map_err(|e| e.to_string())?;
+            println!("password set: {email}");
+            if !flags.contains_key("password") {
+                println!("  password: {password}   (generated — hand it over out of band)");
             }
             Ok(())
         }
@@ -285,9 +373,11 @@ async fn run(args: &[String]) -> Result<(), String> {
         _ => Err(concat!(
             "usage:\n",
             "  opengrok admin org create --name <name> --admin-email <email> --domain <d[,d]> [--password <p>]\n",
+            "  opengrok admin org domain add --org <org_id> --domain <domain>   (operator-vouched, no DNS proof)\n",
             "  opengrok admin invite --org <org_id>\n",
             "  opengrok admin account create --email <email> --org <org_id> --name \"<First Last>\" [--password <p>]\n",
-            "  opengrok admin account enable --email <email>"
+            "  opengrok admin account enable --email <email>\n",
+            "  opengrok admin account password --email <email> [--password <p>]   (the no-mailer reset)"
         )
         .to_string()),
     }

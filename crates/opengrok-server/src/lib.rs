@@ -12,6 +12,7 @@ pub mod auto_review;
 pub mod autonomy;
 pub mod computers;
 pub mod connections;
+pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
 pub mod grpc;

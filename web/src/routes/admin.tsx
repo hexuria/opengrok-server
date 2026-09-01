@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  claimDomain,
   clearAccountMode,
   clearBoxKey,
   disableUser,
@@ -9,6 +10,7 @@ import {
   gatewayUsage,
   getOrgMode,
   issueInvite,
+  listDomains,
   listGatewayKeys,
   listInvites,
   listOrgComputers,
@@ -21,7 +23,10 @@ import {
   setGatewayKeyQuota,
   setOrgMode,
   testBoxConnection,
+  verifyDomain,
+  withdrawDomain,
   type GatewayKey,
+  type OrgDomain,
   type SharingMode,
 } from "../api/admin";
 import { ApiError } from "../api/client";
@@ -188,6 +193,139 @@ function InvitesCard() {
           </table>
         ) : (
           <p className="muted">No invites yet. Issue one to add a teammate.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DomainRow({ entry }: { entry: OrgDomain }) {
+  const queryClient = useQueryClient();
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "domains"] });
+  const [copied, setCopied] = useState(false);
+  const verify = useMutation({ mutationFn: () => verifyDomain(entry.domain), onSuccess: refresh });
+  const withdraw = useMutation({ mutationFn: () => withdrawDomain(entry.domain), onSuccess: refresh });
+  const failure =
+    verify.error instanceof ApiError ? verify.error.message : verify.error ? "Could not verify." : null;
+
+  async function copy(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <li style={{ listStyle: "none", padding: "0.75rem 0", borderTop: "1px solid var(--border)" }}>
+      <div className="spread">
+        <div className="row">
+          <span className="mono" style={{ fontSize: "0.95rem" }}>{entry.domain}</span>
+          <span className={`pill ${entry.status === "verified" ? "on" : "off"}`}>{entry.status}</span>
+        </div>
+        {entry.status === "pending" ? (
+          <div className="row">
+            <button onClick={() => verify.mutate()} disabled={verify.isPending}>
+              {verify.isPending ? "Checking…" : "Verify"}
+            </button>
+            <button className="ghost" onClick={() => withdraw.mutate()} disabled={withdraw.isPending}>
+              Withdraw
+            </button>
+          </div>
+        ) : null}
+      </div>
+      {entry.record ? (
+        <div className="note" style={{ marginTop: "0.6rem" }}>
+          <p className="muted" style={{ margin: "0 0 0.4rem", fontSize: "0.82rem" }}>
+            Add this DNS record, then click Verify. Records can take a few minutes to appear.
+          </p>
+          <table style={{ margin: 0 }}>
+            <tbody>
+              <tr>
+                <td className="muted">Type</td>
+                <td className="mono">{entry.record.type}</td>
+              </tr>
+              <tr>
+                <td className="muted">Name</td>
+                <td className="mono">{entry.record.name}</td>
+              </tr>
+              <tr>
+                <td className="muted">Value</td>
+                <td>
+                  <div className="row spread">
+                    <code className="mono">{entry.record.value}</code>
+                    <button className="ghost" onClick={() => void copy(entry.record?.value ?? "")}>
+                      {copied ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          {failure ? <p className="err">{failure}</p> : null}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+function DomainsCard() {
+  const queryClient = useQueryClient();
+  const domains = useQuery({ queryKey: ["admin", "domains"], queryFn: listDomains, retry: false });
+  const [draft, setDraft] = useState("");
+  const claim = useMutation({
+    mutationFn: () => claimDomain(draft.trim()),
+    onSuccess: async () => {
+      setDraft("");
+      await queryClient.invalidateQueries({ queryKey: ["admin", "domains"] });
+    },
+  });
+
+  if (domains.error instanceof ApiError && domains.error.status === 403) {
+    return null; // The Users card already explains the admin gate.
+  }
+  const claimError =
+    claim.error instanceof ApiError ? claim.error.message : claim.error ? "Could not claim that domain." : null;
+
+  return (
+    <section className="card">
+      <h2 style={{ margin: 0 }}>Domains</h2>
+      <p className="muted" style={{ margin: "0.4rem 0 0", fontSize: "0.88rem" }}>
+        People can sign up with an invite only from a verified domain. Claim one, publish the TXT
+        record we give you, then verify it.
+      </p>
+      <form
+        className="row"
+        style={{ marginTop: "1rem" }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (draft.trim()) claim.mutate();
+        }}
+      >
+        <input
+          aria-label="domain to claim"
+          placeholder="example.com"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          style={{ flex: 1, minWidth: "12rem" }}
+        />
+        <button type="submit" disabled={claim.isPending || !draft.trim()}>
+          {claim.isPending ? "Claiming…" : "Claim domain"}
+        </button>
+      </form>
+      {claimError ? <p className="err">{claimError}</p> : null}
+      <div style={{ marginTop: "1rem" }}>
+        {domains.isLoading ? (
+          <p className="muted">Loading…</p>
+        ) : domains.data && domains.data.domains.length > 0 ? (
+          <ul style={{ margin: 0, padding: 0 }}>
+            {domains.data.domains.map((entry) => (
+              <DomainRow key={entry.domain} entry={entry} />
+            ))}
+          </ul>
+        ) : (
+          <p className="muted">No domains yet.</p>
         )}
       </div>
     </section>
@@ -532,6 +670,7 @@ export function AdminPage() {
           <UsersCard />
           <GatewayAccessCard />
           <ComputersCard />
+          <DomainsCard />
           <InvitesCard />
         </div>
       )}
