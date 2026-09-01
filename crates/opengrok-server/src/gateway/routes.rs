@@ -167,13 +167,19 @@ async fn events(
     );
 
     // The opening: the mandatory retry line, then a complete roster snapshot so a reconnecting
-    // client is seeded before its own listAgents lands.
+    // client is seeded before its own listAgents lands. It carries the CURRENT roster sequence,
+    // not a fresh one: this frame goes to this subscriber alone, and a sequence minted here was a
+    // gap for every other open stream (they saw N, N+2 and resynced the roster after every send).
+    // The replica installs a snapshot as its baseline at `throughSequence = ordered.sequence` and
+    // ignores one older than what it has, so "current" is exactly right for the opener and
+    // invisible to everyone else. `coverage.kind` stays `complete-roster`: it is what the replica
+    // checks first.
     let snapshot = {
         let rows = super::live::roster_rows(&state).await.unwrap_or_default();
         let payload = json!({
             "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
             "agents": rows,
-            "ordered": super::live::ordered(&state, "roster"),
+            "ordered": super::live::current(&state, "roster"),
             "coverage": { "kind": "complete-roster" },
         });
         frame("agents", &payload, wanted.as_ref())
@@ -190,8 +196,17 @@ async fn events(
                     return Some((Ok::<_, Infallible>((channel, payload)), (subscriber, guard)));
                 }
                 // Lagged: frames were dropped for this slow subscriber. Keep going — the client
-                // resyncs from sequence gaps; that is what the ordered stamps are for.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // resyncs from the sequence gap; that is what the ordered stamps are for. Said
+                // out loud, because a silent drop looks exactly like "the server never sent the
+                // reply". The channel cannot say which replica keys the lost frames carried.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                    tracing::warn!(
+                        id = %guard.id,
+                        dropped,
+                        "events: subscriber lagged; frames dropped, the client will see a gap"
+                    );
+                    continue;
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
         }
