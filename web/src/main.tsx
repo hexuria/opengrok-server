@@ -14,6 +14,7 @@ import "./styles.css";
 import { LoginPage } from "./routes/login";
 import { AccountPage } from "./routes/account";
 import { AdminPage } from "./routes/admin";
+import { CoworkersPage } from "./routes/coworkers";
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> });
 const indexRoute = createRoute({
@@ -25,9 +26,10 @@ const indexRoute = createRoute({
 });
 const loginRoute = createRoute({ getParentRoute: () => rootRoute, path: "/login", component: LoginPage });
 const accountRoute = createRoute({ getParentRoute: () => rootRoute, path: "/account", component: AccountPage });
+const coworkersRoute = createRoute({ getParentRoute: () => rootRoute, path: "/coworkers", component: CoworkersPage });
 const adminRoute = createRoute({ getParentRoute: () => rootRoute, path: "/admin", component: AdminPage });
 
-const routeTree = rootRoute.addChildren([indexRoute, loginRoute, accountRoute, adminRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, loginRoute, accountRoute, coworkersRoute, adminRoute]);
 // Served under /console by the Rust server, so the router lives under that basepath.
 const router = createRouter({ routeTree, basepath: "/console" });
 
