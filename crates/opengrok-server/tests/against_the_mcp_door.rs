@@ -400,8 +400,8 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
 
     let call = ToolCall {
         id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
-        name: "shell".to_string(),
-        arguments: json!({ "command": "echo from-mcp" }),
+        name: "write_file".to_string(),
+        arguments: json!({ "path": "/tmp/from-mcp", "content": "hi" }),
     };
     let result = ToolResult::awaiting(&call.id, AwaitingReason::AutoReview, "why");
     let error =
@@ -500,20 +500,23 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(
             &coworker,
-            "shell",
-            &json!({ "command": "rm -rf /" }),
+            "write_file",
+            &json!({ "path": "/tmp/other", "content": "nope" }),
         ),
         None,
         "a different command of the same tool cannot spend this yes"
     );
+    // Arguments round-tripped through jsonb (key order not preserved). Take with the
+    // other key order so a string-hash of to_string would miss and Value equality hits.
+    let reordered = json!({ "content": "hi", "path": "/tmp/from-mcp" });
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments)
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &reordered)
             .as_deref(),
         Some(call.id.as_str()),
-        "allow-once is remembered so the retry reuses this call id"
+        "allow-once matches by Value equality, not key insertion order"
     );
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments),
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &call.arguments),
         None,
         "the yes is one-shot"
     );

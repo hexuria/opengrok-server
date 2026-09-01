@@ -209,15 +209,19 @@ fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 /// One allow-once from an answered MCP card, waiting for the client's retry. Process-local on
-/// purpose: a restart means the retry is judged again (narrower than silently running). Keyed
-/// by coworker+tool+arguments so a different command of the same tool cannot spend this yes
-/// (the executor's skip is per call, never per tool).
-static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, String>>> =
+/// purpose: a restart means the retry is judged again (narrower than silently running).
+/// Matched with `Value` equality (not `to_string`): arguments round-trip through jsonb, which
+/// does not keep object key order, and the executor's skip is per call, never per tool.
+struct McpAllowOnce {
+    arguments: serde_json::Value,
+    call_id: String,
+}
+
+static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, Vec<McpAllowOnce>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn once_key(coworker: &CoworkerId, tool: &str, arguments: &serde_json::Value) -> String {
-    let args = serde_json::to_string(arguments).unwrap_or_else(|_| String::new());
-    format!("{}:{tool}:{args}", coworker.as_str())
+fn coworker_tool_key(coworker: &CoworkerId, tool: &str) -> String {
+    format!("{}:{tool}", coworker.as_str())
 }
 
 /// Record that this coworker may retry this exact tool+args once under `call_id`.
@@ -231,7 +235,12 @@ pub fn remember_mcp_allow_once(
         Ok(map) => map,
         Err(poisoned) => poisoned.into_inner(),
     };
-    map.insert(once_key(coworker, tool, arguments), call_id);
+    map.entry(coworker_tool_key(coworker, tool))
+        .or_default()
+        .push(McpAllowOnce {
+            arguments: arguments.clone(),
+            call_id,
+        });
 }
 
 /// Take the pending allow-once for this coworker+tool+args, if any.
@@ -244,7 +253,14 @@ pub fn take_mcp_allow_once(
         Ok(map) => map,
         Err(poisoned) => poisoned.into_inner(),
     };
-    map.remove(&once_key(coworker, tool, arguments))
+    let key = coworker_tool_key(coworker, tool);
+    let list = map.get_mut(&key)?;
+    let index = list.iter().position(|yes| yes.arguments == *arguments)?;
+    let yes = list.remove(index);
+    if list.is_empty() {
+        map.remove(&key);
+    }
+    Some(yes.call_id)
 }
 
 /// One OpenAI-function-shape schema → an rmcp `Tool`, or `None` (logged) if it is malformed. A tool
@@ -613,23 +629,28 @@ async fn existing_mcp_ask(
         }
         // Reuse only when the card is actually in the transcript. A crash between append_run
         // and append_gateway_entry would otherwise promise a requestId nobody can answer.
-        if card_pending_for(state, coworker, &pending.call_id).await {
-            return Ok(Some(pending.call_id.clone()));
+        // A transcript READ error must not look like "no card": the card may already be
+        // there, and Fail would leave the original press hitting 410.
+        match card_pending_for(state, coworker, &pending.call_id).await {
+            Ok(true) => return Ok(Some(pending.call_id.clone())),
+            Ok(false) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await,
+            Err(error) => return Err(error),
         }
-        fail_stuck_mcp_run(state, account, &run_id, run, seq).await;
     }
     Ok(None)
 }
 
-async fn card_pending_for(state: &GatewayState, coworker: &CoworkerId, request_id: &str) -> bool {
-    let Ok(entries) = state.agui.auth.store.gateway_transcript(coworker).await else {
-        return false;
-    };
-    entries.iter().any(|entry| {
+async fn card_pending_for(
+    state: &GatewayState,
+    coworker: &CoworkerId,
+    request_id: &str,
+) -> Result<bool, opengrok_store::StoreError> {
+    let entries = state.agui.auth.store.gateway_transcript(coworker).await?;
+    Ok(entries.iter().any(|entry| {
         entry["message"]["type"] == "auto-review-approval"
             && entry["message"]["approval"]["requestId"] == request_id
             && entry["message"]["approval"]["status"] == "pending"
-    })
+    }))
 }
 
 async fn fail_stuck_mcp_run(
