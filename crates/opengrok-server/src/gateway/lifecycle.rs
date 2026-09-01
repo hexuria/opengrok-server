@@ -597,13 +597,7 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
     {
         Ok(removed) => {
             for id in &removed {
-                let payload = json!({
-                    "type": "removed",
-                    "id": id,
-                    "agentId": agent,
-                    "ordered": live::ordered(state, &format!("transcript:{agent}")),
-                });
-                live::emit(state, "transcript", payload);
+                live::emit_transcript_removed(state, agent, id);
             }
             (200, json!({ "deleted": removed.len() }))
         }

@@ -4,6 +4,17 @@
 //! `ordered: {replicaKey, epoch, sequence}` (`client-grok-bot.md` §4.5): the client watches for
 //! sequence gaps and epoch changes and treats either as a stale replica. The epoch is minted per
 //! process, so a restart *announces itself* instead of quietly renumbering.
+//!
+//! TWO RULES THE CLIENT'S REPLICA IMPOSES, learned from a night of "no reply until Cmd+R"
+//! (2 Sep 2026):
+//! 1. **A sequence is minted only together with the frame that carries it, and sent under the
+//!    same lock.** `ordered()` used to hand out a number and let the caller send later; two
+//!    tasks on one agent could mint 7 and 8 and send 8 first, and a gap is a resync the client
+//!    could not complete. `emit_ordered` is now the only way to mint.
+//! 2. **A frame written to ONE subscriber must not consume a sequence.** The `/events` opening
+//!    roster snapshot used to mint one; every other open stream then saw N, N+2 and resynced the
+//!    roster after every send. The opener now carries `current()` — the sequence everyone has
+//!    already seen — which the replica installs as its baseline and nobody else notices.
 
 use serde_json::{Value, json};
 
@@ -13,22 +24,45 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// The next `ordered` stamp for a replica key.
-pub fn ordered(state: &GatewayState, replica_key: &str) -> Value {
-    let sequence = match state.seqs.lock() {
-        Ok(mut seqs) => {
-            let seq = seqs.entry(replica_key.to_string()).or_insert(0);
-            *seq += 1;
-            *seq
-        }
-        Err(_) => 0,
-    };
+fn stamp(state: &GatewayState, replica_key: &str, sequence: i64) -> Value {
     json!({ "replicaKey": replica_key, "epoch": state.epoch, "sequence": sequence })
 }
 
-/// Send one frame to every open `/events` stream. No subscriber is an ordinary morning, not an
-/// error — emits happen whether or not anyone is watching.
-pub fn emit(state: &GatewayState, channel: &str, payload: Value) {
+/// The stamp a NEW subscriber is seeded with: the sequence every existing subscriber has already
+/// seen, NOT a fresh one. A per-subscriber frame that minted would be a gap for everyone else.
+pub fn current(state: &GatewayState, replica_key: &str) -> Value {
+    let sequence = state
+        .seqs
+        .lock()
+        .ok()
+        .and_then(|seqs| seqs.get(replica_key).copied())
+        .unwrap_or(0);
+    stamp(state, replica_key, sequence)
+}
+
+/// Mint the next sequence for `replica_key`, build the frame around it, and send it to every open
+/// `/events` stream — all under the sequence lock, so two emits on one key reach the broadcast in
+/// the order they were numbered. `send` is synchronous and never blocks, which is what makes
+/// holding a std mutex across it acceptable. No subscriber is an ordinary morning, not an error.
+pub fn emit_ordered(
+    state: &GatewayState,
+    channel: &str,
+    replica_key: &str,
+    build: impl FnOnce(Value) -> Value,
+) {
+    let Ok(mut seqs) = state.seqs.lock() else {
+        // A poisoned sequence lock is a bug elsewhere; a frame with a made-up number would only
+        // teach the client to distrust the replica. Say so and drop this one.
+        tracing::error!(
+            channel,
+            replica_key,
+            "live: sequence lock poisoned; frame dropped"
+        );
+        return;
+    };
+    let seq = seqs.entry(replica_key.to_string()).or_insert(0);
+    *seq += 1;
+    let payload = build(stamp(state, replica_key, *seq));
     let _ = state.events_tx.send((channel.to_string(), payload));
 }
 
@@ -90,13 +124,15 @@ pub async fn emit_roster(state: &GatewayState) {
     let Ok(rows) = roster_rows(state).await else {
         return;
     };
-    let payload = json!({
-        "activeAgentId": active_agent_id(state),
-        "agents": rows,
-        "ordered": ordered(state, "roster"),
-        "coverage": { "kind": "complete-roster" },
+    let active = active_agent_id(state);
+    emit_ordered(state, "agents", "roster", |ordered| {
+        json!({
+            "activeAgentId": active,
+            "agents": rows,
+            "ordered": ordered,
+            "coverage": { "kind": "complete-roster" },
+        })
     });
-    emit(state, "agents", payload);
 }
 
 /// A single-row delta — `agent-upserted`. `patch` overlays fields the caller knows better than
@@ -113,23 +149,48 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
             target.insert(key.clone(), value.clone());
         }
     }
-    let payload = json!({
-        "activeAgentId": active_agent_id(state),
-        "agent": row,
-        "ordered": ordered(state, "roster"),
+    let active = active_agent_id(state);
+    emit_ordered(state, "agent-upserted", "roster", |ordered| {
+        json!({
+            "activeAgentId": active,
+            "agent": row,
+            "ordered": ordered,
+        })
     });
-    emit(state, "agent-upserted", payload);
 }
 
 /// A transcript frame for one agent — `appended` or `updated`, stamped on that agent's replica.
 pub fn emit_transcript(state: &GatewayState, agent_id: &str, kind: &str, entry: Value) {
-    let payload = json!({
-        "type": kind,
-        "entry": entry,
-        "agentId": agent_id,
-        "ordered": ordered(state, &format!("transcript:{agent_id}")),
-    });
-    emit(state, "transcript", payload);
+    emit_ordered(
+        state,
+        "transcript",
+        &format!("transcript:{agent_id}"),
+        |ordered| {
+            json!({
+                "type": kind,
+                "entry": entry,
+                "agentId": agent_id,
+                "ordered": ordered,
+            })
+        },
+    );
+}
+
+/// A transcript `removed` frame for one entry id, stamped on that agent's replica.
+pub fn emit_transcript_removed(state: &GatewayState, agent_id: &str, entry_id: &str) {
+    emit_ordered(
+        state,
+        "transcript",
+        &format!("transcript:{agent_id}"),
+        |ordered| {
+            json!({
+                "type": "removed",
+                "id": entry_id,
+                "agentId": agent_id,
+                "ordered": ordered,
+            })
+        },
+    );
 }
 
 /// The live roster rows for the gateway's default account (`state.email`). Used by the SSE emitters,
