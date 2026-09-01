@@ -100,6 +100,14 @@ pub enum Outcome {
 
 /// The paragraph a card shows when the judge itself said "ask".
 pub const REVIEW_ASK_REASON: &str = "Your auto-review instructions did not clearly allow this, so it is being asked rather than allowed.";
+/// The paragraph a card shows when the judge matched an Ask-first instruction.
+/// The Settings UI stores those in `blockInstructions` but labels them "Ask first".
+pub fn ask_first_reason(block_instructions: &str) -> String {
+    format!(
+        "Your auto-review instructions asked to check this first: \"{}\"",
+        clip(block_instructions.trim(), 200)
+    )
+}
 /// The paragraph a card shows when the judge could not answer at all.
 pub const REVIEW_UNAVAILABLE_REASON: &str =
     "The reviewer did not answer, so this is being asked rather than allowed.";
@@ -361,6 +369,15 @@ mod tests {
         assert_eq!(
             text,
             "auto-review blocked this — your block instructions say: \"never touch prod\""
+        );
+    }
+
+    #[test]
+    fn an_ask_first_reason_names_the_instruction() {
+        let text = ask_first_reason("  always ask about rm -rf  ");
+        assert_eq!(
+            text,
+            "Your auto-review instructions asked to check this first: \"always ask about rm -rf\""
         );
     }
 }
