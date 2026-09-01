@@ -76,7 +76,7 @@ pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (
             Err(_) => return (500, json!({ "error": "ledger unavailable" })),
         }
 
-        let (code, reply) = hire(state, &account.id, name, args).await;
+        let (code, reply) = hire(state, &account.id, name, model_arg(args), args).await;
         if code == 200
             && let Some(id) = reply.pointer("/agent/id").and_then(Value::as_str)
         {
@@ -87,7 +87,7 @@ pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (
         return (code, reply);
     }
 
-    hire(state, &account.id, name, args).await
+    hire(state, &account.id, name, model_arg(args), args).await
 }
 
 /// The nonce record's second write: the row exists (the probe), the fact replaces it.
@@ -108,10 +108,13 @@ async fn sqlx_upsert_nonce(
         .await
 }
 
+/// Hire, on a given route. `model` is the pin the caller asked for; `None` (or blank) falls back
+/// to the deployment default, which is what every client that has no model field sends.
 async fn hire(
     state: &GatewayState,
     account_id: &opengrok_core::id::AccountId,
     name: &str,
+    model: Option<&str>,
     args: &Value,
 ) -> (u16, Value) {
     use crate::agui::provision;
@@ -119,9 +122,15 @@ async fn hire(
 
     let id = CoworkerId::new();
     let at_ms = now_ms();
+    // The caller's pin when there is one, the deployment's default when there is not. A blank
+    // string is "not one" — it would otherwise be stored and asked of the gateway verbatim.
+    let model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map_or_else(|| state.agui.model.clone(), str::to_string);
     let mut events = match Coworker::default().decide(CoworkerCommand::Hire {
         name: name.to_string(),
-        model: state.agui.model.clone(),
+        model,
         at_ms,
     }) {
         Ok(events) => events,
@@ -276,6 +285,44 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
             .await;
     }
 
+    // A pin can be changed the same way a name can. Its own command, so a client that sends only
+    // a model does not have to restate the name (and cannot rename by accident).
+    //
+    // A REFUSED repin is answered, not swallowed. Folding `decide` into the `if let` chain made a
+    // rejection indistinguishable from "no model sent": the block simply did not match and the
+    // caller got a 200 describing an agent whose pin had not changed. Asking to think with nothing
+    // is a mistake worth being told about (CLAUDE.md #8).
+    if let Some(model) = profile_args.get("model").and_then(Value::as_str)
+        && let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await
+        && model.trim() != loaded.model
+    {
+        let events = match loaded.decide(CoworkerCommand::Repin {
+            model: model.to_string(),
+            at_ms: now_ms(),
+        }) {
+            Ok(events) => events,
+            Err(reason) => return (400, json!({ "error": reason.to_string() })),
+        };
+        let mut after = loaded.clone();
+        for event in &events {
+            after.apply(event);
+        }
+        let view = opengrok_core::coworker::CoworkerView {
+            id: coworker_id.clone(),
+            name: after.name.clone(),
+            model: after.model.clone(),
+            box_id: after.box_id.clone(),
+            retired: after.retired,
+            updated_at_ms: now_ms(),
+        };
+        let _ = state
+            .agui
+            .auth
+            .store
+            .append_coworker(&coworker_id, &account.id, seq, &events, &view)
+            .await;
+    }
+
     let mut profile = state
         .agui
         .auth
@@ -354,6 +401,12 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
     (200, json!({ "deleted": deleted }))
 }
 
+/// The pin a client asked for, if it sent one. Clients that predate the field send nothing, and
+/// get the deployment default — the same shape the REST hire has always had.
+fn model_arg(args: &Value) -> Option<&str> {
+    args.get("model").and_then(Value::as_str)
+}
+
 /// `duplicateAgent {id}` — a fresh hire wearing the original's profile.
 pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
     let Some(id) = args.get("id").and_then(Value::as_str) else {
@@ -382,10 +435,13 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value)
     if let Some(map) = hire_args.as_object_mut() {
         map.remove("avatarDataUrl");
     }
+    // The copy thinks with the same route as its original. Re-hiring on the deployment default
+    // would silently retarget a duplicate of a deliberately-pinned coworker.
     hire(
         state,
         &account.id,
         &format!("{} copy", loaded.name),
+        Some(loaded.model.as_str()),
         &hire_args,
     )
     .await

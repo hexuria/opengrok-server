@@ -406,6 +406,12 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
+        .route("/models", get(list_models))
+        .route("/models/probe", post(probe_model))
+        .route(
+            "/coworkers/{coworker_id}",
+            axum::routing::patch(repin_coworker),
+        )
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
         .route(
             "/coworkers/{coworker_id}/keys",
@@ -416,6 +422,149 @@ pub fn router(state: AgUiState) -> Router {
             axum::routing::delete(revoke_bot_key),
         )
         .with_state(state)
+}
+
+/// `GET /models` — the routes this deployment's gateway advertises.
+///
+/// Signed in is enough: this is the list of things a person may pin their own coworker to, and it
+/// carries no secret. The gateway's key stays here; the browser only ever learns ids.
+pub async fn list_models(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if account_from_bearer(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    }
+    let Some(catalogue) = state.auth.model_catalogue.clone() else {
+        // A mock door has no gateway to ask. Say that, rather than answering [] as though the
+        // gateway had told us it serves nothing.
+        return Json(serde_json::json!({
+            "models": [],
+            "note": "this deployment has no gateway configured (OG_MODEL_DOOR is a mock), so a \
+                     pin must be typed by hand",
+        }))
+        .into_response();
+    };
+    let listing = catalogue.list().await;
+    Json(serde_json::json!({
+        "models": listing
+            .models
+            .iter()
+            .map(|model| serde_json::json!({ "id": model.id }))
+            .collect::<Vec<_>>(),
+        "note": listing.note,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProbeRequest {
+    pub model: String,
+}
+
+/// `POST /models/probe` — ask the gateway to answer one tiny prompt on a candidate pin.
+///
+/// This is how a pin is proven BEFORE it is saved. It is also how we learned that `oag/auto` is
+/// refused on a route with no matching credential — a fact no amount of reading the catalogue
+/// would have revealed, because the id IS advertised.
+pub async fn probe_model(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ProbeRequest>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let model = request.model.trim();
+    if model.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a model is required").into_response();
+    }
+    let Some(catalogue) = state.auth.model_catalogue.clone() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "detail": "this deployment has no gateway configured, so a pin cannot be proven here",
+        }))
+        .into_response();
+    };
+    // A probe is a REAL, billed completion on the deployment's own key. One person clicking Test
+    // needs a handful; a loop wants thousands of somebody else's money.
+    if !catalogue.may_probe(account_id.as_str()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "wait a moment before testing another route",
+        )
+            .into_response();
+    }
+    match catalogue.probe(model).await {
+        Ok(served) => Json(serde_json::json!({ "ok": true, "served": served })).into_response(),
+        // The gateway's own words. A paraphrase would lose the part that says what to do.
+        Err(detail) => Json(serde_json::json!({ "ok": false, "detail": detail })).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepinRequest {
+    /// A route through the gateway, never a key.
+    pub model: String,
+}
+
+/// `PATCH /coworkers/{id}` — point a coworker at a different route.
+///
+/// Ownership answers 404, like every other per-coworker route here: an id that is not yours must
+/// not be distinguishable from one that does not exist.
+pub async fn repin_coworker(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+    Json(request): Json<RepinRequest>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(&account_id)
+        .await
+        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
+        .unwrap_or(false);
+    if !owns {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+    let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    };
+    let at_ms = now_ms();
+    let events = match loaded.decide(CoworkerCommand::Repin {
+        model: request.model.clone(),
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+    };
+    let mut after = loaded.clone();
+    for event in &events {
+        after.apply(event);
+    }
+    let view = opengrok_core::coworker::CoworkerView {
+        id: coworker_id.clone(),
+        name: after.name.clone(),
+        model: after.model.clone(),
+        box_id: after.box_id.clone(),
+        retired: after.retired,
+        updated_at_ms: at_ms,
+    };
+    if state
+        .auth
+        .store
+        .append_coworker(&coworker_id, &account_id, seq, &events, &view)
+        .await
+        .is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not repin").into_response();
+    }
+    Json(serde_json::json!({ "id": coworker_id.as_str(), "model": after.model })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,7 +590,14 @@ pub async fn hire(
 
     let coworker_id = CoworkerId::new();
     let at_ms = now_ms();
-    let model = request.model.unwrap_or_else(|| state.model.clone());
+    // Absent OR blank falls back: `unwrap_or_else` alone let `"model": ""` through, and the
+    // aggregate would (now) refuse it rather than the caller getting the default they meant.
+    let model = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map_or_else(|| state.model.clone(), str::to_string);
 
     let mut coworker = opengrok_core::coworker::Coworker::default();
     let mut events = match coworker.decide(CoworkerCommand::Hire {
@@ -625,11 +781,18 @@ pub(crate) fn account_from_bearer(
     state: &AgUiState,
     headers: &axum::http::HeaderMap,
 ) -> Option<opengrok_core::id::AccountId> {
+    // Header OR the console's httpOnly cookie. The browser cannot send an Authorization header on
+    // its own and must never hold a token in JS, so a cookie is the only way it can reach these —
+    // it is the same access token, verified the same way, which is what account_api already does.
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))?;
-    let claims = state.auth.minter.verify_access(token).ok()?;
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| {
+            crate::auth::cookies::read_cookie(headers, crate::auth::cookies::ACCESS_COOKIE)
+        })?;
+    let claims = state.auth.minter.verify_access(&token).ok()?;
     Some(opengrok_core::id::AccountId::from_stored(claims.sub))
 }
 

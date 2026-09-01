@@ -291,6 +291,57 @@ key that opens the model door, sets the org's budget and that member's cap, and 
   stale), and per-key admin scopes in the gateway so a partner service's credential is not a
   full operator credential.
 
+## Slice 18 — per-coworker model pins
+
+A coworker's model was decided once, at hire, and could never change; every create path except
+REST ignored a requested model and stored the deployment default. Investigation:
+`plan-coworker-model-pins.md` (this pass corrected several of its claims — see below).
+
+- [x] **18.1** `CoworkerCommand::Repin` / `CoworkerEvent::Repinned` — a pin is a decision that can
+  be revisited, with the same `alive()` guard every command but `Hire` takes. And `Hire` finally
+  validates: `decide(Hire)` was an unconditional `Ok`, so the `400` arms its three callers had
+  written were unreachable and `model: ""` was stored and later asked of the gateway verbatim.
+  Both commands now trim and refuse blank. *(this commit)*
+- [x] **18.2** Every create path honours a pin — gateway `createAgent`, seam-B
+  `CreateGrokBotAgent`, REST hire (blank now falls back too, not just absent), and
+  `duplicateAgent`, which was silently re-hiring a deliberately-pinned bot on the default.
+  `updateAgent` and a new `PATCH /coworkers/{id}` both issue `Repin`; ownership answers 404.
+  *(this commit)*
+- [x] **18.3** `GET /models` + `POST /models/probe`: the picker needs the routes this gateway
+  advertises and only the deployment's key may ask, so the server asks and returns ids — the
+  browser never touches the key (asserted in test and smoke). An empty catalogue is `[]` **with a
+  reason**. `account_from_bearer` also accepts the console's cookie, without which a browser could
+  reach none of it. *(this commit)*
+- [x] **18.4** Console `/console/coworkers`: hire, list, repin, with the route as its own column
+  and a **Test** button that reports the gateway's own words. *(this commit)*
+- [x] **18.v** Live against the real gateway: catalogue proxied with no key in the reply; a
+  coworker hired on `openai/gpt-5.5` answered a real turn; repinned to `oag/auto`, the **next**
+  turn failed with the gateway's own sentence rather than quietly using the deployment model.
+  Evidence: `docs/verification/model-pins/README.md`. *(this commit)*
+- [x] **18.r** Peer review (two reviewer agents) closed three real ones: `update_agent` swallowed
+  a REFUSED repin — folding `decide` into an `if let` chain made a rejection indistinguishable
+  from "no model sent", so a caller asking to think with nothing got a 200 and no change (the
+  sibling PATCH already answered 400); `probe` forwarded the gateway's error body verbatim while
+  its neighbour `list` deliberately discards bodies precisely because one "could echo the request,
+  and the request carried the key" — the sentence now travels scrubbed and clipped, with a test
+  driving a gateway that echoes our key; and `POST /models/probe` was an unbounded real-money
+  amplifier, now one probe per account per few seconds. *(this commit)*
+- [ ] **18.later** A run resumed after an approval picks up the coworker's CURRENT pin rather than
+  the one its turn started on (a straight-through turn is stable); carrying the starting pin means
+  storing it on the suspension. Seam B's `UpdateGrokBotAgent` has no repin path. The roster's
+  `description = model` habit (a blank-agent defence in the desktop
+  client, not a statement of choice — the console shows the pin as its own field); the desktop
+  app's own create/update model field + picker; `auto_review_model` is a second deployment model
+  a pin deliberately does not move; per-coworker spend caps (the gateway has no per-day cap, and
+  metering a coworker natively means giving each its own gateway key).
+
+**Corrections this slice made to `plan-coworker-model-pins.md`** (kept because the doc is still
+the reference): its recommended default `oag/auto` is **refused on this deployment** — advertised
+in the catalogue, unservable on a route whose ladder has no matching credential, which is exactly
+why the probe exists; `Hire` had no validation to "follow"; `duplicateAgent` was an unlisted
+fourth create path; six sites read the pin (incl. autonomy and seam-B send), none cached, so
+`Repin` needed no change at any of them.
+
 ## Slice 11+ — breadth (P5 → P10, in order)
 
 Per-tier, verified against the running client. Most of it adapts work that exists:

@@ -72,6 +72,10 @@ pub struct AuthState {
     /// and a seam a test can substitute is worth more than a `std::env` read in a handler.
     /// `None` ⇒ the deployment has not wired it, and that surface answers 503.
     pub gateway_admin: Option<crate::gateway_admin::GatewayAdmin>,
+    /// The model catalogue and pin probe, built from the SAME two variables as the model door so
+    /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
+    /// there is no gateway to ask and the picker says so.
+    pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
 }
 
 impl AuthState {
@@ -85,12 +89,24 @@ impl AuthState {
             logins: Arc::new(Mutex::new(HashMap::new())),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
+            model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
         }
     }
 
     pub fn with_resend(mut self, key: Option<String>, public_url: String) -> Self {
         self.resend_api_key = key.filter(|k| !k.is_empty());
         self.public_url = public_url;
+        self
+    }
+
+    /// Point the catalogue at an explicit gateway — what a test uses to stand in for a real one
+    /// without touching the process environment.
+    #[must_use]
+    pub fn with_model_catalogue(
+        mut self,
+        catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
+    ) -> Self {
+        self.model_catalogue = catalogue;
         self
     }
 

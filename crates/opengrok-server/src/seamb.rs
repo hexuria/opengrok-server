@@ -260,9 +260,18 @@ async fn grok_bot(
                 .map(|id| CoworkerId::from_stored(id.to_string()))
                 .unwrap_or_else(CoworkerId::new);
             let at_ms = now_ms();
+            // The client's pin when it sends one; the deployment default when it does not. The
+            // shipped client has no model field, so today this is always the default — the field
+            // exists so a caller that grows one is honoured rather than silently overridden.
+            let model = args
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map_or_else(|| state.agui.model.clone(), str::to_string);
             let mut events = match Coworker::default().decide(CoworkerCommand::Hire {
                 name: name.to_string(),
-                model: state.agui.model.clone(),
+                model,
                 at_ms,
             }) {
                 Ok(events) => events,

@@ -62,6 +62,9 @@ export function Chrome({
         <Link to="/account" className={path.endsWith("/account") ? "active" : ""}>
           Account
         </Link>
+        <Link to="/coworkers" className={path.endsWith("/coworkers") ? "active" : ""}>
+          Coworkers
+        </Link>
         {isAdmin ? (
           <Link to="/admin" className={path.endsWith("/admin") ? "active" : ""}>
             Admin
