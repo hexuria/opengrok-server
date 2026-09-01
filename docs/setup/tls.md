@@ -56,7 +56,8 @@ Start it and trust the CA:
 ```sh
 caddy run --config ~/opengrok/Caddyfile      # foreground; or `caddy start` to background it
 caddy trust                                  # prompts for the Mac password: installs Caddy's local
-                                             # CA root into the login keychain. One time.
+                                             # CA root into the login keychain. One time, and PER
+                                             # LOGIN KEYCHAIN: another macOS user runs it again.
 ```
 
 Check from the Mac:
@@ -89,6 +90,9 @@ The smokes and the gate need nothing: they run their own server on their own por
 address satisfies. Keep running the gate with a clean environment as before.
 
 ## Desktop side
+
+Do this BEFORE any OAuth work: the app must already be on the https address, or the OAuth
+issuer (`OG_PUBLIC_GATEWAY_URL`) and the address the app talks to disagree.
 
 1. Quit the app. In the client's data root, `sand-data/settings.json`: set `openGrokGatewayUrl`
    to `https://192.168.100.24:1448` (both places the desktop-client doc names).
