@@ -1111,9 +1111,12 @@ pub async fn resolve_local_tool_permission(
         );
     };
 
-    // Allow once / always → approve; never / deny → refuse. (A client may downgrade a blocked
-    // "always" to "allow-once" before it reaches here — both approve, so no special case.)
-    let approved = matches!(resolution.as_str(), "always" | "allow-once");
+    // Allow once / always / this-session → approve; never / deny → refuse. (A client may
+    // downgrade a blocked "always" to "allow-once" before it reaches here — both approve.)
+    let approved = matches!(
+        resolution.as_str(),
+        "always" | "allow-once" | "allow-session"
+    );
     let pending = run.pending.clone();
     let command = pending
         .as_ref()
@@ -1166,7 +1169,7 @@ pub async fn resolve_local_tool_permission(
     // same skip for sudo-as-allow (a standing allow on `sudo` would cover `sudo rm -rf /`);
     // deny of sudo still persists.
     let standing = match resolution.as_str() {
-        "always" => Some("allow"),
+        "always" if !crate::local_exec::prefer_session_allow(&command) => Some("allow"),
         "never" => Some("deny"),
         _ => None,
     };
@@ -1183,11 +1186,27 @@ pub async fn resolve_local_tool_permission(
             .add_local_exec_rule(account_id.as_str(), &machine_id, kind, &command, at_ms)
             .await;
     }
+    let session = resolution == "allow-session"
+        || (resolution == "always" && crate::local_exec::prefer_session_allow(&command));
+    if session
+        && !command.is_empty()
+        && crate::local_exec::standing_rule_refusal("allow", &command).is_none()
+        && let Some((machine_id, _label)) =
+            crate::local_exec::enabled_machine(&state.agui.auth.store, account_id.as_str()).await
+    {
+        state
+            .agui
+            .auth
+            .local_exec
+            .remember_session_allow(account_id.as_str(), &machine_id, &command)
+            .await;
+    }
 
     // Flip the card to its outcome status — same entry id, new ask.status, so the client re-renders
     // the row from buttons to the outcome line.
     let status = match resolution.as_str() {
         "always" => "always",
+        "allow-session" => "allow-session",
         "allow-once" => "allow-once",
         "never" => "never",
         _ => "denied",
