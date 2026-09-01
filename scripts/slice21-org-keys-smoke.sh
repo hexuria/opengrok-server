@@ -30,7 +30,7 @@ trap cleanup EXIT
 
 echo "1. a stand-in for the gateway's admin API"
 cat > "$WORK/stand_in.py" <<'PY'
-import json, sys
+import json, sys, uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 class Handler(BaseHTTPRequestHandler):
@@ -56,13 +56,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/admin/api/principals":
             self._reply({"id": "principal-1", "email": "org"})
         elif self.path == "/admin/api/keys":
+            # A FRESH id per mint, like the real gateway: a fixed one collides with the
+            # gateway_key_view primary key the second time this smoke runs on a database that
+            # kept its rows, which is exactly what the gate does.
             self._reply({
-                "id": "key-smoke-1",
+                "id": f"key-smoke-{uuid.uuid4()}",
                 "key_prefix": "oag_live_smoke01",
                 "key": "oag_live_smoke0123456789_shown_once",
             })
         elif self.path.endswith("/revoke"):
-            self._reply({"id": "key-smoke-1", "active": False})
+            self._reply({"id": self.path.split("/")[-2], "active": False})
         else:
             self._reply({"error": "no such path"}, 404)
 
