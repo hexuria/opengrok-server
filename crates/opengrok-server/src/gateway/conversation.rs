@@ -487,26 +487,42 @@ pub async fn box_control(
                     let live = provider.state(box_id).await.ok();
                     let running = live.as_deref() == Some("running");
                     if *stopped || !running {
-                        if let Err(error) = provider.resume(box_id).await {
-                            return (
-                                200,
-                                json!({
-                                    "agentId": agent_id,
-                                    "state": live.unwrap_or_else(|| "stopped".into()),
-                                    "vncUrl": Value::Null,
-                                    "computerError": {
-                                        "code": error.code(),
-                                        "message": error.to_string(),
-                                    },
-                                }),
-                            );
+                        // Resume AND wait. On box.ascii.dev a sleeping box is `archived`, and an
+                        // accepted resume is a 202 + `provisioning` — not a running box. `wake`
+                        // polls until it is `running` (bounded), so the status we answer with is
+                        // one the client can draw a screen for rather than one it must guess at.
+                        // Past the bound the box is still on its way; the client keeps polling.
+                        let woke = provider.wake(box_id, WAKE_PATIENCE).await;
+                        match woke {
+                            Err(error) => {
+                                return (
+                                    200,
+                                    json!({
+                                        "agentId": agent_id,
+                                        "state": live.unwrap_or_else(|| "stopped".into()),
+                                        "vncUrl": Value::Null,
+                                        "computerError": {
+                                            "code": error.code(),
+                                            "message": error.to_string(),
+                                        },
+                                    }),
+                                );
+                            }
+                            Ok(reached) => {
+                                let _ = state
+                                    .agui
+                                    .auth
+                                    .store
+                                    .mark_scoped_used(scope, &scope_id, now_ms())
+                                    .await;
+                                if reached == "running" {
+                                    // The desktop provisions after the box does; give it a moment
+                                    // so the first status after ensure can carry the screen.
+                                    wait_for_screen(provider.as_ref(), box_id, SCREEN_PATIENCE)
+                                        .await;
+                                }
+                            }
                         }
-                        let _ = state
-                            .agui
-                            .auth
-                            .store
-                            .mark_scoped_used(scope, &scope_id, now_ms())
-                            .await;
                     }
                 }
                 // No provider: fall through to box_status, which attaches computerError
@@ -539,6 +555,38 @@ pub async fn box_control(
 
     // Answer with the box's real resulting state.
     box_status(state, args, caller).await
+}
+
+/// How long `ensureForeverBox` waits for a resumed box to be `running` before answering with
+/// whatever state it reached. A box.ascii.dev resume restores a snapshot onto a fresh machine
+/// (archived → provisioned → running in 10–15s live, bx_ncfmdpem, 2 Sep 2026); past this bound the
+/// client keeps polling `getForeverBoxStatus` instead. The desktop client puts no deadline on this
+/// call: `source/node-agent-coordinator/gateway/gateway-client.ts` `request()` fetches with only
+/// the caller's optional `init.signal`, and `foreverBoxStatusCommand` passes none; nothing on our
+/// side cuts it off either (no `TimeoutLayer` in the router).
+const WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long `ensureForeverBox` waits for the desktop URL once the box is up. `POST /desktop?vnc=1`
+/// answers `provisioning: true` (no URL) until noVNC is ready; a later status poll carries it.
+const SCREEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Poll the provider for a screen URL until one exists or `patience` is spent. The URL is not
+/// returned: `box_status` asks again (the call is idempotent) and reports it in the status shape.
+async fn wait_for_screen(
+    provider: &dyn opengrok_box::Computer,
+    box_id: &str,
+    patience: std::time::Duration,
+) {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(Some(_)) = provider.screen_url(box_id).await {
+            return;
+        }
+        if started.elapsed() >= patience {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// Provision (or re-provision) a coworker's box and PERSIST the re-assignment to its aggregate, so
@@ -767,9 +815,15 @@ pub(crate) async fn run_turn(
         finished: finished.clone(),
     };
 
-    let tools =
-        crate::agui::routes::tools_for_coworker(&state.agui, &account_id, &coworker_id, &[], &[])
-            .await;
+    let tools = crate::agui::routes::tools_for_coworker(
+        &state.agui,
+        &account_id,
+        &coworker_id,
+        &[],
+        &[],
+        crate::agui::routes::TURN_WAKE_PATIENCE,
+    )
+    .await;
     // Whether this turn can actually reach the user's machine — read from the offered schemas so
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
@@ -1538,6 +1592,7 @@ async fn resume_gateway_run(
         &coworker_id,
         gate_yes,
         review_yes,
+        crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await
     else {

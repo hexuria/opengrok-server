@@ -6,6 +6,12 @@
 //! THE FILESYSTEM PERSISTS ACROSS STOP AND RESUME. That is what makes this the right first
 //! computer: `stop` pauses billing and keeps the disk, so an agent's machine can sleep between
 //! turns and wake with its work intact — which is the difference between a coworker and a session.
+//!
+//! ASCII'S WORD FOR ASLEEP IS `archived`, NOT `stopped`. `POST /stop` and the TTL auto-stop both
+//! snapshot the disk and leave the box `archived` (`archiving` on the way there). `POST /resume`
+//! answers 202 with `provisioning`; the box is usable at `ready`/`idle`/`running`, and a command
+//! sent before that is a 409 `box_starting`. `Computer::wake` is the resume-and-wait; `resume`
+//! alone is only the request. Confirmed live 2 Sep 2026 against bx_ncfmdpem.
 
 use async_trait::async_trait;
 

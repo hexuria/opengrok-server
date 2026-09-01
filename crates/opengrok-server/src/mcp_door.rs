@@ -50,6 +50,12 @@ use rmcp::transport::streamable_http_server::tower::{
 use rmcp::{ErrorData as McpError, ServerHandler};
 
 use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
+
+/// How long an MCP call waits for a sleeping box before trying its command anyway. The MCP client
+/// (Claude Code) has its own request timeout, so this stays well under it; a box still starting
+/// answers the command with 409 `box_starting`, which reaches the caller as a truthful tool
+/// result it can retry, rather than a request that times out with nothing to show.
+const MCP_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
 use crate::gateway::GatewayState;
 use opengrok_core::CoworkerId;
 use opengrok_core::id::{AccountId, RunId};
@@ -181,6 +187,7 @@ impl McpDoor {
             &principal.coworker,
             &[],
             review_yes,
+            MCP_WAKE_PATIENCE,
         )
         .await
         {

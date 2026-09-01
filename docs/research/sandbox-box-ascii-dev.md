@@ -81,6 +81,19 @@ SDKs: Python `ascii-box-sdk`, TypeScript `@asciidev/box-sdk`
   snapshot and pauses billing; `resume` restarts; `fork` clones via fast disk snapshot. The
   **filesystem persists** across stop/resume and fork — it is VM-disk based, not container-ephemeral.
   `DELETE` is permanent.
+- **Sleep and wake, as observed live (bx_ncfmdpem, 2 Sep 2026):** the sleeping state is
+  `archived`, never `stopped` — both `POST /stop` and the TTL auto-stop snapshot the disk and leave
+  the box `archived` (`archiving` on the way there; `POST /stop` on a fresh box landed on `archived`
+  within seconds). `POST /resume` answers **202** with `status: resuming` and `box.state:
+  provisioning`; a single 202 is not a running box. `GET /boxes/{id}` then reads
+  `provisioning → provisioned → ready/idle/running` in about 10–15s. A command sent before
+  `ready` is refused **409 `box_starting`** (retryable). `POST /desktop?vnc=1` answers
+  `provisioning: true` with no URL until noVNC is up; the `desktopUrl` followed `running` by 5–6s.
+  Resuming a box that is already resuming is a 409; `archiving` cannot be resumed until it has
+  landed on `archived`. `opengrok_box::Computer::wake` encodes exactly this (resume once, poll
+  `state`, wait through `archiving`), and `ensureForeverBox` / a turn's `tools_for_coworker` use
+  it; `resume` alone is only the request. Resume counts as a machine start against the plan's
+  per-minute rate limit.
 - **Concurrency:** plan-gated, 100 → 1,500 concurrent boxes ($20/mo tier = 100 concurrent), with
   creation rate limits (e.g. 10/min, 50/hr, 150/day on the $20 plan).
   [billing.md](https://docs.ascii.dev/box/billing.md)

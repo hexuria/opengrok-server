@@ -72,6 +72,34 @@ impl BoxError {
 
 pub type BoxResult<T> = std::result::Result<T, BoxError>;
 
+/// A box that is off but can be brought back with `resume`: the disk is kept, nothing is running.
+/// Each provider has its own word for it — Docker says `exited`/`paused`/`created`, box.ascii.dev
+/// says `archived` (its auto-stop ARCHIVES; a box is never "stopped" there) — and a client that
+/// only knows one of them leaves the others sitting "This computer is archived." forever.
+pub fn is_asleep(state: &str) -> bool {
+    matches!(
+        state,
+        "stopped" | "paused" | "exited" | "created" | "archived"
+    )
+}
+
+/// A box on its way somewhere: not up yet, and not to be resumed again. box.ascii.dev answers
+/// `POST /resume` with 202 and `provisioning`, then `provisioned`/`ready` — a single 202 is not a
+/// running box, and a command sent before `ready` is refused with 409 `box_starting`. `archiving`
+/// is here too: a box mid-archive cannot be resumed until it has finished becoming `archived`.
+pub fn is_starting(state: &str) -> bool {
+    matches!(
+        state,
+        "provisioning"
+            | "provisioned"
+            | "init"
+            | "cloning"
+            | "restarting"
+            | "resuming"
+            | "archiving"
+    )
+}
+
 /// A computer a coworker can work on.
 #[async_trait]
 pub trait Computer: Send + Sync {
@@ -100,7 +128,53 @@ pub trait Computer: Send + Sync {
 
     /// Stop billing, keep the disk. `resume` brings the same filesystem back.
     async fn stop(&self, box_id: &str) -> BoxResult<()>;
+    /// Ask for the box back. This only STARTS a resume on providers that restore asynchronously;
+    /// use `wake` when the caller needs the box up.
     async fn resume(&self, box_id: &str) -> BoxResult<()>;
+
+    /// Bring a sleeping box up and WAIT for it: resume it if it is asleep, then poll `state` until
+    /// it is `running` (or gone, or in error, or `patience` is spent). Returns the last state seen,
+    /// so the caller checks for `"running"` rather than trusting that a resume was accepted — on
+    /// box.ascii.dev an accepted resume is a 202 and `provisioning`, and commands sent before the box
+    /// is `ready` are refused with 409 `box_starting`.
+    ///
+    /// A box already starting is not resumed again; a box mid-`archiving` is waited on and resumed
+    /// once it is `archived`. A resume refused while the provider already reports the box on its
+    /// way up is not an error. A transport error from `state` ends the wake with that error —
+    /// callers treat a wake as best-effort and go on to try the box — rather than retrying inside.
+    async fn wake(&self, box_id: &str, patience: std::time::Duration) -> BoxResult<String> {
+        let started = std::time::Instant::now();
+        let mut resumed = false;
+        let mut state = self.state(box_id).await?;
+        loop {
+            if state == "running" || state == "absent" || state == "error" {
+                return Ok(state);
+            }
+            if is_starting(&state) {
+                // On its way (or still archiving): nothing to send, only patience.
+            } else if is_asleep(&state) && !resumed {
+                match self.resume(box_id).await {
+                    Ok(()) => resumed = true,
+                    Err(error) => {
+                        // A second resume against a box that just accepted one is refused; the
+                        // state tells us whether that refusal matters.
+                        let now = self.state(box_id).await?;
+                        if is_asleep(&now) {
+                            return Err(error);
+                        }
+                        resumed = true;
+                        state = now;
+                        continue;
+                    }
+                }
+            }
+            if started.elapsed() >= patience {
+                return Ok(state);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            state = self.state(box_id).await?;
+        }
+    }
 
     /// Permanent. The disk goes with it.
     async fn destroy(&self, box_id: &str) -> BoxResult<()>;

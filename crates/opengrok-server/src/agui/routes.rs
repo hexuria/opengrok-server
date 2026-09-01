@@ -28,6 +28,11 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// How long a turn waits for a sleeping box to come up before running its first command anyway.
+/// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
+/// running took 10–15s live (bx_ncfmdpem, 2 Sep 2026); 90s leaves room for a slow restore.
+pub(crate) const TURN_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// What the endpoint needs: a way to reach a model, and which route to ask for.
 ///
 /// The door is a trait object so `OG_MODEL_DOOR=mock` swaps the whole model layer without the
@@ -75,12 +80,16 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
+/// `wake_patience` bounds how long a sleeping box is waited on before the first command is tried
+/// anyway: a turn can afford `TURN_WAKE_PATIENCE`; the MCP door, whose caller (Claude Code) has
+/// its own request timeout, passes a shorter one and lets the tool result say "still starting".
 pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     approved: &[String],
     review_approved: &[String],
+    wake_patience: std::time::Duration,
 ) -> Option<ToolRunner> {
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
@@ -105,11 +114,23 @@ pub(crate) async fn tools_for_coworker(
         .ok()
         .flatten()?;
     let computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
-    // Idle-stop: a box paused by the sweep is resumed before this turn runs (disk was kept, so it
-    // comes back where it was), and its last-used stamp is refreshed so the sweep leaves it running
-    // while it is in use. Best-effort — a resume failure still lets the turn try.
-    if stopped && let Err(error) = computer.resume(&box_id).await {
-        tracing::warn!(%error, box_id, "could not resume an idle-stopped box; the turn may fail");
+    // A sleeping box is woken before this turn runs (disk was kept, so it comes back where it was),
+    // and its last-used stamp is refreshed so the sweep leaves it running while it is in use. Ask
+    // the provider rather than trusting our `stopped` flag: box.ascii.dev archives a box on its own
+    // TTL, and that box is `archived` with our flag still clear. `wake` also WAITS — a resumed ascii
+    // box is `provisioning` for a while and refuses commands (409 `box_starting`) until `ready`.
+    // Best-effort — a wake failure still lets the turn try.
+    let live = computer.state(&box_id).await.ok();
+    if stopped || live.as_deref() != Some("running") {
+        match computer.wake(&box_id, wake_patience).await {
+            Ok(reached) if reached != "running" => {
+                tracing::warn!(box_id, state = %reached, "the box did not come up in time; the turn may fail");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
+            }
+        }
     }
     let _ = state
         .auth
@@ -1037,7 +1058,15 @@ pub async fn run(
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
             Some(coworker_id) => {
-                tools_for_coworker(&state, account_id, coworker_id, &[], &[]).await
+                tools_for_coworker(
+                    &state,
+                    account_id,
+                    coworker_id,
+                    &[],
+                    &[],
+                    TURN_WAKE_PATIENCE,
+                )
+                .await
             }
             None => None,
         },
@@ -1512,8 +1541,15 @@ async fn continue_run(
         }
         _ => (std::slice::from_ref(&approved.call_id), &[]),
     };
-    let Some(runner) =
-        tools_for_coworker(&state, &account_id, &coworker_id, gate_yes, review_yes).await
+    let Some(runner) = tools_for_coworker(
+        &state,
+        &account_id,
+        &coworker_id,
+        gate_yes,
+        review_yes,
+        TURN_WAKE_PATIENCE,
+    )
+    .await
     else {
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
