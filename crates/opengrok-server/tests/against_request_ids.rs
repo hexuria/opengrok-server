@@ -112,6 +112,38 @@ async fn every_response_carries_a_request_id_the_callers_or_a_fresh_one() {
         Some("desk-0x1f")
     );
 
+    // An id that is too long, or not visible ASCII, is not kept: a fresh UUID is minted so a
+    // hostile value never reaches the log.
+    for bad in [&"x".repeat(129), "has space"] {
+        let res = client
+            .get(format!("{base}/health"))
+            .header("x-request-id", bad)
+            .send()
+            .await
+            .expect("health");
+        let echoed = res
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .expect("an id is always answered")
+            .to_string();
+        assert_ne!(echoed, bad);
+        uuid::Uuid::parse_str(&echoed).expect("a replaced id is a UUID");
+    }
+    let res = client
+        .get(format!("{base}/health"))
+        .header("x-request-id", "y".repeat(128))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(
+        res.headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("y".repeat(128).as_str()),
+        "128 visible ASCII is the limit, inclusive"
+    );
+
     // A refused request still answers with the id: the refusal is what you want to find.
     let res = client
         .get(format!("{base}/events"))

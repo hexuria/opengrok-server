@@ -65,6 +65,35 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .layer(tower_http::request_id::SetRequestIdLayer::x_request_id(
             tower_http::request_id::MakeRequestUuid,
         ))
+        .layer(axum::middleware::from_fn(bound_request_id))
+}
+
+/// The longest client-supplied request id we keep. A UUID is 36; the desktop's are shorter. Past
+/// this the header is dropped before `SetRequestId` sees it, so a fresh id is minted instead —
+/// the id lands on every log line the request touches, and an 8 KB value there is a nuisance
+/// even though `HeaderValue` already rules out control characters.
+const REQUEST_ID_MAX: usize = 128;
+
+/// Runs OUTSIDE `SetRequestId` (added last): strips an `X-Request-Id` that is too long or not
+/// visible ASCII, so the layer below mints one.
+async fn bound_request_id(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let keep = req
+        .headers()
+        .get("x-request-id")
+        .map(|value| {
+            let bytes = value.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= REQUEST_ID_MAX
+                && bytes.iter().all(|b| b.is_ascii_graphic())
+        })
+        .unwrap_or(true);
+    if !keep {
+        req.headers_mut().remove("x-request-id");
+    }
+    next.run(req).await
 }
 
 /// The request id the layer above put on the request — or `-` when the layer is not mounted
