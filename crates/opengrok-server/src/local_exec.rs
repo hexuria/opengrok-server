@@ -81,7 +81,7 @@ fn matches(pattern: &str, command: &str) -> bool {
 /// `C:\Windows\System32\sudo.exe`). Used only to decide whether a standing
 /// allow is forbidden; matching at run time is still `matches` above.
 fn first_command(pattern: &str) -> &str {
-    let token = pattern.trim().split_whitespace().next().unwrap_or("");
+    let token = pattern.split_whitespace().next().unwrap_or("");
     token.rsplit(['/', '\\']).next().unwrap_or(token)
 }
 
@@ -601,7 +601,8 @@ pub async fn enqueue_and_wait(
     approval_id: &str,
     pre_approved: bool,
 ) -> EnqueueResult {
-    let policy = load_effective_policy(&state.store, &state.local_exec, account_id, machine_id).await;
+    let policy =
+        load_effective_policy(&state.store, &state.local_exec, account_id, machine_id).await;
     let decision = decide(&policy, command);
     let request_id = uuid::Uuid::now_v7().to_string();
     let origin_label = origin.label();
@@ -1107,7 +1108,9 @@ mod tests {
         assert!(!prefer_session_allow("uname"));
         assert!(prefer_session_allow("cd src && cargo test"));
         assert!(prefer_session_allow("git log | head"));
-        assert!(prefer_session_allow(&"x".repeat(STANDING_ALLOW_MAX_BYTES + 1)));
+        assert!(prefer_session_allow(
+            &"x".repeat(STANDING_ALLOW_MAX_BYTES + 1)
+        ));
     }
 
     #[test]
