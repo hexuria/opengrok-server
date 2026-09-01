@@ -284,6 +284,23 @@ create table if not exists bot_key_view (
 );
 create index if not exists bot_key_account_idx on bot_key_view (account_id);
 
+-- Gateway keys: which open-ai-gateway key belongs to which org member. The SECRET IS NOT HERE —
+-- the gateway holds its hash and we show the plaintext once, exactly like a bot key. This row is
+-- attribution: it is what lets the console list an org's keys without reading every key in the
+-- gateway, and what tells us whose key an id is before we ask the gateway to revoke it.
+-- `revoked` mirrors the gateway's own flag; the gateway remains the authority on whether a key
+-- still authenticates.
+create table if not exists gateway_key_view (
+    key_id            text    primary key,
+    org_id            text    not null,
+    member_account_id text    not null,
+    key_prefix        text    not null,
+    label             text    not null,
+    revoked           boolean not null default false,
+    created_at_ms     bigint  not null
+);
+create index if not exists gateway_key_org_idx on gateway_key_view (org_id);
+
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
 -- and colour). A wire-format projection like gateway_entry: the client is the only reader.
 create table if not exists seamb_profile (
