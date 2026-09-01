@@ -34,7 +34,9 @@ jobs:
       PGPASSWORD: oag
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The version comes from rust-toolchain.toml — the same compiler a developer runs. `@stable`
+      # floated ahead of every desk and failed the gate on lints nobody could reproduce locally.
+      - uses: dtolnay/rust-toolchain@1.95
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
