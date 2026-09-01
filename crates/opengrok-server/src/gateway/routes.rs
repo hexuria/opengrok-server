@@ -149,6 +149,22 @@ async fn events(
         .filter(|raw| !raw.trim().is_empty())
         .map(|raw| raw.split(',').map(|name| name.trim().to_string()).collect());
     let subscriber = state.events_tx.subscribe();
+    // Connect and disconnect are logged with the request id and the live subscriber count, so
+    // "was the stream up at 03:16, and for whom" is one grep. The guard rides in the stream's
+    // state and logs when the body is dropped — which is how a client going away shows up here;
+    // there is no other signal.
+    let guard = StreamGuard {
+        id: crate::request_id(&headers),
+        channels: query.channels.clone().unwrap_or_default(),
+        tx: state.events_tx.clone(),
+        opened: std::time::Instant::now(),
+    };
+    tracing::info!(
+        id = %guard.id,
+        channels = %guard.channels,
+        subscribers = state.events_tx.receiver_count(),
+        "events: stream opened"
+    );
 
     // The opening: the mandatory retry line, then a complete roster snapshot so a reconnecting
     // client is seeded before its own listAgents lands.
@@ -165,11 +181,13 @@ async fn events(
     let opening =
         stream::once(async move { Ok::<_, Infallible>(format!("retry: 1000\n\n{snapshot}")) });
 
-    let live = stream::unfold(subscriber, |mut subscriber| async move {
+    // State is `(subscriber, guard)` in that order on purpose: tuple fields drop in order, so the
+    // receiver is gone before the guard counts what is left.
+    let live = stream::unfold((subscriber, guard), |(mut subscriber, guard)| async move {
         loop {
             match subscriber.recv().await {
                 Ok((channel, payload)) => {
-                    return Some((Ok::<_, Infallible>((channel, payload)), subscriber));
+                    return Some((Ok::<_, Infallible>((channel, payload)), (subscriber, guard)));
                 }
                 // Lagged: frames were dropped for this slow subscriber. Keep going — the client
                 // resyncs from sequence gaps; that is what the ordered stamps are for.
@@ -196,6 +214,26 @@ async fn events(
         axum::body::Body::from_stream(opening.chain(futures::stream::select(live, pings))),
     )
         .into_response()
+}
+
+/// Logs the close of one `/events` stream when the body it rides in is dropped.
+struct StreamGuard {
+    id: String,
+    channels: String,
+    tx: tokio::sync::broadcast::Sender<(String, Value)>,
+    opened: std::time::Instant,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        tracing::info!(
+            id = %self.id,
+            channels = %self.channels,
+            subscribers = self.tx.receiver_count(),
+            open_secs = self.opened.elapsed().as_secs(),
+            "events: stream closed"
+        );
+    }
 }
 
 /// One SSE data frame in the `{channel, payload}` envelope — or nothing, when the subscriber

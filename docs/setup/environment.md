@@ -67,6 +67,6 @@ literals), and a variable that exists in code but not here is a documentation bu
 | Variable | What it is |
 |---|---|
 | `RUST_LOG` | tracing filter, e.g. `opengrok=debug,opengrok_server=debug,opengrok_harness=debug` |
-| `OG_TRACE_REQUESTS` | `1` logs every request path/status — for driving the client end to end; off by default |
+| `OG_TRACE_REQUESTS` | **on by default**: one INFO line per request (method, path, status, ms, request id, Origin presence, bearer *length*, never its value), plus `/events` stream open/close with the subscriber count. `0` turns it off. Every request carries an `X-Request-Id` — the client's if it sent one, a UUID otherwise — echoed on the response and stamped on every log line the handler writes |
 
 Retired: `SAND_GATEWAY_TOKEN` is read by nothing — the client bearer is `OG_GATEWAY_BEARER`.
