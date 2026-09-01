@@ -333,6 +333,11 @@ impl Org {
                 if domains.is_empty() {
                     return Err(OrgError::NoDomains);
                 }
+                // The shell vouches for these, but a typo is still a typo: refuse it loudly at
+                // bootstrap rather than store a domain no email can ever match.
+                if domains.iter().any(|d| !is_domain_name(d)) {
+                    return Err(OrgError::InvalidDomain);
+                }
                 Ok(vec![OrgEvent::Created {
                     name,
                     admin,
@@ -581,6 +586,19 @@ mod tests {
                 at_ms: 4,
             }),
             Err(OrgError::DomainNotClaimed)
+        ));
+    }
+
+    #[test]
+    fn creating_an_org_refuses_a_domain_that_is_not_one() {
+        assert!(matches!(
+            Org::default().decide(OrgCommand::Create {
+                name: "Acme".to_string(),
+                admin: AccountId::from_stored("acct_admin"),
+                domains: vec!["acme.com".to_string(), "not a domain".to_string()],
+                at_ms: 1,
+            }),
+            Err(OrgError::InvalidDomain)
         ));
     }
 

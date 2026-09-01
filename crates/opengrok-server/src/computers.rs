@@ -43,7 +43,7 @@ pub fn router(state: AgUiState) -> Router {
 
 /// `GET /admin/computers` — which org-configurable kinds are set up. Secrets never appear here.
 async fn status(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -83,7 +83,7 @@ async fn set(
     Path(kind): Path<String>,
     Json(body): Json<SetCredential>,
 ) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -133,7 +133,7 @@ async fn test(
     headers: HeaderMap,
     Path(kind): Path<String>,
 ) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -210,7 +210,7 @@ struct SetMode {
 
 /// `GET /admin/computers/mode` — the org's default sharing mode (built-in default: per-account).
 async fn get_mode(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -231,7 +231,7 @@ async fn set_mode(
     headers: HeaderMap,
     Json(body): Json<SetMode>,
 ) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -327,7 +327,7 @@ async fn clear(
     headers: HeaderMap,
     Path(kind): Path<String>,
 ) -> Response {
-    let (org_id, _) = match admin_org(&state.auth, &headers).await {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };

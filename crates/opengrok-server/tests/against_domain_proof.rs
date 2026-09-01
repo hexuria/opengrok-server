@@ -209,7 +209,7 @@ async fn a_claimed_domain_admits_nobody_until_its_txt_record_resolves() {
     let store = store_from(&database_url).await;
     let stamp = uuid::Uuid::now_v7().simple().to_string();
     let vouched = format!("acme-{stamp}.test");
-    let (_, admin_email) = seed_org(&store, &vouched, "adminpass1").await;
+    let (org_id, admin_email) = seed_org(&store, &vouched, "adminpass1").await;
 
     let dns = Arc::new(StaticDns::new());
     let lookup: Arc<dyn TxtLookup> = dns.clone();
@@ -410,6 +410,32 @@ async fn a_claimed_domain_admits_nobody_until_its_txt_record_resolves() {
         .await
         .expect("withdraw again");
     assert_eq!(res.status(), 404);
+
+    // Two admins at once: a write decided against a stale org is refused by the store, which is
+    // what stops a second concurrent claim from silently replacing the first admin's token.
+    let (org, stale_seq) = store.load_org(&org_id).await.expect("load");
+    let events = org
+        .decide(OrgCommand::ClaimDomain {
+            domain: format!("race-{stamp}.test"),
+            token: "dv_first".to_string(),
+            at_ms: now_ms(),
+        })
+        .expect("claim");
+    let mut first = org.clone();
+    for event in &events {
+        first.apply(event);
+    }
+    store
+        .append_org(&org_id, stale_seq, &events, &first, now_ms())
+        .await
+        .expect("the first writer lands");
+    let second = store
+        .append_org(&org_id, stale_seq, &events, &first, now_ms())
+        .await;
+    assert!(
+        matches!(second, Err(opengrok_store::StoreError::Conflict)),
+        "the second writer at the same seq must conflict: {second:?}"
+    );
 
     // No resolver bound: the claim stands, the check is 503 — never a false "not there".
     let (bare, _) = app_with(store.clone(), b"domain-proof-secret", None);

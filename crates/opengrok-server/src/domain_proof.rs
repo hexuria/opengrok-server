@@ -15,7 +15,6 @@
 //! before comparison, which is how every other verifier reads them and what a DNS host shows.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -125,7 +124,7 @@ pub enum ProofOutcome {
     Unavailable(String),
 }
 
-pub async fn check(dns: &Arc<dyn TxtLookup>, domain: &str, token: &str) -> ProofOutcome {
+pub async fn check(dns: &dyn TxtLookup, domain: &str, token: &str) -> ProofOutcome {
     let name = opengrok_core::org::challenge_record_name(domain);
     match dns.txt(&name).await {
         Ok(values) if opengrok_core::org::challenge_satisfied(token, &values) => {

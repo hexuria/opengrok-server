@@ -95,7 +95,7 @@ async fn start_reset(state: &AuthState, email: &str) {
     let link = format!("{}/reset-password?token={token}", state.public_url);
     tokio::spawn(async move {
         let sent = super::resend::send_password_reset(&key, &view.email, &link).await;
-        tracing::info!(email = %view.email, sent, "password reset requested");
+        tracing::info!(account = %view.id, sent, "password reset requested");
     });
 }
 

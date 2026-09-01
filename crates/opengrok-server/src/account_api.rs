@@ -305,11 +305,14 @@ pub(crate) async fn persist(
 
 // ---- Admin: the org's admin manages its users ----
 
-/// The caller's org and a confirmation they are its admin — or a refusal.
+/// The caller's org, the seq it was loaded at, and a confirmation they are its admin — or a
+/// refusal. The seq travels with the org so a write decided against THIS state appends at THIS
+/// seq: two admins acting at once cannot both pass `decide` and both land, because the second
+/// append conflicts and is told to retry.
 pub async fn admin_org(
     state: &AuthState,
     headers: &axum::http::HeaderMap,
-) -> Result<(OrgId, opengrok_core::org::Org), Response> {
+) -> Result<(OrgId, opengrok_core::org::Org, i64), Response> {
     let (id, account, _) = caller(state, headers).await?;
     let Some(org_id) = account
         .org_id
@@ -318,7 +321,7 @@ pub async fn admin_org(
     else {
         return Err((StatusCode::FORBIDDEN, "you are not in an organization").into_response());
     };
-    let Ok((org, _)) = state.store.load_org(&org_id).await else {
+    let Ok((org, org_seq)) = state.store.load_org(&org_id).await else {
         return Err((StatusCode::NOT_FOUND, "no such organization").into_response());
     };
     if org.admin.as_ref() != Some(&id) {
@@ -329,12 +332,12 @@ pub async fn admin_org(
         )
             .into_response());
     }
-    Ok((org_id, org))
+    Ok((org_id, org, org_seq))
 }
 
 /// `GET /admin/users` — the org's members with their state.
 async fn list_users(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -417,15 +420,10 @@ async fn disable_user(
 /// `POST /admin/invites` — issue a code, and hand back both the code and a paste-or-click signup
 /// link. No expiry, single-use, no seat limit (all v1 decisions).
 async fn issue_invite(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (org_id, org) = match admin_org(&state, &headers).await {
-        Ok(pair) => pair,
+    let (org_id, org, org_seq) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
         Err(refusal) => return refusal,
     };
-    let (_, _, seq) = match caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
-    let _ = seq;
     let code = format!("inv_{}", uuid::Uuid::now_v7().simple());
     let at_ms = now_ms();
     let events = match org.decide(OrgCommand::IssueInvite {
@@ -435,25 +433,8 @@ async fn issue_invite(State(state): State<AuthState>, headers: axum::http::Heade
         Ok(events) => events,
         Err(reason) => return (StatusCode::CONFLICT, reason.to_string()).into_response(),
     };
-    let mut after = org;
-    for event in &events {
-        after.apply(event);
-    }
-    // The org's own seq — reload to append correctly.
-    let Ok((_, org_seq)) = state.store.load_org(&org_id).await else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "org unavailable").into_response();
-    };
-    if state
-        .store
-        .append_org(&org_id, org_seq, &events, &after, at_ms)
-        .await
-        .is_err()
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not issue the invite",
-        )
-            .into_response();
+    if let Err(refusal) = append_org_events(&state, &org_id, org, org_seq, &events).await {
+        return refusal;
     }
     // The link the admin can send: the signup page with the code prefilled. Bare code included so
     // they can also just paste it, exactly as Uriah asked.
@@ -467,7 +448,7 @@ async fn issue_invite(State(state): State<AuthState>, headers: axum::http::Heade
 
 /// `GET /admin/invites` — the org's outstanding codes and their state.
 async fn list_invites(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (_, org) = match admin_org(&state, &headers).await {
+    let (_, org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -508,28 +489,36 @@ fn domain_json(domain: &str, pending_token: Option<&str>) -> Value {
     }
 }
 
-/// Decide against the org, apply, and append at its current seq. Reloads for the seq the same
-/// way `issue_invite` does — `admin_org` proves authority, this proves ordering.
+/// Apply events to the org and append them at `org_seq` — the seq the org was LOADED at, from
+/// `admin_org`. Not a fresh reload: the decision was made against that state, and appending at a
+/// later seq would let two concurrent writers both pass `decide` and both land (the second
+/// domain claim would silently replace the first admin's token). A stale seq is the store's
+/// `Conflict`, answered 409 so the caller reloads and tries again.
 async fn append_org_events(
     state: &AuthState,
     org_id: &OrgId,
     org: opengrok_core::org::Org,
+    org_seq: i64,
     events: &[opengrok_core::org::OrgEvent],
 ) -> Result<opengrok_core::org::Org, Response> {
     let mut after = org;
     for event in events {
         after.apply(event);
     }
-    let Ok((_, org_seq)) = state.store.load_org(org_id).await else {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "org unavailable").into_response());
-    };
     state
         .store
         .append_org(org_id, org_seq, events, &after, now_ms())
         .await
-        .map_err(|error| {
-            tracing::error!(%error, "could not persist an org change");
-            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        .map_err(|error| match error {
+            opengrok_store::StoreError::Conflict => (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "another change to the organization landed first; reload and retry" })),
+            )
+                .into_response(),
+            other => {
+                tracing::error!(error = %other, "could not persist an org change");
+                (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+            }
         })?;
     Ok(after)
 }
@@ -537,7 +526,7 @@ async fn append_org_events(
 /// `GET /admin/domains` — verified domains and pending claims, each pending one with the exact
 /// TXT record to publish.
 async fn list_domains(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (_, org) = match admin_org(&state, &headers).await {
+    let (_, org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -565,8 +554,8 @@ async fn claim_domain(
     headers: axum::http::HeaderMap,
     Json(claim): Json<DomainClaim>,
 ) -> Response {
-    let (org_id, org) = match admin_org(&state, &headers).await {
-        Ok(pair) => pair,
+    let (org_id, org, org_seq) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
         Err(refusal) => return refusal,
     };
     let token = {
@@ -592,7 +581,7 @@ async fn claim_domain(
             return (status, Json(json!({ "error": reason.to_string() }))).into_response();
         }
     };
-    match append_org_events(&state, &org_id, org, &events).await {
+    match append_org_events(&state, &org_id, org, org_seq, &events).await {
         Ok(_) => (
             StatusCode::CREATED,
             Json(domain_json(&domain, Some(&token))),
@@ -609,8 +598,8 @@ async fn verify_domain(
     headers: axum::http::HeaderMap,
     Path(domain): Path<String>,
 ) -> Response {
-    let (org_id, org) = match admin_org(&state, &headers).await {
-        Ok(pair) => pair,
+    let (org_id, org, org_seq) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
         Err(refusal) => return refusal,
     };
     let domain = opengrok_core::org::normalize_domain(&domain);
@@ -625,7 +614,7 @@ async fn verify_domain(
             .into_response();
     };
     use crate::domain_proof::ProofOutcome;
-    match crate::domain_proof::check(&state.dns, &domain, &token).await {
+    match crate::domain_proof::check(state.dns.as_ref(), &domain, &token).await {
         ProofOutcome::Proven => {}
         ProofOutcome::NotFound(reason) => {
             return (StatusCode::CONFLICT, Json(json!({ "error": reason }))).into_response();
@@ -651,7 +640,7 @@ async fn verify_domain(
                 .into_response();
         }
     };
-    match append_org_events(&state, &org_id, org, &events).await {
+    match append_org_events(&state, &org_id, org, org_seq, &events).await {
         Ok(_) => {
             tracing::info!(org = %org_id, domain, "domain ownership proven by DNS");
             Json(domain_json(&domain, None)).into_response()
@@ -667,8 +656,8 @@ async fn withdraw_domain(
     headers: axum::http::HeaderMap,
     Path(domain): Path<String>,
 ) -> Response {
-    let (org_id, org) = match admin_org(&state, &headers).await {
-        Ok(pair) => pair,
+    let (org_id, org, org_seq) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
         Err(refusal) => return refusal,
     };
     let events = match org.decide(OrgCommand::WithdrawDomainClaim {
@@ -684,7 +673,7 @@ async fn withdraw_domain(
                 .into_response();
         }
     };
-    match append_org_events(&state, &org_id, org, &events).await {
+    match append_org_events(&state, &org_id, org, org_seq, &events).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(refusal) => refusal,
     }
@@ -746,7 +735,7 @@ async fn list_gateway_keys(
     State(state): State<AuthState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -793,7 +782,7 @@ async fn mint_gateway_key(
     headers: axum::http::HeaderMap,
     Json(request): Json<MintKeyRequest>,
 ) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -881,7 +870,7 @@ async fn revoke_gateway_key(
     headers: axum::http::HeaderMap,
     Path(key_id): Path<String>,
 ) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -937,7 +926,7 @@ async fn set_gateway_key_quota(
     Path(key_id): Path<String>,
     Json(request): Json<QuotaRequest>,
 ) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -974,7 +963,7 @@ async fn set_gateway_budget(
     headers: axum::http::HeaderMap,
     Json(request): Json<BudgetRequest>,
 ) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
@@ -1001,7 +990,7 @@ async fn set_gateway_budget(
 
 /// `GET /admin/gateway/usage` — the org's budget and month-to-date spend, read live.
 async fn gateway_usage(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
-    let (org_id, _org) = match admin_org(&state, &headers).await {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
