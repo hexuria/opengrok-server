@@ -372,9 +372,10 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 ## Later — unordered, deliberately
 
-- [ ] Commands: `goal`, `plan`, `review`.
-- [ ] Per-coworker model pins — investigated, not implemented; the dialect/default/surfaces
-  decision is written up in `plan-coworker-model-pins.md` and awaits an adversarial pass.
+- [ ] Commands: `goal`, `plan`, `review`. Parked: the packaged app's `sendPrompt` has no
+  `mode` field and no Plan-mode picker (`docs/verification/plan-mode-wire/`). Honouring
+  one here would invent a contract. A client composer control is the prerequisite.
+  Auto-review (the consent judge) is a different product and already shipped.
 - [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
   `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
 - [ ] Channels / multi-party rooms (phases 3–4 of `archive/plan-bots-computers-channels.md`) —

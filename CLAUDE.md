@@ -71,7 +71,7 @@ crates/
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
   opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
-  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability; goal/plan/review behaviours
+  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
   opengrok-box      the coworker's computer — a trait; box.ascii.dev first, cua and Docker later
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do

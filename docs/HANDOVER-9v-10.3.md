@@ -218,9 +218,11 @@ If `account_id` is null → the header did not bind. Check the vault value liter
 
 In the order I'd take them:
 
-1. **The `goal` / `plan` / `review` commands** — the highest-leverage unbuilt feature. The harness
-   behaviours already exist in `opengrok-harness`; this slice wires them to the client's command
-   surface. (`docs/ROADMAP.md` → "Later".)
+1. **The `goal` / `plan` / `review` commands** — parked. The harness does **not** already
+   have these behaviours (`review.rs` is the auto-review judge). The packaged app's
+   `sendPrompt` has no `mode` and no Plan-mode picker
+   (`docs/verification/plan-mode-wire/`). A client composer control is the prerequisite;
+   honouring a field we invented would break CLAUDE.md #1.
 2. **Deferred hardening**, all deliberately parked, none urgent:
    - `18.later` — a run resumed after an approval picks up the coworker's *current* pin, not the
      one its turn started on (straight-through turns ARE stable). Fixing it means storing the pin
