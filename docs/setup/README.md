@@ -11,6 +11,7 @@ a bug in the docs — fix the doc in the same commit as whatever you learned.
 | 3 | [`running.md`](running.md) | `curl http://127.0.0.1:1447/health` answers `{"ok":true,…}` |
 | 4 | [`gate.md`](gate.md) | `scripts/gate.sh --smoke` passes end to end |
 | 5 | [`desktop-client.md`](desktop-client.md) | the packaged app boots against your server in OpenGrok server mode |
+| 6 | [`tls.md`](tls.md) | (only for the MCP door's OAuth) `curl https://<lan>:1448/health` answers through Caddy with a trusted certificate |
 
 Prerequisites, once per machine: a Rust toolchain (edition 2024), Docker Desktop (for the dev
 Postgres and local-Docker computers), `psql`, `jq`, and — only for desktop-client work — the
