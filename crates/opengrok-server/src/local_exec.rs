@@ -41,6 +41,9 @@ pub struct LocalExecPolicy {
     /// Command patterns that auto-DENY under `Ask` (added on demand: "always deny").
     #[serde(default)]
     pub deny: Vec<String>,
+    /// Allows that live only in this process. Dropped on restart. Not in GET /policy.
+    #[serde(default, skip)]
+    pub session_allow: Vec<String>,
 }
 
 /// The gate's verdict for one command.
@@ -107,7 +110,8 @@ pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> 
 ///
 /// - `Never` (default): deny, always.
 /// - `Bypass`: allow (the lists are skipped by the user's deliberate choice; still audited).
-/// - `Ask`: a denylist match denies (deny wins), else an allowlist match allows, else ask.
+/// - `Ask`: a denylist match denies (deny wins), else an allowlist *or session
+///   allow* match allows, else ask.
 pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     match policy.mode {
         LocalExecMode::Never => LocalExecDecision::Deny(
@@ -117,13 +121,29 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
         LocalExecMode::Ask => {
             if policy.deny.iter().any(|pattern| matches(pattern, command)) {
                 LocalExecDecision::Deny("a deny rule matched this command".to_string())
-            } else if policy.allow.iter().any(|pattern| matches(pattern, command)) {
+            } else if policy
+                .allow
+                .iter()
+                .chain(policy.session_allow.iter())
+                .any(|pattern| matches(pattern, command))
+            {
                 LocalExecDecision::Allow
             } else {
                 LocalExecDecision::Ask
             }
         }
     }
+}
+
+/// Postgres btree keys blow up past roughly 2,700 bytes, and the insert is
+/// discarded (`let _ =`). Long or chained commands belong in the session list.
+pub const STANDING_ALLOW_MAX_BYTES: usize = 1800;
+
+pub fn prefer_session_allow(command: &str) -> bool {
+    command.len() > STANDING_ALLOW_MAX_BYTES
+        || command.contains(" && ")
+        || command.contains(" || ")
+        || command.contains(" | ")
 }
 
 impl LocalExecMode {
@@ -168,7 +188,24 @@ pub async fn load_policy(
         .local_exec_rules(account_id, machine_id, "deny")
         .await
         .unwrap_or_default();
-    LocalExecPolicy { mode, allow, deny }
+    LocalExecPolicy {
+        mode,
+        allow,
+        deny,
+        session_allow: Vec::new(),
+    }
+}
+
+/// Persisted policy plus this process's session allows.
+pub async fn load_effective_policy(
+    store: &opengrok_store::PgStore,
+    broker: &LocalExecBroker,
+    account_id: &str,
+    machine_id: &str,
+) -> LocalExecPolicy {
+    let mut policy = load_policy(store, account_id, machine_id).await;
+    policy.session_allow = broker.session_allows(account_id, machine_id).await;
+    policy
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -564,7 +601,7 @@ pub async fn enqueue_and_wait(
     approval_id: &str,
     pre_approved: bool,
 ) -> EnqueueResult {
-    let policy = load_policy(&state.store, account_id, machine_id).await;
+    let policy = load_effective_policy(&state.store, &state.local_exec, account_id, machine_id).await;
     let decision = decide(&policy, command);
     let request_id = uuid::Uuid::now_v7().to_string();
     let origin_label = origin.label();
@@ -912,7 +949,13 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
         account_id: &opengrok_core::id::AccountId,
         command: &str,
     ) -> opengrok_tools::UserMachineVerdict {
-        let policy = load_policy(&self.auth.store, account_id.as_str(), &self.machine_id).await;
+        let policy = load_effective_policy(
+            &self.auth.store,
+            &self.auth.local_exec,
+            account_id.as_str(),
+            &self.machine_id,
+        )
+        .await;
         match decide(&policy, command) {
             LocalExecDecision::Allow => opengrok_tools::UserMachineVerdict::Allow,
             LocalExecDecision::Ask => opengrok_tools::UserMachineVerdict::Ask,
@@ -973,6 +1016,7 @@ mod tests {
             mode,
             allow: allow.iter().map(|s| s.to_string()).collect(),
             deny: deny.iter().map(|s| s.to_string()).collect(),
+            session_allow: Vec::new(),
         }
     }
 
@@ -1042,6 +1086,28 @@ mod tests {
         assert_eq!(standing_rule_refusal("allow", "sudoedit"), None);
         assert_eq!(standing_rule_refusal("allow", "echo sudo"), None);
         assert_eq!(standing_rule_refusal("allow", "uname"), None);
+    }
+
+    #[test]
+    fn session_allow_runs_under_ask_and_dies_with_the_struct() {
+        let mut p = policy(LocalExecMode::Ask, &[], &[]);
+        p.session_allow = vec!["git status".into()];
+        assert_eq!(decide(&p, "git status --short"), LocalExecDecision::Allow);
+        assert_eq!(decide(&p, "git log"), LocalExecDecision::Ask);
+        let mut denied = p.clone();
+        denied.deny = vec!["git".into()];
+        assert!(matches!(
+            decide(&denied, "git status"),
+            LocalExecDecision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn long_or_chained_commands_prefer_the_session_list() {
+        assert!(!prefer_session_allow("uname"));
+        assert!(prefer_session_allow("cd src && cargo test"));
+        assert!(prefer_session_allow("git log | head"));
+        assert!(prefer_session_allow(&"x".repeat(STANDING_ALLOW_MAX_BYTES + 1)));
     }
 
     #[test]
