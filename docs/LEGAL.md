@@ -2,6 +2,12 @@
 
 Read this before writing code that touches the client contract. It is short on purpose.
 
+> **Status, 1 Sep 2026: the operator made this repository public before the rights review.**
+> A deliberate operator decision, recorded here rather than smoothed over: the sections below
+> were written assuming private-until-reviewed, and the review is now *outstanding against a
+> published repo* — more urgent, not less. Everything else on this page still binds: no vendored
+> stubs, transcription with provenance, no third-party marks in product surfaces.
+
 ---
 
 ## The situation
@@ -55,7 +61,8 @@ here and therefore cannot be and is not copied.
 4. **No redistribution before review.** `NOTICE.md` requires an independent rights review before
    publishing or distributing. Therefore:
 
-> **OpenGrok stays private until a rights review clears it.**
+> **OpenGrok was intended to stay private until a rights review cleared it.** The operator
+> published it on 1 Sep 2026 with the review still outstanding (see the status note at the top).
 > Nothing in `docs/PLAN.md` depends on publishing. If publication becomes a goal, the review is a
 > prerequisite task, not a formality — and the two candidates for review are the client
 > reconstruction itself and this contract implementation.

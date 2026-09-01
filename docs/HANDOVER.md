@@ -22,7 +22,7 @@ mode), 10.3 (one browser send from barok-works), 12.later, and the "Later" bucke
 
 [`setup/`](setup/README.md), in order: prerequisites → postgres → environment → running → gate
 → desktop-client. `scripts/serve.sh` builds and (re)starts the dev server from `.env`;
-`scripts/gate.sh --smoke` is the merge gate (CI is red from a billing hole and is not a signal).
+`scripts/gate.sh --smoke` is the merge gate, and CI runs the same script since the repo went public (1 Sep 2026).
 
 ## Decisions already made — do not relitigate
 

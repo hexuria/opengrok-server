@@ -1,9 +1,12 @@
 # The gate
 
-`scripts/gate.sh` runs everything CI runs, in the same order, because CI is not always
-available — and right now it is not: **GitHub Actions is red from an account-billing hole, and
-CI red is not a merge signal either way. The local gate is the gate.** Nothing merges on a red
-`scripts/gate.sh --smoke`.
+`scripts/gate.sh` runs everything CI runs — literally: since 1 Sep 2026 the workflow calls
+this script instead of re-listing its steps, so the two cannot drift. The local run is the
+pre-push ritual; CI is the public record. Nothing merges on a red `scripts/gate.sh --smoke`,
+local or CI. (Two portability lessons are baked in: CI pins the same toolchain as
+`rust-toolchain.toml` — a floating @stable failed lints nobody could reproduce at a desk — and
+the smokes reach Postgres via a local `psql` when there is one, the dev container only as a
+fallback.)
 
 ## Running it
 

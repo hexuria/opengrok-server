@@ -337,7 +337,9 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 ## Blocked on the operator, not on code
 
-- [ ] GitHub Actions CI — billing. `scripts/gate.sh --smoke` is the gate meanwhile.
-- [ ] Rights review → publication (LEGAL.md; the repo stays private until then).
+- [x] GitHub Actions CI — resolved 1 Sep 2026 by the repo going public: the workflow now runs
+  `scripts/gate.sh --smoke` itself, green. *(this commit)*
+- [ ] **Rights review — now OVERDUE rather than blocking**: the operator published the repo on
+  1 Sep 2026 with the review still outstanding (`LEGAL.md` status note).
 - [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway.
