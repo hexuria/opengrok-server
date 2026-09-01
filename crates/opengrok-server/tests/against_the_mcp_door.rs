@@ -498,12 +498,22 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     );
     assert!(run.answered.contains(&call.id));
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell").as_deref(),
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &coworker,
+            "shell",
+            &json!({ "command": "rm -rf /" }),
+        ),
+        None,
+        "a different command of the same tool cannot spend this yes"
+    );
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments)
+            .as_deref(),
         Some(call.id.as_str()),
         "allow-once is remembered so the retry reuses this call id"
     );
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell"),
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments),
         None,
         "the yes is one-shot"
     );

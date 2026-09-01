@@ -250,9 +250,9 @@ the proof, not construction.
   output IS the container id. Evidence: `docs/verification/door1/README.md`. (`2502deb`)
 - [x] **16.cards** An MCP Ask synthesizes a durable run and a real `auto-review-approval`
   card (`requestId` = the tool call id); the MCP error names it and does not wait. The person
-  answers in OpenGrok (`resolveAutoReviewApproval`), which resumes the run the way a
-  conversation Ask already does. PolicyApproval still has no transcribed desktop card;
-  reverse-exec stays excluded. *(this commit)*
+  answers in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run;
+  the MCP client retries under the remembered call id. PolicyApproval still has no
+  transcribed desktop card; reverse-exec stays excluded. *(this commit)*
 - [ ] **16.later** OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
   three-doors order).
 

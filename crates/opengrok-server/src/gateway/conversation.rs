@@ -1410,6 +1410,7 @@ pub async fn resolve_auto_review_approval(
             crate::mcp_door::remember_mcp_allow_once(
                 &coworker_id,
                 &pending.tool,
+                &pending.arguments,
                 pending.call_id.clone(),
             );
         }

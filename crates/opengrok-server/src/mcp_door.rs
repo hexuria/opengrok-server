@@ -14,9 +14,10 @@
 //! - **An auto-review `ask` raises a real card.** `run_one` has no in-flight run to suspend, so
 //!   the door synthesizes one (Start + Suspend) and emits the same `auto-review-approval` card a
 //!   shell Ask would. The MCP reply names `requestId` and does **not** wait; the person answers
-//!   in OpenGrok (`resolveAutoReviewApproval`), which resumes the run the way a conversation Ask
-//!   already does. PolicyApproval still has no transcribed desktop card — fail closed, and do
-//!   not promise one. Reverse-exec is excluded before execute, so ExecConsent cannot arrive here.
+//!   in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run; the MCP
+//!   client retries under the remembered call id. PolicyApproval still has no transcribed
+//!   desktop card — fail closed, and do not promise one. Reverse-exec is excluded before
+//!   execute, so ExecConsent cannot arrive here.
 //! - **The reverse-exec channel (`user_machine_shell`) is not carried over MCP in v1.** It reaches
 //!   the account owner's real machine; a leaked bot key must not widen from "this coworker's box"
 //!   to "the owner's laptop" through a new external ingress. It is excluded from the listing and
@@ -209,30 +210,41 @@ fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
 
 /// One allow-once from an answered MCP card, waiting for the client's retry. Process-local on
 /// purpose: a restart means the retry is judged again (narrower than silently running). Keyed
-/// by coworker+tool so a different tool cannot spend this yes.
+/// by coworker+tool+arguments so a different command of the same tool cannot spend this yes
+/// (the executor's skip is per call, never per tool).
 static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn once_key(coworker: &CoworkerId, tool: &str) -> String {
-    format!("{}:{tool}", coworker.as_str())
+fn once_key(coworker: &CoworkerId, tool: &str, arguments: &serde_json::Value) -> String {
+    let args = serde_json::to_string(arguments).unwrap_or_else(|_| String::new());
+    format!("{}:{tool}:{args}", coworker.as_str())
 }
 
-/// Record that this coworker may retry `tool` once under `call_id` (the id the card answered).
-pub fn remember_mcp_allow_once(coworker: &CoworkerId, tool: &str, call_id: String) {
+/// Record that this coworker may retry this exact tool+args once under `call_id`.
+pub fn remember_mcp_allow_once(
+    coworker: &CoworkerId,
+    tool: &str,
+    arguments: &serde_json::Value,
+    call_id: String,
+) {
     let mut map = match MCP_ALLOW_ONCE.lock() {
         Ok(map) => map,
         Err(poisoned) => poisoned.into_inner(),
     };
-    map.insert(once_key(coworker, tool), call_id);
+    map.insert(once_key(coworker, tool, arguments), call_id);
 }
 
-/// Take the pending allow-once for this coworker+tool, if any.
-pub fn take_mcp_allow_once(coworker: &CoworkerId, tool: &str) -> Option<String> {
+/// Take the pending allow-once for this coworker+tool+args, if any.
+pub fn take_mcp_allow_once(
+    coworker: &CoworkerId,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<String> {
     let mut map = match MCP_ALLOW_ONCE.lock() {
         Ok(map) => map,
         Err(poisoned) => poisoned.into_inner(),
     };
-    map.remove(&once_key(coworker, tool))
+    map.remove(&once_key(coworker, tool, arguments))
 }
 
 /// One OpenAI-function-shape schema → an rmcp `Tool`, or `None` (logged) if it is malformed. A tool
@@ -352,9 +364,9 @@ impl ServerHandler for McpDoor {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
         };
-        // An allow-once on an MCP card must release the retry: the next call of the same tool
-        // reuses the answered call id so the judge skip (keyed on call.id) actually fires.
-        let once_id = take_mcp_allow_once(&principal.coworker, &call.name);
+        // An allow-once on an MCP card must release the retry: the next call of the SAME
+        // tool+args reuses the answered call id so the judge skip (keyed on call.id) fires.
+        let once_id = take_mcp_allow_once(&principal.coworker, &call.name, &call.arguments);
         if let Some(id) = once_id.as_ref() {
             call.id = id.clone();
         }
@@ -363,7 +375,7 @@ impl ServerHandler for McpDoor {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => {
                 if let Some(id) = once_id {
-                    remember_mcp_allow_once(&principal.coworker, &call.name, id);
+                    remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
                 }
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "this coworker has no computer, so it has no tools to run",
@@ -372,7 +384,7 @@ impl ServerHandler for McpDoor {
             }
             Toolbox::Unavailable => {
                 if let Some(id) = once_id {
-                    remember_mcp_allow_once(&principal.coworker, &call.name, id);
+                    remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
                 }
                 return Err(McpError::internal_error(
                     "this coworker's computer could not be reached right now",
@@ -380,10 +392,26 @@ impl ServerHandler for McpDoor {
                 ));
             }
         };
+        // Hold the per-coworker lock through persist: two overlapping Asks of the same
+        // tool+args must not insert two awaiting runs, and take/remember must not race.
         let result = {
             let lock = coworker_lock(&principal.coworker);
             let _guard = lock.lock().await;
-            runner.run_one(&call).await
+            let result = runner.run_one(&call).await;
+            if result.awaiting_approval {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    reply_to_ask(
+                        &self.state,
+                        &principal.account,
+                        &principal.coworker,
+                        &call,
+                        &result,
+                    )
+                    .await,
+                )])
+                .into());
+            }
+            result
         };
         // Allowed calls still have no durable audit (see the module note). An Ask is persisted
         // below. Arguments are redacted the way the judge redacts them: identity stripped, secrets masked.
@@ -397,19 +425,9 @@ impl ServerHandler for McpDoor {
         );
         let response = if result.ok {
             CallToolResult::success(vec![ContentBlock::text(result.content)])
-        } else if result.awaiting_approval {
-            CallToolResult::error(vec![ContentBlock::text(
-                reply_to_ask(
-                    &self.state,
-                    &principal.account,
-                    &principal.coworker,
-                    &call,
-                    &result,
-                )
-                .await,
-            )])
         } else {
             // A refusal is content the model can reason about, exactly as in a run.
+            // Ask is handled inside the lock above so persist is serialized per coworker.
             CallToolResult::error(vec![ContentBlock::text(result.content)])
         };
         Ok(response.into())
@@ -578,7 +596,7 @@ async fn existing_mcp_ask(
 ) -> Result<Option<String>, opengrok_store::StoreError> {
     let waiting = state.agui.auth.store.awaiting_approval(account).await?;
     for run_id in waiting {
-        let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
         };
         if run.thread_id != format!("mcp-{}", coworker.as_str()) {
@@ -587,12 +605,61 @@ async fn existing_mcp_ask(
         let Some(pending) = run.pending.as_ref() else {
             continue;
         };
-        if pending.reason == SuspendReason::AutoReview
-            && pending.tool == call.name
-            && pending.arguments == call.arguments
+        if pending.reason != SuspendReason::AutoReview
+            || pending.tool != call.name
+            || pending.arguments != call.arguments
         {
+            continue;
+        }
+        // Reuse only when the card is actually in the transcript. A crash between append_run
+        // and append_gateway_entry would otherwise promise a requestId nobody can answer.
+        if card_pending_for(state, coworker, &pending.call_id).await {
             return Ok(Some(pending.call_id.clone()));
         }
+        fail_stuck_mcp_run(state, account, &run_id, run, seq).await;
     }
     Ok(None)
+}
+
+async fn card_pending_for(state: &GatewayState, coworker: &CoworkerId, request_id: &str) -> bool {
+    let Ok(entries) = state.agui.auth.store.gateway_transcript(coworker).await else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry["message"]["type"] == "auto-review-approval"
+            && entry["message"]["approval"]["requestId"] == request_id
+            && entry["message"]["approval"]["status"] == "pending"
+    })
+}
+
+async fn fail_stuck_mcp_run(
+    state: &GatewayState,
+    account: &AccountId,
+    run_id: &RunId,
+    mut run: Run,
+    seq: i64,
+) {
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let Ok(failed) = run.decide(RunCommand::Fail {
+        reason: "the approval card was never written".to_string(),
+        at_ms,
+    }) else {
+        return;
+    };
+    for event in &failed {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: RunStatus::Failed,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    let _ = state
+        .agui
+        .auth
+        .store
+        .append_run(run_id, seq, &failed, &view, Some(account))
+        .await;
 }
