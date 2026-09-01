@@ -480,3 +480,184 @@ async fn a_structured_error_names_the_vendor_code() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+/// A stand-in that sleeps the ascii way: `archived`, a 202 `provisioning` on resume, then a few
+/// polls of `provisioning` before `ready`. Each GET advances the script so the test can count.
+fn archived_box(states_after_resume: Vec<&'static str>) -> Router<Recorded> {
+    let script = Arc::new(Mutex::new((false, states_after_resume)));
+    let for_get = script.clone();
+    Router::new()
+        .route(
+            "/boxes/{id}",
+            get(
+                move |State(state): State<Recorded>, Path(id): Path<String>, headers: HeaderMap| {
+                    let script = for_get.clone();
+                    async move {
+                        state.record("GET", &format!("/boxes/{id}"), json!(null), &headers);
+                        let word = {
+                            let mut guard = script.lock().expect("script");
+                            if !guard.0 {
+                                "archived"
+                            } else if guard.1.len() > 1 {
+                                guard.1.remove(0)
+                            } else {
+                                guard.1.first().copied().unwrap_or("ready")
+                            }
+                        };
+                        Json(
+                            json!({"type":"box.info","box":{"id":id,"name":"Box","state":word,
+                                "desktopAvailable":false,"snapshotAvailable":true}}),
+                        )
+                    }
+                },
+            ),
+        )
+        .route(
+            "/boxes/{id}/resume",
+            post(
+                move |State(state): State<Recorded>, Path(id): Path<String>, headers: HeaderMap| {
+                    let script = script.clone();
+                    async move {
+                        state.record(
+                            "POST",
+                            &format!("/boxes/{id}/resume"),
+                            json!(null),
+                            &headers,
+                        );
+                        let already = {
+                            let mut guard = script.lock().expect("script");
+                            let was = guard.0;
+                            guard.0 = true;
+                            was
+                        };
+                        if already {
+                            return (
+                                axum::http::StatusCode::CONFLICT,
+                                Json(json!({"ok":false,"type":"box.error","status":409,
+                                        "code":"box_starting","message":"already resuming"})),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::ACCEPTED,
+                            Json(
+                                json!({"ok":true,"type":"box.resuming","id":id,"status":"resuming",
+                                    "box":{"id":id,"name":"Box","state":"provisioning",
+                                           "desktopAvailable":false,"snapshotAvailable":true}}),
+                            ),
+                        )
+                    }
+                },
+            ),
+        )
+}
+
+/// box.ascii.dev's sleeping box is `archived`, and its resume is a 202 that leaves the box
+/// `provisioning`. `wake` must resume it ONCE and keep polling until it is running, rather than
+/// calling a single accepted resume "up" — the first command against a provisioning box is a 409.
+#[tokio::test]
+async fn waking_an_archived_box_resumes_once_and_waits_until_it_runs() {
+    let (base, recorded) =
+        start_stand_in(archived_box(vec!["provisioning", "provisioning", "ready"])).await;
+    let reached = boxes(&base)
+        .wake("bx_asleep", std::time::Duration::from_secs(30))
+        .await
+        .expect("wake");
+    assert_eq!(reached, "running");
+    let resumes = recorded
+        .calls
+        .lock()
+        .expect("calls")
+        .iter()
+        .filter(|(method, path, _)| method == "POST" && path == "/boxes/bx_asleep/resume")
+        .count();
+    assert_eq!(resumes, 1, "one resume; the rest is patience");
+}
+
+/// A box mid-`archiving` cannot be resumed yet. `wake` waits for it to finish sleeping, then wakes
+/// it — it does not fire a resume the provider would refuse, and it does not give up.
+#[tokio::test]
+async fn waking_a_box_that_is_still_archiving_waits_then_resumes() {
+    let script = Arc::new(Mutex::new(vec![
+        "archiving",
+        "archiving",
+        "archived",
+        "provisioning",
+        "ready",
+    ]));
+    let resumed = Arc::new(Mutex::new(0usize));
+    let router: Router<Recorded> = Router::new()
+        .route(
+            "/boxes/{id}",
+            get({
+                let script = script.clone();
+                move |Path(id): Path<String>| {
+                    let script = script.clone();
+                    async move {
+                        let word = {
+                            let mut guard = script.lock().expect("script");
+                            if guard.len() > 1 { guard.remove(0) } else { guard[0] }
+                        };
+                        Json(json!({"type":"box.info","box":{"id":id,"name":"Box","state":word,
+                                    "desktopAvailable":false,"snapshotAvailable":true}}))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/boxes/{id}/resume",
+            post({
+                let resumed = resumed.clone();
+                let script = script.clone();
+                move |Path(id): Path<String>| {
+                    let resumed = resumed.clone();
+                    let script = script.clone();
+                    async move {
+                        *resumed.lock().expect("count") += 1;
+                        let head = script.lock().expect("script").first().copied();
+                        if head != Some("provisioning") && head != Some("archived") {
+                            return (
+                                axum::http::StatusCode::CONFLICT,
+                                Json(json!({"ok":false,"code":"box_archiving","message":"wait"})),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::ACCEPTED,
+                            Json(json!({"ok":true,"type":"box.resuming","id":id,"status":"resuming"})),
+                        )
+                    }
+                }
+            }),
+        );
+    let (base, _) = start_stand_in(router).await;
+    let reached = boxes(&base)
+        .wake("bx_archiving", std::time::Duration::from_secs(30))
+        .await
+        .expect("wake");
+    assert_eq!(reached, "running");
+    assert_eq!(
+        *resumed.lock().expect("count"),
+        1,
+        "no resume while archiving; one once archived"
+    );
+}
+
+/// A running box is left alone: no resume, one look.
+#[tokio::test]
+async fn waking_a_running_box_does_nothing() {
+    let (base, recorded) = start_stand_in(archived_box(vec!["ready"])).await;
+    // Flip the script to "already resumed" so GET answers ready straight away.
+    boxes(&base).resume("bx_up").await.expect("prime");
+    let reached = boxes(&base)
+        .wake("bx_up", std::time::Duration::from_secs(5))
+        .await
+        .expect("wake");
+    assert_eq!(reached, "running");
+    let resumes = recorded
+        .calls
+        .lock()
+        .expect("calls")
+        .iter()
+        .filter(|(method, path, _)| method == "POST" && path == "/boxes/bx_up/resume")
+        .count();
+    assert_eq!(resumes, 1, "only the priming resume; wake itself sent none");
+}

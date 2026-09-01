@@ -58,8 +58,15 @@ pub(crate) async fn fire(
         return;
     };
 
-    let tools =
-        crate::agui::routes::tools_for_coworker(&state, &account_id, &coworker_id, &[], &[]).await;
+    let tools = crate::agui::routes::tools_for_coworker(
+        &state,
+        &account_id,
+        &coworker_id,
+        &[],
+        &[],
+        crate::agui::routes::TURN_WAKE_PATIENCE,
+    )
+    .await;
 
     let journal = StoreJournal {
         state: state.clone(),

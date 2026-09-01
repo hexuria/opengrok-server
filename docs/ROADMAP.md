@@ -372,6 +372,14 @@ vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle ri
 - [x] P10 — the box control surface over what the deployment has: null (the validated
   truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
   click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
+- [x] **P10.wake** A sleeping box.ascii.dev box is `archived`, not `stopped`, and a resume is a
+  202 + `provisioning`, not a running box. `Computer::wake` resumes once and polls `state` until
+  `running` (waiting through `archiving`); `ensureForeverBox` and a turn's `tools_for_coworker`
+  wake before they act, the MCP door with a shorter patience. Verified live on bx_ncfmdpem,
+  2 Sep 2026: archived → running in 10–15s, desktop URL 5–6s later; desktop client PR
+  hexuria/opengrok#15 treats archived/archiving as asleep and provisioning as starting.
+  Details: [`research/sandbox-box-ascii-dev.md`](research/sandbox-box-ascii-dev.md) "Sleep and
+  wake". Unverified: a wake during a real turn against an archived box.
 - [x] **P10.sdk** Typed Box Public API v1 client (`opengrok_box::ascii::Client`) transcribed
   from [`docs/box/`](box/README.md) (vendor pages fetched 1 Sep 2026; live site wins if they
   disagree). `AsciiBoxes` stays the `Computer` adapter — the harness never talks HTTP itself.
