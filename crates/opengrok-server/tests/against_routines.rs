@@ -456,3 +456,83 @@ async fn a_routine_change_refreshes_the_pane_without_spending_a_roster_sequence(
         "a routine change must not consume a roster sequence: {roster}"
     );
 }
+
+/// The pane autosaves an edit on blur at the same instant a person clicks "Test run": two
+/// mutations on one schedule a few milliseconds apart. The loser used to answer 500 "storage
+/// failed" (live, 2 Sep 2026). Each mutation now re-reads and retries once on the store's
+/// conflict, so both land; a second loss would be 409, never 500.
+#[tokio::test]
+async fn an_autosave_and_a_test_run_on_one_routine_both_land() {
+    let database_url = database_or_skip!();
+    let email = format!("routines-race-{}@og.local", uuid::Uuid::now_v7().simple());
+    let (router, _gateway) = app(&database_url, &email).await;
+    let base = spawn(router).await;
+    let client = reqwest::Client::new();
+    let (_, created) = api(&client, &base, "createAgent", json!({ "name": "Racer" })).await;
+    let agent = created["agent"]["id"]
+        .as_str()
+        .expect("agent id")
+        .to_string();
+    let (_, list) = api(
+        &client,
+        &base,
+        "createAgentAutomation",
+        json!({ "id": agent, "spec": {
+            "name": "Hourly", "prompt": "check in", "isEnabled": true,
+            "trigger": { "type": "cron", "schedule": "0 * * * *" } } }),
+    )
+    .await;
+    let automation = list[0]["id"].as_str().expect("id").to_string();
+
+    for round in 0..8 {
+        let update = api(
+            &client,
+            &base,
+            "updateAgentAutomation",
+            json!({ "id": agent, "automationId": automation, "spec": {
+                "name": "Hourly", "prompt": format!("check in, edit {round}"), "isEnabled": true,
+                "trigger": { "type": "cron", "schedule": "0 * * * *" } } }),
+        );
+        let run_now = api(
+            &client,
+            &base,
+            "runAgentAutomationNow",
+            json!({ "id": agent, "automationId": automation }),
+        );
+        let ((update_status, update_body), (run_status, run_body)) = tokio::join!(update, run_now);
+        assert_ne!(update_status, 500, "round {round}: {update_body}");
+        assert_ne!(run_status, 500, "round {round}: {run_body}");
+        assert_eq!(update_status, 200, "round {round}: {update_body}");
+        assert_eq!(run_status, 200, "round {round}: {run_body}");
+    }
+
+    // Every edit landed on the one row, and every run-now shows in its history once the fired
+    // runs have journaled (they start on their own task, a beat after the 200).
+    let mut list = Value::Null;
+    for _ in 0..50 {
+        let (_, latest) = api(
+            &client,
+            &base,
+            "getAgentAutomations",
+            json!({ "id": agent }),
+        )
+        .await;
+        list = latest;
+        if list[0]["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.len() >= 8)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let records = list.as_array().expect("array");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["prompt"], "check in, edit 7");
+    assert!(
+        records[0]["runs"]
+            .as_array()
+            .is_some_and(|runs| runs.len() >= 8),
+        "{list}"
+    );
+}

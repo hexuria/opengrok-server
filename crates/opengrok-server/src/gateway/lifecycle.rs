@@ -930,72 +930,132 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
     )
 }
 
+/// Load the schedule, decide with `decide`, append at the loaded seq — and if another writer got
+/// there first, re-read and try ONCE more before answering 409. Why: the desktop's Routines pane
+/// autosaves an edit on blur at the same instant a person clicks "Test run", so two mutations on
+/// one schedule a few milliseconds apart are the ordinary case, not a race to design away. The
+/// loser used to answer 500 "storage failed" (seen live 2 Sep 2026); now it decides again against
+/// the winner's state, which is what the person meant anyway.
+///
+/// `decide` sees the fresh aggregate and returns the events to append, or a refusal already
+/// shaped for the wire. Returns the aggregate after the append and the seq it landed at.
+async fn mutate_schedule<F>(
+    state: &GatewayState,
+    account: &opengrok_core::account::AccountView,
+    schedule_id: &ScheduleId,
+    at_ms: i64,
+    mut decide: F,
+) -> Result<Schedule, (u16, Value)>
+where
+    F: FnMut(&Schedule) -> Result<Vec<opengrok_core::schedule::ScheduleEvent>, (u16, Value)>,
+{
+    for attempt in 0..2 {
+        let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(schedule_id).await else {
+            return Err((404, json!({ "error": "no such routine" })));
+        };
+        let events = decide(&loaded)?;
+        let mut after = loaded;
+        for event in &events {
+            after.apply(event);
+        }
+        match state
+            .agui
+            .auth
+            .store
+            .append_schedule(schedule_id, &account.id, seq, &events, &after, at_ms)
+            .await
+        {
+            Ok(_) => return Ok(after),
+            Err(opengrok_store::StoreError::Conflict) if attempt == 0 => {
+                tracing::info!(schedule = %schedule_id, "a routine write lost a race; re-reading and retrying once");
+                continue;
+            }
+            Err(opengrok_store::StoreError::Conflict) => {
+                return Err((
+                    409,
+                    json!({ "error": "another change to this routine landed first; reload and retry" }),
+                ));
+            }
+            Err(error) => {
+                tracing::error!(%error, schedule = %schedule_id, "could not write a routine change");
+                return Err((500, json!({ "error": "storage failed" })));
+            }
+        }
+    }
+    Err((
+        409,
+        json!({ "error": "another change to this routine landed first; reload and retry" }),
+    ))
+}
+
+/// The routine a mutation names, owned by this account — or the refusal. Ownership by the same
+/// rule as /schedules: not yours reads as not there.
+async fn owned_schedule(
+    state: &GatewayState,
+    args: &Value,
+) -> Result<(opengrok_core::account::AccountView, ScheduleId), (u16, Value)> {
+    let Some(id) = automation_arg(args) else {
+        return Err((400, json!({ "error": "automationId is required" })));
+    };
+    let Some(account) = account(state, &state.email).await else {
+        return Err((200, json!([])));
+    };
+    let schedule_id = ScheduleId::from_stored(id.to_string());
+    match state.agui.auth.store.schedule_owner(&schedule_id).await {
+        Ok(Some(owner)) if owner == account.id => Ok((account, schedule_id)),
+        _ => Err((404, json!({ "error": "no such routine" }))),
+    }
+}
+
 /// `updateAgentAutomation {id, automationId, spec}` — edit in place: name, schedule, prompt and
 /// enabled state on the SAME row, never a second one.
 pub async fn update_automation(state: &GatewayState, args: &Value) -> (u16, Value) {
-    let Some(id) = automation_arg(args) else {
-        return (400, json!({ "error": "automationId is required" }));
-    };
     let spec = match parse_spec(args) {
         Ok(spec) => spec,
         Err(refusal) => return refusal,
     };
-    let Some(account) = account(state, &state.email).await else {
-        return (200, json!([]));
+    let (account, schedule_id) = match owned_schedule(state, args).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
     };
-    let schedule_id = ScheduleId::from_stored(id.to_string());
-    // Ownership by the same rule as /schedules: not yours reads as not there.
-    match state.agui.auth.store.schedule_owner(&schedule_id).await {
-        Ok(Some(owner)) if owner == account.id => {}
-        _ => return (404, json!({ "error": "no such routine" })),
-    }
-    let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
-        return (404, json!({ "error": "no such routine" }));
+    let at_ms = now_ms();
+    let after = match mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+        let mut events = loaded
+            .decide(ScheduleCommand::Update {
+                name: spec.name.clone(),
+                cron: spec.cron.clone(),
+                prompt: spec.prompt.clone(),
+                at_ms,
+            })
+            .map_err(|reason| (400, json!({ "error": reason.to_string() })))?;
+        let mut after = loaded.clone();
+        for event in &events {
+            after.apply(event);
+        }
+        // The editor's toggle rides along: flip only when it differs, so an unchanged edit does
+        // not log a pause that never happened.
+        let flip = match (spec.enabled, after.paused) {
+            (false, false) => Some(ScheduleCommand::Pause { at_ms }),
+            (true, true) => Some(ScheduleCommand::Resume { at_ms }),
+            _ => None,
+        };
+        if let Some(command) = flip
+            && let Ok(more) = after.decide(command)
+        {
+            events.extend(more);
+        }
+        Ok(events)
+    })
+    .await
+    {
+        Ok(after) => after,
+        Err(refusal) => return refusal,
     };
-    let agent = loaded
+    let agent = after
         .coworker_id
         .as_ref()
         .map(|c| c.as_str().to_string())
         .unwrap_or_default();
-    let at_ms = now_ms();
-    let mut events = match loaded.decide(ScheduleCommand::Update {
-        name: spec.name,
-        cron: spec.cron,
-        prompt: spec.prompt,
-        at_ms,
-    }) {
-        Ok(events) => events,
-        Err(reason) => return (400, json!({ "error": reason.to_string() })),
-    };
-    let mut after = loaded;
-    for event in &events {
-        after.apply(event);
-    }
-    // The editor's toggle rides along: flip only when it differs, so an unchanged edit does not
-    // log a pause that never happened.
-    let flip = match (spec.enabled, after.paused) {
-        (false, false) => Some(ScheduleCommand::Pause { at_ms }),
-        (true, true) => Some(ScheduleCommand::Resume { at_ms }),
-        _ => None,
-    };
-    if let Some(command) = flip
-        && let Ok(more) = after.decide(command)
-    {
-        for event in &more {
-            after.apply(event);
-        }
-        events.extend(more);
-    }
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
-        .await
-    {
-        tracing::error!(%error, "could not update an automation");
-        return (500, json!({ "error": "storage failed" }));
-    }
     emit_automations(state, &agent).await;
     (
         200,
@@ -1005,40 +1065,29 @@ pub async fn update_automation(state: &GatewayState, args: &Value) -> (u16, Valu
 
 /// setEnabled / delete: pause, resume, delete on the schedule aggregate; the reply is the array.
 pub async fn change_automation(state: &GatewayState, args: &Value, action: &str) -> (u16, Value) {
-    let Some(id) = automation_arg(args) else {
-        return (400, json!({ "error": "automationId is required" }));
+    let (account, schedule_id) = match owned_schedule(state, args).await {
+        Ok(found) => found,
+        // Not yours (or nothing named) reads as the unchanged array, as before.
+        Err((404, _)) => return (200, Value::Array(automations_array(state, None).await)),
+        Err(refusal) => return refusal,
     };
-    let Some(account) = account(state, &state.email).await else {
-        return (200, json!([]));
-    };
-    let schedule_id = ScheduleId::from_stored(id.to_string());
-    // Ownership by the same rule as /schedules: not yours reads as not there.
-    match state.agui.auth.store.schedule_owner(&schedule_id).await {
-        Ok(Some(owner)) if owner == account.id => {}
-        _ => return (200, Value::Array(automations_array(state, None).await)),
-    }
-    let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
-        return (200, Value::Array(automations_array(state, None).await));
-    };
-    let agent = loaded.coworker_id.as_ref().map(|c| c.as_str().to_string());
     let at_ms = now_ms();
-    let command = match action {
-        "enable" => ScheduleCommand::Resume { at_ms },
-        "disable" => ScheduleCommand::Pause { at_ms },
-        _ => ScheduleCommand::Delete { at_ms },
+    let result = mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+        let command = match action {
+            "enable" => ScheduleCommand::Resume { at_ms },
+            "disable" => ScheduleCommand::Pause { at_ms },
+            _ => ScheduleCommand::Delete { at_ms },
+        };
+        // Already in the asked-for state (paused twice, enabled twice): nothing to write, and
+        // not an error the pane should see.
+        Ok(loaded.decide(command).unwrap_or_default())
+    })
+    .await;
+    let agent = match result {
+        Ok(after) => after.coworker_id.as_ref().map(|c| c.as_str().to_string()),
+        Err((code @ (409 | 500), body)) => return (code, body),
+        Err(_) => None,
     };
-    if let Ok(events) = loaded.decide(command) {
-        let mut after = loaded;
-        for event in &events {
-            after.apply(event);
-        }
-        let _ = state
-            .agui
-            .auth
-            .store
-            .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
-            .await;
-    }
     if let Some(agent) = &agent {
         emit_automations(state, agent).await;
     }
@@ -1051,47 +1100,29 @@ pub async fn change_automation(state: &GatewayState, args: &Value, action: &str)
 /// `runAgentAutomationNow` — the sweep's firing path, on demand. The run is a `manual` one in the
 /// pane's history, and it posts into the coworker's chat when it finishes, like a clock firing.
 pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Value) {
-    let Some(id) = automation_arg(args) else {
-        return (400, json!({ "error": "automationId is required" }));
-    };
-    let Some(account) = account(state, &state.email).await else {
-        return (200, Value::Null);
-    };
-    let schedule_id = ScheduleId::from_stored(id.to_string());
-    match state.agui.auth.store.schedule_owner(&schedule_id).await {
-        Ok(Some(owner)) if owner == account.id => {}
-        _ => return (404, json!({ "error": "no such routine" })),
-    }
-    let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
-        return (404, json!({ "error": "no such routine" }));
-    };
-    let Some(coworker_id) = loaded.coworker_id.clone() else {
-        return (200, Value::Null);
+    let (account, schedule_id) = match owned_schedule(state, args).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
     };
     let run_id = RunId::new();
     let at_ms = now_ms();
-    let events = match loaded.decide(ScheduleCommand::Fire {
-        run_id: run_id.clone(),
-        manual: true,
-        at_ms,
-    }) {
-        Ok(events) => events,
-        Err(reason) => return (409, json!({ "error": reason.to_string() })),
-    };
-    let mut after = loaded;
-    for event in &events {
-        after.apply(event);
-    }
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
-        .await
+    let after = match mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+        loaded
+            .decide(ScheduleCommand::Fire {
+                run_id: run_id.clone(),
+                manual: true,
+                at_ms,
+            })
+            .map_err(|reason| (409, json!({ "error": reason.to_string() })))
+    })
+    .await
     {
-        tracing::error!(%error, "could not record a manual firing");
-        return (500, json!({ "error": "storage failed" }));
-    }
+        Ok(after) => after,
+        Err(refusal) => return refusal,
+    };
+    let Some(coworker_id) = after.coworker_id.clone() else {
+        return (200, Value::Null);
+    };
     tokio::spawn(crate::autonomy::fire(
         state.agui.clone(),
         crate::autonomy::Firing {
