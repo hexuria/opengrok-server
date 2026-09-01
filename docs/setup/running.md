@@ -48,5 +48,17 @@ running `scripts/serve.sh` again without the overrides.
 
 ## Logs
 
-Tracing goes to stdout under `RUST_LOG`. For request-level visibility while driving a client,
-set `OG_TRACE_REQUESTS=1` (every path + status, including the ones that can never match).
+Tracing goes to stdout under `RUST_LOG`. Request-level visibility is on by default: one line per
+request (path, status, ms, and the ones that can never match — a 0-length bearer, an Origin the
+gateway refuses), and one line each when an `/events` stream opens and closes, with how many
+subscribers are left. `OG_TRACE_REQUESTS=0` turns it off.
+
+Every request has an `X-Request-Id`. The desktop client sends one per gateway call and per SSE
+connect; the server mints a UUID when a caller does not, and echoes it on the response either way.
+The handler runs inside a span carrying it, so the request line and everything logged while
+serving it share one key:
+
+```sh
+grep 'id=desk-0x1f' server.log          # one call, start to finish
+grep 'events: stream' server.log        # was the stream up at 03:16, and for whom
+```

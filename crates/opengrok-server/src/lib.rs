@@ -45,24 +45,80 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .nest("/mcp", mcp_door::router(gateway))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
-    // Opt-in request trace (OG_TRACE_REQUESTS=1): one INFO line per request with method, path,
-    // status, whether an Origin header was present (the gateway refuses those 403 before the token),
-    // and the LENGTH of the presented bearer (never its value) so a 0- or wrong-length token that
-    // can never match is visible. A diagnostic for driving the client end to end; off by default.
-    if std::env::var("OG_TRACE_REQUESTS").as_deref() == Ok("1") {
-        app.layer(axum::middleware::from_fn(trace_request))
-    } else {
+    // Request trace, ON by default (`OG_TRACE_REQUESTS=0` turns it off): one INFO line per
+    // request with method, path, status, the request id, whether an Origin header was present
+    // (the gateway refuses those 403 before the token), and the LENGTH of the presented bearer
+    // (never its value) so a 0- or wrong-length token that can never match is visible. It used to
+    // be opt-in, and the dev server went silent for a day after a restart without the flag — the
+    // question "was the stream up at 03:16" had no answer. Default-on is the answer.
+    let app = if std::env::var("OG_TRACE_REQUESTS").as_deref() == Ok("0") {
         app
+    } else {
+        app.layer(axum::middleware::from_fn(trace_request))
+    };
+    // Request ids. `X-Request-Id` is taken from the client when it sends one (the desktop client
+    // stamps every gateway call and every SSE connect), minted as a UUID when it does not, and
+    // echoed on the response either way — so a client log line and a server log line for the same
+    // call share one key. ORDER MATTERS: `.layer()` wraps what came before, so `Set` is added last
+    // to run first, then `Propagate` copies the id onto the response, and only then does the trace
+    // above (innermost) see a request that already carries its id.
+    app.layer(tower_http::request_id::PropagateRequestIdLayer::x_request_id())
+        .layer(tower_http::request_id::SetRequestIdLayer::x_request_id(
+            tower_http::request_id::MakeRequestUuid,
+        ))
+        .layer(axum::middleware::from_fn(bound_request_id))
+}
+
+/// The longest client-supplied request id we keep. A UUID is 36; the desktop's are shorter. Past
+/// this the header is dropped before `SetRequestId` sees it, so a fresh id is minted instead —
+/// the id lands on every log line the request touches, and an 8 KB value there is a nuisance
+/// even though `HeaderValue` already rules out control characters.
+const REQUEST_ID_MAX: usize = 128;
+
+/// Runs OUTSIDE `SetRequestId` (added last): strips an `X-Request-Id` that is too long or not
+/// visible ASCII, so the layer below mints one.
+async fn bound_request_id(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let keep = req
+        .headers()
+        .get("x-request-id")
+        .map(|value| {
+            let bytes = value.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= REQUEST_ID_MAX
+                && bytes.iter().all(|b| b.is_ascii_graphic())
+        })
+        .unwrap_or(true);
+    if !keep {
+        req.headers_mut().remove("x-request-id");
     }
+    next.run(req).await
+}
+
+/// The request id the layer above put on the request — or `-` when the layer is not mounted
+/// (tests that build a bare router).
+pub fn request_id(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string()
 }
 
 /// See `OG_TRACE_REQUESTS` above. Logs presence/length of sensitive headers, never their contents.
+/// The handler runs inside a span carrying the request id, so every line it logs — a policy
+/// refusal, a box wake, a domain proof — is greppable by the same id as the request line.
 async fn trace_request(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    use tracing::Instrument as _;
+
     let method = req.method().clone();
     let uri = req.uri().clone();
+    let id = request_id(req.headers());
     let has_origin = req.headers().contains_key(axum::http::header::ORIGIN);
     let auth_len = req
         .headers()
@@ -71,8 +127,10 @@ async fn trace_request(
         .map(|value| value.len())
         .unwrap_or(0);
     let started = std::time::Instant::now();
-    let response = next.run(req).await;
+    let span = tracing::info_span!("http", id = %id);
+    let response = next.run(req).instrument(span).await;
     tracing::info!(
+        %id,
         %method,
         %uri,
         status = response.status().as_u16(),

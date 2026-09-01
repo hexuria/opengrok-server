@@ -426,6 +426,11 @@ Listing them as pending would make this tracker lie about how far away done is.
 - [ ] stdio MCP servers inside a coworker's own container (the follow-up to HTTP-only).
 - [ ] Graph harness (the loop is linear today, `MAX_ROUNDS = 8`).
 - [ ] Redis — only after a measured hot query, per the standing decision.
+- [ ] OTLP export on both sides, sharing the request id as the trace id; crash capture is a
+  separate decision. The first brick shipped: request trace on by default, `X-Request-Id`
+  accepted-or-minted and echoed, `/events` open/close logged with the subscriber count
+  (`verification/request-ids/`; the desktop client stamps the same header per call and per
+  SSE connect). *(this commit)*
 - [ ] Remaining Box API v1 endpoints in `ascii::Client` (snapshots, environments, webhooks,
   ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) — add when a
   coworker path needs them, not as a completeness exercise. Vendor pages already live in
