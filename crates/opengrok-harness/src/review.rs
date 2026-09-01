@@ -240,7 +240,11 @@ mod tests {
                 .is_some_and(|s| s.starts_with(JUDGE_MARKER))
         );
         assert!(request.messages[0].content.contains("<<<ARGS"));
-        assert!(request.messages[0].content.contains("ASK-FIRST INSTRUCTIONS"));
+        assert!(
+            request.messages[0]
+                .content
+                .contains("ASK-FIRST INSTRUCTIONS")
+        );
         assert!(request.messages[0].content.contains("(none)"));
     }
 

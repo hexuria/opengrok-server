@@ -1353,6 +1353,17 @@ pub async fn resolve_auto_review_approval(
     let approved = matches!(word.as_str(), "approved" | "always" | "allow-once");
     let pending = run.pending.clone();
     let resumed_seq = run.emitted.len() as u32;
+    // Hold the MCP per-coworker lock across Answer/remember/Finish so a retry cannot
+    // take-or-run between those steps and leave a leftover yes.
+    let mcp_lock = run
+        .thread_id
+        .starts_with("mcp-")
+        .then(|| crate::mcp_door::coworker_lock(&coworker_id));
+    let _mcp_guard = if let Some(lock) = mcp_lock.as_ref() {
+        Some(lock.lock().await)
+    } else {
+        None
+    };
 
     let at_ms = now_ms();
     let events = match run.decide(opengrok_core::run::RunCommand::Answer {
@@ -1377,15 +1388,16 @@ pub async fn resolve_auto_review_approval(
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    if let Err(error) = state
+    let seq = match state
         .agui
         .auth
         .store
         .append_run(&run_id, seq, &events, &view, Some(&account_id))
         .await
     {
-        return (503, json!({ "error": error.to_string() }));
-    }
+        Ok(seq) => seq,
+        Err(error) => return (503, json!({ "error": error.to_string() })),
+    };
 
     // Flip the card on the SAME entryId — the renderer dedups on requestId:status.
     let status = if approved { "approved" } else { "denied" };
@@ -1398,6 +1410,45 @@ pub async fn resolve_auto_review_approval(
             .await
     {
         live::emit_transcript(state, &agent_id, "updated", card);
+    }
+
+    // An MCP-synthesized run is not a conversation. Resuming it would execute the tool on this
+    // side while the MCP client is told to retry (double-run, and a new call id that cannot
+    // spend this yes). Finish it here; an approved allow-once is remembered so the retry
+    // reuses the answered call id and the judge skip actually fires.
+    if run.thread_id.starts_with("mcp-") {
+        if approved && let Some(pending) = pending.as_ref() {
+            crate::mcp_door::remember_mcp_allow_once(
+                &coworker_id,
+                &pending.tool,
+                &pending.arguments,
+                pending.call_id.clone(),
+            );
+        }
+        if let Ok(finished) = run.decide(opengrok_core::run::RunCommand::Finish { at_ms }) {
+            for event in &finished {
+                run.apply(event);
+            }
+            let view = opengrok_core::run::RunView {
+                id: run_id.clone(),
+                thread_id: run.thread_id.clone(),
+                status: run.status,
+                event_count: run.emitted.len() as i64,
+                updated_at_ms: at_ms,
+            };
+            if let Err(error) = state
+                .agui
+                .auth
+                .store
+                .append_run(&run_id, seq, &finished, &view, Some(&account_id))
+                .await
+            {
+                // Answer and the card already landed; 503 here would leave the card
+                // approved and the retry token set, with a press that never retries Finish.
+                tracing::error!(%error, "mcp ask: could not finish the synthesized run");
+            }
+        }
+        return (200, json!({ "ok": true }));
     }
 
     if let Some(pending) = pending {

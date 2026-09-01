@@ -33,7 +33,7 @@ pub use auth::{AuthState, TokenMinter};
 pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
-        .merge(seamb::router(gateway))
+        .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
@@ -41,7 +41,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
-        .nest("/mcp", mcp_door::router(state.clone()))
+        .nest("/mcp", mcp_door::router(gateway))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
     // Opt-in request trace (OG_TRACE_REQUESTS=1): one INFO line per request with method, path,
