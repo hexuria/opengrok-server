@@ -11,13 +11,14 @@
 //!   personal, or revoked credential is a real `401`/`403` before rmcp is reached — and even
 //!   `initialize` requires a live bot key. The layer stashes the resolved principal so the
 //!   handler never re-derives it.
-//! - **An auto-review `ask` raises a real card.** `run_one` has no in-flight run to suspend, so
-//!   the door synthesizes one (Start + Suspend) and emits the same `auto-review-approval` card a
-//!   shell Ask would. The MCP reply names `requestId` and does **not** wait; the person answers
+//! - **An `ask` raises a real card — the judge's and the policy grant's alike.** `run_one` has no
+//!   in-flight run to suspend, so the door synthesizes one (Start + Suspend) and emits the same
+//!   `auto-review-approval` card a shell Ask would; a policy ask carries the grant's reason and
+//!   no proposed rule. The MCP reply names `requestId` and does **not** wait; the person answers
 //!   in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run; the MCP
-//!   client retries under the remembered call id. PolicyApproval still has no transcribed
-//!   desktop card — fail closed, and do not promise one. Reverse-exec is excluded before
-//!   execute, so ExecConsent cannot arrive here.
+//!   client retries under the remembered call id, and the remembered yes releases the gate or
+//!   skips the judge by the ask's reason. Reverse-exec is excluded before execute, so ExecConsent
+//!   cannot arrive here.
 //! - **The reverse-exec channel (`user_machine_shell`) is not carried over MCP in v1.** It reaches
 //!   the account owner's real machine; a leaked bot key must not widen from "this coworker's box"
 //!   to "the owner's laptop" through a new external ingress. It is excluded from the listing and
@@ -167,7 +168,12 @@ impl McpDoor {
             })
     }
 
-    async fn toolbox_for(&self, principal: &McpPrincipal, review_yes: &[String]) -> Toolbox {
+    async fn toolbox_for(
+        &self,
+        principal: &McpPrincipal,
+        gate_yes: &[String],
+        review_yes: &[String],
+    ) -> Toolbox {
         let Ok((coworker, _)) = self
             .state
             .agui
@@ -185,7 +191,7 @@ impl McpDoor {
             &self.state.agui,
             &principal.account,
             &principal.coworker,
-            &[],
+            gate_yes,
             review_yes,
             MCP_WAKE_PATIENCE,
         )
@@ -224,6 +230,9 @@ pub fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
 struct McpAllowOnce {
     arguments: serde_json::Value,
     call_id: String,
+    /// `true` when the yes answered a policy (gate) ask, `false` for the judge's. The retry
+    /// releases the gate or skips the judge accordingly — never both.
+    gate: bool,
 }
 
 static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, Vec<McpAllowOnce>>>> =
@@ -233,12 +242,14 @@ fn coworker_tool_key(coworker: &CoworkerId, tool: &str) -> String {
     format!("{}:{tool}", coworker.as_str())
 }
 
-/// Record that this coworker may retry this exact tool+args once under `call_id`.
+/// Record that this coworker may retry this exact tool+args once under `call_id`. `gate` says
+/// which ask the yes answered: a policy grant's (release the gate) or the judge's (skip it).
 pub fn remember_mcp_allow_once(
     coworker: &CoworkerId,
     tool: &str,
     arguments: &serde_json::Value,
     call_id: String,
+    gate: bool,
 ) {
     let mut map = match MCP_ALLOW_ONCE.lock() {
         Ok(map) => map,
@@ -249,15 +260,16 @@ pub fn remember_mcp_allow_once(
         .push(McpAllowOnce {
             arguments: arguments.clone(),
             call_id,
+            gate,
         });
 }
 
-/// Take the pending allow-once for this coworker+tool+args, if any.
+/// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate)`.
 pub fn take_mcp_allow_once(
     coworker: &CoworkerId,
     tool: &str,
     arguments: &serde_json::Value,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let mut map = match MCP_ALLOW_ONCE.lock() {
         Ok(map) => map,
         Err(poisoned) => poisoned.into_inner(),
@@ -269,7 +281,7 @@ pub fn take_mcp_allow_once(
     if list.is_empty() {
         map.remove(&key);
     }
-    Some(yes.call_id)
+    Some((yes.call_id, yes.gate))
 }
 
 /// One OpenAI-function-shape schema → an rmcp `Tool`, or `None` (logged) if it is malformed. A tool
@@ -316,9 +328,10 @@ impl ServerHandler for McpDoor {
             .with_server_info(Implementation::new("opengrok", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Tools run on the coworker this key names, on that coworker's own computer, \
-                 under the account's policy. A call that needs auto-review approval is refused \
-                 with a requestId; a card is waiting in the OpenGrok app — answer it there, \
-                 then retry. Reverse-exec (your own machine) is not available over MCP.",
+                 under the account's policy. A call that needs a person's approval (the \
+                 account's auto-review, or the coworker's policy) is refused with a requestId; \
+                 a card is waiting in the OpenGrok app — answer it there, then retry. \
+                 Reverse-exec (your own machine) is not available over MCP.",
             )
     }
 
@@ -337,7 +350,7 @@ impl ServerHandler for McpDoor {
                 .with_ttl_ms(0)
                 .with_cache_scope(CacheScope::Private)
         };
-        let runner = match self.toolbox_for(&principal, &[]).await {
+        let runner = match self.toolbox_for(&principal, &[], &[]).await {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => return Ok(uncacheable(Vec::new())),
             Toolbox::Unavailable => {
@@ -394,8 +407,8 @@ impl ServerHandler for McpDoor {
         // a leftover yes.
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
-        let once_id = take_mcp_allow_once(&principal.coworker, &call.name, &call.arguments);
-        if let Some(id) = once_id.as_ref() {
+        let once = take_mcp_allow_once(&principal.coworker, &call.name, &call.arguments);
+        if let Some((id, _)) = once.as_ref() {
             call.id = id.clone();
         } else {
             match existing_mcp_ask(&self.state, &principal.account, &principal.coworker, &call)
@@ -421,12 +434,24 @@ impl ServerHandler for McpDoor {
                 }
             }
         }
-        let review_yes: Vec<String> = once_id.iter().cloned().collect();
-        let runner = match self.toolbox_for(&principal, &review_yes).await {
+        // Which gate the remembered yes opens: a policy yes releases the gate, a judge yes skips
+        // the judge. The same call id, never both lists.
+        let (gate_yes, review_yes): (Vec<String>, Vec<String>) = match once.as_ref() {
+            Some((id, true)) => (vec![id.clone()], Vec::new()),
+            Some((id, false)) => (Vec::new(), vec![id.clone()]),
+            None => (Vec::new(), Vec::new()),
+        };
+        let runner = match self.toolbox_for(&principal, &gate_yes, &review_yes).await {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => {
-                if let Some(id) = once_id {
-                    remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
+                if let Some((id, gate)) = once {
+                    remember_mcp_allow_once(
+                        &principal.coworker,
+                        &call.name,
+                        &call.arguments,
+                        id,
+                        gate,
+                    );
                 }
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "this coworker has no computer, so it has no tools to run",
@@ -434,8 +459,14 @@ impl ServerHandler for McpDoor {
                 .into());
             }
             Toolbox::Unavailable => {
-                if let Some(id) = once_id {
-                    remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
+                if let Some((id, gate)) = once {
+                    remember_mcp_allow_once(
+                        &principal.coworker,
+                        &call.name,
+                        &call.arguments,
+                        id,
+                        gate,
+                    );
                 }
                 return Err(McpError::internal_error(
                     "this coworker's computer could not be reached right now",
@@ -458,10 +489,10 @@ impl ServerHandler for McpDoor {
             .into());
         }
         if !result.ok
-            && let Some(id) = once_id
+            && let Some((id, gate)) = once
         {
             // A failed execute must not spend the yes — the client will retry.
-            remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id);
+            remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id, gate);
         }
         // Allowed calls still have no durable audit (see the module note). An Ask is persisted
         // above, under the lock. Arguments are redacted the way the judge redacts them.
@@ -501,9 +532,27 @@ pub async fn reply_to_ask(
     call: &ToolCall,
     result: &opengrok_tools::ToolResult,
 ) -> String {
-    match result.awaiting_reason {
-        Some(AwaitingReason::AutoReview) => {
-            match persist_mcp_ask(state, account, coworker, call).await {
+    let reason = match result.awaiting_reason {
+        Some(AwaitingReason::AutoReview) => SuspendReason::AutoReview,
+        Some(AwaitingReason::PolicyApproval) => SuspendReason::PolicyApproval,
+        // ExecConsent is reverse-exec, which is refused by name before execute. Do not promise
+        // a card that does not exist.
+        _ => {
+            return format!(
+                "{} — approval is not available over MCP; grant this tool to the coworker in the \
+                 OpenGrok app or console, or run it from the app.",
+                result.content
+            );
+        }
+    };
+    let why = result
+        .content
+        .strip_prefix("waiting for approval: ")
+        .map(str::trim)
+        .filter(|why| !why.is_empty());
+    match reason {
+        SuspendReason::AutoReview | SuspendReason::PolicyApproval => {
+            match persist_mcp_ask(state, account, coworker, call, reason, why).await {
                 Ok(request_id) => ask_waiting_text(&result.content, &request_id),
                 Err(error) => {
                     tracing::error!(%error, "mcp door: could not raise an approval card");
@@ -515,8 +564,6 @@ pub async fn reply_to_ask(
                 }
             }
         }
-        // PolicyApproval has no transcribed desktop card. ExecConsent is reverse-exec, which
-        // is refused by name before execute. Do not promise a card that does not exist.
         _ => format!(
             "{} — approval is not available over MCP; grant this tool to the coworker in the \
              OpenGrok app or console, or run it from the app.",
@@ -533,6 +580,8 @@ async fn persist_mcp_ask(
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
+    reason: SuspendReason,
+    why: Option<&str>,
 ) -> Result<String, opengrok_store::StoreError> {
     if let Some(existing) = existing_mcp_ask(state, account, coworker, call).await? {
         return Ok(existing);
@@ -570,7 +619,7 @@ async fn persist_mcp_ask(
             call_id: call.id.clone(),
             tool: call.name.clone(),
             arguments: call.arguments.clone(),
-            reason: SuspendReason::AutoReview,
+            reason,
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -593,15 +642,26 @@ async fn persist_mcp_ask(
         .await?;
 
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
-    let card = crate::gateway::cards::auto_review_card(
-        &entry_id,
-        &call.id,
-        "pending",
-        &call.name,
-        &call.arguments,
-        Some(opengrok_tools::review::REVIEW_ASK_REASON),
-        at_ms,
-    );
+    let card = match reason {
+        SuspendReason::PolicyApproval => crate::gateway::cards::policy_approval_card(
+            &entry_id,
+            &call.id,
+            "pending",
+            &call.name,
+            &call.arguments,
+            why,
+            at_ms,
+        ),
+        _ => crate::gateway::cards::auto_review_card(
+            &entry_id,
+            &call.id,
+            "pending",
+            &call.name,
+            &call.arguments,
+            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            at_ms,
+        ),
+    };
     if let Err(error) = state
         .agui
         .auth
@@ -659,8 +719,10 @@ async fn existing_mcp_ask(
         let Some(pending) = run.pending.as_ref() else {
             continue;
         };
-        if pending.reason != SuspendReason::AutoReview
-            || pending.tool != call.name
+        if !matches!(
+            pending.reason,
+            SuspendReason::AutoReview | SuspendReason::PolicyApproval
+        ) || pending.tool != call.name
             || pending.arguments != call.arguments
         {
             continue;

@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use opengrok_tools::USER_MACHINE_SHELL;
 
-/// The `auto-review-approval` card. Re-emit with the SAME `entry_id` and a new `status` to settle
-/// it — the renderer dedups on `auto-review-approval:${requestId}:${status}`.
+/// The `auto-review-approval` card for the judge's ask. Re-emit with the SAME `entry_id` and a
+/// new `status` to settle it — the renderer dedups on `auto-review-approval:${requestId}:${status}`.
 pub fn auto_review_card(
     entry_id: &str,
     request_id: &str,
@@ -15,6 +15,63 @@ pub fn auto_review_card(
     tool: &str,
     arguments: &Value,
     reason: Option<&str>,
+    timestamp_ms: i64,
+) -> Value {
+    approval_card(
+        entry_id,
+        request_id,
+        status,
+        tool,
+        arguments,
+        reason,
+        Some(proposed_rule(tool, arguments)),
+        timestamp_ms,
+    )
+}
+
+/// The SAME card for a policy grant's "needs a human yes" — the client's shape, reused rather
+/// than a new type its closed card inventory would reject. Two differences, both in optional
+/// fields: `reason` is the grant's sentence, and `proposedRule` is absent. Without a rule the
+/// client's "Always allow" is a plain approve that writes nothing
+/// (`transcript-card/auto-review-actions.ts:149-150`), which is right: a policy grant is widened
+/// in policy, never from a card. The server tells the two asks apart by the run's suspend reason.
+pub fn policy_approval_card(
+    entry_id: &str,
+    request_id: &str,
+    status: &str,
+    tool: &str,
+    arguments: &Value,
+    why: Option<&str>,
+    timestamp_ms: i64,
+) -> Value {
+    approval_card(
+        entry_id,
+        request_id,
+        status,
+        tool,
+        arguments,
+        Some(
+            why.filter(|why| !why.is_empty())
+                .unwrap_or(POLICY_ASK_REASON),
+        ),
+        None,
+        timestamp_ms,
+    )
+}
+
+/// What the card says when the grant gave no reason of its own.
+pub const POLICY_ASK_REASON: &str =
+    "This coworker's policy needs a person to say yes before it may run this tool.";
+
+#[allow(clippy::too_many_arguments)]
+fn approval_card(
+    entry_id: &str,
+    request_id: &str,
+    status: &str,
+    tool: &str,
+    arguments: &Value,
+    reason: Option<&str>,
+    proposed_rule: Option<String>,
     timestamp_ms: i64,
 ) -> Value {
     let mut approval = json!({
@@ -32,7 +89,9 @@ pub fn auto_review_card(
     if let Some(command) = command_for(tool, arguments) {
         approval["command"] = json!(command);
     }
-    approval["proposedRule"] = json!(proposed_rule(tool, arguments));
+    if let Some(rule) = proposed_rule {
+        approval["proposedRule"] = json!(rule);
+    }
     json!({
         "kind": "send-message",
         "id": entry_id,
@@ -208,5 +267,34 @@ mod tests {
         );
         assert_eq!(settled["id"], pending["id"]);
         assert_eq!(settled["message"]["approval"]["status"], "approved");
+    }
+
+    #[test]
+    fn a_policy_ask_is_the_same_card_with_the_grants_reason_and_no_rule() {
+        let args = json!({ "command": "rm -rf build" });
+        let card = policy_approval_card(
+            "e_2",
+            "call_2",
+            "pending",
+            "shell",
+            &args,
+            Some("only the on-call may clean builds"),
+            9,
+        );
+        assert_eq!(card["message"]["type"], "auto-review-approval");
+        let approval = &card["message"]["approval"];
+        assert_eq!(approval["requestId"], "call_2");
+        assert_eq!(approval["surface"], "box_shell");
+        assert_eq!(approval["command"], "rm -rf build");
+        assert_eq!(approval["reason"], "only the on-call may clean builds");
+        assert!(
+            approval.get("proposedRule").is_none(),
+            "a policy card offers no rule: {approval}"
+        );
+        let unexplained = policy_approval_card("e_3", "call_3", "pending", "shell", &args, None, 9);
+        assert_eq!(
+            unexplained["message"]["approval"]["reason"],
+            POLICY_ASK_REASON
+        );
     }
 }

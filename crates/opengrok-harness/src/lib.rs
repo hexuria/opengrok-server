@@ -236,7 +236,8 @@ pub async fn resume_conversation(
         let reason = still_waiting
             .awaiting_reason
             .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-        let mut waiting = projection.awaiting_approval(&approved, reason);
+        let mut waiting =
+            projection.awaiting_approval(&approved, reason, awaiting_why(&still_waiting.content));
         let _ = journal.record(&run_id, &waiting).await;
         all.append(&mut waiting);
         return all;
@@ -320,20 +321,23 @@ async fn converse(
                         });
                     }
 
-                    if let Some((waiting, reason)) = results
+                    if let Some((waiting, reason, why)) = results
                         .iter()
                         .position(|result| result.awaiting_approval)
                         .and_then(|index| {
                             let reason = results[index]
                                 .awaiting_reason
                                 .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-                            calls.get(index).map(|call| (call, reason))
+                            calls
+                                .get(index)
+                                .map(|call| (call, reason, results[index].content.clone()))
                         })
                     {
                         // Ended as a readable state, not a silent stop and not a failure. The run
                         // stays `running` in the log, which is exactly what `interrupted_runs`
                         // looks for — resumption and approval share the same machinery.
-                        let mut waiting_events = projection.awaiting_approval(waiting, reason);
+                        let mut waiting_events =
+                            projection.awaiting_approval(waiting, reason, awaiting_why(&why));
                         let _ = journal.record(run_id, &round_events).await;
                         let _ = journal.record(run_id, &waiting_events).await;
                         all.append(&mut round_events);
@@ -381,6 +385,15 @@ async fn converse(
     }
 
     all
+}
+
+/// The gate's sentence out of an awaiting result. `ToolResult::awaiting` writes
+/// "waiting for approval: <why>"; the card wants only the why.
+fn awaiting_why(content: &str) -> Option<&str> {
+    content
+        .strip_prefix("waiting for approval: ")
+        .map(str::trim)
+        .filter(|why| !why.is_empty())
 }
 
 #[cfg(test)]

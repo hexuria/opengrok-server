@@ -264,11 +264,24 @@ the proof, not construction.
 - [x] **16.cards** An MCP Ask synthesizes a durable run and a real `auto-review-approval`
   card (`requestId` = the tool call id); the MCP error names it and does not wait. The person
   answers in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run;
-  the MCP client retries under the remembered call id. PolicyApproval still has no
-  transcribed desktop card; reverse-exec stays excluded. *(this commit)*
-- [ ] **16.later** OAuth 2.1 metadata on /mcp. PolicyApproval still has no transcribed desktop
-  card (AutoReview Ask does — 16.cards). Reverse-exec stays excluded from MCP. The org-key mint
-  console surface shipped as slice 17.
+  the MCP client retries under the remembered call id. PolicyApproval got its card in 16.policy;
+  reverse-exec stays excluded. *(this commit)*
+- [x] **16.policy** A policy grant's "needs a human yes" has a card. It was a stuck run: `card_for`
+  returned nothing for `PolicyApproval`, the resolve verb matched only auto-review, so a
+  `needs_approval` grant behaved like a deny that left a suspended run behind. The ask now rides
+  the client's own `auto-review-approval` card (`cards::policy_approval_card`) with the grant's
+  reason (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule`
+  — so the client's "Always" is a plain approve that writes nothing
+  (`transcript-card/auto-review-actions.ts:149-150`); a policy is widened in policy, never from a
+  card. `resolveAutoReviewApproval` settles both reasons and the resume routes a policy yes to
+  the gate; `resolveLocalToolPermission` settles exec-consent only. The MCP door raises the same
+  card for a policy ask and remembers its yes as a GATE yes for the retry.
+  `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → desktop verb → finished
+  run → gate yes remembered. Plan: `plan-slice16-later.md` Part A. *(this commit)*
+- [ ] **16.later** OAuth 2.1 on /mcp — `plan-slice16-later.md` Part B: an embedded authorization
+  server under `/oauth/mcp/*` whose token is a bot key; waits on TLS in front of the dev server
+  (`setup/tls.md`). Reverse-exec stays excluded from MCP. The org-key mint console surface
+  shipped as slice 17.
 
 ## Slice 17 — one identity across both doors
 

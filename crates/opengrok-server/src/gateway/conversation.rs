@@ -678,6 +678,8 @@ struct Suspension {
     tool: String,
     arguments: Value,
     reason: opengrok_core::run::SuspendReason,
+    /// The gate's sentence, when it gave one — a policy grant's reason.
+    why: Option<String>,
 }
 
 fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
@@ -710,6 +712,12 @@ fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> 
                         .and_then(Value::as_str)
                         .unwrap_or_default(),
                 ),
+                why: event
+                    .extra
+                    .get("why")
+                    .and_then(Value::as_str)
+                    .filter(|why| !why.is_empty())
+                    .map(str::to_string),
             });
         }
     }
@@ -754,8 +762,19 @@ fn card_for(suspension: &Suspension) -> Option<Value> {
             Some(opengrok_tools::review::REVIEW_ASK_REASON),
             now_ms(),
         )),
-        // A policy-grant approval on a box tool has no card in the desktop client yet. Named and
-        // logged rather than invisible; the same emission point grows a card when one exists.
+        // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
+        // reason and no proposed rule. Answered by `resolveAutoReviewApproval`, which routes the
+        // yes to the GATE (not the judge) by this reason.
+        SuspendReason::PolicyApproval => Some(super::cards::policy_approval_card(
+            &entry_id(),
+            &suspension.call_id,
+            "pending",
+            &suspension.tool,
+            &suspension.arguments,
+            suspension.why.as_deref(),
+            now_ms(),
+        )),
+        // Reverse-exec consent on anything but user_machine_shell: nothing renders it.
         _ => None,
     }
 }
@@ -1158,9 +1177,10 @@ pub async fn resolve_local_tool_permission(
             && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
             && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
             // The wrong verb must not settle the other card: this one answers the machine
-            // owner's consent, never an auto-review ask.
+            // owner's consent, never an auto-review ask and never a policy ask (both ride the
+            // auto-review card and its verb).
             && run.pending.as_ref().map(|p| p.reason)
-                != Some(opengrok_core::run::SuspendReason::AutoReview)
+                == Some(opengrok_core::run::SuspendReason::ExecConsent)
         {
             found = Some((run_id, run, seq));
             break;
@@ -1346,10 +1366,11 @@ pub async fn resolve_local_tool_permission(
 
 /// `resolveAutoReviewApproval {entryId, requestId, resolution, agentId}` — the auto-review card's
 /// answer. Mirrors `resolve_local_tool_permission` step for step; the differences are the card
-/// path it flips (`message.approval.status`), the suspension reason it will settle (ONLY
-/// auto-review), and that it writes no standing rule — the card's "Always" is client-side, which
-/// appends the proposed rule to the coworker tier through `PUT /auto-review/policy` and then
-/// sends `approved`.
+/// path it flips (`message.approval.status`), the suspension reasons it will settle (the judge's
+/// ask AND a policy grant's ask — both ride this card; the resume routes the yes by reason), and
+/// that it writes no standing rule — the card's "Always" is client-side, which appends the
+/// proposed rule to the coworker tier through `PUT /auto-review/policy` and then sends
+/// `approved`; a policy card carries no rule, so there "Always" is a plain approve.
 pub async fn resolve_auto_review_approval(
     state: &GatewayState,
     args: &Value,
@@ -1403,8 +1424,13 @@ pub async fn resolve_auto_review_approval(
         if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
             && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
             && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
-            && run.pending.as_ref().map(|p| p.reason)
-                == Some(opengrok_core::run::SuspendReason::AutoReview)
+            && matches!(
+                run.pending.as_ref().map(|p| p.reason),
+                Some(
+                    opengrok_core::run::SuspendReason::AutoReview
+                        | opengrok_core::run::SuspendReason::PolicyApproval
+                )
+            )
         {
             found = Some((run_id, run, seq));
             break;
@@ -1505,6 +1531,8 @@ pub async fn resolve_auto_review_approval(
                 &pending.tool,
                 &pending.arguments,
                 pending.call_id.clone(),
+                // A policy yes releases the GATE on the retry; a judge yes skips the judge.
+                pending.reason != opengrok_core::run::SuspendReason::AutoReview,
             );
         }
         if let Ok(finished) = run.decide(opengrok_core::run::RunCommand::Finish { at_ms }) {
