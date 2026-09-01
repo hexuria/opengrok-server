@@ -18,7 +18,7 @@
 pub mod review;
 pub use review::{
     AwaitingReason, Gate, Outcome, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy,
-    ReviewVerdict, block_refusal, combine, redact_arguments,
+    ReviewVerdict, ask_first_reason, combine, redact_arguments,
 };
 pub mod mcp;
 
@@ -245,8 +245,10 @@ impl AutoReview {
             .await;
         match verdict {
             ReviewVerdict::Allow => ReviewOutcome::Allow,
+            // The Settings UI labels this list "Ask first" and stores it as
+            // blockInstructions. A match must raise a card, not refuse.
             ReviewVerdict::Block => {
-                ReviewOutcome::Block(block_refusal(&self.policy.block_instructions))
+                ReviewOutcome::Ask(ask_first_reason(&self.policy.block_instructions))
             }
             ReviewVerdict::Ask => ReviewOutcome::Ask(review::REVIEW_ASK_REASON.to_string()),
             ReviewVerdict::Unavailable => {
@@ -1646,21 +1648,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_review_block_refuses_and_touches_no_box() {
+    async fn a_review_block_asks_and_touches_no_box() {
+        // Settings stores "Ask first" in blockInstructions; a match is a card, not a refuse.
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Block);
         let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge.clone());
         let result = executor
             .execute(&context_with_box("box_mine"), &shell_call("c1"))
             .await;
-        assert!(!result.ok);
-        assert!(!result.awaiting_approval);
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert!(result.content.contains("never touch prod"), "{result:?}");
-        assert_eq!(
-            spy.last_box(),
-            None,
-            "a blocked call must not reach the box"
-        );
+        assert_eq!(spy.last_box(), None, "an ask must not reach the box");
         assert_eq!(judge.calls(), 1);
     }
 
@@ -1725,20 +1724,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_machine_ask_plus_review_block_refuses_without_dispatch() {
+    async fn a_machine_ask_plus_review_ask_first_is_one_card_the_exec_one() {
         let sink = FakeSink::new(UserMachineReply::NeedsApproval);
         let judge = CountingJudge::new(ReviewVerdict::Block);
         let executor = allowing(Arc::new(SpyComputer::default()))
             .with_user_machine(sink.clone())
             .with_auto_review(blocking_policy(), judge);
         let result = executor.execute(&no_box_context(), &machine_call()).await;
-        assert!(!result.ok);
-        assert!(
-            !result.awaiting_approval,
-            "a written rule outranks a pending click"
-        );
-        assert!(result.content.contains("never touch prod"), "{result:?}");
-        assert!(sink_saw_nothing(&sink));
+        assert!(result.awaiting_approval);
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
+        assert_eq!(sink.seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
     }
 
     #[tokio::test]
@@ -1772,11 +1767,10 @@ mod tests {
         assert!(!shown.contains("sk-abc"), "{shown}");
     }
 
-    /// Nothing escapes the gate: every tool this executor offers, including the reverse-exec tool
-    /// and the box tools, is refused under an always-block judge, and none of them touches a
-    /// machine on the way.
+    /// Ask-first covers every offered tool: each call suspends for a card and
+    /// none of them touches a machine on the way.
     #[tokio::test]
-    async fn nothing_offered_escapes_an_always_block_judge() {
+    async fn nothing_offered_escapes_an_ask_first_judge() {
         let spy = Arc::new(SpyComputer::default());
         let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
         let judge = CountingJudge::new(ReviewVerdict::Block);
@@ -1794,10 +1788,9 @@ mod tests {
                     ),
                 )
                 .await;
-            assert!(!result.ok, "{name} slipped past the judge: {result:?}");
             assert!(
-                result.content.contains("auto-review blocked"),
-                "{name}: {result:?}"
+                result.awaiting_approval,
+                "{name} ran without a card: {result:?}"
             );
         }
         assert_eq!(spy.last_box(), None);
