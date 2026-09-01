@@ -765,6 +765,7 @@ pub(crate) async fn run_turn(
         thread_id: thread_id.clone(),
         account_id: Some(account_id),
         coworker_id: Some(coworker_id.clone()),
+        model: Some(model.clone()),
     };
     let request = ModelRequest {
         model,
@@ -1468,9 +1469,10 @@ async fn resume_gateway_run(
         thread_id: run.thread_id.clone(),
         account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
+        model: run.model.clone(),
     };
     let request = ModelRequest {
-        model: coworker.model.clone(),
+        model: run.pin_for_resume(&coworker.model),
         system: None,
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),

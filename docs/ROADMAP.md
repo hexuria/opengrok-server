@@ -326,9 +326,11 @@ REST ignored a requested model and stored the deployment default. Investigation:
   and the request carried the key" — the sentence now travels scrubbed and clipped, with a test
   driving a gateway that echoes our key; and `POST /models/probe` was an unbounded real-money
   amplifier, now one probe per account per few seconds. *(this commit)*
-- [ ] **18.later** A run resumed after an approval picks up the coworker's CURRENT pin rather than
-  the one its turn started on (a straight-through turn is stable); carrying the starting pin means
-  storing it on the suspension. Seam B's `UpdateGrokBotAgent` has no repin path. The roster's
+- [x] **18.pin** A resumed run thinks with the pin its turn started on. Stored on
+  `RunEvent::Started` (`#[serde(default)]` so old logs replay); `pin_for_resume` falls back to
+  the current pin only when that field is absent. Gateway and AG-UI continue paths both honour
+  it. *(this commit)*
+- [ ] **18.later** Seam B's `UpdateGrokBotAgent` has no repin path. The roster's
   `description = model` habit (a blank-agent defence in the desktop
   client, not a statement of choice — the console shows the pin as its own field); the desktop
   app's own create/update model field + picker; `auto_review_model` is a second deployment model

@@ -134,6 +134,7 @@ async fn seed_suspended_run(
         .decide(RunCommand::Start {
             thread_id: thread_id.clone(),
             coworker_id: Some(coworker.clone()),
+            model: Some("xai/grok-4.6".to_string()),
             at_ms: 1,
         })
         .expect("start");

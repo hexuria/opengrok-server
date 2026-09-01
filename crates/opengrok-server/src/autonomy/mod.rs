@@ -66,6 +66,7 @@ pub(crate) async fn fire(
         thread_id: thread_id.clone(),
         account_id: Some(account_id),
         coworker_id: Some(coworker_id),
+        model: Some(coworker.model.clone()),
     };
 
     let request = ModelRequest {

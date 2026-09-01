@@ -78,6 +78,11 @@ pub enum RunEvent {
     Started {
         thread_id: String,
         coworker_id: Option<CoworkerId>,
+        /// The pin this turn captured. A resume must not reload the coworker and pick up a
+        /// pin that moved while we were waiting. Absent on logs written before this field
+        /// existed (`#[serde(default)]`); those keep the old behaviour — the current pin.
+        #[serde(default)]
+        model: Option<String>,
         at_ms: i64,
     },
     /// One rendered protocol event, stored verbatim so a replay is byte-exact rather than
@@ -134,6 +139,8 @@ pub struct Run {
     pub started: bool,
     pub thread_id: String,
     pub coworker_id: Option<CoworkerId>,
+    /// Captured at start. See `RunEvent::Started::model`.
+    pub model: Option<String>,
     pub status: RunStatus,
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
@@ -154,6 +161,7 @@ impl Default for Run {
             started: false,
             thread_id: String::new(),
             coworker_id: None,
+            model: None,
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
@@ -190,6 +198,7 @@ pub enum RunCommand {
     Start {
         thread_id: String,
         coworker_id: Option<CoworkerId>,
+        model: Option<String>,
         at_ms: i64,
     },
     Emit {
@@ -234,11 +243,13 @@ impl Run {
             RunEvent::Started {
                 thread_id,
                 coworker_id,
+                model,
                 ..
             } => {
                 self.started = true;
                 self.thread_id = thread_id.clone();
                 self.coworker_id = coworker_id.clone();
+                self.model = model.clone();
                 self.status = RunStatus::Running;
             }
             RunEvent::Emitted { payload, .. } => self.emitted.push(payload.clone()),
@@ -279,15 +290,27 @@ impl Run {
         self.emitted.len() as i64
     }
 
+    /// The pin a resume must think with. A captured start pin wins; a log written before
+    /// pins were stored falls back to the coworker's current one (the old behaviour).
+    pub fn pin_for_resume(&self, current: &str) -> String {
+        self.model
+            .as_deref()
+            .filter(|pin| !pin.is_empty())
+            .unwrap_or(current)
+            .to_string()
+    }
+
     pub fn decide(&self, command: RunCommand) -> Result<Vec<RunEvent>, RunError> {
         match command {
             RunCommand::Start {
                 thread_id,
                 coworker_id,
+                model,
                 at_ms,
             } => Ok(vec![RunEvent::Started {
                 thread_id,
                 coworker_id,
+                model,
                 at_ms,
             }]),
 
@@ -393,6 +416,7 @@ mod tests {
             .decide(RunCommand::Start {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
+                model: None,
                 at_ms: 1,
             })
             .unwrap()
@@ -427,6 +451,7 @@ mod tests {
         let mut log = vec![RunEvent::Started {
             thread_id: "t1".to_string(),
             coworker_id: None,
+            model: None,
             at_ms: 1,
         }];
         for index in 0..5 {
@@ -504,6 +529,7 @@ mod tests {
             RunEvent::Started {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
+                model: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -654,6 +680,7 @@ mod tests {
             RunEvent::Started {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
+                model: None,
                 at_ms: 1,
             },
             RunEvent::Suspended {
@@ -692,5 +719,34 @@ mod tests {
             }),
             Err(RunError::NotStarted)
         );
+    }
+
+    #[test]
+    fn a_started_run_remembers_its_pin() {
+        let mut run = Run::default();
+        for event in run
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: Some("openai/gpt-5.5".to_string()),
+                at_ms: 1,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert_eq!(run.model.as_deref(), Some("openai/gpt-5.5"));
+        assert_eq!(run.pin_for_resume("oag/auto"), "openai/gpt-5.5");
+    }
+
+    #[test]
+    fn a_log_without_a_pin_resumes_on_the_current_one() {
+        let event: RunEvent = serde_json::from_str(
+            r#"{"type":"started","thread_id":"t1","coworker_id":null,"at_ms":1}"#,
+        )
+        .unwrap();
+        let run = Run::replay([&event]);
+        assert_eq!(run.model, None);
+        assert_eq!(run.pin_for_resume("oag/auto"), "oag/auto");
     }
 }

@@ -1053,6 +1053,7 @@ pub async fn run(
         thread_id: input.thread_id.clone(),
         account_id: account_id.clone(),
         coworker_id: run_coworker,
+        model: Some(request.model.clone()),
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -1092,6 +1093,9 @@ pub struct StoreJournal {
     /// Which coworker is doing the work. Recorded on the run because a run that is answered days
     /// later has to know whose tools to continue with, and the request that started it is long gone.
     pub coworker_id: Option<CoworkerId>,
+    /// The pin this turn captured. Written on `RunCommand::Start` so a resume does not reload
+    /// a coworker that was repinned while we were waiting.
+    pub model: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -1107,6 +1111,7 @@ impl opengrok_harness::RunJournal for StoreJournal {
             &self.thread_id,
             self.account_id.as_ref(),
             self.coworker_id.as_ref(),
+            self.model.as_deref(),
             events,
         )
         .await
@@ -1121,6 +1126,7 @@ async fn append_events(
     thread_id: &str,
     account_id: Option<&opengrok_core::id::AccountId>,
     coworker_id: Option<&CoworkerId>,
+    model: Option<&str>,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
     if events.is_empty() {
@@ -1137,6 +1143,10 @@ async fn append_events(
             .decide(RunCommand::Start {
                 thread_id: thread_id.to_string(),
                 coworker_id: coworker_id.cloned(),
+                model: model
+                    .map(str::trim)
+                    .filter(|pin| !pin.is_empty())
+                    .map(str::to_string),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -1514,12 +1524,14 @@ async fn continue_run(
         thread_id: run.thread_id.clone(),
         account_id: Some(account_id),
         coworker_id: run.coworker_id.clone(),
+        model: run.model.clone(),
     };
 
     let request = ModelRequest {
-        // The coworker's model, not the deployment's — the same rule `run()` enforces, and the
-        // same silent substitution if it slips.
-        model: coworker.model.clone(),
+        // The pin the turn started on, not the coworker's current one. A coworker that was
+        // repinned while this run waited on a card must not change what the continuation thinks
+        // with. Logs written before the pin was stored fall back to the current pin.
+        model: run.pin_for_resume(&coworker.model),
         system: None,
         messages: conversation_from(&run),
         tools: Vec::new(),
