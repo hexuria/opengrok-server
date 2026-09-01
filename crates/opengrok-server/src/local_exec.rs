@@ -74,6 +74,34 @@ fn matches(pattern: &str, command: &str) -> bool {
     command == pattern || command.starts_with(&format!("{pattern} "))
 }
 
+/// The first word of a command pattern, after a path prefix (`/usr/bin/sudo`,
+/// `C:\Windows\System32\sudo.exe`). Used only to decide whether a standing
+/// allow is forbidden; matching at run time is still `matches` above.
+fn first_command(pattern: &str) -> &str {
+    let token = pattern.trim().split_whitespace().next().unwrap_or("");
+    token.rsplit(['/', '\\']).next().unwrap_or(token)
+}
+
+/// Whether this standing rule may be persisted. Deny is never refused here —
+/// remembering "never run sudo" is a safety net. Allow of `sudo` (and
+/// `sudo.exe`, any path, any arguments) is refused, because a standing allow
+/// on `sudo` would silently cover `sudo rm -rf /`.
+///
+/// Both writers go through this: `POST /local-exec/policy/rule` and the
+/// Always/Never card in `conversation`. The store itself is not a writer of
+/// policy, only of rows.
+pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> {
+    if kind != "allow" {
+        return None;
+    }
+    let command = first_command(pattern);
+    if command.eq_ignore_ascii_case("sudo") || command.eq_ignore_ascii_case("sudo.exe") {
+        Some("sudo cannot be a standing allow")
+    } else {
+        None
+    }
+}
+
 /// THE GATE. The one place a command on the user's own machine is judged. Everything that would run
 /// a reverse-exec command MUST pass through here first, on the server, before anything is queued.
 ///
@@ -425,6 +453,9 @@ async fn add_rule(
             "kind must be allow|deny and pattern non-empty",
         )
             .into_response();
+    }
+    if let Some(why) = standing_rule_refusal(&body.kind, pattern) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
     }
     match state
         .store
@@ -991,6 +1022,26 @@ mod tests {
             decide(&p, "sudo rm -rf /"),
             LocalExecDecision::Deny(_)
         ));
+    }
+
+    #[test]
+    fn sudo_cannot_stand_as_allow() {
+        let refused = Some("sudo cannot be a standing allow");
+        assert_eq!(standing_rule_refusal("allow", "sudo"), refused);
+        assert_eq!(standing_rule_refusal("allow", "sudo rm -rf /"), refused);
+        assert_eq!(standing_rule_refusal("allow", "/usr/bin/sudo"), refused);
+        assert_eq!(
+            standing_rule_refusal("allow", r"C:\Windows\System32\sudo.exe"),
+            refused
+        );
+        assert_eq!(standing_rule_refusal("allow", "  SUDO -u root id"), refused);
+        // Deny of sudo is the safety net; it is not refused.
+        assert_eq!(standing_rule_refusal("deny", "sudo"), None);
+        assert_eq!(standing_rule_refusal("deny", "sudo rm"), None);
+        // A different command that merely starts with the letters, or sudo later.
+        assert_eq!(standing_rule_refusal("allow", "sudoedit"), None);
+        assert_eq!(standing_rule_refusal("allow", "echo sudo"), None);
+        assert_eq!(standing_rule_refusal("allow", "uname"), None);
     }
 
     #[test]
