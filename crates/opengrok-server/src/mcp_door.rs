@@ -11,10 +11,12 @@
 //!   personal, or revoked credential is a real `401`/`403` before rmcp is reached — and even
 //!   `initialize` requires a live bot key. The layer stashes the resolved principal so the
 //!   handler never re-derives it.
-//! - **An `ask` FAILS CLOSED.** There is no run to suspend and the MCP client cannot render our
-//!   consent cards, so a call that needs a person comes back as an error saying approval is not
-//!   available over MCP. Raising a durable card from a runless call is a follow-up (ROADMAP
-//!   16.later), so the message must not promise a card that does not exist.
+//! - **An auto-review `ask` raises a real card.** `run_one` has no in-flight run to suspend, so
+//!   the door synthesizes one (Start + Suspend) and emits the same `auto-review-approval` card a
+//!   shell Ask would. The MCP reply names `requestId` and does **not** wait; the person answers
+//!   in OpenGrok (`resolveAutoReviewApproval`), which resumes the run the way a conversation Ask
+//!   already does. PolicyApproval still has no transcribed desktop card — fail closed, and do
+//!   not promise one. Reverse-exec is excluded before execute, so ExecConsent cannot arrive here.
 //! - **The reverse-exec channel (`user_machine_shell`) is not carried over MCP in v1.** It reaches
 //!   the account owner's real machine; a leaked bot key must not widen from "this coworker's box"
 //!   to "the owner's laptop" through a new external ingress. It is excluded from the listing and
@@ -22,10 +24,10 @@
 //! - **A computerless coworker lists an EMPTY toolbox; an unreachable computer is an ERROR.** An
 //!   empty success is the dangerous reply (CLAUDE.md §3): a KEK/credential/DB failure must not
 //!   masquerade as "this coworker simply has no tools".
-//! - **No durable per-call audit yet.** Box and plugin tool calls in a normal run are journaled by
-//!   the harness; `run_one` bypasses the harness, so the only record here is a redacted tracing
-//!   line. A durable audit row for door calls is ROADMAP 16.later; until then this path is not
-//!   forensically equivalent to a run, and this comment says so rather than claiming otherwise.
+//! - **Allowed calls still have no durable per-call audit.** Box and plugin tool calls in a
+//!   normal run are journaled by the harness; a successful `run_one` is still only a redacted
+//!   tracing line. An Ask now has a run row (that is the card); a full audit of every door call
+//!   is still later.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -46,12 +48,13 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::AgUiState;
 use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
+use crate::gateway::GatewayState;
 use opengrok_core::CoworkerId;
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, RunId};
+use opengrok_core::run::{Run, RunCommand, RunView, SuspendReason};
 use opengrok_harness::tools::ToolRunner;
-use opengrok_tools::{ToolCall, USER_MACHINE_SHELL, redact_arguments};
+use opengrok_tools::{AwaitingReason, ToolCall, USER_MACHINE_SHELL, redact_arguments};
 
 /// The authenticated caller, resolved once by `guard` and read by the handler. A bot key hard-binds
 /// one account to one coworker, so this pair is the whole identity — the MCP client cannot name a
@@ -63,13 +66,13 @@ struct McpPrincipal {
 }
 
 /// The `/mcp` surface: the rmcp streamable-HTTP service behind the auth-and-origin guard.
-pub fn router(state: AgUiState) -> axum::Router {
+pub fn router(state: GatewayState) -> axum::Router {
     axum::Router::new()
         .fallback_service(service(state.clone()))
         .layer(axum::middleware::from_fn_with_state(state, guard))
 }
 
-fn service(state: AgUiState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
+fn service(state: GatewayState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
     StreamableHttpService::new(
         move || {
             Ok(McpDoor {
@@ -96,13 +99,13 @@ fn service(state: AgUiState) -> StreamableHttpService<McpDoor, LocalSessionManag
 /// personal, or revoked credential never reaches rmcp (which would answer 200 + a JSON-RPC error);
 /// it gets a real `401`/`403`, so an OAuth-capable client can discover it must authenticate, and
 /// `initialize` itself is gated.
-async fn guard(State(state): State<AgUiState>, mut req: Request, next: Next) -> Response {
+async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) -> Response {
     // A browser page must never be able to drive this, with or without a token — the same refusal
     // the gateway makes, before anything else.
     if req.headers().contains_key(header::ORIGIN) {
         return (StatusCode::FORBIDDEN, "browser origins are not served").into_response();
     }
-    match principal_from_bearer(&state, req.headers()).await {
+    match principal_from_bearer(&state.agui, req.headers()).await {
         Ok(Some((account, Some(coworker)))) => {
             req.extensions_mut()
                 .insert(McpPrincipal { account, coworker });
@@ -129,7 +132,7 @@ fn unauthorized(message: &'static str) -> Response {
 }
 
 pub struct McpDoor {
-    state: AgUiState,
+    state: GatewayState,
 }
 
 /// What a coworker's toolbox resolved to. The three cases are kept apart because collapsing them is
@@ -160,6 +163,7 @@ impl McpDoor {
     async fn toolbox_for(&self, principal: &McpPrincipal) -> Toolbox {
         let Ok((coworker, _)) = self
             .state
+            .agui
             .auth
             .store
             .load_coworker(&principal.coworker)
@@ -171,7 +175,7 @@ impl McpDoor {
             return Toolbox::NoComputer;
         }
         match tools_for_coworker(
-            &self.state,
+            &self.state.agui,
             &principal.account,
             &principal.coworker,
             &[],
@@ -247,9 +251,9 @@ impl ServerHandler for McpDoor {
             .with_server_info(Implementation::new("opengrok", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Tools run on the coworker this key names, on that coworker's own computer, \
-                 under the account's policy. A call that needs a person's approval is refused \
-                 with a reason — approval is not available over MCP; grant the tool in the \
-                 OpenGrok app or console, or run it from the app.",
+                 under the account's policy. A call that needs auto-review approval is refused \
+                 with a requestId; a card is waiting in the OpenGrok app — answer it there, \
+                 then retry. Reverse-exec (your own machine) is not available over MCP.",
             )
     }
 
@@ -340,8 +344,8 @@ impl ServerHandler for McpDoor {
             let _guard = lock.lock().await;
             runner.run_one(&call).await
         };
-        // The only record of a door call today (no durable audit yet — see the module note).
-        // Arguments are redacted the way the judge redacts them: identity stripped, secrets masked.
+        // Allowed calls still have no durable audit (see the module note). An Ask is persisted
+        // below. Arguments are redacted the way the judge redacts them: identity stripped, secrets masked.
         tracing::info!(
             coworker = %principal.coworker.as_str(),
             tool = %call.name,
@@ -353,16 +357,143 @@ impl ServerHandler for McpDoor {
         let response = if result.ok {
             CallToolResult::success(vec![ContentBlock::text(result.content)])
         } else if result.awaiting_approval {
-            // No card exists on this path, so do not tell the caller to answer one.
-            CallToolResult::error(vec![ContentBlock::text(format!(
-                "{} — approval is not available over MCP; grant this tool to the coworker in the \
-                 OpenGrok app or console, or run it from the app.",
-                result.content
-            ))])
+            CallToolResult::error(vec![ContentBlock::text(
+                reply_to_ask(
+                    &self.state,
+                    &principal.account,
+                    &principal.coworker,
+                    &call,
+                    &result,
+                )
+                .await,
+            )])
         } else {
             // A refusal is content the model can reason about, exactly as in a run.
             CallToolResult::error(vec![ContentBlock::text(result.content)])
         };
         Ok(response.into())
     }
+}
+
+/// An MCP Ask: raise a card when we have one, fail closed when we do not, never wait.
+/// Returns the error text the door sends the MCP client. Public so the door test can drive
+/// this path without a Ready toolbox (a computer) — `run_one` only Asks after that.
+pub async fn reply_to_ask(
+    state: &GatewayState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    call: &ToolCall,
+    result: &opengrok_tools::ToolResult,
+) -> String {
+    match result.awaiting_reason {
+        Some(AwaitingReason::AutoReview) => {
+            match persist_mcp_ask(state, account, coworker, call).await {
+                Ok(request_id) => format!(
+                    "{} — a card is waiting in the OpenGrok app (requestId: {request_id}). \
+                     Answer it there, then retry this call.",
+                    result.content
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "mcp door: could not raise an approval card");
+                    format!(
+                        "{} — approval is needed, but the card could not be raised; grant this \
+                         tool to the coworker in the OpenGrok app or console, or retry.",
+                        result.content
+                    )
+                }
+            }
+        }
+        // PolicyApproval has no transcribed desktop card. ExecConsent is reverse-exec, which
+        // is refused by name before execute. Do not promise a card that does not exist.
+        _ => format!(
+            "{} — approval is not available over MCP; grant this tool to the coworker in the \
+             OpenGrok app or console, or run it from the app.",
+            result.content
+        ),
+    }
+}
+
+/// Synthesize a durable run + auto-review card for an MCP Ask so the person can answer it
+/// in OpenGrok. Returns the `requestId` (the tool call id).
+async fn persist_mcp_ask(
+    state: &GatewayState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    call: &ToolCall,
+) -> Result<String, opengrok_store::StoreError> {
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let run_id = RunId::new();
+    // Distinct from `gateway-{coworker}`: this run is the MCP call's audit row, not a
+    // conversation turn. Resume still works — `resolveAutoReviewApproval` keys off the
+    // pending call id, not the thread.
+    let thread_id = format!("mcp-{}", coworker.as_str());
+    let model = state
+        .agui
+        .auth
+        .store
+        .load_coworker(coworker)
+        .await
+        .ok()
+        .map(|(coworker, _)| coworker.model)
+        .filter(|pin| !pin.trim().is_empty());
+
+    let mut run = Run::default();
+    let mut events = run
+        .decide(RunCommand::Start {
+            thread_id: thread_id.clone(),
+            coworker_id: Some(coworker.clone()),
+            model,
+            at_ms,
+        })
+        .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+    for event in &events {
+        run.apply(event);
+    }
+    let suspended = run
+        .decide(RunCommand::Suspend {
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            arguments: call.arguments.clone(),
+            reason: SuspendReason::AutoReview,
+            at_ms,
+        })
+        .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+    for event in &suspended {
+        run.apply(event);
+    }
+    events.extend(suspended);
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id,
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    state
+        .agui
+        .auth
+        .store
+        .append_run(&run_id, 0, &events, &view, Some(account))
+        .await?;
+
+    let entry_id = format!("e_{}", uuid::Uuid::now_v7());
+    let card = crate::gateway::cards::auto_review_card(
+        &entry_id,
+        &call.id,
+        "pending",
+        &call.name,
+        &call.arguments,
+        Some(opengrok_tools::review::REVIEW_ASK_REASON),
+        at_ms,
+    );
+    state
+        .agui
+        .auth
+        .store
+        .append_gateway_entry(coworker, &card, at_ms)
+        .await?;
+    // Persist-only would be enough for a reload; emitting means an open desktop sees the
+    // card without reconnecting. No subscriber is an ordinary morning (live::emit).
+    crate::gateway::live::emit_transcript(state, coworker.as_str(), "appended", card);
+    Ok(call.id.clone())
 }

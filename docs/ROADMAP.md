@@ -248,8 +248,12 @@ the proof, not construction.
   connected, and one invocation with both doors configured answered via the gateway, called
   `mcp__opengrok__shell`, and ran it on the coworker's own container — the tool's hostname
   output IS the container id. Evidence: `docs/verification/door1/README.md`. (`2502deb`)
-- [ ] **16.later** Card-driven MCP approvals (synthesize a durable run so an ask raises a real
-  card); OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
+- [x] **16.cards** An MCP Ask synthesizes a durable run and a real `auto-review-approval`
+  card (`requestId` = the tool call id); the MCP error names it and does not wait. The person
+  answers in OpenGrok (`resolveAutoReviewApproval`), which resumes the run the way a
+  conversation Ask already does. PolicyApproval still has no transcribed desktop card;
+  reverse-exec stays excluded. *(this commit)*
+- [ ] **16.later** OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
   three-doors order).
 
 ## Slice 17 — one identity across both doors
