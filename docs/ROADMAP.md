@@ -276,8 +276,20 @@ key that opens the model door, sets the org's budget and that member's cap, and 
 - [x] **17.v** Live, against the real gateway: budget set → key minted from the console → Claude
   Code answered on that key → $0.097560 rolled up under the org's principal → revoke → 401.
   Evidence: `docs/verification/one-identity/README.md`. *(this commit)*
+- [x] **17.r** Peer review closed a real lockout in the gateway half: `upsert_principal`'s
+  `ON CONFLICT` rewrote `role`, and that path only ever asks for `member` — so binding an org
+  whose email collided with an existing admin's SILENTLY DEMOTED that operator (the admin gate
+  wants an admin key *and* an admin principal). Role is now untouched on conflict, with a
+  regression test; amounts too large for `numeric(14,6)` are a 400 rather than a swallowed 500;
+  and the module doc no longer implies more than the code enforces — `require_admin_layer` is
+  all-or-nothing, so the key handed to a partner service is a FULL gateway admin credential.
+  Ours: the mint's non-idempotence and the revoke mirror are documented where they bite.
+  *(this commit)*
 - [ ] **17.later** Per-member model pins (slice 18), SSO/SCIM mapping onto the gateway's
-  `oidc_subject` hook, self-service key rotation.
+  `oidc_subject` hook, self-service key rotation, an idempotency key on the mint, reconciling
+  the console's key listing against the gateway (a failed revoke mirror leaves it reading
+  stale), and per-key admin scopes in the gateway so a partner service's credential is not a
+  full operator credential.
 
 ## Slice 11+ — breadth (P5 → P10, in order)
 

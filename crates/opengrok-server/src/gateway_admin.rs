@@ -35,10 +35,11 @@ pub struct PrincipalUsage {
     pub requests: i64,
 }
 
+/// Why a call to the gateway's admin API did not do what was asked. There is no
+/// "not configured" case here on purpose: a deployment with no admin connection has
+/// no `GatewayAdmin` at all, so the refusal happens before a call is attempted.
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
-    #[error("the gateway admin API is not configured")]
-    NotConfigured,
     #[error("the gateway refused: {0}")]
     Refused(String),
     #[error("the gateway is unreachable: {0}")]

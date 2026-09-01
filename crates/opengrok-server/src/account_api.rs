@@ -518,11 +518,6 @@ fn gateway_admin(state: &AuthState) -> Result<crate::gateway_admin::GatewayAdmin
 fn gateway_refusal(error: &crate::gateway_admin::AdminError) -> Response {
     use crate::gateway_admin::AdminError;
     match error {
-        AdminError::NotConfigured => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "this deployment has no gateway admin connection".to_string(),
-        )
-            .into_response(),
         // The gateway's own sentence, which names the real problem, reaches the operator.
         AdminError::Refused(detail) => (
             StatusCode::BAD_GATEWAY,
@@ -631,6 +626,12 @@ async fn mint_gateway_key(
     // Attribution is recorded AFTER the gateway minted, so a row never claims a key that does not
     // exist. If this insert fails the key is real but unattributed — the operator is told, rather
     // than being handed a key the console will never list.
+    //
+    // MINTING IS NOT IDEMPOTENT, and cannot be while the gateway assigns the id: a reply lost to a
+    // timeout means the admin sees no key and may press again, minting a second real one. That is
+    // survivable in a way the reverse would not be — every key is listed and individually
+    // revocable, so a duplicate is visible and removable, whereas silently reusing one would hand
+    // two people the same credential. An idempotency key on the mint is ROADMAP 17.later.
     if let Err(error) = state
         .store
         .insert_gateway_key(
@@ -694,12 +695,22 @@ async fn revoke_gateway_key(
     if let Err(error) = admin.revoke_key(&key_id).await {
         return gateway_refusal(&error);
     }
-    if let Err(error) = state
+    // Mirror it, with one retry: the key is already dead either way, but a row still reading
+    // "active" makes the console state something untrue, and that is worth a second attempt.
+    let mut mirrored = state
         .store
         .mark_gateway_key_revoked(&key_id, org_id.as_str())
-        .await
-    {
-        tracing::warn!(%error, %key_id, "revoked in the gateway but could not mirror it locally");
+        .await;
+    if mirrored.is_err() {
+        mirrored = state
+            .store
+            .mark_gateway_key_revoked(&key_id, org_id.as_str())
+            .await;
+    }
+    if let Err(error) = mirrored {
+        // ERROR, not warn: the key is revoked but the console will keep showing it as active until
+        // somebody reconciles. Reconciling the listing against the gateway is ROADMAP 17.later.
+        tracing::error!(%error, %key_id, "revoked in the gateway but could not mirror it locally; the listing will read stale");
     }
     StatusCode::NO_CONTENT.into_response()
 }
