@@ -121,7 +121,8 @@ tonic gRPC server cannot answer the client.
 - [x] **9.3** `GrokBotService` — the mock's 12 (transcripts as base64 bodies with string seqs,
   sends idempotent on `(agent, messageId)`, real turns instead of the mock's canned line), plus
   `EnsureSandBox` minting OUR gateway: `OG_PUBLIC_GATEWAY_URL` + the gateway bearer, refused
-  outright when no non-loopback address is configured. *(this commit)*
+  when that URL is unset. The client refuses a loopback host, so the configured address must
+  not be one — asserted by `slice13-seamb-smoke.sh`, not by the mint. *(this commit)*
 - [x] **9.4** tonic is in: `proto/opengrok_seamb.proto` (hand-transcribed, provenance in the
   file, codegen into target/ never the tree), both services on an opt-in `OG_GRPC_BIND`
   listener, proven by a real tonic client in `against_our_own_grpc.rs` — unauthenticated
@@ -134,8 +135,8 @@ tonic gRPC server cannot answer the client.
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
 
-Runs from a client Bot arrive anonymous today: no tools, no policy, the deployment's model.
-Access tokens live one hour, so a Bot registered with a static header dies hourly.
+A client Bot used to arrive anonymous: no tools, no policy, the deployment's model.
+Access tokens live one hour, so a Bot registered with a static header died hourly.
 
 - [x] **10.1** `POST /coworkers/{id}/keys`: a durable, revocable bot-key — signed with a `use`
   discriminator so an access token can never pass as one, shown exactly once at mint, its
@@ -145,12 +146,11 @@ Access tokens live one hour, so a Bot registered with a static header dies hourl
   POST /ag-ui with nothing but the key runs as the coworker, on its model, owned by the minting
   account — and a revoked key answers 401 rather than silently downgrading to anonymous.
   *(this commit)*
-- [ ] **10.3** Proven from barok-works end to end. Every hop holds separately — the key sits in
-  their vault (`hasAuth: true`), their loader attaches it per load, and the same minted key via
-  curl runs owned on the same live server — but the one browser send with the header attached is
-  still owed: the first attempt bound the STALE duplicate Bot (the package-sync-never-prunes
-  finding, now cleaned up), and the retry died under machine load. One quiet-machine send
-  closes it.
+- [x] **10.3** Proven from barok-works end to end. A browser send from the OpenGrok channel
+  landed as Hexuria, owned (`run_view.account_id` non-null, thread id not `gateway-<coworker>`).
+  The first send of the day *looked* like success and was anonymous: the vault held a key
+  minted for a previous account, which does not verify, which is `Ok(None)`. `hasAuth: true`
+  is not proof. `docs/verification/barok-bot-binding/`. *(this commit)*
 
 ## Slice 12 — Identity: orgs, invites, credential accounts (`796bf61`)
 

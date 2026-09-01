@@ -3,6 +3,13 @@
 Written 2026-09-01. Everything below is verified against the live box unless marked ASSUMPTION.
 Read `CLAUDE.md` (invariants) and `docs/ROADMAP.md` (the tracker) first.
 
+**Update, same day:** 10.3 is closed. The recon below was right that `"the Bot replied"` is not
+proof, and wrong that the likely miss was a missing `Bearer ` prefix — the vault already had
+the prefix, but the JWT was minted for a previous account and did not verify, which is the
+anonymous path. Rebound to a live Hexuria key; one channel send produced
+`run_view.account_id = acct_01a0551e-…`. Evidence: `docs/verification/barok-bot-binding/`.
+9.v is still blocked on the human.
+
 ---
 
 ## 1. Where the project actually is

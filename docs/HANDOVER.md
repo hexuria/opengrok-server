@@ -16,7 +16,8 @@ the web console at `/console`, and the consent model (per-machine policy, never-
 two-tier auto-review with a model judge). A dev instance runs on `:1447` against the real judge.
 [`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
 true — and its unticked boxes are the work: 9.v (the client minting its own connection in server
-mode), 10.3 (one browser send from barok-works), 12.later, and the "Later" bucket.
+mode; blocked on the password for `signin@acme.test`, see [`HANDOVER-9v-10.3.md`](HANDOVER-9v-10.3.md)),
+12.later, and the "Later" bucket. 10.3 closed 1 Sep 2026.
 
 ## How to stand it up
 
