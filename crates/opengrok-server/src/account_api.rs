@@ -495,12 +495,15 @@ async fn list_invites(State(state): State<AuthState>, headers: axum::http::Heade
 // request. A key id that belongs to another org answers 404, not 403 — a member of one org must
 // not be able to learn that another org's key exists by probing ids.
 
-/// The admin surface, or a refusal saying the deployment has not wired the gateway's admin door.
+/// The admin surface this deployment was booted with, or a refusal saying it has none.
+///
+/// Read from the state, not the environment: it is resolved once at boot, so a handler cannot see
+/// a different answer than the one the server started with, and a test can substitute a stand-in.
 ///
 /// `Box`ed refusal: `Response` is large, and a `Result` whose error dwarfs its success value is
 /// paid for on every call that succeeds.
-fn gateway_admin() -> Result<crate::gateway_admin::GatewayAdmin, Box<Response>> {
-    crate::gateway_admin::GatewayAdmin::from_env().ok_or_else(|| {
+fn gateway_admin(state: &AuthState) -> Result<crate::gateway_admin::GatewayAdmin, Box<Response>> {
+    state.gateway_admin.clone().ok_or_else(|| {
         Box::new(
             (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -590,7 +593,7 @@ async fn mint_gateway_key(
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    let admin = match gateway_admin() {
+    let admin = match gateway_admin(&state) {
         Ok(admin) => admin,
         Err(refusal) => return *refusal,
     };
@@ -681,7 +684,7 @@ async fn revoke_gateway_key(
         Ok(Some(_)) => {}
         _ => return (StatusCode::NOT_FOUND, "no such key").into_response(),
     }
-    let admin = match gateway_admin() {
+    let admin = match gateway_admin(&state) {
         Ok(admin) => admin,
         Err(refusal) => return *refusal,
     };
@@ -726,7 +729,7 @@ async fn set_gateway_key_quota(
         Ok(Some(_)) => {}
         _ => return (StatusCode::NOT_FOUND, "no such key").into_response(),
     }
-    let admin = match gateway_admin() {
+    let admin = match gateway_admin(&state) {
         Ok(admin) => admin,
         Err(refusal) => return *refusal,
     };
@@ -755,7 +758,7 @@ async fn set_gateway_budget(
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    let admin = match gateway_admin() {
+    let admin = match gateway_admin(&state) {
         Ok(admin) => admin,
         Err(refusal) => return *refusal,
     };
@@ -782,7 +785,7 @@ async fn gateway_usage(State(state): State<AuthState>, headers: axum::http::Head
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    let admin = match gateway_admin() {
+    let admin = match gateway_admin(&state) {
         Ok(admin) => admin,
         Err(refusal) => return *refusal,
     };

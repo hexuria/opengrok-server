@@ -67,6 +67,11 @@ pub struct AuthState {
     /// a caller waiting for one command's result. One per replica, shared by the `/local-exec/*`
     /// routes.
     pub local_exec: Arc<crate::local_exec::LocalExecBroker>,
+    /// The other door's key desk: open-ai-gateway's admin API, for minting an org member a key.
+    /// Resolved ONCE at boot rather than per request — the environment is not a per-request input,
+    /// and a seam a test can substitute is worth more than a `std::env` read in a handler.
+    /// `None` ⇒ the deployment has not wired it, and that surface answers 503.
+    pub gateway_admin: Option<crate::gateway_admin::GatewayAdmin>,
 }
 
 impl AuthState {
@@ -79,12 +84,21 @@ impl AuthState {
             public_url: String::new(),
             logins: Arc::new(Mutex::new(HashMap::new())),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
+            gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
         }
     }
 
     pub fn with_resend(mut self, key: Option<String>, public_url: String) -> Self {
         self.resend_api_key = key.filter(|k| !k.is_empty());
         self.public_url = public_url;
+        self
+    }
+
+    /// Point the gateway's admin door somewhere explicit — what a test uses to stand in for the
+    /// real gateway without touching the process environment.
+    #[must_use]
+    pub fn with_gateway_admin(mut self, admin: Option<crate::gateway_admin::GatewayAdmin>) -> Self {
+        self.gateway_admin = admin;
         self
     }
 }

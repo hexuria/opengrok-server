@@ -63,6 +63,17 @@ impl std::fmt::Debug for GatewayAdmin {
 }
 
 impl GatewayAdmin {
+    /// An explicit connection. What a test points at a stand-in gateway, and what `from_env`
+    /// builds after reading the two variables.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            token: token.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
     /// From the environment, or `None` when the deployment has not wired the admin door.
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("OG_GATEWAY_ADMIN_URL")
@@ -71,11 +82,7 @@ impl GatewayAdmin {
         let token = std::env::var("OG_GATEWAY_ADMIN_TOKEN")
             .ok()
             .filter(|token| !token.is_empty())?;
-        Some(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            token,
-            http: reqwest::Client::new(),
-        })
+        Some(Self::new(base_url, token))
     }
 
     /// The principal that IS this org. Deterministic, so we store no gateway ids: the org id is

@@ -6,15 +6,22 @@ import {
   clearBoxKey,
   disableUser,
   enableUser,
+  gatewayUsage,
   getOrgMode,
   issueInvite,
+  listGatewayKeys,
   listInvites,
   listOrgComputers,
   listUsers,
+  mintGatewayKey,
+  revokeGatewayKey,
   setAccountMode,
   setBoxKey,
+  setGatewayBudget,
+  setGatewayKeyQuota,
   setOrgMode,
   testBoxConnection,
+  type GatewayKey,
   type SharingMode,
 } from "../api/admin";
 import { ApiError } from "../api/client";
@@ -294,12 +301,236 @@ function ComputersCard() {
   );
 }
 
+/** One member's key row: the prefix, its cap, and revoke. */
+function GatewayKeyRow({
+  gkey,
+  email,
+}: {
+  gkey: GatewayKey;
+  email: string;
+}) {
+  const queryClient = useQueryClient();
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["admin", "gateway", "keys"] });
+  const [cap, setCap] = useState("");
+
+  const revoke = useMutation({ mutationFn: () => revokeGatewayKey(gkey.id), onSuccess: refresh });
+  const saveCap = useMutation({
+    mutationFn: () => setGatewayKeyQuota(gkey.id, cap.trim() ? cap.trim() : null),
+    onSuccess: refresh,
+  });
+
+  return (
+    <tr>
+      <td>{email}</td>
+      <td>
+        <code>{gkey.keyPrefix}…</code>
+      </td>
+      <td>{gkey.revoked ? "Revoked" : "Active"}</td>
+      <td>
+        {gkey.revoked ? (
+          <span className="muted">—</span>
+        ) : (
+          <span className="row">
+            <input
+              type="text"
+              inputMode="decimal"
+              placeholder="no cap"
+              value={cap}
+              onChange={(e) => setCap(e.target.value)}
+              aria-label={`Monthly cap for ${email}`}
+              size={8}
+            />
+            <button onClick={() => saveCap.mutate()} disabled={saveCap.isPending}>
+              Set cap
+            </button>
+          </span>
+        )}
+      </td>
+      <td>
+        {gkey.revoked ? null : (
+          <button onClick={() => revoke.mutate()} disabled={revoke.isPending}>
+            Revoke
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * Gateway access: the keys that open the model door for this org's members.
+ *
+ * A minted key is shown ONCE — the server keeps only its prefix, and the gateway only its hash —
+ * so the reveal below is the single moment it can be copied. The budget and spend are read live
+ * from the gateway rather than mirrored here, because a second copy of a number about money is a
+ * number that will eventually disagree.
+ */
+function GatewayAccessCard() {
+  const queryClient = useQueryClient();
+  const users = useQuery({ queryKey: ["admin", "users"], queryFn: listUsers, retry: false });
+  const keys = useQuery({
+    queryKey: ["admin", "gateway", "keys"],
+    queryFn: listGatewayKeys,
+    retry: false,
+  });
+  const usage = useQuery({
+    queryKey: ["admin", "gateway", "usage"],
+    queryFn: gatewayUsage,
+    retry: false,
+  });
+
+  const [member, setMember] = useState("");
+  const [quota, setQuota] = useState("");
+  const [budget, setBudget] = useState("");
+  const [revealed, setRevealed] = useState<{ email: string; key: string } | null>(null);
+
+  const mint = useMutation({
+    mutationFn: () => mintGatewayKey(member, quota),
+    onSuccess: (minted) => {
+      setRevealed({ email: minted.label, key: minted.key });
+      setQuota("");
+      queryClient.invalidateQueries({ queryKey: ["admin", "gateway"] });
+    },
+  });
+  const saveBudget = useMutation({
+    mutationFn: () => setGatewayBudget(budget.trim() ? budget.trim() : null),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "gateway", "usage"] }),
+  });
+
+  const notAdmin =
+    keys.error instanceof ApiError && keys.error.status === 403;
+  if (notAdmin) {
+    return (
+      <section className="card">
+        <h2>Gateway access</h2>
+        <p className="muted">Admins only — you do not manage this organization.</p>
+      </section>
+    );
+  }
+
+  // The deployment has not wired its gateway admin connection; say so plainly instead of
+  // rendering controls that can only fail.
+  const unwired =
+    keys.error instanceof ApiError && keys.error.status === 503
+      ? keys.error.message
+      : usage.error instanceof ApiError && usage.error.status === 503
+        ? usage.error.message
+        : null;
+  if (unwired) {
+    return (
+      <section className="card">
+        <h2>Gateway access</h2>
+        <p className="muted">{unwired}</p>
+      </section>
+    );
+  }
+
+  const emailFor = (id: string) =>
+    users.data?.users.find((u) => u.id === id)?.email ?? id;
+
+  return (
+    <section className="card">
+      <h2>Gateway access</h2>
+      <p className="muted">
+        A key here opens the model door for one member: they set it as their client's API token.
+        Spending counts against this organization.
+      </p>
+
+      {usage.data ? (
+        <p>
+          <strong>{usage.data.monthToDateUsd}</strong> spent this month
+          {usage.data.monthlyBudgetUsd ? ` of ${usage.data.monthlyBudgetUsd}` : " (no budget set)"} ·{" "}
+          {usage.data.requests} requests
+        </p>
+      ) : null}
+
+      <div className="row">
+        <input
+          type="text"
+          inputMode="decimal"
+          placeholder="Monthly budget, e.g. 50.00"
+          value={budget}
+          onChange={(e) => setBudget(e.target.value)}
+          aria-label="Organization monthly budget"
+        />
+        <button onClick={() => saveBudget.mutate()} disabled={saveBudget.isPending}>
+          Save budget
+        </button>
+      </div>
+      {saveBudget.error instanceof Error ? (
+        <p className="error">{saveBudget.error.message}</p>
+      ) : null}
+
+      <div className="row">
+        <select value={member} onChange={(e) => setMember(e.target.value)} aria-label="Member">
+          <option value="">Choose a member…</option>
+          {users.data?.users.map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.email}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          inputMode="decimal"
+          placeholder="Cap (optional)"
+          value={quota}
+          onChange={(e) => setQuota(e.target.value)}
+          aria-label="Per-member cap"
+          size={10}
+        />
+        <button onClick={() => mint.mutate()} disabled={!member || mint.isPending}>
+          Mint key
+        </button>
+      </div>
+      {mint.error instanceof Error ? <p className="error">{mint.error.message}</p> : null}
+
+      {revealed ? (
+        <div className="card inset">
+          <p>
+            <strong>{revealed.email}</strong>&rsquo;s key. Copy it now — it is not shown again.
+          </p>
+          <code className="wrap">{revealed.key}</code>
+          <div className="row">
+            <button onClick={() => void navigator.clipboard?.writeText(revealed.key)}>Copy</button>
+            <button onClick={() => setRevealed(null)}>Done</button>
+          </div>
+        </div>
+      ) : null}
+
+      {keys.isLoading ? (
+        <p className="muted">Loading…</p>
+      ) : keys.data && keys.data.keys.length > 0 ? (
+        <table>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Key</th>
+              <th>State</th>
+              <th>Cap</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {keys.data.keys.map((k) => (
+              <GatewayKeyRow key={k.id} gkey={k} email={emailFor(k.memberId)} />
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p className="muted">No keys yet.</p>
+      )}
+    </section>
+  );
+}
+
 export function AdminPage() {
   return (
     <AuthedFrame requireAdmin>
       {() => (
         <div className="stack">
           <UsersCard />
+          <GatewayAccessCard />
           <ComputersCard />
           <InvitesCard />
         </div>

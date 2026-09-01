@@ -84,3 +84,68 @@ export async function clearAccountMode(id: string): Promise<void> {
   });
   if (!res.ok) throw new ApiError(res.status, "could not clear the override");
 }
+
+// ---- Gateway keys: one identity, two doors ----
+//
+// A member's key opens the model door (open-ai-gateway). The secret comes back exactly ONCE, in
+// the mint reply — the server never stores it and cannot show it again, so the UI must hand it to
+// the person there and then.
+
+export interface GatewayKey {
+  id: string;
+  memberId: string;
+  keyPrefix: string;
+  label: string;
+  revoked: boolean;
+  createdAtMs: number;
+}
+
+export interface MintedGatewayKey extends Omit<GatewayKey, "revoked" | "createdAtMs"> {
+  /** Shown once. Never fetchable again. */
+  key: string;
+}
+
+export interface GatewayUsage {
+  monthlyBudgetUsd: string | null;
+  monthToDateUsd: string;
+  requests: number;
+  provisioned: boolean;
+}
+
+export function listGatewayKeys(): Promise<{ keys: GatewayKey[] }> {
+  return getJson<{ keys: GatewayKey[] }>("/admin/gateway/keys");
+}
+
+export function mintGatewayKey(memberId: string, quotaUsd?: string): Promise<MintedGatewayKey> {
+  return postJson<MintedGatewayKey>("/admin/gateway/keys", {
+    memberId,
+    quotaUsd: quotaUsd && quotaUsd.trim() ? quotaUsd.trim() : undefined,
+  });
+}
+
+export async function revokeGatewayKey(id: string): Promise<void> {
+  const res = await request(`/admin/gateway/keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
+export async function setGatewayKeyQuota(id: string, quotaUsd: string | null): Promise<void> {
+  const res = await request(`/admin/gateway/keys/${encodeURIComponent(id)}/quota`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ quotaUsd }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
+export async function setGatewayBudget(monthlyBudgetUsd: string | null): Promise<void> {
+  const res = await request("/admin/gateway/budget", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ monthlyBudgetUsd }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
+export function gatewayUsage(): Promise<GatewayUsage> {
+  return getJson<GatewayUsage>("/admin/gateway/usage");
+}
