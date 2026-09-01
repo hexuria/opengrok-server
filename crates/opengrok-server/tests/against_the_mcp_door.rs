@@ -416,6 +416,14 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
         "must not claim no card exists once one was raised: {error}"
     );
 
+    let error_again =
+        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
+            .await;
+    assert!(
+        error_again.contains(&format!("requestId: {}", call.id)),
+        "a retry before answer reuses the same requestId: {error_again}"
+    );
+
     let awaiting = store.awaiting_approval(&account).await.expect("awaiting");
     assert_eq!(
         awaiting.len(),
@@ -483,12 +491,22 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert_eq!(flipped["message"]["approval"]["status"], "approved");
 
     let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_ne!(
+    assert_eq!(
         run.status,
-        RunStatus::AwaitingApproval,
-        "answered ⇒ not waiting"
+        RunStatus::Finished,
+        "an MCP run is finished on the card, not resumed as a conversation"
     );
     assert!(run.answered.contains(&call.id));
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell").as_deref(),
+        Some(call.id.as_str()),
+        "allow-once is remembered so the retry reuses this call id"
+    );
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell"),
+        None,
+        "the yes is one-shot"
+    );
 }
 
 /// PolicyApproval has no transcribed desktop card. An Ask of that reason must not invent one

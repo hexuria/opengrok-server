@@ -1377,15 +1377,16 @@ pub async fn resolve_auto_review_approval(
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    if let Err(error) = state
+    let seq = match state
         .agui
         .auth
         .store
         .append_run(&run_id, seq, &events, &view, Some(&account_id))
         .await
     {
-        return (503, json!({ "error": error.to_string() }));
-    }
+        Ok(seq) => seq,
+        Err(error) => return (503, json!({ "error": error.to_string() })),
+    };
 
     // Flip the card on the SAME entryId — the renderer dedups on requestId:status.
     let status = if approved { "approved" } else { "denied" };
@@ -1398,6 +1399,42 @@ pub async fn resolve_auto_review_approval(
             .await
     {
         live::emit_transcript(state, &agent_id, "updated", card);
+    }
+
+    // An MCP-synthesized run is not a conversation. Resuming it would execute the tool on this
+    // side while the MCP client is told to retry (double-run, and a new call id that cannot
+    // spend this yes). Finish it here; an approved allow-once is remembered so the retry
+    // reuses the answered call id and the judge skip actually fires.
+    if run.thread_id.starts_with("mcp-") {
+        if approved && let Some(pending) = pending.as_ref() {
+            crate::mcp_door::remember_mcp_allow_once(
+                &coworker_id,
+                &pending.tool,
+                pending.call_id.clone(),
+            );
+        }
+        if let Ok(finished) = run.decide(opengrok_core::run::RunCommand::Finish { at_ms }) {
+            for event in &finished {
+                run.apply(event);
+            }
+            let view = opengrok_core::run::RunView {
+                id: run_id.clone(),
+                thread_id: run.thread_id.clone(),
+                status: run.status,
+                event_count: run.emitted.len() as i64,
+                updated_at_ms: at_ms,
+            };
+            if let Err(error) = state
+                .agui
+                .auth
+                .store
+                .append_run(&run_id, seq, &finished, &view, Some(&account_id))
+                .await
+            {
+                return (503, json!({ "error": error.to_string() }));
+            }
+        }
+        return (200, json!({ "ok": true }));
     }
 
     if let Some(pending) = pending {

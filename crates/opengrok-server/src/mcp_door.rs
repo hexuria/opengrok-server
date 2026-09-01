@@ -52,7 +52,7 @@ use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
 use crate::gateway::GatewayState;
 use opengrok_core::CoworkerId;
 use opengrok_core::id::{AccountId, RunId};
-use opengrok_core::run::{Run, RunCommand, RunView, SuspendReason};
+use opengrok_core::run::{Run, RunCommand, RunStatus, RunView, SuspendReason};
 use opengrok_harness::tools::ToolRunner;
 use opengrok_tools::{AwaitingReason, ToolCall, USER_MACHINE_SHELL, redact_arguments};
 
@@ -160,7 +160,7 @@ impl McpDoor {
             })
     }
 
-    async fn toolbox_for(&self, principal: &McpPrincipal) -> Toolbox {
+    async fn toolbox_for(&self, principal: &McpPrincipal, review_yes: &[String]) -> Toolbox {
         let Ok((coworker, _)) = self
             .state
             .agui
@@ -179,7 +179,7 @@ impl McpDoor {
             &principal.account,
             &principal.coworker,
             &[],
-            &[],
+            review_yes,
         )
         .await
         {
@@ -205,6 +205,34 @@ fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
     map.entry(coworker.as_str().to_string())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
+}
+
+/// One allow-once from an answered MCP card, waiting for the client's retry. Process-local on
+/// purpose: a restart means the retry is judged again (narrower than silently running). Keyed
+/// by coworker+tool so a different tool cannot spend this yes.
+static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn once_key(coworker: &CoworkerId, tool: &str) -> String {
+    format!("{}:{tool}", coworker.as_str())
+}
+
+/// Record that this coworker may retry `tool` once under `call_id` (the id the card answered).
+pub fn remember_mcp_allow_once(coworker: &CoworkerId, tool: &str, call_id: String) {
+    let mut map = match MCP_ALLOW_ONCE.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.insert(once_key(coworker, tool), call_id);
+}
+
+/// Take the pending allow-once for this coworker+tool, if any.
+pub fn take_mcp_allow_once(coworker: &CoworkerId, tool: &str) -> Option<String> {
+    let mut map = match MCP_ALLOW_ONCE.lock() {
+        Ok(map) => map,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    map.remove(&once_key(coworker, tool))
 }
 
 /// One OpenAI-function-shape schema → an rmcp `Tool`, or `None` (logged) if it is malformed. A tool
@@ -272,7 +300,7 @@ impl ServerHandler for McpDoor {
                 .with_ttl_ms(0)
                 .with_cache_scope(CacheScope::Private)
         };
-        let runner = match self.toolbox_for(&principal).await {
+        let runner = match self.toolbox_for(&principal, &[]).await {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => return Ok(uncacheable(Vec::new())),
             Toolbox::Unavailable => {
@@ -316,28 +344,41 @@ impl ServerHandler for McpDoor {
             )])
             .into());
         }
-        let runner = match self.toolbox_for(&principal).await {
-            Toolbox::Ready(runner) => runner,
-            Toolbox::NoComputer => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "this coworker has no computer, so it has no tools to run",
-                )])
-                .into());
-            }
-            Toolbox::Unavailable => {
-                return Err(McpError::internal_error(
-                    "this coworker's computer could not be reached right now",
-                    None,
-                ));
-            }
-        };
-        let call = ToolCall {
+        let mut call = ToolCall {
             id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
             name: request.name.to_string(),
             arguments: request
                 .arguments
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
+        };
+        // An allow-once on an MCP card must release the retry: the next call of the same tool
+        // reuses the answered call id so the judge skip (keyed on call.id) actually fires.
+        let once_id = take_mcp_allow_once(&principal.coworker, &call.name);
+        if let Some(id) = once_id.as_ref() {
+            call.id = id.clone();
+        }
+        let review_yes: Vec<String> = once_id.iter().cloned().collect();
+        let runner = match self.toolbox_for(&principal, &review_yes).await {
+            Toolbox::Ready(runner) => runner,
+            Toolbox::NoComputer => {
+                if let Some(id) = once_id {
+                    remember_mcp_allow_once(&principal.coworker, &call.name, id);
+                }
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "this coworker has no computer, so it has no tools to run",
+                )])
+                .into());
+            }
+            Toolbox::Unavailable => {
+                if let Some(id) = once_id {
+                    remember_mcp_allow_once(&principal.coworker, &call.name, id);
+                }
+                return Err(McpError::internal_error(
+                    "this coworker's computer could not be reached right now",
+                    None,
+                ));
+            }
         };
         let result = {
             let lock = coworker_lock(&principal.coworker);
@@ -414,18 +455,22 @@ pub async fn reply_to_ask(
 }
 
 /// Synthesize a durable run + auto-review card for an MCP Ask so the person can answer it
-/// in OpenGrok. Returns the `requestId` (the tool call id).
+/// in OpenGrok. Returns the `requestId` (the tool call id). A retry of the same tool+args
+/// while a card is already pending reuses that requestId — a second persist would flood cards.
 async fn persist_mcp_ask(
     state: &GatewayState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
 ) -> Result<String, opengrok_store::StoreError> {
+    if let Some(existing) = existing_mcp_ask(state, account, coworker, call).await? {
+        return Ok(existing);
+    }
+
     let at_ms = chrono::Utc::now().timestamp_millis();
     let run_id = RunId::new();
     // Distinct from `gateway-{coworker}`: this run is the MCP call's audit row, not a
-    // conversation turn. Resume still works — `resolveAutoReviewApproval` keys off the
-    // pending call id, not the thread.
+    // conversation turn. Answering it Finishes the run; it must not resume as a model turn.
     let thread_id = format!("mcp-{}", coworker.as_str());
     let model = state
         .agui
@@ -464,12 +509,12 @@ async fn persist_mcp_ask(
     events.extend(suspended);
     let view = RunView {
         id: run_id.clone(),
-        thread_id,
+        thread_id: thread_id.clone(),
         status: run.status,
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    state
+    let seq = state
         .agui
         .auth
         .store
@@ -486,14 +531,68 @@ async fn persist_mcp_ask(
         Some(opengrok_tools::review::REVIEW_ASK_REASON),
         at_ms,
     );
-    state
+    if let Err(error) = state
         .agui
         .auth
         .store
         .append_gateway_entry(coworker, &card, at_ms)
-        .await?;
+        .await
+    {
+        // A suspended run with no card is stuck forever (recovery skips awaiting). Fail it so
+        // a retry cannot accumulate more of them. Best-effort: if this append also fails the
+        // caller still hears "card could not be raised".
+        if let Ok(failed) = run.decide(RunCommand::Fail {
+            reason: "the approval card could not be raised".to_string(),
+            at_ms,
+        }) {
+            for event in &failed {
+                run.apply(event);
+            }
+            let failed_view = RunView {
+                id: run_id.clone(),
+                thread_id,
+                status: RunStatus::Failed,
+                event_count: run.emitted.len() as i64,
+                updated_at_ms: at_ms,
+            };
+            let _ = state
+                .agui
+                .auth
+                .store
+                .append_run(&run_id, seq, &failed, &failed_view, Some(account))
+                .await;
+        }
+        return Err(error);
+    }
     // Persist-only would be enough for a reload; emitting means an open desktop sees the
     // card without reconnecting. No subscriber is an ordinary morning (live::emit).
     crate::gateway::live::emit_transcript(state, coworker.as_str(), "appended", card);
     Ok(call.id.clone())
+}
+
+async fn existing_mcp_ask(
+    state: &GatewayState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    call: &ToolCall,
+) -> Result<Option<String>, opengrok_store::StoreError> {
+    let waiting = state.agui.auth.store.awaiting_approval(account).await?;
+    for run_id in waiting {
+        let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+            continue;
+        };
+        if run.thread_id != format!("mcp-{}", coworker.as_str()) {
+            continue;
+        }
+        let Some(pending) = run.pending.as_ref() else {
+            continue;
+        };
+        if pending.reason == SuspendReason::AutoReview
+            && pending.tool == call.name
+            && pending.arguments == call.arguments
+        {
+            return Ok(Some(pending.call_id.clone()));
+        }
+    }
+    Ok(None)
 }
