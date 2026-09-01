@@ -634,11 +634,12 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
 /// mutation, a firing, or a finished run reaches an open pane without a poll.
 pub(crate) async fn emit_automations(state: &GatewayState, agent: &str) {
     let automations = automations_array(state, Some(agent)).await;
-    live::emit_ordered(
+    // UNSTAMPED: the renderer's automations family has no replica and its own emitter sends no
+    // stamp; a roster sequence spent here was a roster gap on every routine change.
+    live::emit_unstamped(
         state,
         "agents-automation",
-        "roster",
-        |ordered| json!({ "agentId": agent, "automations": automations, "ordered": ordered }),
+        json!({ "agentId": agent, "automations": automations }),
     );
 }
 

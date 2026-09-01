@@ -24,7 +24,7 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::gateway::{GatewayState, live};
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -374,5 +374,85 @@ async fn the_routines_pane_creates_edits_runs_and_deletes_one_schedule() {
             .unwrap()
             .iter()
             .all(|r| r["id"] != automation)
+    );
+}
+
+/// Read chunks until a `data:` frame appears; return its JSON payload.
+async fn next_frame(res: &mut reqwest::Response, buffer: &mut String) -> Value {
+    loop {
+        if let Some(start) = buffer.find("data: ")
+            && let Some(end) = buffer[start..].find("\n\n")
+        {
+            let line = buffer[start + 6..start + end].to_string();
+            buffer.replace_range(..start + end + 2, "");
+            return serde_json::from_str(&line).expect("frame json");
+        }
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), res.chunk())
+            .await
+            .expect("a frame within 5s")
+            .expect("chunk")
+            .expect("bytes");
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// The pane's refresh frame carries no ordering stamp and spends no sequence: a routine change
+/// must not be a roster gap for the desktop (the class #14 removed). Open a stream, change a
+/// routine, then emit one roster frame — the roster sequence continues from the opener, and the
+/// `agents-automation` frame in between has no `ordered`.
+#[tokio::test]
+async fn a_routine_change_refreshes_the_pane_without_spending_a_roster_sequence() {
+    let database_url = database_or_skip!();
+    let email = format!("routines-live-{}@og.local", uuid::Uuid::now_v7().simple());
+    let (router, gateway) = app(&database_url, &email).await;
+    let base = spawn(router).await;
+    let client = reqwest::Client::new();
+    let (_, created) = api(&client, &base, "createAgent", json!({ "name": "Live" })).await;
+    let agent = created["agent"]["id"]
+        .as_str()
+        .expect("agent id")
+        .to_string();
+
+    let mut stream = client
+        .get(format!("{base}/events"))
+        .header("authorization", "Bearer test-bearer")
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .expect("events");
+    assert_eq!(stream.status(), 200);
+    let mut buffer = String::new();
+    let opener = next_frame(&mut stream, &mut buffer).await;
+    assert_eq!(opener["channel"], "agents");
+    let opener_seq = opener["payload"]["ordered"]["sequence"]
+        .as_i64()
+        .expect("roster sequence");
+
+    let (status, _) = api(
+        &client,
+        &base,
+        "createAgentAutomation",
+        json!({ "id": agent, "spec": {
+            "name": "Nightly", "prompt": "tidy up", "isEnabled": true,
+            "trigger": { "type": "cron", "schedule": "0 2 * * *" } } }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let refresh = next_frame(&mut stream, &mut buffer).await;
+    assert_eq!(refresh["channel"], "agents-automation", "{refresh}");
+    assert_eq!(refresh["payload"]["agentId"], agent);
+    assert_eq!(refresh["payload"]["automations"][0]["name"], "Nightly");
+    assert!(
+        refresh["payload"].get("ordered").is_none(),
+        "the pane frame is unstamped: {refresh}"
+    );
+
+    live::emit_roster(&gateway).await;
+    let roster = next_frame(&mut stream, &mut buffer).await;
+    assert_eq!(roster["channel"], "agents");
+    assert_eq!(
+        roster["payload"]["ordered"]["sequence"].as_i64(),
+        Some(opener_seq + 1),
+        "a routine change must not consume a roster sequence: {roster}"
     );
 }
