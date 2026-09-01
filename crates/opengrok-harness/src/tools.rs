@@ -30,6 +30,12 @@ impl ToolRunner {
             .tool_schemas(&self.context.account_id, &self.context.coworker_id)
     }
 
+    /// Run a single call — the MCP door's shape, where each request is one call with no turn
+    /// around it. Same executor, same identity: the door gets no path around the gates.
+    pub async fn run_one(&self, call: &ToolCall) -> ToolResult {
+        self.executor.execute(&self.context, call).await
+    }
+
     pub async fn run_all(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {

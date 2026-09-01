@@ -210,6 +210,48 @@ standing rule and nothing else. Design: `docs/AUTO-REVIEW.md`.
   `docs/consent-model-B5-acceptance.md`. Known, accepted v1 scope: the pinned 0.18 card's
   "Always" writes the global tier (client-side; the per-agent widget writes the coworker tier).
 
+## Slice 15 — Door 1, the model half: Claude Code through our gateway
+
+The three-doors assessment (1 Sep) found this already built in open-ai-gateway; the slice is
+the proof, not construction.
+
+- [x] **15.v** With nothing but `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`, Claude Code
+  chats through open-ai-gateway and the usage ledger records it (25k-token system prompt, real
+  cost, streamed). `/v1/models?claude_code=1` serves the alias twins. Dev provider is the
+  machine's own opencodex door via `gateway.provider_base_urls` — no credential invented.
+  Evidence: `docs/verification/door1/README.md`. (`81845a2`)
+
+## Slice 16 — Door 1, the tool half: the MCP door
+
+- [x] **16.1** `POST /mcp` (rmcp server-side, streamable HTTP, stateless + json_response): a
+  bot key names the coworker; `tools_for_coworker` builds the same policy-wired runner a run
+  gets; every call goes through `Executor::execute` — identity overwrite, gate, judge, audit.
+  Ask fails closed with instructions (no run to suspend; cards are a follow-up); a
+  computerless coworker lists an empty toolbox, not a broken handshake. (`46a353c`)
+- [x] **16.2** Listings declare `ttlMs: 0, cacheScope: private` — required by MCP protocol
+  2026-07-28 (SEP-2549), and right for a per-key, policy-filtered list. Found live: Claude
+  Code rejected the listing without them. (`2502deb`)
+- [x] **16.t** `tests/against_the_mcp_door.rs` (hand-written JSON-RPC client, never
+  rmcp-to-rmcp) + `scripts/slice20-mcp-door-smoke.sh` in the gate: the slice-7 attack replayed
+  through MCP (foreign coworkerId overwritten), ungranted tool refused naming the rule,
+  person-token pointed at the bot-key mint, revoked key refused. (`46a353c`)
+- [x] **16.r** Peer review (two reviewer agents on the diff) closed one real security bug and
+  hardened the door: `overwrite_identity`/`strip_identity` in `opengrok-tools` missed the
+  camelCase identity aliases (`coworkerId`/`boxId`) they were supposed to strip, so a plugin
+  call could forward an attacker-chosen coworker id to a connector — the exact confused-deputy
+  #7 prevents; now every alias from one shared list is stripped. Door: auth + browser-origin
+  refusal moved to a transport-edge layer (real 401/403, `initialize` gated), an unreachable
+  computer is an error not an empty toolbox, reverse-exec excluded from MCP, the ask reply no
+  longer promises a nonexistent card, serverInfo names OpenGrok, concurrent calls serialized
+  per coworker. (`3980be2`)
+- [x] **16.v** Validated on Claude Code itself: `claude mcp list` shows the live door
+  connected, and one invocation with both doors configured answered via the gateway, called
+  `mcp__opengrok__shell`, and ran it on the coworker's own container — the tool's hostname
+  output IS the container id. Evidence: `docs/verification/door1/README.md`. (`2502deb`)
+- [ ] **16.later** Card-driven MCP approvals (synthesize a durable run so an ask raises a real
+  card); OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
+  three-doors order).
+
 ## Slice 11+ — breadth (P5 → P10, in order)
 
 Per-tier, verified against the running client. Most of it adapts work that exists:

@@ -15,6 +15,7 @@ pub mod connections;
 pub mod gateway;
 pub mod grpc;
 pub mod local_exec;
+pub mod mcp_door;
 pub mod recovery;
 pub mod seamb;
 pub mod seamb_send;
@@ -38,6 +39,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
+        .nest("/mcp", mcp_door::router(state.clone()))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
     // Opt-in request trace (OG_TRACE_REQUESTS=1): one INFO line per request with method, path,

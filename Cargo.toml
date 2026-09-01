@@ -56,6 +56,11 @@ rmcp = { version = "3", default-features = false, features = [
   "client",
   "transport-streamable-http-client",
   "transport-streamable-http-client-reqwest",
+  # Server-side: the /mcp door on opengrok-server. Same SDK both directions on purpose —
+  # but the door's integration test drives it with a hand-written JSON-RPC client, because
+  # rmcp-to-rmcp only proves the two halves share an interpretation.
+  "server",
+  "transport-streamable-http-server",
 ] }
 # prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
 #   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.

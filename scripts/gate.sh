@@ -105,7 +105,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
-for script in slice6-computer slice8-approval; do
+for script in slice6-computer slice8-approval slice20-mcp-door; do
   step "scripts/$script-smoke.sh (tool door)"
   OG_BASE="$BASE" OG_PORT="$PORT" OG_MODEL_DOOR=mock-tools "scripts/$script-smoke.sh" >/dev/null \
     || fail "$script"

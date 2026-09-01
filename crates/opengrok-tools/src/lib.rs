@@ -708,29 +708,41 @@ pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
         _ => serde_json::Map::new(),
     };
 
+    // Strip EVERY identity alias the model may have written — both spellings of account/coworker/
+    // box — BEFORE inserting ours. Overwriting only `coworker_id`/`box_id` left the camelCase
+    // twins (`coworkerId`/`boxId`) to ride through untouched, and for a plugin tool the whole
+    // argument map is forwarded to a remote server: an attacker-chosen `coworkerId` reaching a
+    // connector is exactly what "overwrite, never validate" (CLAUDE.md #7) forbids. The alias list
+    // is the same one the judge redacts (`review::IDENTITY_KEYS`), so the two cannot drift.
+    for key in crate::review::IDENTITY_KEYS {
+        object.remove(*key);
+    }
+
     object.insert(
         "coworker_id".to_string(),
         Value::String(context.coworker_id.to_string()),
     );
-    match &context.box_id {
-        Some(box_id) => object.insert("box_id".to_string(), Value::String(box_id.to_string())),
-        // Removed rather than left as the model wrote it.
-        None => object.remove("box_id"),
-    };
+    // A box is inserted when the session has one; when it does not, the key stays removed rather
+    // than carrying whatever the model wrote (the strip above already took every spelling).
+    if let Some(box_id) = &context.box_id {
+        object.insert("box_id".to_string(), Value::String(box_id.to_string()));
+    }
 
     Value::Object(object)
 }
 
-/// Remove the identity keys we added before handing arguments to a remote server.
+/// Remove the identity keys before handing arguments to a remote server.
 ///
 /// They exist so a LOCAL tool cannot be aimed elsewhere. A remote MCP server never sees them: it
 /// did not ask for them, its schema does not have them, and a strict server would reject the call
-/// over a field the model never wrote.
+/// over a field the model never wrote. Every alias `overwrite_identity` guards against is removed
+/// here too — a value the model must not choose must not leave the process under any spelling.
 fn strip_identity(arguments: Value) -> Value {
     match arguments {
         Value::Object(mut map) => {
-            map.remove("coworker_id");
-            map.remove("box_id");
+            for key in crate::review::IDENTITY_KEYS {
+                map.remove(*key);
+            }
             Value::Object(map)
         }
         other => other,
@@ -962,6 +974,57 @@ mod tests {
         let context = context_with_box("box_mine");
         let overwritten = overwrite_identity(&json!("box_id=box_elsewhere"), &context);
         assert_eq!(overwritten["box_id"], "box_mine");
+    }
+
+    /// Every identity alias the model might write — snake_case AND camelCase, for account, coworker
+    /// and box — is overwritten or removed, never forwarded. The camelCase twins used to ride
+    /// through to a remote plugin tool verbatim; this is the regression guard for that gap.
+    #[test]
+    fn a_camel_case_identity_alias_cannot_ride_through() {
+        let context = context_with_box("box_mine");
+        let overwritten = overwrite_identity(
+            &json!({
+                "coworkerId": "cw_somebody_else",
+                "boxId": "box_elsewhere",
+                "accountId": "acct_elsewhere",
+                "command": "ls",
+            }),
+            &context,
+        );
+        // The model's camelCase choices are gone; only the session's snake_case identity remains.
+        assert!(overwritten.get("coworkerId").is_none(), "{overwritten:?}");
+        assert!(overwritten.get("boxId").is_none(), "{overwritten:?}");
+        assert!(overwritten.get("accountId").is_none(), "{overwritten:?}");
+        assert_eq!(overwritten["coworker_id"], "cw_1");
+        assert_eq!(overwritten["box_id"], "box_mine");
+        assert_eq!(overwritten["command"], "ls", "the real argument survives");
+    }
+
+    /// `strip_identity` (arguments about to leave for a remote MCP server) removes every alias too,
+    /// so nothing the model chose about identity — in any spelling — reaches a connector.
+    #[test]
+    fn strip_identity_removes_every_alias_before_a_remote_call() {
+        let stripped = strip_identity(json!({
+            "coworker_id": "cw_1",
+            "coworkerId": "cw_2",
+            "box_id": "box_1",
+            "boxId": "box_2",
+            "account_id": "acct_1",
+            "accountId": "acct_2",
+            "query": "hello",
+        }));
+        let object = stripped.as_object().unwrap();
+        for key in [
+            "coworker_id",
+            "coworkerId",
+            "box_id",
+            "boxId",
+            "account_id",
+            "accountId",
+        ] {
+            assert!(object.get(key).is_none(), "{key} survived: {stripped:?}");
+        }
+        assert_eq!(stripped["query"], "hello", "the real argument survives");
     }
 
     /// With no computer assigned, a model's `box_id` must not become the one used.

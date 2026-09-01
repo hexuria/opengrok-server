@@ -18,7 +18,14 @@ ok()   { echo "  ok: $*"; }
 
 command -v jq >/dev/null || fail "jq is required"
 : "${OG_DATABASE_URL:?needs OG_DATABASE_URL}"
-PSQL=(docker exec oag-dev-postgres-1 psql -U oag -d "$PGDB" -tAc)
+# Reach Postgres however this machine can: a local psql client speaking OG_DATABASE_URL if there
+# is one (CI, and any dev box with the client installed), else the dev compose container by name.
+# Hardcoding the container made this script fail anywhere that Postgres is not that container.
+if command -v psql >/dev/null 2>&1 && psql "$OG_DATABASE_URL" -tAc "select 1" >/dev/null 2>&1; then
+  PSQL=(psql "$OG_DATABASE_URL" -tAc)
+else
+  PSQL=(docker exec oag-dev-postgres-1 psql -U oag -d "$PGDB" -tAc)
+fi
 "${PSQL[@]}" "select 1" >/dev/null 2>&1 || fail "cannot reach Postgres to plant an abandoned run"
 
 start_server() {

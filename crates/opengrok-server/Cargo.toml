@@ -24,6 +24,7 @@ opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-wire = { path = "../opengrok-wire" }
 opengrok-proto = { path = "../opengrok-proto" }
 opengrok-harness = { path = "../opengrok-harness" }
+rmcp.workspace = true
 opengrok-store = { path = "../opengrok-store" }
 opengrok-policy = { path = "../opengrok-policy" }
 jsonwebtoken.workspace = true

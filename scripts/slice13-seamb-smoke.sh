@@ -140,7 +140,10 @@ echo "$answer" | jq -e '.message.content | length > 0' >/dev/null || fail "no an
 ok "one user message, one answered turn, bodies decode"
 
 echo "8. commit accepts entries the client already shaped"
-BODY=$(printf '{"kind":"notice","id":"n1","text":"committed from the client","timestampMs":1}' | base64)
+# tr strips the newline GNU base64 inserts at 76 chars; BSD base64 never wraps, which is how
+# this passed on every Mac and broke only in CI — the wrapped newline lands inside a JSON string.
+BODY=$(printf '{"kind":"notice","id":"n1","text":"committed from the client","timestampMs":1}' | base64 | tr -d '
+')
 committed=$(rpc GrokBotService CommitGrokBotTranscriptEntries "$tok" \
   "{\"agentId\":\"$aid\",\"generation\":1,\"entries\":[{\"seq\":\"0\",\"entryKind\":\"notice\",\"body\":\"$BODY\"}]}")
 echo "$committed" | jq -e '.committedCount == 1' >/dev/null || fail "commit: $committed"

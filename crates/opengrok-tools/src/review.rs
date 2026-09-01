@@ -137,7 +137,13 @@ pub fn block_refusal(block_instructions: &str) -> String {
 
 /// Keys the executor overwrites with the session's identity. The judge must never see a value the
 /// model chose for one of them, and it needs none of them to judge an action.
-const IDENTITY_KEYS: &[&str] = &[
+///
+/// This is also the single source of truth for `overwrite_identity`/`strip_identity` (in
+/// `lib.rs`): every spelling here is a value the model must never get to choose, so every spelling
+/// here must be removed before a tool runs or an argument leaves the process. Listing a key here
+/// but stripping only some of them is the exact gap that let a camelCase `coworkerId` ride through
+/// to a remote plugin.
+pub(crate) const IDENTITY_KEYS: &[&str] = &[
     "account_id",
     "accountId",
     "coworker_id",

@@ -1,0 +1,8 @@
+# Pinned so local, CI, and the gateway repo all judge the code with the SAME compiler —
+# open-ai-gateway pins this channel too. CI's previous `@stable` floated ahead of every
+# developer machine, and a lint that fires only on the runner is a gate nobody can
+# reproduce at their desk. Bumping this is a deliberate act that fixes whatever the new
+# clippy finds in the same change.
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]
