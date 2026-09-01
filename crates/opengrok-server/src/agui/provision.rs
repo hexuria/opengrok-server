@@ -25,6 +25,91 @@ async fn account_org(state: &AgUiState, account_id: &AccountId) -> Option<String
     account.org_id
 }
 
+/// Why `lookup_provider` could not build a computer. `invalid_key` is a saved ascii secret this
+/// process cannot open (KEK rotated); `no_org_key` is no secret at all; `not_supported` is a kind
+/// this deployment does not serve. The client already has copy for these codes.
+pub struct ProviderLookup {
+    pub computer: Option<Arc<dyn Computer>>,
+    pub error: Option<(String, String)>,
+}
+
+fn ascii_unreadable() -> ProviderLookup {
+    ProviderLookup {
+        computer: None,
+        error: Some((
+            "invalid_key".into(),
+            "The saved box.ascii.dev key cannot be opened. An admin can paste it again on the dashboard.".into(),
+        )),
+    }
+}
+
+fn ascii_missing() -> ProviderLookup {
+    ProviderLookup {
+        computer: None,
+        error: Some((
+            "no_org_key".into(),
+            "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard".into(),
+        )),
+    }
+}
+
+/// The provider for a computer of `kind` in this org, plus why it is missing when it is.
+/// Decrypt failure is `invalid_key`, not "no computer" — a sealed blob the current KEK cannot
+/// open is how a live box looked absent after a reboot regenerated `OG_CREDENTIAL_KEK`.
+pub async fn lookup_provider(
+    state: &AgUiState,
+    org_id: Option<&str>,
+    kind: &str,
+) -> ProviderLookup {
+    match kind {
+        "ascii" => lookup_ascii(state, org_id).await,
+        "local-docker" => ProviderLookup {
+            computer: Some(Arc::new(opengrok_box::DockerComputer::new())),
+            error: None,
+        },
+        _ => ProviderLookup {
+            computer: None,
+            error: Some((
+                "not_supported".into(),
+                "this deployment does not offer that computer".into(),
+            )),
+        },
+    }
+}
+
+async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup {
+    let Some(org) = org_id else {
+        return ascii_missing();
+    };
+    let has_row = state
+        .auth
+        .store
+        .org_computer_kinds(org)
+        .await
+        .ok()
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "ascii"));
+    let Some(vault) = state.vault.as_ref() else {
+        return if has_row {
+            ascii_unreadable()
+        } else {
+            ascii_missing()
+        };
+    };
+    match state
+        .auth
+        .store
+        .org_computer_secret(vault, org, "ascii")
+        .await
+    {
+        Ok(Some(key)) => ProviderLookup {
+            computer: Some(Arc::new(opengrok_box::AsciiBoxes::new(key))),
+            error: None,
+        },
+        Ok(None) => ascii_missing(),
+        Err(_) => ascii_unreadable(),
+    }
+}
+
 /// The provider for a computer of `kind` in this org: an AsciiBoxes built from the org's sealed
 /// box.ascii.dev key for `"ascii"`, or a fresh server-host Docker for `"local-docker"`. `None`
 /// when the kind cannot be served (e.g. `"ascii"` but the org has no key or the vault is absent).
@@ -34,22 +119,7 @@ pub async fn provider_for(
     org_id: Option<&str>,
     kind: &str,
 ) -> Option<Arc<dyn Computer>> {
-    match kind {
-        "ascii" => {
-            let vault = state.vault.as_ref()?;
-            let org = org_id?;
-            let key = state
-                .auth
-                .store
-                .org_computer_secret(vault, org, "ascii")
-                .await
-                .ok()
-                .flatten()?;
-            Some(Arc::new(opengrok_box::AsciiBoxes::new(key)))
-        }
-        "local-docker" => Some(Arc::new(opengrok_box::DockerComputer::new())),
-        _ => None,
-    }
+    lookup_provider(state, org_id, kind).await.computer
 }
 
 /// The provider for an account's existing computer of `kind`, resolving the account's org itself.

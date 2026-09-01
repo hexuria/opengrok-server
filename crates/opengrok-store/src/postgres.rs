@@ -1758,8 +1758,9 @@ impl PgStore {
         Ok(())
     }
 
-    /// Which computer kinds this org has configured — the names only, never the secrets. Drives the
-    /// admin dashboard's status and the `configured` flag advertised to clients.
+    /// Which computer kinds this org has a secret row for — the names only, never the secrets.
+    /// A row can exist and still be unreadable (KEK rotated); callers that advertise "configured"
+    /// to a person must use `org_computer_kinds_openable` so a dead blob is not a live computer.
     pub async fn org_computer_kinds(&self, org_id: &str) -> StoreResult<Vec<String>> {
         let prefix = format!("org-computer:{org_id}:");
         let rows = sqlx::query("select id from secret_store where id like $1")
@@ -1771,5 +1772,24 @@ impl PgStore {
             .filter_map(|row| row.try_get::<String, _>("id").ok())
             .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
             .collect())
+    }
+
+    /// Kinds whose secrets actually open with this vault. A ciphertext sealed under a lost KEK
+    /// is not configured — listing it as ready is how a dead key looked like a live computer.
+    pub async fn org_computer_kinds_openable(
+        &self,
+        vault: &Vault,
+        org_id: &str,
+    ) -> StoreResult<Vec<String>> {
+        let mut openable = Vec::new();
+        for kind in self.org_computer_kinds(org_id).await? {
+            if matches!(
+                self.org_computer_secret(vault, org_id, &kind).await,
+                Ok(Some(_))
+            ) {
+                openable.push(kind);
+            }
+        }
+        Ok(openable)
     }
 }

@@ -100,3 +100,40 @@ async fn an_org_box_key_seals_lists_opens_and_clears() {
             .is_empty()
     );
 }
+
+/// A ciphertext sealed under one KEK must not count as configured under another — that is how a
+/// rotated OG_CREDENTIAL_KEK made ascii look "configured" while every open failed.
+#[tokio::test]
+async fn a_key_sealed_under_another_kek_is_not_openable() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let vault = vault();
+    let org = format!("org_{}", uuid::Uuid::now_v7().simple());
+    store
+        .set_org_computer_secret(&vault, &org, "ascii", "box_live_secret_key", 1)
+        .await
+        .expect("set");
+
+    let other = Vault::from_base64_key("ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=")
+        .expect("other vault");
+    assert!(
+        store
+            .org_computer_secret(&other, &org, "ascii")
+            .await
+            .is_err(),
+        "opening with the wrong KEK must fail, not return None"
+    );
+    assert!(
+        store
+            .org_computer_kinds_openable(&other, &org)
+            .await
+            .expect("openable")
+            .is_empty(),
+        "an unreadable secret is not configured"
+    );
+    assert_eq!(
+        store.org_computer_kinds(&org).await.expect("kinds"),
+        vec!["ascii".to_string()],
+        "the row is still there — only opening it fails"
+    );
+}
