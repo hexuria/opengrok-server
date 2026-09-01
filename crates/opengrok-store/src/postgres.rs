@@ -24,6 +24,16 @@ pub struct PgStore {
     pool: PgPool,
 }
 
+/// One run as a routine's history lists it: the stored status word (`running`,
+/// `awaiting-approval`, `finished`, `failed`), when it began, when it last moved.
+#[derive(Debug, Clone)]
+pub struct ThreadRun {
+    pub id: RunId,
+    pub status: String,
+    pub started_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -313,8 +323,9 @@ impl PgStore {
         }
 
         sqlx::query(
-            "insert into run_view (id, thread_id, status, event_count, updated_at_ms, account_id)
-             values ($1, $2, $3, $4, $5, $6)
+            "insert into run_view
+               (id, thread_id, status, event_count, updated_at_ms, account_id, started_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $5)
              on conflict (id) do update set
                thread_id = excluded.thread_id,
                status = excluded.status,
@@ -322,7 +333,9 @@ impl PgStore {
                updated_at_ms = excluded.updated_at_ms,
                -- The owner is set once and never overwritten with NULL: a later batch that arrives
                -- without a session must not orphan a run somebody owns.
-               account_id = coalesce(excluded.account_id, run_view.account_id)",
+               account_id = coalesce(excluded.account_id, run_view.account_id),
+               -- The start is the first append's stamp, kept for good.
+               started_at_ms = coalesce(run_view.started_at_ms, excluded.started_at_ms)",
         )
         .bind(view.id.as_str())
         .bind(&view.thread_id)
@@ -348,6 +361,36 @@ impl PgStore {
     /// conversation, so "anyone with the id may read it" would make a run id a password — and run
     /// ids appear in client URLs and logs. An unowned run is readable by nobody: `NULL` here means
     /// "no session started it", which must not read as "everybody's".
+    /// The runs journaled under one thread, newest first — a routine's run history for the
+    /// desktop's pane (every firing of one schedule shares the schedule's id as its thread).
+    pub async fn runs_for_thread(
+        &self,
+        thread_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<ThreadRun>> {
+        let rows = sqlx::query(
+            "select id, status, started_at_ms, updated_at_ms from run_view
+             where thread_id = $1 order by updated_at_ms desc limit $2",
+        )
+        .bind(thread_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
+                Ok(ThreadRun {
+                    id: RunId::from_stored(row.try_get::<String, _>("id")?),
+                    status: row.try_get("status")?,
+                    started_at_ms: row
+                        .try_get::<Option<i64>, _>("started_at_ms")?
+                        .unwrap_or(updated_at_ms),
+                    updated_at_ms,
+                })
+            })
+            .collect()
+    }
+
     pub async fn run_owned_by(&self, id: &RunId, account: &AccountId) -> StoreResult<bool> {
         let row = sqlx::query("select account_id from run_view where id = $1")
             .bind(id.as_str())

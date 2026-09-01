@@ -608,11 +608,161 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
     }
 }
 
-// ---- Automations: slice 6's schedules wearing the client's names ----
+// ---- Automations: slice 6's schedules wearing the desktop's Routines pane ----
+//
+// THE PANE'S SHAPES, TRANSCRIBED. The renderer's routines controller
+// (`frontend/src/recovered/features/automations/routines/controller.ts:43-54`) sends
+// `{id, spec: {name, prompt, trigger, isEnabled}}` to create, `{id, automationId, spec}` to
+// update, `{id, automationId, isEnabled}` to enable, `{id, automationId}` to delete and run; every
+// mutating verb answers the FULL array for the agent. `parseAutomation` (`:92-106`) rejects the
+// whole reply unless each record has string `id`, `name`, `prompt`, `triggerDescription`, an object
+// `trigger`, boolean `isEnabled` and an array `runs` whose items parse. The host's record
+// (`source/host/automations/automation.ts:84-89`) adds `schedule`, `nextRunAt`, `createdAt`,
+// `lastRunAt`, `raisedNotices`, `filePath`, and runs as `{id, trigger, startedAt, finishedAt,
+// status, detail?}` with status `running | ok | error` and trigger `schedule | manual`.
+//
+// The pre-pane body (`{agentId, cron, instruction}`) and its keys (`cron`, `instruction`,
+// `enabled`, `nextDueMs`) are still accepted and still answered, as a superset — the smokes speak
+// it and the pane ignores keys it does not know.
+//
+// ONLY SCHEDULES. The pane's trigger picker also offers slack, git, teams, linear, sentry and
+// pagerduty; the server has no such wake sources, so a non-cron trigger is refused with a 400 the
+// pane shows, rather than accepted and silently never firing.
 
-fn automation_json(view: &opengrok_core::schedule::ScheduleView) -> Value {
+/// The desktop's Routines pane refreshes from an `agents-automation` frame carrying
+/// `{agentId, automations}` (`gateway-event-families.ts:10` → the controller's `ingest`), so a
+/// mutation, a firing, or a finished run reaches an open pane without a poll.
+pub(crate) async fn emit_automations(state: &GatewayState, agent: &str) {
+    let automations = automations_array(state, Some(agent)).await;
+    live::emit_ordered(
+        state,
+        "agents-automation",
+        "roster",
+        |ordered| json!({ "agentId": agent, "automations": automations, "ordered": ordered }),
+    );
+}
+
+/// A sentence for the pane's "when" column. Covers the shapes the picker writes; anything else
+/// shows the expression itself, which is honest and still readable.
+fn describe_cron(display: &str) -> String {
+    let fields: Vec<&str> = display.split_whitespace().collect();
+    let [minute, hour, day, month, weekday] = fields.as_slice() else {
+        return format!("On schedule {display}");
+    };
+    let time = |m: &str, h: &str| -> Option<String> {
+        let m: u32 = m.parse().ok()?;
+        let h: u32 = h.parse().ok()?;
+        Some(format!("{h:02}:{m:02}"))
+    };
+    let weekday_name = |d: &str| -> Option<&'static str> {
+        Some(match d {
+            "0" | "7" | "sun" | "SUN" => "Sunday",
+            "1" | "mon" | "MON" => "Monday",
+            "2" | "tue" | "TUE" => "Tuesday",
+            "3" | "wed" | "WED" => "Wednesday",
+            "4" | "thu" | "THU" => "Thursday",
+            "5" | "fri" | "FRI" => "Friday",
+            "6" | "sat" | "SAT" => "Saturday",
+            _ => return None,
+        })
+    };
+    if let Some(every) = minute.strip_prefix("*/")
+        && (*hour, *day, *month, *weekday) == ("*", "*", "*", "*")
+    {
+        return format!("Every {every} minutes");
+    }
+    if *minute == "*" && (*hour, *day, *month, *weekday) == ("*", "*", "*", "*") {
+        return "Every minute".to_string();
+    }
+    if let Some(every) = hour.strip_prefix("*/")
+        && (*day, *month, *weekday) == ("*", "*", "*")
+        && minute.parse::<u32>().is_ok()
+    {
+        return format!("Every {every} hours");
+    }
+    if let Some(at) = time(minute, hour)
+        && (*day, *month) == ("*", "*")
+    {
+        return match *weekday {
+            "*" => format!("Every day at {at}"),
+            "1-5" => format!("Weekdays at {at}"),
+            "0,6" | "6,0" => format!("Weekends at {at}"),
+            single => match weekday_name(single) {
+                Some(name) => format!("Every {name} at {at}"),
+                None => format!("At {at} on days {single}"),
+            },
+        };
+    }
+    if let Some(at) = time(minute, hour)
+        && *month == "*"
+        && *weekday == "*"
+        && day.parse::<u32>().is_ok()
+    {
+        return format!("Monthly on day {day} at {at}");
+    }
+    format!("On schedule {display}")
+}
+
+/// The pane's record for one schedule, with its run history.
+async fn automation_json(
+    state: &GatewayState,
+    view: &opengrok_core::schedule::ScheduleView,
+) -> Value {
+    let schedule_id = ScheduleId::from_stored(view.id.clone());
+    // Which runs a person started: the aggregate knows; the projection does not.
+    let manual = state
+        .agui
+        .auth
+        .store
+        .load_schedule(&schedule_id)
+        .await
+        .map(|(schedule, _)| schedule.manual_runs)
+        .unwrap_or_default();
+    let runs: Vec<Value> = state
+        .agui
+        .auth
+        .store
+        .runs_for_thread(&view.id, 20)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|run| {
+            let (status, finished_at) = match run.status.as_str() {
+                "finished" => ("ok", Some(run.updated_at_ms)),
+                "failed" => ("error", Some(run.updated_at_ms)),
+                // Running, or paused on a card — the pane has no word for "waiting", and
+                // "running" is the one that keeps it from reading as done.
+                _ => ("running", None),
+            };
+            let mut entry = json!({
+                "id": run.id.as_str(),
+                "trigger": if manual.contains(run.id.as_str()) { "manual" } else { "schedule" },
+                "startedAt": run.started_at_ms,
+                "finishedAt": finished_at,
+                "status": status,
+            });
+            if status == "error" {
+                entry["detail"] = json!("The run failed. Its run log has the reason.");
+            }
+            entry
+        })
+        .collect();
+    let schedule = opengrok_core::schedule::display_cron(&view.cron);
     json!({
         "id": view.id,
+        "name": view.name,
+        "prompt": view.prompt,
+        "trigger": { "type": "cron", "schedule": schedule },
+        "isEnabled": view.active,
+        "createdAt": view.created_at_ms,
+        "lastRunAt": view.last_fired_ms,
+        "raisedNotices": [],
+        "schedule": schedule,
+        "triggerDescription": describe_cron(&schedule),
+        "nextRunAt": view.next_due_ms,
+        "runs": runs,
+        "filePath": "",
+        // The pre-pane keys, kept for the smokes and anything else that learned them.
         "agentId": view.coworker_id.as_str(),
         "cron": view.cron,
         "instruction": view.prompt,
@@ -632,11 +782,14 @@ async fn automations_array(state: &GatewayState, agent: Option<&str>) -> Vec<Val
         .schedules_for(&account.id)
         .await
         .unwrap_or_default();
-    schedules
+    let mut out = Vec::with_capacity(schedules.len());
+    for view in schedules
         .iter()
         .filter(|view| agent.is_none_or(|agent| view.coworker_id.as_str() == agent))
-        .map(automation_json)
-        .collect()
+    {
+        out.push(automation_json(state, view).await);
+    }
+    out
 }
 
 pub async fn get_automations(state: &GatewayState, args: &Value) -> (u16, Value) {
@@ -647,19 +800,91 @@ pub async fn get_automations(state: &GatewayState, args: &Value) -> (u16, Value)
     (200, Value::Array(automations_array(state, agent).await))
 }
 
+/// What both body shapes boil down to. `None` is a refusal already shaped for the wire.
+struct RoutineSpec {
+    name: String,
+    cron: String,
+    prompt: String,
+    enabled: bool,
+}
+
+fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
+    if let Some(spec) = args.get("spec") {
+        // The pane's shape.
+        let trigger = spec.get("trigger").unwrap_or(&Value::Null);
+        let kind = trigger.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "cron" {
+            return Err((
+                400,
+                json!({ "error": "only schedules are supported on this server" }),
+            ));
+        }
+        let Some(cron) = trigger.get("schedule").and_then(Value::as_str) else {
+            return Err((400, json!({ "error": "trigger.schedule is required" })));
+        };
+        return Ok(RoutineSpec {
+            name: spec
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Routine")
+                .to_string(),
+            cron: cron.to_string(),
+            prompt: spec
+                .get("prompt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            enabled: spec
+                .get("isEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        });
+    }
+    // The pre-pane shape.
+    let Some(cron) = args.get("cron").and_then(Value::as_str) else {
+        return Err((400, json!({ "error": "cron is required" })));
+    };
+    Ok(RoutineSpec {
+        name: args
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Routine")
+            .to_string(),
+        cron: cron.to_string(),
+        prompt: args
+            .get("instruction")
+            .or_else(|| args.get("prompt"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+    })
+}
+
+/// The agent a routine call is about: the pane's `id`, or the pre-pane `agentId`.
+fn agent_arg(args: &Value) -> Option<&str> {
+    args.get("id")
+        .or_else(|| args.get("agentId"))
+        .and_then(Value::as_str)
+}
+
+/// The routine a mutation names: the pane's `automationId`, or the pre-pane `id` (which the pane
+/// uses for the AGENT — so `automationId` is looked at first).
+fn automation_arg(args: &Value) -> Option<&str> {
+    args.get("automationId")
+        .or_else(|| args.get("id"))
+        .and_then(Value::as_str)
+}
+
 /// The mutating automation commands answer the NEW FULL ARRAY, per the contract note.
 pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Value) {
-    let Some(agent) = args.get("agentId").and_then(Value::as_str) else {
-        return (400, json!({ "error": "agentId is required" }));
+    let Some(agent) = agent_arg(args) else {
+        return (400, json!({ "error": "id (the agent) is required" }));
     };
-    let Some(cron) = args.get("cron").and_then(Value::as_str) else {
-        return (400, json!({ "error": "cron is required" }));
+    let spec = match parse_spec(args) {
+        Ok(spec) => spec,
+        Err(refusal) => return refusal,
     };
-    let prompt = args
-        .get("instruction")
-        .or_else(|| args.get("prompt"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let Some(account) = account(state, &state.email).await else {
         return (
             500,
@@ -667,16 +892,25 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         );
     };
     let at_ms = now_ms();
-    let events = match Schedule::default().decide(ScheduleCommand::Create {
+    let mut events = match Schedule::default().decide(ScheduleCommand::Create {
         coworker_id: CoworkerId::from_stored(agent.to_string()),
-        cron: cron.to_string(),
-        prompt: prompt.to_string(),
+        cron: spec.cron,
+        prompt: spec.prompt,
+        name: spec.name,
         at_ms,
     }) {
         Ok(events) => events,
         Err(reason) => return (400, json!({ "error": reason.to_string() })),
     };
-    let after = Schedule::replay(&events);
+    let mut after = Schedule::replay(&events);
+    if !spec.enabled
+        && let Ok(paused) = after.decide(ScheduleCommand::Pause { at_ms })
+    {
+        for event in &paused {
+            after.apply(event);
+        }
+        events.extend(paused);
+    }
     let id = ScheduleId::new();
     if let Err(error) = state
         .agui
@@ -688,20 +922,90 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         tracing::error!(%error, "could not create an automation");
         return (500, json!({ "error": "storage failed" }));
     }
+    emit_automations(state, agent).await;
     (
         200,
         Value::Array(automations_array(state, Some(agent)).await),
     )
 }
 
+/// `updateAgentAutomation {id, automationId, spec}` — edit in place: name, schedule, prompt and
+/// enabled state on the SAME row, never a second one.
+pub async fn update_automation(state: &GatewayState, args: &Value) -> (u16, Value) {
+    let Some(id) = automation_arg(args) else {
+        return (400, json!({ "error": "automationId is required" }));
+    };
+    let spec = match parse_spec(args) {
+        Ok(spec) => spec,
+        Err(refusal) => return refusal,
+    };
+    let Some(account) = account(state, &state.email).await else {
+        return (200, json!([]));
+    };
+    let schedule_id = ScheduleId::from_stored(id.to_string());
+    // Ownership by the same rule as /schedules: not yours reads as not there.
+    match state.agui.auth.store.schedule_owner(&schedule_id).await {
+        Ok(Some(owner)) if owner == account.id => {}
+        _ => return (404, json!({ "error": "no such routine" })),
+    }
+    let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
+        return (404, json!({ "error": "no such routine" }));
+    };
+    let agent = loaded
+        .coworker_id
+        .as_ref()
+        .map(|c| c.as_str().to_string())
+        .unwrap_or_default();
+    let at_ms = now_ms();
+    let mut events = match loaded.decide(ScheduleCommand::Update {
+        name: spec.name,
+        cron: spec.cron,
+        prompt: spec.prompt,
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(reason) => return (400, json!({ "error": reason.to_string() })),
+    };
+    let mut after = loaded;
+    for event in &events {
+        after.apply(event);
+    }
+    // The editor's toggle rides along: flip only when it differs, so an unchanged edit does not
+    // log a pause that never happened.
+    let flip = match (spec.enabled, after.paused) {
+        (false, false) => Some(ScheduleCommand::Pause { at_ms }),
+        (true, true) => Some(ScheduleCommand::Resume { at_ms }),
+        _ => None,
+    };
+    if let Some(command) = flip
+        && let Ok(more) = after.decide(command)
+    {
+        for event in &more {
+            after.apply(event);
+        }
+        events.extend(more);
+    }
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
+        .await
+    {
+        tracing::error!(%error, "could not update an automation");
+        return (500, json!({ "error": "storage failed" }));
+    }
+    emit_automations(state, &agent).await;
+    (
+        200,
+        Value::Array(automations_array(state, Some(&agent)).await),
+    )
+}
+
 /// setEnabled / delete: pause, resume, delete on the schedule aggregate; the reply is the array.
 pub async fn change_automation(state: &GatewayState, args: &Value, action: &str) -> (u16, Value) {
-    let Some(id) = args
-        .get("id")
-        .or_else(|| args.get("automationId"))
-        .and_then(Value::as_str)
-    else {
-        return (400, json!({ "error": "id is required" }));
+    let Some(id) = automation_arg(args) else {
+        return (400, json!({ "error": "automationId is required" }));
     };
     let Some(account) = account(state, &state.email).await else {
         return (200, json!([]));
@@ -715,6 +1019,7 @@ pub async fn change_automation(state: &GatewayState, args: &Value, action: &str)
     let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
         return (200, Value::Array(automations_array(state, None).await));
     };
+    let agent = loaded.coworker_id.as_ref().map(|c| c.as_str().to_string());
     let at_ms = now_ms();
     let command = match action {
         "enable" => ScheduleCommand::Resume { at_ms },
@@ -733,48 +1038,90 @@ pub async fn change_automation(state: &GatewayState, args: &Value, action: &str)
             .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
             .await;
     }
-    (200, Value::Array(automations_array(state, None).await))
+    if let Some(agent) = &agent {
+        emit_automations(state, agent).await;
+    }
+    (
+        200,
+        Value::Array(automations_array(state, agent.as_deref()).await),
+    )
 }
 
-/// `runAgentAutomationNow` — the sweep's firing path, on demand.
+/// `runAgentAutomationNow` — the sweep's firing path, on demand. The run is a `manual` one in the
+/// pane's history, and it posts into the coworker's chat when it finishes, like a clock firing.
 pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Value) {
-    let Some(id) = args
-        .get("id")
-        .or_else(|| args.get("automationId"))
-        .and_then(Value::as_str)
-    else {
-        return (400, json!({ "error": "id is required" }));
+    let Some(id) = automation_arg(args) else {
+        return (400, json!({ "error": "automationId is required" }));
     };
     let Some(account) = account(state, &state.email).await else {
         return (200, Value::Null);
     };
     let schedule_id = ScheduleId::from_stored(id.to_string());
+    match state.agui.auth.store.schedule_owner(&schedule_id).await {
+        Ok(Some(owner)) if owner == account.id => {}
+        _ => return (404, json!({ "error": "no such routine" })),
+    }
     let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(&schedule_id).await else {
-        return (200, Value::Null);
+        return (404, json!({ "error": "no such routine" }));
     };
     let Some(coworker_id) = loaded.coworker_id.clone() else {
         return (200, Value::Null);
     };
     let run_id = RunId::new();
-    if let Ok(events) = loaded.decide(ScheduleCommand::Fire {
+    let at_ms = now_ms();
+    let events = match loaded.decide(ScheduleCommand::Fire {
         run_id: run_id.clone(),
-        at_ms: now_ms(),
+        manual: true,
+        at_ms,
     }) {
-        let _ = state
-            .agui
-            .auth
-            .store
-            .append_schedule(&schedule_id, &account.id, seq, &events, &loaded, now_ms())
-            .await;
-        tokio::spawn(crate::autonomy::fire(
-            state.agui.clone(),
-            format!("automation {schedule_id} (run now)"),
-            account.id,
-            coworker_id,
-            loaded.prompt.clone(),
-            schedule_id.as_str().to_string(),
-            run_id,
-        ));
+        Ok(events) => events,
+        Err(reason) => return (409, json!({ "error": reason.to_string() })),
+    };
+    let mut after = loaded;
+    for event in &events {
+        after.apply(event);
     }
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_schedule(&schedule_id, &account.id, seq, &events, &after, at_ms)
+        .await
+    {
+        tracing::error!(%error, "could not record a manual firing");
+        return (500, json!({ "error": "storage failed" }));
+    }
+    tokio::spawn(crate::autonomy::fire(
+        state.agui.clone(),
+        crate::autonomy::Firing {
+            origin: format!("automation {schedule_id} (run now)"),
+            account_id: account.id,
+            coworker_id: coworker_id.clone(),
+            prompt: after.prompt.clone(),
+            thread_id: schedule_id.as_str().to_string(),
+            run_id,
+            announce: Some(crate::autonomy::Announce {
+                gateway: state.clone(),
+                name: after.name.clone(),
+            }),
+        },
+    ));
+    emit_automations(state, coworker_id.as_str()).await;
     (200, Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::describe_cron;
+
+    #[test]
+    fn the_when_column_reads_as_a_sentence() {
+        assert_eq!(describe_cron("0 9 * * 1"), "Every Monday at 09:00");
+        assert_eq!(describe_cron("30 17 * * 1-5"), "Weekdays at 17:30");
+        assert_eq!(describe_cron("0 8 * * *"), "Every day at 08:00");
+        assert_eq!(describe_cron("*/15 * * * *"), "Every 15 minutes");
+        assert_eq!(describe_cron("0 */2 * * *"), "Every 2 hours");
+        assert_eq!(describe_cron("0 9 1 * *"), "Monthly on day 1 at 09:00");
+        assert_eq!(describe_cron("*/2 * * * * *"), "On schedule */2 * * * * *");
+    }
 }

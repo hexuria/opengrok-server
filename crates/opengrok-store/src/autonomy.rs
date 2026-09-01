@@ -24,6 +24,7 @@ pub struct DueSchedule {
     pub account_id: AccountId,
     pub coworker_id: CoworkerId,
     pub prompt: String,
+    pub name: String,
 }
 
 /// One row of the event log, as the monitor sweep reads it.
@@ -103,25 +104,36 @@ impl PgStore {
                 .as_ref()
                 .map(|c| c.as_str().to_string())
                 .unwrap_or_default();
+            // A firing in this batch stamps last_fired_ms; anything else leaves it alone.
+            let fired_at = events.iter().find_map(|event| match event {
+                ScheduleEvent::Fired { at_ms, .. } => Some(*at_ms),
+                _ => None,
+            });
             sqlx::query(
                 "insert into schedule_view
-                   (id, account_id, coworker_id, cron, prompt, active, next_due_ms, updated_at_ms)
-                 values ($1, $2, $3, $4, $5, $6, $7, $8)
+                   (id, account_id, coworker_id, cron, prompt, name, active, next_due_ms,
+                    updated_at_ms, created_at_ms, last_fired_ms)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
                  on conflict (id) do update set
                    cron = excluded.cron,
                    prompt = excluded.prompt,
+                   name = excluded.name,
                    active = excluded.active,
                    next_due_ms = excluded.next_due_ms,
-                   updated_at_ms = excluded.updated_at_ms",
+                   updated_at_ms = excluded.updated_at_ms,
+                   created_at_ms = coalesce(schedule_view.created_at_ms, excluded.created_at_ms),
+                   last_fired_ms = coalesce(excluded.last_fired_ms, schedule_view.last_fired_ms)",
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
             .bind(&coworker)
             .bind(&state.cron)
             .bind(&state.prompt)
+            .bind(&state.name)
             .bind(active)
             .bind(next_due_ms)
             .bind(at_ms)
+            .bind(fired_at)
             .execute(&mut *tx)
             .await?;
         }
@@ -132,7 +144,8 @@ impl PgStore {
 
     pub async fn schedules_for(&self, account_id: &AccountId) -> StoreResult<Vec<ScheduleView>> {
         let rows = sqlx::query(
-            "select id, coworker_id, cron, prompt, active, next_due_ms
+            "select id, coworker_id, cron, prompt, name, active, next_due_ms, updated_at_ms,
+                    created_at_ms, last_fired_ms
              from schedule_view where account_id = $1 order by updated_at_ms desc",
         )
         .bind(account_id.as_str())
@@ -141,13 +154,21 @@ impl PgStore {
 
         rows.into_iter()
             .map(|row| {
+                let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
                 Ok(ScheduleView {
                     id: row.try_get("id")?,
                     coworker_id: CoworkerId::from_stored(row.try_get::<String, _>("coworker_id")?),
                     cron: row.try_get("cron")?,
                     prompt: row.try_get("prompt")?,
+                    name: row.try_get("name")?,
                     active: row.try_get("active")?,
                     next_due_ms: row.try_get("next_due_ms")?,
+                    // Rows from before the column existed: the best "created" we have is the
+                    // last update.
+                    created_at_ms: row
+                        .try_get::<Option<i64>, _>("created_at_ms")?
+                        .unwrap_or(updated_at_ms),
+                    last_fired_ms: row.try_get("last_fired_ms")?,
                 })
             })
             .collect()
@@ -177,7 +198,7 @@ impl PgStore {
         let mut tx = self.pool().begin().await?;
 
         let rows = sqlx::query(
-            "select id, account_id, coworker_id, cron, prompt from schedule_view
+            "select id, account_id, coworker_id, cron, prompt, name from schedule_view
              where active and next_due_ms is not null and next_due_ms <= $1
              order by next_due_ms limit $2
              for update skip locked",
@@ -205,6 +226,7 @@ impl PgStore {
                 account_id: AccountId::from_stored(row.try_get::<String, _>("account_id")?),
                 coworker_id: CoworkerId::from_stored(row.try_get::<String, _>("coworker_id")?),
                 prompt: row.try_get("prompt")?,
+                name: row.try_get("name")?,
             });
         }
 

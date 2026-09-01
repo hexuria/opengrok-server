@@ -108,6 +108,13 @@ async fn create_schedule(
     let events = match Schedule::default().decide(ScheduleCommand::Create {
         coworker_id,
         cron: body.cron,
+        // The pre-pane `/schedules` API has no name; the pane shows the prompt's first words.
+        name: body
+            .prompt
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" "),
         prompt: body.prompt,
         at_ms,
     }) {

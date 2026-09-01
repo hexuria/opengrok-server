@@ -382,6 +382,18 @@ vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle ri
 - [x] P9 automations — slice 6's schedules wearing the client's names; one scheduler, two
   vocabularies, the same rows readable under `/schedules`. Workflows stay honest empties.
   (`c8ee938`)
+- [x] **P9.pane** The desktop's Routines pane wired for real (found live 2 Sep 2026: its create
+  answered 400, its list showed empty, its edit made a second schedule). The pane's bodies
+  (`routines/controller.ts:43-54`) and record (`automation.ts:84-89`, `parseAutomation`) are
+  transcribed: `{id, spec}` create, `{id, automationId, spec}` UPDATES the row (schedule gains
+  `name` and an `Updated` event), `isEnabled`, run-now marks the firing `manual`; every reply
+  is the pane's array with `name`, `trigger`, `schedule` (5-field on the way out),
+  `triggerDescription` (a sentence), `nextRunAt`, `lastRunAt`, `runs` from `run_view` by thread.
+  Non-cron triggers (slack, git, …) are refused 400 "only schedules are supported on this
+  server". A finished routine run posts into the coworker's chat as a message from the coworker
+  and refreshes the pane over `agents-automation`; the run keeps its own thread for history. The
+  schedule sweep now takes the gateway for that. The pre-pane body and keys still work.
+  `tests/against_routines.rs`. *(this commit)*
 - [x] P10 — the box control surface over what the deployment has: null (the validated
   truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
   click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*

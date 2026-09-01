@@ -29,7 +29,7 @@ pub mod postgres;
 pub mod vault;
 
 pub use autonomy::{DueSchedule, LogEvent};
-pub use postgres::{CredentialUpdate, PgStore};
+pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use vault::{Sealed, Vault};
 
 #[derive(Debug, thiserror::Error)]
