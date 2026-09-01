@@ -61,8 +61,11 @@ echo "$missing" | jq -e '.outcome == "not-found"' >/dev/null || fail "phantom ac
 ok "found, and not-found for a stranger"
 
 echo "7. the SSE stream carried the whole choreography"
-for _ in $(seq 1 15); do
-  grep -q '"type":"updated"' "$SSE" 2>/dev/null && break
+# Wait for the turn's LAST frame — the roster pulse that says the coworker stopped running — not
+# for the final transcript update. The pulse follows the update by a few milliseconds, and a
+# capture stopped on the update lost the pulse on a slow CI runner (#15's CI run 33569452117).
+for _ in $(seq 1 20); do
+  grep -q '"channel":"agent-upserted".*"isRunning":false' "$SSE" 2>/dev/null && break
   sleep 1
 done
 kill $SSE_PID 2>/dev/null || true; wait $SSE_PID 2>/dev/null || true
