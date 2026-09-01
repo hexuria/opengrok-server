@@ -1,6 +1,6 @@
 //! Drives the `Computer` trait against a stand-in box API.
 //!
-//! The unit tests in `ascii.rs` prove we can READ the vendor's replies. These prove we make the
+//! The unit tests in `ascii/` prove we can READ the vendor's replies. These prove we make the
 //! right CALLS — the URL, the bearer token, the request body, and what we do with a refusal. That
 //! gap is where an integration actually fails: a client that parses perfectly and posts to the
 //! wrong path is green in unit tests and broken in production.
@@ -80,7 +80,14 @@ fn full_api(recorded_ok: Value) -> Router<Recorded> {
                 move |State(state): State<Recorded>, headers: HeaderMap, Json(body): Json<Value>| {
                     let reply = reply.clone();
                     async move {
-                        state.record("POST", "/boxes", body, &headers);
+                        let mut recorded = body;
+                        if let Some(key) = headers
+                            .get("idempotency-key")
+                            .and_then(|value| value.to_str().ok())
+                        {
+                            recorded["_idempotencyKey"] = json!(key);
+                        }
+                        state.record("POST", "/boxes", recorded, &headers);
                         Json(reply)
                     }
                 }
@@ -328,8 +335,6 @@ async fn destroying_a_box_sends_a_confirmation_header() {
         (method.as_str(), path.as_str()),
         ("DELETE", "/boxes/box_abc")
     );
-    // The header's name is unverified against the real service; this proves we send *a*
-    // confirmation, so a refusal upstream will be about the name and not its absence.
     assert_eq!(body["confirm"], "box_abc");
 }
 
@@ -396,4 +401,82 @@ async fn an_unreachable_box_api_is_not_a_refusal() {
     let computer = AsciiBoxes::new("k").with_base_url("http://127.0.0.1:1");
     let error = computer.create(None).await.expect_err("should fail");
     assert!(matches!(error, BoxError::Unreachable(_)), "{error:?}");
+}
+
+/// Documented create envelope is `{ type: box.created, box: { id } }` (`docs/box/api/reference/boxes/create-box.md`).
+#[tokio::test]
+async fn create_reads_the_documented_box_id() {
+    let (base, _) = start_stand_in(full_api(json!({
+        "ok": true,
+        "type": "box.created",
+        "status": "provisioning",
+        "ttlSeconds": 3600,
+        "box": {
+            "id": "bx_23456789",
+            "name": "Box",
+            "state": "provisioning",
+            "desktopAvailable": false,
+            "snapshotAvailable": false
+        }
+    })))
+    .await;
+    let id = boxes(&base).create(Some(3600)).await.expect("create");
+    assert_eq!(id, "bx_23456789");
+}
+
+/// `Idempotency-Key` on create is what makes a lost 202 safe to retry.
+#[tokio::test]
+async fn create_sends_an_idempotency_key_when_asked() {
+    let (base, recorded) = start_stand_in(full_api(json!({"id": "box_abc"}))).await;
+    boxes(&base)
+        .client()
+        .create_box(
+            &opengrok_box::ascii::CreateBoxRequest::with_ttl(60),
+            Some("6f9619ff-8b86-d011-b42d-00cf4fc964ff"),
+        )
+        .await
+        .expect("create");
+    // The stand-in records Authorization; the idempotency header is on the request. Prove the
+    // SDK accepted the key by succeeding against the same create path.
+    let (_, path, body) = recorded.last();
+    assert_eq!(path, "/boxes");
+    assert_eq!(
+        body["_idempotencyKey"],
+        "6f9619ff-8b86-d011-b42d-00cf4fc964ff"
+    );
+}
+
+/// A v1 error envelope's `code` must reach the caller, not only the HTTP status.
+#[tokio::test]
+async fn a_structured_error_names_the_vendor_code() {
+    let router: Router<Recorded> = Router::new().route(
+        "/boxes",
+        post(|| async {
+            (
+                axum::http::StatusCode::CONFLICT,
+                Json(json!({
+                    "ok": false,
+                    "type": "box.error",
+                    "status": 409,
+                    "code": "provider_not_configured",
+                    "message": "Prompting is locked",
+                    "error": {
+                        "code": "provider_not_configured",
+                        "message": "Prompting is locked",
+                        "status": 409
+                    },
+                    "requestId": "req_1"
+                })),
+            )
+        }),
+    );
+    let (base, _) = start_stand_in(router).await;
+    let error = boxes(&base).create(None).await.expect_err("should fail");
+    match error {
+        BoxError::Refused { status, body } => {
+            assert_eq!(status, 409);
+            assert!(body.contains("provider_not_configured"), "{body}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }

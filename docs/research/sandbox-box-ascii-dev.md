@@ -1,11 +1,12 @@
 # box.ascii.dev — the coworker's computer
 
-**Researched:** 29 Aug 2026, against the live docs. Verdict and endpoint table below are
-primary-source; two shapes are explicitly marked unverified and must be pinned against a real box
-before production structs are written.
+**Researched:** 29 Aug 2026, against the live docs. Pinned 31 Aug 2026 (create id, delete
+header) against a real box. Typed client 1–2 Sep 2026 from the vendor pages in
+[`docs/box/`](../box/README.md) (fetched 1 Sep 2026). Live site wins if the local copy drifts.
 
-**Role in OpenGrok:** the first implementation of the `Computer` trait in `crates/opengrok-box`. A
-coworker's computer is a *seam*, not a vendor — a local Docker implementation is expected to follow.
+**Role in OpenGrok:** the first implementation of the `Computer` trait in `crates/opengrok-box`.
+A coworker's computer is a *seam*, not a vendor — local Docker is the other adapter, and the
+default when no `OG_BOX_API_KEY` is set.
 
 ---
 
@@ -20,8 +21,9 @@ URLs, disk-level snapshot/fork, and a VNC desktop for computer-use.
 The weak spot: command execution is either **synchronous** (blocks up to 600s) or **detached with
 poll-only status** (log-tail polling — no streaming socket or SSE). True live stdout/stderr for a
 Rust server must be built by polling `GET /boxes/{boxId}/commands/{processId}`, or by driving SSH
-yourself. There is no Rust SDK and none is needed. Region is EU-only today. Hosted-only — no
-open-source or self-host path found.
+yourself. Vendor SDKs are Python and TypeScript; **ours is** `opengrok_box::ascii::Client`
+(plain REST + bearer, shapes from [`docs/box/`](../box/README.md)). Region is EU-only today.
+Hosted-only — no open-source or self-host path found.
 
 **Design consequence, already encoded in `opengrok-box`:** `run` (single result) and `watch` (a poll) are
 separate trait methods. Hiding the poll behind a nice `Stream` would conceal the latency from the
@@ -31,8 +33,9 @@ caller choosing a timeout.
 
 ## Endpoints
 
-Base URL: `https://ascii.dev/api/box/v1` — reference index at
-[docs.ascii.dev/box/api/v1](https://docs.ascii.dev/box/api/v1).
+Base URL: `https://ascii.dev/api/box/v1` — vendor pages mirrored locally in
+[`docs/box/`](../box/README.md) (fetched 1 Sep 2026 from
+[docs.ascii.dev/box/api/v1](https://docs.ascii.dev/box/api/v1)). Live site wins if they disagree.
 
 | Need | Method + Path | Notes |
 |---|---|---|
@@ -43,7 +46,7 @@ Base URL: `https://ascii.dev/api/box/v1` — reference index at
 | Stop (pause billing) | `POST /boxes/{boxId}/stop` | archives with a snapshot |
 | Resume | `POST /boxes/{boxId}/resume` | — |
 | Fork (snapshot clone) | `POST /boxes/{boxId}/fork` | idempotency supported |
-| Delete | `DELETE /boxes/{boxId}` | requires a confirmation header (**name/value unverified**) |
+| Delete | `DELETE /boxes/{boxId}` | confirmation header `X-Ascii-Confirm-Delete` equal to the box id (OpenAPI `ConfirmDelete`; live 31 Aug 2026) |
 | **Run command (sync)** | `POST /boxes/{boxId}/commands` — `{command, cwd?, timeoutSeconds (1–600, default 30), detached:false}` → `{type:"command.finished", success, exitCode, stdout, stderr, stdoutTruncated, stderrTruncated, timedOut, startedAt, finishedAt}` | [execute-box-command](https://docs.ascii.dev/box/api/reference/agent/execute-box-command.md) |
 | **Run command (detached)** | same endpoint, `detached:true` → `{type:"command.started", processId, pid, logPath, errLogPath}` | — |
 | **Poll command status** | `GET /boxes/{boxId}/commands/{processId}?tailBytes=` (default 512KiB, max 524288) → `{processId, pid, status, running, exitCode, signal, command, cwd, startedAt, finishedAt, stdout, stderr, …}` | **poll only, log tail** — [get-command-status](https://docs.ascii.dev/box/api/reference/agent/get-command-status.md) |
@@ -55,14 +58,16 @@ Base URL: `https://ascii.dev/api/box/v1` — reference index at
 | Bulk upload | not documented as a REST endpoint | `PUT /files` with base64 for small files; SCP (`box scp` CLI) for larger — **unverified** |
 | **Expose port / preview URL** | `POST /boxes/{boxId}/host` — `{port, title}` → `https://<box-subdomain>-<port>.on.ascii.dev?_token=<token>` | tokenised by default; `--public` drops the token. [hosting.md](https://docs.ascii.dev/box/hosting.md) |
 | **Desktop / computer-use** | `POST /boxes/{boxId}/desktop?vnc=1&theme=` → `{type:"desktop.url", desktopUrl, ip, mode, provisioning, message}` | a **noVNC/VNC URL only** — no REST screenshot/click primitives. [get-desktop-streaming-url](https://docs.ascii.dev/box/api/reference/agent/get-desktop-streaming-url.md) |
-| SSH access | `POST /boxes/{boxId}/sshkey` + `box ssh` CLI | the escape hatch for a real PTY |
+| SSH access | `POST /boxes/{boxId}/sshkey` + `box ssh` CLI | body field is OpenAPI `key`, not `publicKey` |
 | Events | `GET /boxes/{boxId}/events` | agent-prompt/lifecycle events, **not** raw shell stdout |
 | Prompt an in-box AI agent | `POST /boxes/{boxId}/prompt` — `{provider:"codex"\|"claude-code", model?, reasoningEffort?, prompt}`; status via `GET /boxes/{boxId}/prompts/{promptId}` | ASCII's own agent runner — *not* what OpenGrok uses; we bring our own harness |
 | Snapshots | `GET /snapshots`, `GET /boxes/{boxId}/snapshots[/latest]`, `GET /snapshots/{id}/{tree,files,download}`, `DELETE /snapshots/{id}` | `fork` is the restore/clone primitive |
 | Account / limits | `GET /me`, `GET /limits`, `GET /account/data-retention`, `GET /api-keys`, `GET /api-keys/{id}/usage` | — |
 
 SDKs: Python `ascii-box-sdk`, TypeScript `@asciidev/box-sdk`
-([overview](https://docs.ascii.dev/box/sdks/overview)). **No Rust SDK — not needed.**
+([overview](https://docs.ascii.dev/box/sdks/overview)). **Our Rust client** is
+`opengrok_box::ascii::Client`, typed from [`docs/box/`](../box/README.md). The `Computer` trait
+(`AsciiBoxes`) is a thin adapter over it.
 
 ---
 
@@ -85,82 +90,50 @@ SDKs: Python `ascii-box-sdk`, TypeScript `@asciidev/box-sdk`
 
 ---
 
-## Minimal Rust flow (verified endpoints only)
+## Minimal Rust flow
 
-```rust
-use serde_json::json;
+Do not copy the 29 Aug raw-`reqwest` sketch — it guessed `created["id"]` and omitted the
+delete header. Use `opengrok_box::ascii::Client` (`crates/opengrok-box/src/ascii/client.rs`).
+`AsciiBoxes` is the `Computer` adapter on top of it.
 
-const BASE: &str = "https://ascii.dev/api/box/v1";
+Pinned shapes (do not "simplify"):
 
-async fn box_flow(api_key: &str) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
-    let auth = format!("Bearer {api_key}");
+- Create id is documented `box.id` (`bx_…`). `CreateBoxResponse::id()` also accepts a bare
+  `id` / `boxId` so a stand-in that has not been updated still works. Rust 2024 reserves
+  `box`, so the nested field is `box_` with `#[serde(rename = "box")]`.
+- Delete sends `X-Ascii-Confirm-Delete` equal to the box id (`CONFIRM_DELETE_HEADER`).
+- Desktop: `POST /boxes/{id}/desktop?vnc=1` → `desktopUrl`. First call after ensure can
+  return no URL while the desktop is still provisioning; a later poll carries the link.
+  Do not log the URL — it carries a password / `_token`.
+- SSH key body field is OpenAPI `key`, not `publicKey`.
 
-    // (a) create
-    let created: serde_json::Value = client
-        .post(format!("{BASE}/boxes"))
-        .header("Authorization", &auth)
-        .json(&json!({ "ttlSeconds": 3600 }))
-        .send().await?.json().await?;
-    // UNVERIFIED: the field name carrying the new box's id. Pin against a real box.
-    let box_id = created["id"].as_str().unwrap_or_default().to_string();
-
-    // (b) run to completion
-    let ls: serde_json::Value = client
-        .post(format!("{BASE}/boxes/{box_id}/commands"))
-        .header("Authorization", &auth)
-        .json(&json!({ "command": "ls -la", "timeoutSeconds": 30, "detached": false }))
-        .send().await?.json().await?;
-    println!("{}", ls["stdout"]);
-
-    // (b2) long-running: detached + poll. There is no streaming socket.
-    let started: serde_json::Value = client
-        .post(format!("{BASE}/boxes/{box_id}/commands"))
-        .header("Authorization", &auth)
-        .json(&json!({ "command": "npm run build", "detached": true }))
-        .send().await?.json().await?;
-    let process_id = started["processId"].clone();
-    loop {
-        let status: serde_json::Value = client
-            .get(format!("{BASE}/boxes/{box_id}/commands/{process_id}"))
-            .header("Authorization", &auth)
-            .send().await?.json().await?;
-        if status["running"] == false { break; }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-
-    // (c) write a file
-    client.put(format!("{BASE}/boxes/{box_id}/files"))
-        .header("Authorization", &auth)
-        .json(&json!({ "path": "/home/user/hello.txt", "content": "hi", "encoding": "utf8" }))
-        .send().await?;
-
-    // (d) destroy — UNVERIFIED: the confirmation header's name/value.
-    client.delete(format!("{BASE}/boxes/{box_id}"))
-        .header("Authorization", &auth)
-        .send().await?;
-
-    Ok(())
-}
-```
+Covered by `Client` today: create (optional `Idempotency-Key`) / get / list, stop / resume /
+fork / delete, run_command / start_command / command_status, read / write files, host_port,
+desktop, interrupt, configure_ssh_key, update_box. Not yet: snapshots, environments,
+webhooks, ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me` — add when
+a coworker path needs them.
 
 ---
 
 ## Gaps and risks
 
 1. **No true streaming exec.** Sync (≤600s) or detached-with-polling; no WS/SSE for stdout. Live
-   terminal output means polling `tailBytes` tails, or driving SSH/PTY yourself.
+   terminal output means polling `tailBytes` tails, or driving SSH/PTY yourself. `run` and
+   `watch` stay separate trait methods for this reason.
 2. **No directory-listing endpoint** — shell out to `ls`.
-3. **No computer-use action API** — a VNC URL, not click/screenshot primitives. Agentic computer-use
-   means driving VNC ourselves.
-4. **No Rust SDK** — immaterial; plain REST + bearer.
-5. **Hosted-only, closed-source.** No self-host path found. *This is the argument for keeping
-   `Computer` a trait and adding a local Docker implementation.*
-6. **EU-only regions** (Germany, Finland, France) — latency and data-residency implications.
-7. **Plan-gated concurrency and creation rate limits** — a server running many coworkers must budget
+3. **No computer-use action API** — a VNC URL, not click/screenshot primitives. The desktop
+   client's right-sidebar screen is that URL in an Electron `<webview>` (`*.on.ascii.dev/vnc.html`).
+   `Page.captureScreenshot` of the renderer does **not** composite `<webview>` pixels — an empty
+   thumbnail in a CDP capture is not proof the screen is blank; click the preview.
+4. **Hosted-only, closed-source.** No self-host path found. *This is the argument for keeping
+   `Computer` a trait and shipping a local Docker implementation* — which we did.
+5. **EU-only regions** (Germany, Finland, France) — latency and data-residency implications.
+6. **Plan-gated concurrency and creation rate limits** — a server running many coworkers must budget
    against the tier.
-8. **Two unpinned shapes** (created-box id field; delete confirmation header) — pull the raw OpenAPI
-   spec and hit a real box before writing production structs. This is a P3 task.
+7. **Client coverage.** Snapshots / environments / webhooks / prompt-agent / secrets / repos /
+   artifacts / events / `/me` are documented in `docs/box/` and not in `ascii::Client` yet.
+
+The two shapes that were unpinned here (create id; delete header) are pinned — see above.
 
 ---
 
@@ -177,3 +150,4 @@ async fn box_flow(api_key: &str) -> anyhow::Result<()> {
 - [hosting](https://docs.ascii.dev/box/hosting.md) · [snapshots](https://docs.ascii.dev/box/snapshots.md) ·
   [billing](https://docs.ascii.dev/box/billing.md) · [production use](https://docs.ascii.dev/box/use-in-production.md) ·
   [CLI reference](https://docs.ascii.dev/box/cli-reference.md) · [SDKs](https://docs.ascii.dev/box/sdks/overview)
+- Local mirror: [`docs/box/`](../box/README.md) (fetched 1 Sep 2026). Live site wins if they disagree.

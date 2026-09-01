@@ -217,22 +217,25 @@ If `account_id` is null → the header did not bind. Check the vault value liter
 
 ## 4. What comes after these two boxes
 
-In the order I'd take them:
+**This list is a 1 Sep 2026 snapshot and several items on it have shipped.** The living
+remainder is [`HANDOVER.md`](HANDOVER.md) (What's left) and [`ROADMAP.md`](ROADMAP.md).
+Shipped since this page: `16.cards` (MCP AutoReview Ask raises a real card), slice 17
+(org gateway keys from the console), slice 18 including `18.pin` (a resumed run thinks
+with the pin its turn started on), and the typed Box Public API v1 client
+(`opengrok_box::ascii::Client`, vendor pages in `docs/box/`).
 
-1. **The `goal` / `plan` / `review` commands** — parked. The harness does **not** already
-   have these behaviours (`review.rs` is the auto-review judge). The packaged app's
-   `sendPrompt` has no `mode` and no Plan-mode picker
-   (`docs/verification/plan-mode-wire/`). A client composer control is the prerequisite;
-   honouring a field we invented would break CLAUDE.md #1.
-2. **Deferred hardening**, all deliberately parked, none urgent:
-   - `18.later` — a run resumed after an approval picks up the coworker's *current* pin, not the
-     one its turn started on (straight-through turns ARE stable). Fixing it means storing the pin
-     on the suspension. Also: seam B has no repin path; the roster's `description = model` habit.
-   - `16.later` — card-driven MCP approvals.
-   - `12.later` — DNS ownership proof for domains.
-   - `17.later` — SSO/SCIM onto the gateway's org mapping.
-3. **Also on the Later list:** artifacts/uploads, mem0, channels/multi-party rooms, stdio MCP
-   servers inside a coworker's container, graph harness (`MAX_ROUNDS = 8` today), Redis (only
+Still parked, and still true:
+
+1. **The `goal` / `plan` / `review` commands** — the packaged app's `sendPrompt` has no
+   `mode` and no Plan-mode picker (`docs/verification/plan-mode-wire/`). Honouring a field
+   we invented would break CLAUDE.md #1.
+2. **`12.later`** DNS ownership proof; password reset via Resend.
+3. **`16.later`** OAuth 2.1 metadata on `/mcp`. PolicyApproval still has no transcribed
+   desktop card. Reverse-exec stays excluded from MCP.
+4. **`17.later` / `18.later`** — SSO/SCIM, key rotation, mint idempotency, Seam B repin,
+   desktop model picker. See ROADMAP.
+5. **Later bucket** — artifacts/uploads, mem0, channels/multi-party rooms, stdio MCP
+   inside a coworker's container, graph harness (`MAX_ROUNDS = 8` today), Redis (only
    after a measured hot query — standing decision).
 
 **Blocked on the operator, not on code — and now OVERDUE:** the rights review. The repo was made

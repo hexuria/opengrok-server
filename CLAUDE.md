@@ -72,7 +72,7 @@ crates/
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
   opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
   opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
-  opengrok-box      the coworker's computer — a trait; box.ascii.dev first, cua and Docker later
+  opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
@@ -89,7 +89,7 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 | The client we serve | `/Volumes/goldcoders/OSS/opengrok` — reference: `docs/research/client-grok-bot.md` |
 | The model door | `/Volumes/goldcoders/OSS/open-ai-gateway` — reference: `docs/research/gateway-open-ai-gateway.md` |
 | The prior product's lessons | `/Volumes/goldcoders/projects/opensesame/opensesame` — reference: `docs/research/lessons-opensesame.md` |
-| The coworker's computer | `docs/research/sandbox-box-ascii-dev.md` |
+| The coworker's computer | `docs/research/sandbox-box-ascii-dev.md` (our notes); vendor API pages in `docs/box/` |
 | Connectors | `docs/research/connectors-open-connector.md` |
 | Picture-explainers | `docs/DIAGRAMS.md` (sources vendored in `docs/artifacts/`) |
 

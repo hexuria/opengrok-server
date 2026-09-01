@@ -8,7 +8,8 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 | [`client-grok-bot.md`](client-grok-bot.md) | The Grok Bot desktop client: architecture, the 123 `SAND_GATEWAY_COMMANDS`, transcript entry kinds and card types, the live activity stream, the box seam, and the first-boot call order | touching `opengrok-wire` or `opengrok-server` |
 | [`gateway-open-ai-gateway.md`](gateway-open-ai-gateway.md) | open-ai-gateway: crate layout, the two listeners, auth, the model-pin dialect, endpoints, the `/v1/models` diagnostics envelope, and whether it can be embedded | touching `opengrok-harness` or planning the single-binary release |
 | [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `opengrok-store` or `opengrok-harness` |
-| [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, auth and session model, a minimal Rust flow, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
+| [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, pinned shapes (`box.id`, `X-Ascii-Confirm-Delete`), the typed `ascii::Client`, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
+| [`../box/README.md`](../box/README.md) | Local copy of the Box Public API v1 pages + OpenAPI spec (vendor markdown, not ours) | fixing or extending `opengrok-box` against the live contract |
 | [`client-versions-0.18-0.30.md`](client-versions-0.18-0.30.md) | Every client protocol surface across 0.18 / 0.27 / 0.29 / 0.30 — per-version counts, provenance paths and exact deltas for gateway commands, internal RPC edges, the transcript/card/SSE contract, local-exec daemon frames, feature gates, and an inventory-only `aiserver.v1` listing | building `og-wire` or `og-server` against a specific client generation |
 | [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `opengrok-tools` or planning P6 |
 
@@ -42,6 +43,10 @@ Each doc is long because the detail is the point. These four are the ones that c
 
 A reference doc that has drifted is worse than none, because it is trusted. If you find a claim that
 no longer holds, fix the document in the same commit as the code — and say in the commit body that
-you did. Mark anything unverified as unverified rather than smoothing it over; two shapes in the
-box.ascii.dev report are flagged exactly that way, and pinning them is a scheduled task, not a
-lingering doubt.
+you did. Mark anything unverified as unverified rather than smoothing it over.
+
+The two box.ascii.dev shapes that used to be flagged that way are now pinned (create id is
+`box.id`; delete confirmation is `X-Ascii-Confirm-Delete` equal to the box id) — see
+[`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md). Bulk upload is still unverified as a REST
+endpoint. The typed client is `opengrok_box::ascii::Client`; vendor pages live in
+[`docs/box/`](../box/README.md).

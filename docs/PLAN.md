@@ -153,21 +153,26 @@ today.
 ### 4.3 The computer — `opengrok-box`
 
 A trait, so a coworker's computer is a **seam and not a vendor**. box.ascii.dev is the first
-implementation: persistent Ubuntu VMs, plain REST, bearer auth — a `reqwest` client is the whole
-integration.
+implementation: persistent Ubuntu VMs, plain REST, bearer auth. The typed v1 client is
+`opengrok_box::ascii::Client` (shapes from [`box/`](box/README.md)); `AsciiBoxes` is the
+`Computer` adapter. Local Docker is the other adapter, and the default when no
+`OG_BOX_API_KEY` is set.
 
 Verified: create, sync and detached exec, file read/write, port exposure with preview URLs,
-stop/resume/fork, destroy. **Gaps designed around rather than discovered later:**
+stop/resume/fork, destroy, desktop/VNC. The two shapes that were unpinned here are now
+pinned: create id is `box.id` (legacy `id`/`boxId` fallback); delete confirmation is
+`X-Ascii-Confirm-Delete` equal to the box id (live 31 Aug 2026). **Gaps designed around
+rather than discovered later:**
 
 - **no live stdout socket** — detached + poll is the honest shape, which is why `run` and `watch`
   are separate trait methods rather than a `Stream` that hides the latency;
 - no directory-list endpoint (shell `ls`);
-- computer-use is a VNC URL, not click/screenshot primitives;
-- hosted-only, EU-only regions, plan-gated concurrency;
-- two response shapes still unpinned (the created-box id field; the delete confirmation header) —
-  a P3 task against a real box.
+- computer-use is a VNC URL, not click/screenshot primitives — `getForeverBoxStatus.vncUrl`
+  is that URL when the box is running;
+- hosted-only, EU-only regions, plan-gated concurrency.
 
 Full report: [`research/sandbox-box-ascii-dev.md`](research/sandbox-box-ascii-dev.md).
+Vendor pages: [`box/`](box/README.md).
 
 ### 4.4 Tools — `opengrok-tools`
 
@@ -251,7 +256,8 @@ streams back as activity; the transcript persists. The durability test is the po
 mid-run and the run resumes.
 
 **P3 — The computer.** `opengrok-box` against a real box.ascii.dev VM; shell and file tools wired through
-`opengrok-tools`; the two unpinned response shapes written down.
+`opengrok-tools`; the two response shapes that were unpinned here are now written down
+(`box.id`; `X-Ascii-Confirm-Delete`).
 
 **P4 — Broadcast, done right.** The fan-out ledger: one request, a durable row, every coworker asked
 **in parallel** (with a small concurrency cap for the subscription's sake), answers landing as each

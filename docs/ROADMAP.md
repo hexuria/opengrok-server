@@ -169,7 +169,7 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
 - [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
   verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
 - [ ] **12.later** Domain OWNERSHIP proof (DNS challenge) — matching is in v1, ownership deferred;
-  password reset via Resend; an in-app admin surface for invites/enable (CLI-only in v1).
+  password reset via Resend. The in-app admin surface for invites/enable shipped in slice 13.
 
 ## Slice 13 — Web console
 
@@ -253,8 +253,9 @@ the proof, not construction.
   answers in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run;
   the MCP client retries under the remembered call id. PolicyApproval still has no
   transcribed desktop card; reverse-exec stays excluded. *(this commit)*
-- [ ] **16.later** OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
-  three-doors order).
+- [ ] **16.later** OAuth 2.1 metadata on /mcp. PolicyApproval still has no transcribed desktop
+  card (AutoReview Ask does — 16.cards). Reverse-exec stays excluded from MCP. The org-key mint
+  console surface shipped as slice 17.
 
 ## Slice 17 — one identity across both doors
 
@@ -371,6 +372,18 @@ vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle ri
 - [x] P10 — the box control surface over what the deployment has: null (the validated
   truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
   click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
+- [x] **P10.sdk** Typed Box Public API v1 client (`opengrok_box::ascii::Client`) transcribed
+  from [`docs/box/`](box/README.md) (vendor pages fetched 1 Sep 2026; live site wins if they
+  disagree). `AsciiBoxes` stays the `Computer` adapter — the harness never talks HTTP itself.
+  Create id is documented `box.id` (`bx_…`), with legacy `id` / `boxId` fallback. Delete sends
+  `X-Ascii-Confirm-Delete` equal to the box id (live 31 Aug 2026). SSH key body field is
+  OpenAPI `key`, not `publicKey`. `getForeverBoxStatus` / `ensureForeverBox` return `vncUrl`
+  from `POST /boxes/{id}/desktop?vnc=1` (`desktopUrl`) only when `live_state == "running"` —
+  a first poll can be running with a null URL while the desktop is still provisioning.
+  Verified 2 Sep 2026 on packaged Open Grok.app: Hexuria's right-sidebar screen paints the
+  live noVNC desktop. Snapshots, environments, webhooks, ASCII's in-box prompt agent, secrets,
+  repos, artifacts, events, and `/me` stay out until a coworker path needs them.
+  *(this commit)*
 
 **P11 is deliberately not here.** Sharing/rooms, teach recording, channels, memories and the
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.
@@ -392,6 +405,10 @@ Listing them as pending would make this tracker lie about how far away done is.
 - [ ] stdio MCP servers inside a coworker's own container (the follow-up to HTTP-only).
 - [ ] Graph harness (the loop is linear today, `MAX_ROUNDS = 8`).
 - [ ] Redis — only after a measured hot query, per the standing decision.
+- [ ] Remaining Box API v1 endpoints in `ascii::Client` (snapshots, environments, webhooks,
+  ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) — add when a
+  coworker path needs them, not as a completeness exercise. Vendor pages already live in
+  `docs/box/`.
 
 ## Blocked on the operator, not on code
 

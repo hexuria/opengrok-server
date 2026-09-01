@@ -2,7 +2,8 @@
 //!
 //! ONE TRAIT, SEVERAL COMPUTERS. A coworker's computer is a seam, not a vendor: the harness asks
 //! for a shell, a file, a port; something behind this trait provides them. The first
-//! implementation drives box.ascii.dev; a local Docker one for tests and self-hosting comes next.
+//! implementation drives box.ascii.dev through a typed v1 client (`ascii::Client`, shapes from
+//! `docs/box/`); a local Docker one for tests and self-hosting comes next.
 //! The client already models its own computer this way (`BoxEndpoint { host, port, authToken }`),
 //! so keeping the seam here is what lets the same coworker run on either.
 //!
@@ -18,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub mod ascii;
 pub mod docker;
 
-pub use ascii::AsciiBoxes;
+pub use ascii::{AsciiBoxes, Client as AsciiClient};
 pub use docker::DockerComputer;
 
 /// What a command did. `truncated` is carried rather than dropped: a tail is not the output, and a

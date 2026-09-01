@@ -321,8 +321,11 @@ pub async fn stop_agent_turn(state: &GatewayState, args: &Value, _caller: &str) 
 /// computer" forever: a running box says `running`, a released one `absent`, and a dead one its real
 /// word (`exited`/`stopped`/…), so a box that died says it died instead of pretending to boot.
 ///
-/// `vncUrl` is ALWAYS null: our boxes are headless (shell + files, no screen). The client renders a
-/// running-but-headless box honestly on its side; we never invent a screen URL that does not exist.
+/// `vncUrl` is the noVNC desktop URL when the box is running and the provider has a screen
+/// (`Computer::screen_url` → ASCII `POST /boxes/{id}/desktop?vnc=1`); otherwise null. A first
+/// poll after ensure can be `running` with `vncUrl: null` while the desktop is still
+/// provisioning — a later poll carries the link. We never invent a URL. Do not log it: it
+/// carries a password / `_token`.
 pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     use crate::agui::provision;
 

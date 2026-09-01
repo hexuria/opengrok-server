@@ -1,0 +1,411 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.ascii.dev/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# List boxes
+
+
+
+## OpenAPI
+
+````yaml openapi/box-v1.yaml GET /boxes
+openapi: 3.1.0
+info:
+  title: Box Public API v1
+  version: 1.0.0
+  description: >
+    Public JSON API for creating, operating, prompting, observing, and exposing
+    Box sandboxes from backend services, CI jobs, hosted workers, and Box
+    automation products.
+
+
+    The v1 reference intentionally documents the developer integration surface
+    only. Dashboard billing actions are not part of v1.
+servers:
+  - url: https://ascii.dev/api/box/v1
+security:
+  - BoxBearerAuth: []
+tags:
+  - name: Box
+    description: >-
+      Unified Box account, setup, lifecycle, prompting, event history, desktop
+      access, and SSH operations.
+paths:
+  /boxes:
+    get:
+      tags:
+        - Box
+      summary: List boxes
+      operationId: boxes
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Sort'
+        - name: state
+          in: query
+          schema:
+            type: string
+          description: Comma-separated Box state filter, for example `ready,idle,running`.
+      responses:
+        '200':
+          description: Boxes owned by the authenticated Box user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BoxListResponse'
+              examples:
+                boxes:
+                  value:
+                    ok: true
+                    type: box.list
+                    boxes:
+                      - id: bx_23456789
+                        name: Box 2026-05-31 12:00
+                        state: idle
+                        url: https://machine.on.ascii.dev
+                        ip: 203.0.113.10
+                        createdAt: '2026-05-31T12:00:00Z'
+                        updatedAt: '2026-05-31T12:05:00Z'
+                        archiveAfter: '2026-05-31T13:00:00Z'
+                        desktopAvailable: true
+                        desktopUrl: https://desktop.example/stream.html?token=redacted
+                        snapshotAvailable: false
+                        snapshotCompletedAt: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 100
+      description: Maximum items to return.
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type:
+          - string
+          - 'null'
+      description: Opaque pagination cursor returned as `pageInfo.nextCursor`.
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        enum:
+          - asc
+          - desc
+        default: desc
+      description: Sort direction for cursor pagination.
+  schemas:
+    BoxListResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessBase'
+        - type: object
+          required:
+            - boxes
+          properties:
+            type:
+              type: string
+              const: box.list
+            boxes:
+              type: array
+              items:
+                $ref: '#/components/schemas/Box'
+            pageInfo:
+              $ref: '#/components/schemas/PageInfo'
+    SuccessBase:
+      type: object
+      required:
+        - ok
+        - type
+      properties:
+        ok:
+          type: boolean
+          examples:
+            - true
+        type:
+          type: string
+          description: Stable success envelope discriminator added by v1.
+    Box:
+      type: object
+      required:
+        - id
+        - name
+        - state
+        - desktopAvailable
+        - snapshotAvailable
+      properties:
+        id:
+          type: string
+          pattern: ^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$
+          examples:
+            - bx_23456789
+        name:
+          type: string
+          examples:
+            - Box 2026-05-31 12:00
+        state:
+          type: string
+          enum:
+            - init
+            - provisioning
+            - provisioned
+            - cloning
+            - ready
+            - idle
+            - running
+            - archiving
+            - archived
+            - error
+        type:
+          type: string
+          enum:
+            - small
+            - default
+            - large
+            - bare-metal
+          description: >-
+            Machine size this box was created with. Fixed for the life of the
+            box.
+        vcpu:
+          type: integer
+          description: vCPUs guaranteed by this box's type.
+          examples:
+            - 4
+        memoryGB:
+          type: integer
+          description: RAM in GB guaranteed by this box's type.
+          examples:
+            - 8
+        billingMultiplier:
+          type: number
+          description: >-
+            Rate at which this box consumes machine time. 0.5 for `small`, 1 for
+            `default`, 2 for `large`.
+          examples:
+            - 1
+        url:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: Machine URL when assigned.
+        ip:
+          type:
+            - string
+            - 'null'
+          description: Machine IPv6 or IPv4 address when assigned.
+        createdAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        updatedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        archiveAfter:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Automatic archival time, or null when auto-stop is disabled.
+        desktopAvailable:
+          type: boolean
+        desktopUrl:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: Secret-bearing desktop stream URL when available. Redact from logs.
+        snapshotAvailable:
+          type: boolean
+        snapshotCompletedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: >-
+            Timestamp of the most recent successfully completed snapshot, or
+            null.
+        subdomain:
+          type:
+            - string
+            - 'null'
+          description: >-
+            The box's stable three-word subdomain slug (e.g.
+            "frazil-pneuma-rallye"), or null before one is assigned.
+        lastSnapshotAttemptAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: >-
+            Timestamp of the most recent snapshot attempt of any status (queued,
+            in_progress, completed, failed, cancelled), or null. Use with
+            snapshotCompletedAt to detect snapshots that keep failing.
+        lastSnapshotStatus:
+          type:
+            - string
+            - 'null'
+          enum:
+            - queued
+            - in_progress
+            - completed
+            - failed
+            - cancelled
+            - null
+          description: >-
+            Status of the most recent snapshot attempt, or null if none. A value
+            other than completed while snapshotCompletedAt stays stale indicates
+            failing snapshots.
+        setupStatus:
+          type:
+            - string
+            - 'null'
+          enum:
+            - pending
+            - running
+            - done
+            - failed
+            - null
+          description: >-
+            Outcome of the create-time `setupScript`: `pending` (stored, not yet
+            started), `running` (executing on the box in the background), `done`
+            (exit code 0) or `failed` (non-zero exit, or the box lost track of
+            the process). Null when the box was created without a setup script.
+        setupError:
+          type:
+            - string
+            - 'null'
+          description: >-
+            Short failure detail (exit code plus a stderr tail) when
+            `setupStatus` is `failed`; while `pending`, may carry the last
+            start/upload error from a retry in progress. Otherwise null.
+        environment:
+          type:
+            - string
+            - 'null'
+          description: >-
+            Name of the Box environment this box is running, or null if it is
+            attached to none (a `noEnv` box, or one whose environment was
+            deleted). A box freezes onto one environment version when it starts
+            and keeps it for life, so this is what the box actually holds, not
+            what the environment says today.
+          examples:
+            - base
+        environmentVersion:
+          type:
+            - integer
+            - 'null'
+          description: >-
+            Version number of `environment` that this box is pinned to. Compare
+            it against the environment's latest version to see whether an
+            upgrade is pending: a box below the latest is still running the
+            older configuration until someone calls `POST
+            /environments/{environmentId}/upgrade`.
+          examples:
+            - 3
+    PageInfo:
+      type: object
+      required:
+        - nextCursor
+        - hasMore
+        - limit
+      properties:
+        nextCursor:
+          type:
+            - string
+            - 'null'
+        hasMore:
+          type: boolean
+        limit:
+          type: integer
+    ErrorEnvelope:
+      type: object
+      required:
+        - ok
+        - type
+        - status
+        - code
+        - message
+        - error
+        - requestId
+      properties:
+        ok:
+          type: boolean
+          examples:
+            - false
+        type:
+          type: string
+          examples:
+            - box.error
+        status:
+          type: integer
+          examples:
+            - 409
+        code:
+          type: string
+          examples:
+            - provider_not_configured
+        message:
+          type: string
+          examples:
+            - Prompting is locked until Codex is configured on the Agents page.
+        requestId:
+          type: string
+          examples:
+            - req_01HX...
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - status
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            status:
+              type: integer
+            details:
+              type: object
+              additionalProperties: true
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          examples:
+            unauthorized:
+              value:
+                ok: false
+                type: box.error
+                status: 401
+                code: unauthorized
+                message: Unauthorized
+                error:
+                  code: unauthorized
+                  message: Unauthorized
+                  status: 401
+                requestId: req_01HX...
+  securitySchemes:
+    BoxBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: box_api_key
+      description: >-
+        Box bearer token in the form `box_...`. Service API keys authenticate
+        Box operations.
+
+````

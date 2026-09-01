@@ -69,13 +69,13 @@ crates/
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
   opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
   opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability; the auto-review judge
-  opengrok-box      the coworker's computer — a trait; local Docker and box.ascii.dev today
+  opengrok-box      the coworker's computer — a trait; local Docker and box.ascii.dev (typed v1 client) today
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
   opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint, /console
 docs/
-  setup/ · research/ · verification/ · archive/ · the documents in the table above
+  setup/ · research/ · box/ (vendor API pages) · verification/ · archive/ · the documents in the table above
 scripts/
   serve.sh (run the dev server) · gate.sh (the merge gate) · slice*-smoke.sh (the evidence)
 web/

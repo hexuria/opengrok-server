@@ -39,8 +39,8 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise |
-| `OG_BOX_API_KEY` | unset | box.ascii.dev (`box_…`), for computers that outlive this machine |
+| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise. The ASCII adapter is `opengrok_box::ascii::Client` (shapes from `docs/box/`); `AsciiBoxes` is the `Computer` trait on top of it |
+| `OG_BOX_API_KEY` | unset | box.ascii.dev (`box_…`), for computers that outlive this machine. A running box's desktop URL (`getForeverBoxStatus.vncUrl`) comes from `POST /boxes/{id}/desktop?vnc=1` — do not log it |
 | `OG_BOX_IDLE_STOP_SECONDS` | `0` (off) | stop an idle box after this many seconds |
 | `OG_DOCKER_IMAGE` | `debian:stable-slim` | the image a Docker computer is built from; any image with a shell |
 | `OG_HOSTED` | unset | `1` = hosted/multi-tenant: local Docker is never advertised or used (untrusted bot containers must not run on the API host) |

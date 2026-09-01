@@ -41,13 +41,23 @@ Every UI claim is verified in the packaged app over CDP, never in the client's r
 source tree (which does not ship):
 
 ```sh
-# in the client repo: package and install, then launch with a debug port
-just package && just install
+# in the client repo: package, then install IN PLACE. Never `just install` —
+# that justfile still writes /Applications/Grok-0.27.app (pre-rebrand). Never
+# `rm -rf /Applications/Open Grok.app` first: macOS drops Full Disk Access.
+npm run package
+rsync -a --delete "dist/Open Grok.app/" "/Applications/Open Grok.app/"
+pkill -9 -f "Open Grok.app/Contents"; sleep 2
 "/Applications/Open Grok.app/Contents/MacOS/Grok Bot" --remote-debugging-port=9223
 
-# inspect and drive from the client repo's tools
+# inspect and drive from the client repo's tools (no Origin header — CDP 403s with one)
 node docs/research/tools/cdp-eval-main.mjs "document.body.innerText.slice(0,400)"
 ```
+
+The live app is `/Applications/Open Grok.app` (`bot.opengrok.app`). The inner binary stays
+`Grok Bot`. Do not launch official `/Applications/Grok Bot.app` (`com.anysphere.sand`) and
+do not use `SAND_HOST_GATEWAY_URL`. Electron `Page.captureScreenshot` does not composite
+`<webview>` pixels — an empty right-sidebar thumbnail in a renderer capture is not proof
+the computer screen is blank; click the preview.
 
 Server-side, `OG_TRACE_REQUESTS=1` shows each gateway call as the app makes it. The end-to-end
 evidence pattern — client screenshot paired with the server's own rows — is what

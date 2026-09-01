@@ -1,0 +1,91 @@
+# ascii
+
+- [Quickstart](https://docs.ascii.dev/box/quickstart.md): Install Box, finish onboarding, and start your first cloud sandbox.
+- [Build a Platform on Box](https://docs.ascii.dev/box/platform-guide.md): Run your users' agents, previews, and workspaces on Box: architectures, costs, and provisioning patterns.
+- [Machine Capabilities](https://docs.ascii.dev/box/machines.md): What's pre-installed on every box and what you can do with it.
+- [Environments](https://docs.ascii.dev/box/environments.md): Decide what every new Box starts with: repositories, secrets, and which of your credentials it may use.
+- [Setup & Scripts](https://docs.ascii.dev/box/setup.md): Run code inside a Box: setup scripts and driving setup from your own program.
+- [Snapshots & Copies](https://docs.ascii.dev/box/snapshots.md): How a Box persists, and the four ways to bring one back: resume, fork, template, and download.
+- [Data retention and deletion](https://docs.ascii.dev/box/data-retention.md): Choose archive or permanent deletion, enable zero data retention, and understand what is retained.
+- [Long-Running Tasks](https://docs.ascii.dev/box/long-running-tasks.md): Keep a Box running longer and restart processes after resume or fork.
+- [SSH Access](https://docs.ascii.dev/box/ssh-access.md): Connect to a Box over SSH from your terminal or external tools.
+- [Desktop Streaming](https://docs.ascii.dev/box/desktop-streaming.md): How Box opens a browser-based desktop stream for GUI work.
+- [Host with box](https://docs.ascii.dev/box/hosting.md): Run a service inside a Box and expose it on a stable public HTTPS URL.
+- [API Keys](https://docs.ascii.dev/box/api-keys.md): Create, store, rotate, and revoke Box API keys for automation.
+- [Webhooks](https://docs.ascii.dev/box/webhooks.md): Receive signed notifications when a Box becomes ready, finishes restoring, errors, or archives.
+- [Agent sign-in](https://docs.ascii.dev/box/agent-auth.md): How an agent registers itself with Box, claims a human, and starts the 7-day free trial.
+- [Billing & Limits](https://docs.ascii.dev/box/billing.md): How Box billing works: per-second pricing, plans, credits, what is included, and what happens when you run out.
+- [FAQ](https://docs.ascii.dev/box/faq.md): Short answers on accounts, regions, billing, snapshots, lifecycle, and running a platform on Box.
+- [Box SDKs](https://docs.ascii.dev/box/sdks/overview.md): Use Box from Python and TypeScript/JavaScript services.
+- [Python SDK](https://docs.ascii.dev/box/sdks/python.md): Install, configure, and use the ascii-box-sdk Python package.
+- [TypeScript and JavaScript SDK](https://docs.ascii.dev/box/sdks/typescript.md): Install, configure, and use the @asciidev/box-sdk npm package.
+- [Eve](https://docs.ascii.dev/box/integrations/eve.md): Run Eve sandboxes on Box with the @asciidev/eve-box backend: a zero-to-one guide for newcomers to either tool.
+- [Harbor](https://docs.ascii.dev/box/integrations/harbor.md): Run Harbor agent trials and evals on Box with the harbor-box environment adapter: a zero-to-one guide for newcomers to either tool.
+- [Use in Docker](https://docs.ascii.dev/box/use-in-production.md): Install Box in Docker images and authenticate the CLI with an API key.
+- [Use in Code](https://docs.ascii.dev/box/use-in-code.md): Call Box from scripts and applications by wrapping the CLI with --json.
+- [CLI Reference](https://docs.ascii.dev/box/cli-reference.md): Complete reference for all box CLI commands and global flags.
+- [Box Public API v1](https://docs.ascii.dev/box/api/v1.md): Create, manage, prompt, observe, and expose Box sandboxes from your own products.
+- [Get current Box user](https://docs.ascii.dev/box/api/reference/account/get-current-box-user.md): Returns GitHub identity for the authenticated Box account.
+- [List organizations](https://docs.ascii.dev/box/api/reference/account/list-organizations.md)
+- [Get Box limits](https://docs.ascii.dev/box/api/reference/account/get-box-limits.md): Check remaining machine starts, compute time, credits, access readiness, and concurrent-box capacity for the authenticated account. Pass `org` / `X-Box-Org` (or `teamId`) to read a team wallet you belong to.
+- [Get account data-retention policy](https://docs.ascii.dev/box/api/reference/account/get-account-data-retention-policy.md): Read the account zero-data-retention setting.
+- [Update account data-retention policy](https://docs.ascii.dev/box/api/reference/account/update-account-data-retention-policy.md): Enable or disable account zero data retention using a Box session.
+- [Get deletion operation](https://docs.ascii.dev/box/api/reference/account/get-deletion-operation.md): Poll an accepted Box or snapshot deletion operation.
+- [List GitHub repositories available to Box](https://docs.ascii.dev/box/api/reference/account/list-github-repositories-available-to-box.md): Returns GitHub repositories grouped by installation plus the current selected repositories for new Boxes.
+- [Select repository for Boxes](https://docs.ascii.dev/box/api/reference/account/select-repository-for-boxes.md): Idempotently selects one repository for the Box environment. Use `databaseId` from `GET /repos` as `repositoryId`; selecting an already-selected repository updates its `baseBranch`.
+- [List API keys](https://docs.ascii.dev/box/api/reference/account/list-api-keys.md): Lists API key metadata only. Raw key secrets are not returned after creation/rotation. Results are scoped to the authenticated Box account.
+- [Get API key usage](https://docs.ascii.dev/box/api/reference/account/get-api-key-usage.md): Get the 30-day request total and created Boxes and Agents for one API key.
+- [List webhooks](https://docs.ascii.dev/box/api/reference/account/list-webhooks.md): List account-wide Box lifecycle webhook endpoints.
+- [Create webhook](https://docs.ascii.dev/box/api/reference/account/create-webhook.md): Create an account-wide Box lifecycle webhook endpoint.
+- [Get webhook](https://docs.ascii.dev/box/api/reference/account/get-webhook.md): Get one Box lifecycle webhook endpoint without its signing secret.
+- [Update webhook](https://docs.ascii.dev/box/api/reference/account/update-webhook.md): Update a Box lifecycle webhook endpoint.
+- [Delete webhook](https://docs.ascii.dev/box/api/reference/account/delete-webhook.md): Delete a Box lifecycle webhook endpoint and its queued deliveries.
+- [Rotate webhook signing secret](https://docs.ascii.dev/box/api/reference/account/rotate-webhook-signing-secret.md): Replace a webhook signing secret and return the new secret once.
+- [Get Box secrets setup](https://docs.ascii.dev/box/api/reference/account/get-box-secrets-setup.md): Returns the environment variables and secret files configured for Boxes.
+- [Update Box secrets setup](https://docs.ascii.dev/box/api/reference/account/update-box-secrets-setup.md)
+- [List Box environments](https://docs.ascii.dev/box/api/reference/environments/list-box-environments.md): Returns every non-deleted Box environment with its latest-version flags, contents, and per-version box usage. A default environment named `base` is created on first access if none exists.
+- [Create a Box environment](https://docs.ascii.dev/box/api/reference/environments/create-box-environment.md): Create a new named environment. It starts on version 1 with all fine-grained flags on and `safeForThirdParties` off.
+- [Update a Box environment](https://docs.ascii.dev/box/api/reference/environments/update-box-environment.md): Rename, set as default, and/or edit flags and contents. Any flag or content change mints a new immutable version; existing boxes stay on their pinned version until you call upgrade.
+- [Delete a Box environment](https://docs.ascii.dev/box/api/reference/environments/delete-box-environment.md): Soft-deletes an environment. The default environment cannot be deleted, and at least one environment is always kept.
+- [Upgrade boxes to an environment's latest version](https://docs.ascii.dev/box/api/reference/environments/upgrade-box-environment.md): Repoints the caller's active boxes from an older version of this environment to its latest version, scrubbing any owner secrets the new version drops and hot-pushing the new config.
+- [Set environment variable](https://docs.ascii.dev/box/api/reference/environments/set-environment-var.md): Sets or replaces a single variable without reading or rewriting the rest. Mints a new immutable version.
+- [Remove environment variable](https://docs.ascii.dev/box/api/reference/environments/delete-environment-var.md): Removes a single variable. Mints a new immutable version.
+- [Write environment secret file](https://docs.ascii.dev/box/api/reference/environments/set-environment-secret-file.md): Adds or replaces a single secret file by path. Mints a new immutable version.
+- [Remove environment secret file](https://docs.ascii.dev/box/api/reference/environments/delete-environment-secret-file.md): Removes the secret file at `path`. Mints a new immutable version.
+- [Add environment repository](https://docs.ascii.dev/box/api/reference/environments/add-environment-repo.md): Adds a repository (or updates its base branch) by database id from the repository list. Mints a new immutable version.
+- [Remove environment repository](https://docs.ascii.dev/box/api/reference/environments/delete-environment-repo.md): Removes one repository from the environment's selection. Mints a new immutable version.
+- [List boxes](https://docs.ascii.dev/box/api/reference/boxes/list-boxes.md)
+- [Create box](https://docs.ascii.dev/box/api/reference/boxes/create-box.md): Provision a new cloud computer. Store the returned `box.id` with your product job/session record. Send an `Idempotency-Key` header to make this call safe to retry after a lost response without creating a second billable box.
+- [Get box](https://docs.ascii.dev/box/api/reference/boxes/get-box.md): Poll this endpoint after create, stop, resume, or fork operations.
+- [Update box](https://docs.ascii.dev/box/api/reference/boxes/update-box.md)
+- [Stop and archive box](https://docs.ascii.dev/box/api/reference/boxes/stop-and-archive-box.md): Stop active work and archive/snapshot the box for later resume or fork.
+- [Permanently delete Box data](https://docs.ascii.dev/box/api/reference/boxes/permanently-delete-box-data.md): Confirm and accept irreversible background deletion of a Box.
+- [Resume box](https://docs.ascii.dev/box/api/reference/boxes/resume-box.md)
+- [Fork box](https://docs.ascii.dev/box/api/reference/boxes/fork-box.md): Provision a new box from an existing one. Send an `Idempotency-Key` header to make this call safe to retry after a lost response without creating a second billable fork.
+- [List snapshots](https://docs.ascii.dev/box/api/reference/snapshots/list-snapshots.md): List visible completed snapshots across all of your boxes using immutable ownership attribution. Pinned, deletion-scheduled, and privacy-fenced Box snapshots are omitted. Follow `nextCursor` through the complete history; there is no hidden 500-snapshot cap.
+- [List box snapshots](https://docs.ascii.dev/box/api/reference/snapshots/list-box-snapshots.md): List visible completed snapshots for one Box with uncapped cursor pagination.
+- [Get latest box snapshot](https://docs.ascii.dev/box/api/reference/snapshots/get-latest-box-snapshot.md): Return the most recent completed snapshot for this box, or `null` if it has none.
+- [Get snapshot file tree](https://docs.ascii.dev/box/api/reference/snapshots/get-snapshot-tree.md): List the files and folders captured in a snapshot, with sizes. Returns a flat list of entries you can render as a tree.
+- [Download a file or folder from a snapshot](https://docs.ascii.dev/box/api/reference/snapshots/get-snapshot-file.md): Stream a single file's bytes, or a folder subtree as a tar archive, directly out of a snapshot, the box can be stopped or archived; the machine is never contacted. Use `GET /snapshots/{snapshotId}/tree` to list paths, then pass one here. Paths are relative to the snapshot root (same space as `tree`…
+- [Get snapshot download](https://docs.ascii.dev/box/api/reference/snapshots/get-snapshot-download.md): Return time-limited signed URLs for every chunk needed to reconstruct the box filesystem at this snapshot (the full chain, base through this generation), plus the inventory. Download the chunks and reassemble them as described by `reconstruct`. The `box snapshot pull` CLI command does this for you.
+- [Permanently delete snapshot data](https://docs.ascii.dev/box/api/reference/snapshots/permanently-delete-snapshot-data.md): Confirm and accept irreversible background deletion of a snapshot.
+- [List named snapshots](https://docs.ascii.dev/box/api/reference/snapshots/list-named-snapshots.md): List your named snapshots, newest first.
+- [Save a named snapshot](https://docs.ascii.dev/box/api/reference/snapshots/save-named-snapshot.md): Freeze a box's current state under a name (`box snapshot <id> <name>` in the CLI). Answers `202` immediately with the snapshot in `saving`; a running box takes a fresh capture first, which can run minutes. Poll `GET /named-snapshots/{name}` until the status settles at `ready` or `failed`. Reusing on…
+- [Get a named snapshot](https://docs.ascii.dev/box/api/reference/snapshots/get-named-snapshot.md)
+- [Delete a named snapshot](https://docs.ascii.dev/box/api/reference/snapshots/delete-named-snapshot.md): Remove a named snapshot and release its storage (`box snapshot rm <name>` in the CLI). Boxes already deployed from it are unaffected.
+- [Prompt Box](https://docs.ascii.dev/box/api/reference/agent/prompt-box-agent.md): Queue a natural-language work item for Codex or Claude Code inside the box. Observe progress with `GET /boxes/{boxId}/events`.
+- [List box events](https://docs.ascii.dev/box/api/reference/agent/list-box-events.md): Return Box work, lifecycle, and progress events so product UIs can show what the box is doing. Event payloads are extensible. Clients can long-poll this endpoint with `sort=asc` and a cursor to stream responses. Response events expose agent text, streaming partials via `data.is_streaming`, and tool…
+- [Get prompt run status](https://docs.ascii.dev/box/api/reference/agent/get-prompt-run-status.md): Returns first-class status for a queued/running/finished prompt so clients do not infer completion from box state and events.
+- [Read Box file](https://docs.ascii.dev/box/api/reference/agent/read-box-file.md)
+- [Write Box file](https://docs.ascii.dev/box/api/reference/agent/write-box-file.md)
+- [Execute Box command](https://docs.ascii.dev/box/api/reference/agent/execute-box-command.md): Runs the command synchronously by default (timeout configurable via `timeoutSeconds`, 600s cap). With `detached: true` the command starts in the background and a process id is returned immediately; poll `/boxes/{boxId}/commands/{processId}` for status and logs. Returns 400 invalid_timeout when `time…
+- [Get command status](https://docs.ascii.dev/box/api/reference/agent/get-command-status.md)
+- [Download Box artifact](https://docs.ascii.dev/box/api/reference/agent/download-box-artifact.md)
+- [Interrupt running work](https://docs.ascii.dev/box/api/reference/agent/interrupt-running-agent-work.md)
+- [Get desktop streaming URL](https://docs.ascii.dev/box/api/reference/agent/get-desktop-streaming-url.md): Create or fetch a secret-bearing desktop/noVNC URL for live computer-use visibility. Use `?vnc=1` for noVNC; a `provisioning: true` response means poll again.
+- [Configure box SSH key](https://docs.ascii.dev/box/api/reference/agent/configure-box-ssh-key.md): Adds an OpenSSH public key to the running Box so the caller can SSH as user `user`.
+
+## OpenAPI Specs
+
+- [openapi](/api-reference/openapi.json)
+- [box-v1](/openapi/box-v1.yaml)
