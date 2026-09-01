@@ -510,10 +510,9 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     // other key order so a string-hash of to_string would miss and Value equality hits.
     let reordered = json!({ "content": "hi", "path": "/tmp/from-mcp" });
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &reordered)
-            .as_deref(),
-        Some(call.id.as_str()),
-        "allow-once matches by Value equality, not key insertion order"
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &reordered),
+        Some((call.id.clone(), false)),
+        "allow-once matches by Value equality, not key insertion order; a judge yes is not a gate yes"
     );
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &call.arguments),
@@ -522,47 +521,110 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     );
 }
 
-/// PolicyApproval has no transcribed desktop card. An Ask of that reason must not invent one
-/// or leave a stuck awaiting run.
+/// A policy grant's "needs a human yes" over MCP raises the SAME card as the judge's ask, with
+/// the grant's reason and no proposed rule; the desktop's verb answers it, and the remembered
+/// yes is a GATE yes for the retry — not a judge skip.
 #[tokio::test]
-async fn a_policy_approval_ask_does_not_raise_a_card() {
+async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
     let database_url = database_or_skip!();
     let store = store_from(&database_url).await;
     let host_email = format!("mcp-policy-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_computerless_coworker(&store, &account).await;
-    let (_app, _state, gateway) = app_with(store.clone(), &host_email);
+    let (app, _state, gateway) = app_with(store.clone(), &host_email);
+    let base = spawn(app).await;
 
     let call = ToolCall {
         id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
         name: "shell".to_string(),
         arguments: json!({ "command": "echo policy" }),
     };
-    let result = ToolResult::awaiting(&call.id, AwaitingReason::PolicyApproval, "needs grant");
+    let result = ToolResult::awaiting(
+        &call.id,
+        AwaitingReason::PolicyApproval,
+        "only the on-call may run shell here",
+    );
     let error =
         opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
             .await;
     assert!(
-        error.contains("approval is not available over MCP"),
-        "PolicyApproval still fails closed with no card: {error}"
+        error.contains(&format!("requestId: {}", call.id)),
+        "the MCP error names the card's requestId: {error}"
     );
     assert!(
-        !error.contains("requestId"),
-        "must not name a card that was not raised: {error}"
+        !error.contains("approval is not available over MCP"),
+        "a policy ask has a card now: {error}"
     );
+
     let awaiting = store.awaiting_approval(&account).await.expect("awaiting");
-    assert!(
-        awaiting.is_empty(),
-        "no stuck run for a reason that has no card: {awaiting:?}"
+    assert_eq!(awaiting.len(), 1);
+    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
+    assert_eq!(
+        run.pending.as_ref().map(|p| p.reason),
+        Some(opengrok_core::run::SuspendReason::PolicyApproval)
     );
+
     let transcript = store
         .gateway_transcript(&coworker)
         .await
         .expect("transcript");
+    let card = transcript
+        .iter()
+        .find(|entry| entry["message"]["type"] == "auto-review-approval")
+        .cloned()
+        .expect("the policy ask rides the auto-review card");
+    let approval = &card["message"]["approval"];
+    assert_eq!(approval["requestId"], call.id);
+    assert_eq!(approval["status"], "pending");
+    assert_eq!(approval["reason"], "only the on-call may run shell here");
+    assert_eq!(approval["command"], "echo policy");
     assert!(
-        transcript
-            .iter()
-            .all(|entry| entry["message"]["type"] != "auto-review-approval"),
-        "no auto-review card for PolicyApproval: {transcript:?}"
+        approval.get("proposedRule").is_none(),
+        "a policy card offers no rule to write: {approval}"
+    );
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+
+    // A retry before the answer reuses the pending card rather than raising a second one.
+    let again =
+        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
+            .await;
+    assert!(
+        again.contains(&format!("requestId: {}", call.id)),
+        "{again}"
+    );
+
+    let res = reqwest::Client::new()
+        .post(format!("{base}/api/resolveAutoReviewApproval"))
+        .header("Authorization", "Bearer test-bearer")
+        .json(&json!({
+            "entryId": entry_id,
+            "requestId": call.id,
+            "resolution": "approved",
+            "agentId": coworker.as_str(),
+        }))
+        .send()
+        .await
+        .expect("resolve");
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "the desktop verb answers a policy card too"
+    );
+
+    let flipped = store
+        .gateway_transcript(&coworker)
+        .await
+        .expect("transcript")
+        .into_iter()
+        .find(|entry| entry["id"] == entry_id)
+        .expect("card still present");
+    assert_eq!(flipped["message"]["approval"]["status"], "approved");
+    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
+    assert_eq!(run.status, RunStatus::Finished);
+
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments),
+        Some((call.id.clone(), true)),
+        "a policy yes is remembered as a GATE yes for the retry"
     );
 }

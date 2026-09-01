@@ -230,6 +230,9 @@ impl Projection {
         &mut self,
         waiting: &opengrok_tools::ToolCall,
         reason: opengrok_tools::AwaitingReason,
+        // The sentence the gate gave (a policy grant's reason, the judge's) — what the card
+        // shows a person under the summary. `None` when the gate said nothing.
+        why: Option<&str>,
     ) -> Vec<Event> {
         let mut events = self.start();
         if self.finished {
@@ -251,7 +254,9 @@ impl Projection {
                 .with("arguments", waiting.arguments.clone())
                 // WHY: which card the gateway raises and which verb may answer it. Absent on rows
                 // written before reasons existed, which the reader treats as exec-consent.
-                .with("reason", reason.as_str()),
+                .with("reason", reason.as_str())
+                // The gate's own words, for the card. Empty when it had none.
+                .with("why", why.unwrap_or_default()),
         );
         events
     }
@@ -493,6 +498,7 @@ mod tests {
                 arguments: serde_json::Value::Null,
             },
             opengrok_tools::AwaitingReason::ExecConsent,
+            None,
         );
 
         // The open message is closed, so nothing streams forever.
