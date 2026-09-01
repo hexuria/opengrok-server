@@ -47,12 +47,15 @@ async fn status(State(state): State<AgUiState>, headers: HeaderMap) -> Response 
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    let configured = state
-        .auth
-        .store
-        .org_computer_kinds(org_id.as_str())
-        .await
-        .unwrap_or_default();
+    let configured = match state.vault.as_ref() {
+        Some(vault) => state
+            .auth
+            .store
+            .org_computer_kinds_openable(vault, org_id.as_str())
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let computers: Vec<_> = CONFIGURABLE
         .iter()
         .map(|(kind, label)| {

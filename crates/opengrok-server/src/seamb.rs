@@ -571,13 +571,13 @@ async fn grok_bot(
             // box.ascii.dev shows configured when THIS caller's org has set a key on the admin
             // dashboard. Resolve the caller's org, then check its configured kinds.
             let ascii_ready = match store.load_account(&account_id).await {
-                Ok((account, _)) => match account.org_id {
-                    Some(org) => store
-                        .org_computer_kinds(&org)
+                Ok((account, _)) => match (account.org_id, state.agui.vault.as_ref()) {
+                    (Some(org), Some(vault)) => store
+                        .org_computer_kinds_openable(vault, &org)
                         .await
                         .map(|kinds| kinds.iter().any(|kind| kind == "ascii"))
                         .unwrap_or(false),
-                    None => false,
+                    _ => false,
                 },
                 Err(_) => false,
             };
@@ -630,11 +630,19 @@ async fn grok_bot(
                 "configured": false,
                 "active": is_active("windows365"),
             }));
-            let account_error = store
+            let mut account_error = store
                 .account_computer_error(account_id.as_str())
                 .await
                 .ok()
                 .flatten();
+            // A mapped ascii box whose secret will not open is not "no computer set up" — the
+            // mapping is still there. Say the key is unreadable so the desktop can stop waking it.
+            if is_active("ascii") && !ascii_ready {
+                account_error = Some((
+                    "invalid_key".into(),
+                    "The saved box.ascii.dev key cannot be opened. An admin can paste it again on the dashboard.".into(),
+                ));
+            }
             // `mode` (resolved above) is the caller's EFFECTIVE sharing mode, so the client knows
             // whether a computer is pre-provisioned (per-org/per-account) or made per bot.
             // `activeKind` names the kind this account is actually on (null if none) — the field that

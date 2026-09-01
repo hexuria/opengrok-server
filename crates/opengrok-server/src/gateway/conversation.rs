@@ -363,12 +363,26 @@ pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u1
 
     // Ask the provider for the box's REAL state rather than trusting our stopped flag: the flag is
     // idle-stop's bookkeeping and can lag reality (a turn resumes the box), and a stale flag once
-    // reported a running box as "stopped" for the whole computer panel. `_stopped` stays only as a
-    // hint. A provider we cannot build (org key cleared) means the box is unreachable ⇒ "absent".
-    let _ = stopped;
-    let Some(provider) = provision::provider_for(&state.agui, org_id.as_deref(), &kind).await
-    else {
-        return (200, absent());
+    // reported a running box as "stopped" for the whole computer panel. A mapped box whose
+    // provider cannot be built (KEK rotated, key missing) is NOT absent — the mapping is still
+    // there — so we say so with computerError instead of pretending there is no computer.
+    let lookup = provision::lookup_provider(&state.agui, org_id.as_deref(), &kind).await;
+    let Some(provider) = lookup.computer else {
+        let (code, message) = lookup.error.unwrap_or_else(|| {
+            (
+                "unknown".into(),
+                "the computer's provider is not available".into(),
+            )
+        });
+        return (
+            200,
+            json!({
+                "agentId": agent_id,
+                "state": if stopped { "stopped" } else { "unknown" },
+                "vncUrl": Value::Null,
+                "computerError": { "code": code, "message": message },
+            }),
+        );
     };
     let live_state = provider
         .state(&box_id)
@@ -465,16 +479,25 @@ pub async fn box_control(
         }
         BoxAction::Ensure => match &existing {
             Some((box_id, kind, stopped)) => {
-                if let Some(provider) =
-                    provision::provider_for(&state.agui, org_id.as_deref(), kind).await
-                {
-                    let running = provider
-                        .state(box_id)
-                        .await
-                        .map(|state| state == "running")
-                        .unwrap_or(false);
+                let lookup = provision::lookup_provider(&state.agui, org_id.as_deref(), kind).await;
+                if let Some(provider) = lookup.computer {
+                    let live = provider.state(box_id).await.ok();
+                    let running = live.as_deref() == Some("running");
                     if *stopped || !running {
-                        let _ = provider.resume(box_id).await;
+                        if let Err(error) = provider.resume(box_id).await {
+                            return (
+                                200,
+                                json!({
+                                    "agentId": agent_id,
+                                    "state": live.unwrap_or_else(|| "stopped".into()),
+                                    "vncUrl": Value::Null,
+                                    "computerError": {
+                                        "code": error.code(),
+                                        "message": error.to_string(),
+                                    },
+                                }),
+                            );
+                        }
                         let _ = state
                             .agui
                             .auth
@@ -483,6 +506,8 @@ pub async fn box_control(
                             .await;
                     }
                 }
+                // No provider: fall through to box_status, which attaches computerError
+                // and does not pretend the mapped box is absent.
             }
             None => {
                 if let Err((code, message)) = reprovision(state, &account.id, &coworker_id).await {
