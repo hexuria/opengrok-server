@@ -15,9 +15,8 @@ desktop client (P2–P10 breadth), seam B transcribed, bot-keys, orgs/invites/cr
 the web console at `/console`, and the consent model (per-machine policy, never-expiring cards,
 two-tier auto-review with a model judge). A dev instance runs on `:1447` against the real judge.
 [`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
-true — and its unticked boxes are the work: 9.v (the client minting its own connection in server
-mode; blocked on the password for `signin@acme.test`, see [`HANDOVER-9v-10.3.md`](HANDOVER-9v-10.3.md)),
-12.later, and the "Later" bucket. 10.3 closed 1 Sep 2026.
+true — and its unticked boxes are the work: 12.later, and the "Later" bucket. 9.v and 10.3
+closed 1 Sep 2026.
 
 ## How to stand it up
 

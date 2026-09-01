@@ -127,11 +127,11 @@ tonic gRPC server cannot answer the client.
   file, codegen into target/ never the tree), both services on an opt-in `OG_GRPC_BIND`
   listener, proven by a real tonic client in `against_our_own_grpc.rs` — unauthenticated
   refusal, GetMe, the mint. *(this commit)*
-- [ ] **9.v** The client mints its own connection through us: switch the packaged app into
-  OpenGrok server mode, sign in at `/loginDeepControl`, and watch `EnsureSandBox` hand back
-  `OG_PUBLIC_GATEWAY_URL` + the bearer. (The old "remove `SAND_HOST_GATEWAY_URL`" framing is
-  obsolete — the env var is a dead path; see `docs/verification/real-client/README.md`.) The
-  contract is held by `slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
+- [x] **9.v** The client mints its own connection through us: packaged Open Grok.app called
+  `signInToOpenGrokServer`, PKCE login bound a throwaway account, `/auth/poll` went 404→200,
+  `EnsureSandBox` returned `OG_PUBLIC_GATEWAY_URL` and the bearer, and
+  `boxRuntime`/`openGrokGatewayUrl` persisted. `docs/verification/real-client/9v-mint.md`.
+  *(this commit)*
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
 

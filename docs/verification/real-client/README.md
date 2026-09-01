@@ -44,11 +44,9 @@ moved from `.21` to `.24` and the persisted setting had gone stale with it — w
 when the roster "mysteriously" stops loading in server mode: check `openGrokGatewayUrl` in
 `sand-data/settings.json` against the machine's current address.
 
-## 9.v — still open
+## 9.v — closed 1 Sep 2026
 
-"The client mints its own connection through us" needs a sign-in run in server mode (the
-credential form at `/loginDeepControl`, then `EnsureSandBox` handing back
-`OG_PUBLIC_GATEWAY_URL` + the bearer). Not exercised end-to-end from the packaged app yet; the
-contract is held by `scripts/slice13-seamb-smoke.sh` and the tonic round-trip test meanwhile.
-The old framing ("remove `SAND_HOST_GATEWAY_URL`") is obsolete — there is nothing to remove;
-the run is: switch the runtime to OpenGrok server mode, sign in, and watch the mint.
+Packaged Open Grok.app minted its own connection: PKCE `/loginDeepControl` → `/auth/poll`
+404-as-pending then 200 → `EnsureSandBox` handed back `OG_PUBLIC_GATEWAY_URL` and the bearer.
+Evidence: [`9v-mint.md`](9v-mint.md). The env-var path above remains dead; this is the supported
+one.

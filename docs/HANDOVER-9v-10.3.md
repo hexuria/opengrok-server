@@ -46,7 +46,8 @@ anthropic on this route"). Never trust a catalogue id without probing it.
 Switch the packaged desktop app into OpenGrok server mode, sign in at `/loginDeepControl`, and
 watch `EnsureSandBox` hand back `OG_PUBLIC_GATEWAY_URL` + the bearer.
 
-**STATUS: BLOCKED ON THE HUMAN. Do not burn hours trying to route around this.**
+**STATUS: CLOSED 1 Sep 2026.** Throwaway account + throwaway app profile; live
+`signin@acme.test` session untouched. `docs/verification/real-client/9v-mint.md`.
 
 > **THE BLOCKER: nobody knows the password for `signin@acme.test`.**
 > It is not in `.env` (which holds only `OG_*` names), not in either repo's docs, not in the
