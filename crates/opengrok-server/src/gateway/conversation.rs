@@ -1162,7 +1162,9 @@ pub async fn resolve_local_tool_permission(
     // pattern is the exact command (word-boundary prefix match in `decide`), so it can only cover
     // this command and its argument extensions, never a lookalike that shares a prefix. Written
     // only after the answer is durably recorded, and best-effort: a failed write just means the
-    // gate asks again next time, which is the narrower outcome.
+    // gate asks again next time, which is the narrower outcome. `standing_rule_refusal` is the
+    // same skip for sudo-as-allow (a standing allow on `sudo` would cover `sudo rm -rf /`);
+    // deny of sudo still persists.
     let standing = match resolution.as_str() {
         "always" => Some("allow"),
         "never" => Some("deny"),
@@ -1170,6 +1172,7 @@ pub async fn resolve_local_tool_permission(
     };
     if let Some(kind) = standing
         && !command.is_empty()
+        && crate::local_exec::standing_rule_refusal(kind, &command).is_none()
         && let Some((machine_id, _label)) =
             crate::local_exec::enabled_machine(&state.agui.auth.store, account_id.as_str()).await
     {
