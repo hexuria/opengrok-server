@@ -82,10 +82,12 @@ web/
   the web console (Bun/Vite/React SPA served at /console)
 ```
 
-## A note on privacy
+## A note on rights
 
-This repository stays **private** until an independent rights review clears it. See
-[`docs/LEGAL.md`](docs/LEGAL.md) — the reasoning is short, specific, and load-bearing.
+The operator made this repository **public on 1 Sep 2026 with the rights review still
+outstanding**. [`docs/LEGAL.md`](docs/LEGAL.md) records the line the project does not cross —
+transcription with provenance, no vendored stubs, no third-party marks — and why the review
+matters more now, not less.
 
 ## Licence
 

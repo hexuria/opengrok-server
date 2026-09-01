@@ -163,5 +163,12 @@ OG_PORT="$((PORT + 6))" OG_DATABASE_URL="${OG_DATABASE_URL%/*}/opengrok_s19_gate
   scripts/slice19-web-console-smoke.sh >/dev/null || fail "web-console"
 echo "  passed"
 
+# Own server + fresh DB + its own stand-in gateway: the org-key surface boots with a gateway admin
+# connection, which the shared server above deliberately has not got.
+step "scripts/slice21-org-keys-smoke.sh"
+OG_PORT="$((PORT + 7))" OG_DATABASE_URL="${OG_DATABASE_URL%/*}/opengrok_s21_gate" \
+  scripts/slice21-org-keys-smoke.sh >/dev/null || fail "org-keys"
+echo "  passed"
+
 echo
 echo "GATE PASSED (checks, tests and every smoke script)."

@@ -13,6 +13,7 @@ pub mod autonomy;
 pub mod computers;
 pub mod connections;
 pub mod gateway;
+pub mod gateway_admin;
 pub mod grpc;
 pub mod local_exec;
 pub mod mcp_door;

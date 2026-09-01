@@ -12,7 +12,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +36,15 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/users/{id}/enable", post(enable_user))
         .route("/admin/users/{id}/disable", post(disable_user))
         .route("/admin/invites", get(list_invites).post(issue_invite))
+        // One identity, two doors: gateway keys for the org's members. See `gateway_admin`.
+        .route(
+            "/admin/gateway/keys",
+            get(list_gateway_keys).post(mint_gateway_key),
+        )
+        .route("/admin/gateway/keys/{id}", delete(revoke_gateway_key))
+        .route("/admin/gateway/keys/{id}/quota", put(set_gateway_key_quota))
+        .route("/admin/gateway/budget", put(set_gateway_budget))
+        .route("/admin/gateway/usage", get(gateway_usage))
         .with_state(state)
 }
 
@@ -470,4 +479,343 @@ async fn list_invites(State(state): State<AuthState>, headers: axum::http::Heade
         })
         .collect();
     Json(json!({ "invites": invites })).into_response()
+}
+
+// ── Gateway keys: one identity, two doors ─────────────────────────────────────────────────────
+//
+// The org's admin hands a member a key that opens open-ai-gateway (the model door). We do not
+// invent a second credential system for it: the org IS a gateway principal and the member's key IS
+// an api_key on that principal, so the org's budget, the member's cap, that member's spend and an
+// individual revoke are all the gateway's own machinery (`gateway_admin`). What we keep is
+// attribution — which key belongs to whom — because the console must be able to list an org's keys
+// without reading every key in the gateway, and must know whose key an id is BEFORE asking the
+// gateway to revoke it.
+//
+// Authority is the same `admin_org` gate as users and invites: only the org's admin, checked per
+// request. A key id that belongs to another org answers 404, not 403 — a member of one org must
+// not be able to learn that another org's key exists by probing ids.
+
+/// The admin surface this deployment was booted with, or a refusal saying it has none.
+///
+/// Read from the state, not the environment: it is resolved once at boot, so a handler cannot see
+/// a different answer than the one the server started with, and a test can substitute a stand-in.
+///
+/// `Box`ed refusal: `Response` is large, and a `Result` whose error dwarfs its success value is
+/// paid for on every call that succeeds.
+fn gateway_admin(state: &AuthState) -> Result<crate::gateway_admin::GatewayAdmin, Box<Response>> {
+    state.gateway_admin.clone().ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this deployment has no gateway admin connection (set OG_GATEWAY_ADMIN_URL and \
+                 OG_GATEWAY_ADMIN_TOKEN)",
+            )
+                .into_response(),
+        )
+    })
+}
+
+fn gateway_refusal(error: &crate::gateway_admin::AdminError) -> Response {
+    use crate::gateway_admin::AdminError;
+    match error {
+        // The gateway's own sentence, which names the real problem, reaches the operator.
+        AdminError::Refused(detail) => (
+            StatusCode::BAD_GATEWAY,
+            format!("the gateway refused: {detail}"),
+        )
+            .into_response(),
+        AdminError::Unreachable(detail) => (
+            StatusCode::BAD_GATEWAY,
+            format!("the gateway is unreachable: {detail}"),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /admin/gateway/keys` — the org's keys, newest first, with the member each belongs to.
+async fn list_gateway_keys(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    match state.store.gateway_keys_for_org(org_id.as_str()).await {
+        Ok(rows) => {
+            let keys: Vec<Value> = rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "id": row.key_id,
+                        "memberId": row.member_account_id,
+                        // The prefix is the only part of a key that is safe to show, and it is
+                        // what an operator can match against a gateway log during an incident.
+                        "keyPrefix": row.key_prefix,
+                        "label": row.label,
+                        "revoked": row.revoked,
+                        "createdAtMs": row.created_at_ms,
+                    })
+                })
+                .collect();
+            Json(json!({ "keys": keys })).into_response()
+        }
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not list gateway keys",
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct MintKeyRequest {
+    #[serde(rename = "memberId")]
+    member_id: String,
+    /// A per-member spend cap, as a STRING — money is not a float. Absent means uncapped, bounded
+    /// only by the org's own monthly budget.
+    #[serde(rename = "quotaUsd")]
+    quota_usd: Option<String>,
+}
+
+/// `POST /admin/gateway/keys` — mint one member a key. Shown ONCE, exactly like a bot key.
+async fn mint_gateway_key(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<MintKeyRequest>,
+) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let admin = match gateway_admin(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return *refusal,
+    };
+
+    // The member is looked up WITHIN the org's own roster, so membership is intrinsic rather than a
+    // separate comparison somebody could forget: an id outside this org is simply not found. Minting
+    // for another org's user would attribute a key — and its spend — to the wrong org.
+    let member = match state.store.accounts_by_org(org_id.as_str()).await {
+        Ok(views) => match views
+            .into_iter()
+            .find(|view| view.id.as_str() == request.member_id)
+        {
+            Some(view) => view,
+            None => return (StatusCode::NOT_FOUND, "no such member").into_response(),
+        },
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not read the org").into_response();
+        }
+    };
+
+    // Idempotent, and cheap: binding the org to its principal before every mint means we never
+    // have to remember whether we already did.
+    if let Err(error) = admin.ensure_org_principal(org_id.as_str(), None).await {
+        return gateway_refusal(&error);
+    }
+    let label = member.email.clone();
+    let minted = match admin
+        .mint_member_key(org_id.as_str(), &label, request.quota_usd.as_deref())
+        .await
+    {
+        Ok(minted) => minted,
+        Err(error) => return gateway_refusal(&error),
+    };
+
+    // Attribution is recorded AFTER the gateway minted, so a row never claims a key that does not
+    // exist. If this insert fails the key is real but unattributed — the operator is told, rather
+    // than being handed a key the console will never list.
+    //
+    // MINTING IS NOT IDEMPOTENT, and cannot be while the gateway assigns the id: a reply lost to a
+    // timeout means the admin sees no key and may press again, minting a second real one. That is
+    // survivable in a way the reverse would not be — every key is listed and individually
+    // revocable, so a duplicate is visible and removable, whereas silently reusing one would hand
+    // two people the same credential. An idempotency key on the mint is ROADMAP 17.later.
+    if let Err(error) = state
+        .store
+        .insert_gateway_key(
+            &minted.id,
+            org_id.as_str(),
+            member.id.as_str(),
+            &minted.key_prefix,
+            &label,
+            now_ms(),
+        )
+        .await
+    {
+        tracing::error!(%error, key_id = %minted.id, "minted a gateway key but could not record it");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the key was minted but could not be recorded; revoke it in the gateway and retry",
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "id": minted.id,
+            "memberId": member.id.as_str(),
+            "keyPrefix": minted.key_prefix,
+            "label": label,
+            // Shown exactly once. We never store it; the gateway has only its hash.
+            "key": minted.key,
+        })),
+    )
+        .into_response()
+}
+
+/// `DELETE /admin/gateway/keys/{id}` — revoke in the gateway, then mirror it locally.
+async fn revoke_gateway_key(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(key_id): Path<String>,
+) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    // Ownership first, and a key belonging to another org is simply "no such key".
+    match state
+        .store
+        .gateway_key_in_org(&key_id, org_id.as_str())
+        .await
+    {
+        Ok(Some(_)) => {}
+        _ => return (StatusCode::NOT_FOUND, "no such key").into_response(),
+    }
+    let admin = match gateway_admin(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return *refusal,
+    };
+    // The gateway is the authority on whether the key still authenticates, so it is revoked THERE
+    // first. Mirroring locally afterwards only keeps the listing honest; if the mirror fails the
+    // key is still dead, which is the safe direction to fail in.
+    if let Err(error) = admin.revoke_key(&key_id).await {
+        return gateway_refusal(&error);
+    }
+    // Mirror it, with one retry: the key is already dead either way, but a row still reading
+    // "active" makes the console state something untrue, and that is worth a second attempt.
+    let mut mirrored = state
+        .store
+        .mark_gateway_key_revoked(&key_id, org_id.as_str())
+        .await;
+    if mirrored.is_err() {
+        mirrored = state
+            .store
+            .mark_gateway_key_revoked(&key_id, org_id.as_str())
+            .await;
+    }
+    if let Err(error) = mirrored {
+        // ERROR, not warn: the key is revoked but the console will keep showing it as active until
+        // somebody reconciles. Reconciling the listing against the gateway is ROADMAP 17.later.
+        tracing::error!(%error, %key_id, "revoked in the gateway but could not mirror it locally; the listing will read stale");
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct QuotaRequest {
+    #[serde(rename = "quotaUsd")]
+    quota_usd: Option<String>,
+}
+
+/// `PUT /admin/gateway/keys/{id}/quota` — set or clear one member's spend cap.
+async fn set_gateway_key_quota(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(key_id): Path<String>,
+    Json(request): Json<QuotaRequest>,
+) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    match state
+        .store
+        .gateway_key_in_org(&key_id, org_id.as_str())
+        .await
+    {
+        Ok(Some(_)) => {}
+        _ => return (StatusCode::NOT_FOUND, "no such key").into_response(),
+    }
+    let admin = match gateway_admin(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return *refusal,
+    };
+    match admin
+        .set_key_quota(&key_id, request.quota_usd.as_deref())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => gateway_refusal(&error),
+    }
+}
+
+#[derive(Deserialize)]
+struct BudgetRequest {
+    #[serde(rename = "monthlyBudgetUsd")]
+    monthly_budget_usd: Option<String>,
+}
+
+/// `PUT /admin/gateway/budget` — the org's monthly cap, enforced by the gateway on every request.
+async fn set_gateway_budget(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<BudgetRequest>,
+) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let admin = match gateway_admin(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return *refusal,
+    };
+    // The principal may not exist yet (no keys minted), and setting a budget is a reasonable first
+    // move — so bind it, then set.
+    if let Err(error) = admin
+        .ensure_org_principal(org_id.as_str(), request.monthly_budget_usd.as_deref())
+        .await
+    {
+        return gateway_refusal(&error);
+    }
+    match admin
+        .set_org_budget(org_id.as_str(), request.monthly_budget_usd.as_deref())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => gateway_refusal(&error),
+    }
+}
+
+/// `GET /admin/gateway/usage` — the org's budget and month-to-date spend, read live.
+async fn gateway_usage(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
+    let (org_id, _org) = match admin_org(&state, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let admin = match gateway_admin(&state) {
+        Ok(admin) => admin,
+        Err(refusal) => return *refusal,
+    };
+    match admin.org_usage(org_id.as_str()).await {
+        // No principal yet simply means nobody has been given a key — a zeroed reading, not an error.
+        Ok(None) => Json(json!({
+            "monthlyBudgetUsd": Value::Null,
+            "monthToDateUsd": "0.000000",
+            "requests": 0,
+            "provisioned": false,
+        }))
+        .into_response(),
+        Ok(Some(usage)) => Json(json!({
+            "monthlyBudgetUsd": usage.monthly_budget_usd,
+            "monthToDateUsd": usage.month_to_date_usd,
+            "requests": usage.requests,
+            "provisioned": true,
+        }))
+        .into_response(),
+        Err(error) => gateway_refusal(&error),
+    }
 }

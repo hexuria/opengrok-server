@@ -372,6 +372,31 @@ pub struct BotKeyView {
     pub created_at_ms: i64,
 }
 
+/// One org member's open-ai-gateway key, as WE record it. The secret is not here and never was:
+/// the gateway keeps its hash, and the plaintext existed only in the reply that minted it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayKeyView {
+    pub key_id: String,
+    pub org_id: String,
+    pub member_account_id: String,
+    pub key_prefix: String,
+    pub label: String,
+    pub revoked: bool,
+    pub created_at_ms: i64,
+}
+
+fn gateway_key_row(row: sqlx::postgres::PgRow) -> StoreResult<GatewayKeyView> {
+    Ok(GatewayKeyView {
+        key_id: row.try_get("key_id")?,
+        org_id: row.try_get("org_id")?,
+        member_account_id: row.try_get("member_account_id")?,
+        key_prefix: row.try_get("key_prefix")?,
+        label: row.try_get("label")?,
+        revoked: row.try_get("revoked")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+    })
+}
+
 impl PgStore {
     pub async fn insert_bot_key(
         &self,
@@ -428,6 +453,76 @@ impl PgStore {
                 })
             })
             .collect()
+    }
+
+    /// Record which gateway key belongs to which org member. The secret is NOT stored — the
+    /// gateway holds its hash and the plaintext was shown once.
+    pub async fn insert_gateway_key(
+        &self,
+        key_id: &str,
+        org_id: &str,
+        member_account_id: &str,
+        key_prefix: &str,
+        label: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into gateway_key_view
+                (key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms)
+             values ($1, $2, $3, $4, $5, false, $6)",
+        )
+        .bind(key_id)
+        .bind(org_id)
+        .bind(member_account_id)
+        .bind(key_prefix)
+        .bind(label)
+        .bind(at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// One org's keys, newest first. Scoped by org so a listing can never show another org's.
+    pub async fn gateway_keys_for_org(&self, org_id: &str) -> StoreResult<Vec<GatewayKeyView>> {
+        let rows = sqlx::query(
+            "select key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms
+             from gateway_key_view where org_id = $1 order by created_at_ms desc",
+        )
+        .bind(org_id)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(gateway_key_row).collect()
+    }
+
+    /// A key, only if THIS org owns it. Answering `None` for somebody else's key is what lets the
+    /// caller 404 rather than confirm another org's key exists.
+    pub async fn gateway_key_in_org(
+        &self,
+        key_id: &str,
+        org_id: &str,
+    ) -> StoreResult<Option<GatewayKeyView>> {
+        let row = sqlx::query(
+            "select key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms
+             from gateway_key_view where key_id = $1 and org_id = $2",
+        )
+        .bind(key_id)
+        .bind(org_id)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(gateway_key_row).transpose()
+    }
+
+    /// Mirror the gateway's revocation locally. The gateway is the authority on whether the key
+    /// still authenticates; this keeps the console's listing honest.
+    pub async fn mark_gateway_key_revoked(&self, key_id: &str, org_id: &str) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "update gateway_key_view set revoked = true where key_id = $1 and org_id = $2",
+        )
+        .bind(key_id)
+        .bind(org_id)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() == 1)
     }
 
     /// Revoke, if the caller owns it. Answers whether anything changed — the 404-vs-204 fact.

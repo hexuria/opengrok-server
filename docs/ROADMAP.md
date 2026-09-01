@@ -252,6 +252,45 @@ the proof, not construction.
   card); OAuth 2.1 metadata on /mcp; the org-key mint console surface (slice 17 of the
   three-doors order).
 
+## Slice 17 — one identity across both doors
+
+"Same org, different front doors" made literal: an org admin, from the console, hands a member a
+key that opens the model door, sets the org's budget and that member's cap, and sees the spend.
+
+- [x] **17.1** open-ai-gateway gains the identity-integration admin surface (its own repo, PR
+  `ac3effc`): `POST /admin/api/principals`, `POST /admin/api/keys` (plaintext once),
+  `PATCH …/budget`, `PATCH …/quota`, `GET …/usage` — behind the existing admin auth. A key minted
+  over HTTP is **never** `admin`, so the surface cannot widen its own authority; money crosses the
+  wire as a string, never a float. Store round-trips + the router's hardcoded admin-route table.
+- [x] **17.2** The mapping, so the gateway's own machinery does the work: org ↔ **principal**
+  (its `monthly_budget_usd` is the org budget, its usage is the org rollup), member key ↔
+  **api_key** on it (`quota_usd` is the member's cap, revoke is per-member). The principal's
+  address is derived from the org id, so nothing gateway-side is stored here. (`2e30be7`)
+- [x] **17.3** `/admin/gateway/*` behind the existing `admin_org` gate + the console's "Gateway
+  access" card: mint (revealed once), list, revoke, per-member cap, org budget, live spend. The
+  admin connection is a field on `AuthState` resolved at boot — a seam, not a per-request env
+  read. (`c9ac064`)
+- [x] **17.t** `tests/against_the_gateway_keys.rs` (real router, stand-in gateway) +
+  `scripts/slice21-org-keys-smoke.sh` in the gate: a member is refused 403 and never reaches the
+  gateway, another org's key is 404 not 403, a listing never carries a secret. *(this commit)*
+- [x] **17.v** Live, against the real gateway: budget set → key minted from the console → Claude
+  Code answered on that key → $0.097560 rolled up under the org's principal → revoke → 401.
+  Evidence: `docs/verification/one-identity/README.md`. *(this commit)*
+- [x] **17.r** Peer review closed a real lockout in the gateway half: `upsert_principal`'s
+  `ON CONFLICT` rewrote `role`, and that path only ever asks for `member` — so binding an org
+  whose email collided with an existing admin's SILENTLY DEMOTED that operator (the admin gate
+  wants an admin key *and* an admin principal). Role is now untouched on conflict, with a
+  regression test; amounts too large for `numeric(14,6)` are a 400 rather than a swallowed 500;
+  and the module doc no longer implies more than the code enforces — `require_admin_layer` is
+  all-or-nothing, so the key handed to a partner service is a FULL gateway admin credential.
+  Ours: the mint's non-idempotence and the revoke mirror are documented where they bite.
+  *(this commit)*
+- [ ] **17.later** Per-member model pins (slice 18), SSO/SCIM mapping onto the gateway's
+  `oidc_subject` hook, self-service key rotation, an idempotency key on the mint, reconciling
+  the console's key listing against the gateway (a failed revoke mirror leaves it reading
+  stale), and per-key admin scopes in the gateway so a partner service's credential is not a
+  full operator credential.
+
 ## Slice 11+ — breadth (P5 → P10, in order)
 
 Per-tier, verified against the running client. Most of it adapts work that exists:
@@ -298,7 +337,9 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 ## Blocked on the operator, not on code
 
-- [ ] GitHub Actions CI — billing. `scripts/gate.sh --smoke` is the gate meanwhile.
-- [ ] Rights review → publication (LEGAL.md; the repo stays private until then).
+- [x] GitHub Actions CI — resolved 1 Sep 2026 by the repo going public: the workflow now runs
+  `scripts/gate.sh --smoke` itself, green. *(this commit)*
+- [ ] **Rights review — now OVERDUE rather than blocking**: the operator published the repo on
+  1 Sep 2026 with the review still outstanding (`LEGAL.md` status note).
 - [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway.
