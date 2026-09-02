@@ -531,9 +531,11 @@ Listing them as pending would make this tracker lie about how far away done is.
   from `@mentions` since the last user message, order rotating by round, each member's turn on
   its own model, key, tools and policy with the room's prompts word for word, speaking only
   through the room's `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per
-  prompt, `activeRemoteMemberId` on the row while a member speaks. Not yet: a card raised
-  inside a member's turn (the member says nothing; the room shows no card).
-  `tests/against_groups.rs`.
+  prompt, `activeRemoteMemberId` on the row while a member speaks. `tests/against_groups.rs`.
+  A card raised inside a member's turn is the MEMBER's card in the ROOM's transcript, under its
+  name; the room pauses where the round stood (`room_pause`), and the answer — given naming the
+  group, as the desktop does — resumes that member inside the room and then the members still
+  to speak. `tests/against_group_card.rs`.
 - [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).

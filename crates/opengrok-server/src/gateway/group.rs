@@ -9,16 +9,23 @@
 //! is silence; the rounds stop when one produces nothing, or at the caps. Every constant here is
 //! the client's, not ours.
 //!
-//! What is deliberately NOT here yet: a card raised inside a member's turn (a tool that needs a
-//! human yes) ends that member's turn with nothing said — the suspended run is left as it is,
-//! and the room does not yet show the card. Said in `plan-rooms.md` §2.
+//! A card raised inside a member's turn — a tool that needs a person's yes — is the MEMBER's card
+//! in the ROOM's transcript, under the member's name; the room pauses where its round stood
+//! (`room_pause`), and the answer on the card resumes that member inside the room and then the
+//! members still to speak. The verbs that answer cards accept the group as the agent
+//! (`conversation.rs::run_belongs_to`).
 
 use std::sync::{Arc, Mutex};
 
 use opengrok_core::coworker::Coworker;
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
-use opengrok_harness::{ChatMessage, ModelRequest, ToolRunner, run_conversation};
+use opengrok_core::run::PendingApproval;
+use opengrok_harness::{
+    ChatMessage, ModelRequest, ResumeOutcome, Resumption, RunContext, ToolRunner,
+    resume_conversation, run_conversation,
+};
 use opengrok_tools::{ToolCall, ToolResult};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::GatewayState;
@@ -466,19 +473,26 @@ struct Room<'a> {
     description: &'a str,
 }
 
-/// One member's turn: a normal harness turn on the member's own model, key, tools and policy,
-/// with the room's prompts and the `SendMessage` tool added. What it sent, in order.
-async fn run_member_turn(
+/// What a member's turn came to: what it sent, in order — or the card it raised, with the run
+/// now waiting on a person.
+enum MemberOutcome {
+    Spoke(Vec<String>),
+    Suspended {
+        run_id: RunId,
+        suspension: super::conversation::Suspension,
+    },
+}
+
+/// The member's tools: its own runner — its policy, its computer, its gate — with the room's
+/// `SendMessage` added, delivering into the returned list. `gate_yes`/`review_yes` carry an
+/// answered call id on a resume, exactly as a coworker's own resume does.
+async fn member_runner(
     state: &GatewayState,
     account_id: &AccountId,
-    room: &Room<'_>,
     member: &Member,
-    peers: &[Member],
-    history: &[GroupMessage],
-) -> Vec<String> {
-    let group_id = room.id;
-    let group_name = room.name;
-    let group_description = room.description;
+    gate_yes: &[String],
+    review_yes: &[String],
+) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
     let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = sent.clone();
     let deliver: opengrok_harness::LocalTool = Arc::new(move |call: &ToolCall| {
@@ -504,26 +518,51 @@ async fn run_member_turn(
         &state.agui,
         account_id,
         &member.id,
-        &[],
-        &[],
+        gate_yes,
+        review_yes,
         crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await
     .unwrap_or_else(ToolRunner::local_only)
     .with_local(send_message_schema(), deliver);
+    (runner, sent)
+}
 
+/// What the room hears of a member's turn: its messages minus passes, capped.
+fn spoken(sent: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    sent.lock()
+        .map(|sent| sent.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|content| !is_pass(content))
+        .take(GROUP_MAX_MESSAGES_PER_TURN)
+        .collect()
+}
+
+/// One member's turn: a normal harness turn on the member's own model, key, tools and policy,
+/// with the room's prompts and the `SendMessage` tool added.
+async fn run_member_turn(
+    state: &GatewayState,
+    account_id: &AccountId,
+    room: &Room<'_>,
+    member: &Member,
+    peers: &[Member],
+    history: &[GroupMessage],
+) -> MemberOutcome {
+    let group_id = room.id;
+    let (runner, sent) = member_runner(state, account_id, member, &[], &[]).await;
     let new_messages = messages_since_last_spoke(history, &member.id);
     let request = ModelRequest {
         model: member.model.clone(),
         system: Some(member_system_prompt(
             member,
-            group_name,
-            group_description,
+            room.name,
+            room.description,
             peers,
         )),
         messages: vec![ChatMessage {
             role: "user".to_string(),
-            content: turn_prompt(member, group_name, peers, new_messages),
+            content: turn_prompt(member, room.name, peers, new_messages),
         }],
         tools: Vec::new(),
         gateway_key: crate::spend::key_for(&state.agui, &member.id).await,
@@ -554,15 +593,174 @@ async fn run_member_turn(
     {
         tracing::warn!(member = %member.id.as_str(), group = %group_id.as_str(), "group: a member's turn failed; it said nothing");
     }
-    let spoken: Vec<String> = sent
-        .lock()
-        .map(|sent| sent.clone())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|content| !is_pass(content))
-        .take(GROUP_MAX_MESSAGES_PER_TURN)
+    if let Some(suspension) = super::conversation::find_suspension(&events) {
+        return MemberOutcome::Suspended { run_id, suspension };
+    }
+    MemberOutcome::Spoke(spoken(&sent))
+}
+
+/// Where a round stood when a member's run suspended: persisted with the pause so the answer
+/// continues the round, not the prompt from the top. `remaining` is the members still to speak
+/// in this round, in order, after the paused one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundCursor {
+    pub round: usize,
+    pub total: usize,
+    pub this_round: usize,
+    pub remaining: Vec<String>,
+}
+
+/// The card a member raised, into the ROOM's transcript under the member's name, and the round's
+/// position with it. `true` when the room is now paused on a card; `false` when this kind of
+/// pause has no card yet — the member's turn then ends with nothing said, as it always did.
+async fn pause_room(
+    state: &GatewayState,
+    room: &Room<'_>,
+    member: &Member,
+    run_id: &RunId,
+    suspension: &super::conversation::Suspension,
+    cursor: &RoundCursor,
+) -> bool {
+    let Some(mut card) = super::conversation::card_for(suspension) else {
+        tracing::warn!(
+            member = %member.id.as_str(),
+            group = %room.id.as_str(),
+            tool = %suspension.tool,
+            reason = suspension.reason.as_str(),
+            "group: a member's run suspended for a reason that has no card yet; its turn ends with nothing said"
+        );
+        return false;
+    };
+    card["author"] = json!({ "id": member.id.as_str(), "name": member.name });
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_gateway_entry(room.id, &card, now_ms())
+        .await
+    {
+        tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
+    }
+    live::emit_transcript(state, room.id.as_str(), "appended", card);
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .save_room_pause(room.id, run_id, &member.id, &json!(cursor), now_ms())
+        .await
+    {
+        // The card is out and the run waits either way; without the cursor the answer resumes
+        // the member and stops there instead of finishing the round.
+        tracing::error!(%error, group = %room.id.as_str(), "group: the round's position could not be saved");
+    }
+    tracing::info!(
+        member = %member.id.as_str(),
+        group = %room.id.as_str(),
+        run = %run_id.as_str(),
+        round = cursor.round,
+        "group: paused on a member's card"
+    );
+    true
+}
+
+/// The rounds from a cursor — the client's loop, made resumable. Ends at the caps, on a round in
+/// which nobody spoke, or on a card (the room is then paused; `resume_member_turn` continues).
+async fn run_rounds(
+    state: &GatewayState,
+    account_id: &AccountId,
+    room: &Room<'_>,
+    members: &[Member],
+    history: &mut Vec<GroupMessage>,
+    cursor: RoundCursor,
+) {
+    let agent_id = room.id.as_str().to_string();
+    let mut round = cursor.round;
+    let mut total = cursor.total;
+    let mut this_round = cursor.this_round;
+    let mut speakers: Vec<Member> = cursor
+        .remaining
+        .iter()
+        .filter_map(|id| members.iter().find(|m| m.id.as_str() == id).cloned())
         .collect();
-    spoken
+    loop {
+        while !speakers.is_empty() {
+            let member = speakers.remove(0);
+            if total >= GROUP_MAX_MEMBER_TURNS {
+                return;
+            }
+            let peers: Vec<Member> = members
+                .iter()
+                .filter(|m| m.id != member.id)
+                .cloned()
+                .collect();
+            live::set_running(
+                state,
+                &agent_id,
+                true,
+                json!({ "activeRemoteMemberId": member.id.as_str() }),
+            )
+            .await;
+            match run_member_turn(state, account_id, room, &member, &peers, history).await {
+                MemberOutcome::Spoke(sent) => {
+                    for content in sent {
+                        post_member_message(state, room.id, &member, &content).await;
+                        history.push(GroupMessage {
+                            speaker: Speaker::Member {
+                                id: member.id.as_str().to_string(),
+                                name: member.name.clone(),
+                            },
+                            content,
+                        });
+                        total += 1;
+                        this_round += 1;
+                        if total >= GROUP_MAX_MEMBER_TURNS {
+                            return;
+                        }
+                    }
+                }
+                MemberOutcome::Suspended { run_id, suspension } => {
+                    let at = RoundCursor {
+                        round,
+                        total,
+                        this_round,
+                        remaining: speakers.iter().map(|m| m.id.as_str().to_string()).collect(),
+                    };
+                    if pause_room(state, room, &member, &run_id, &suspension, &at).await {
+                        return;
+                    }
+                }
+            }
+        }
+        if this_round == 0 {
+            return;
+        }
+        round += 1;
+        if round >= GROUP_MAX_ROUNDS {
+            return;
+        }
+        this_round = 0;
+        let responders = resolve_responders(members, history);
+        speakers = order_round_speakers(&responders, round);
+    }
+}
+
+/// The room's description, from the group's seam-B profile.
+async fn room_description(state: &GatewayState, group_id: &CoworkerId) -> String {
+    state
+        .agui
+        .auth
+        .store
+        .seamb_profile(group_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|profile| {
+            profile
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 /// The room's turn, off the request's clock: `GroupChatOrchestrator.run`, transcribed.
@@ -577,21 +775,7 @@ pub async fn run_group_turn(
         state: state.clone(),
         agent_id: agent_id.clone(),
     };
-    let description = state
-        .agui
-        .auth
-        .store
-        .seamb_profile(&group_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|profile| {
-            profile
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
+    let description = room_description(&state, &group_id).await;
     let members = resolve_members(&state, &group).await;
     if members.is_empty() {
         return;
@@ -604,57 +788,183 @@ pub async fn run_group_turn(
         .await
         .map(|entries| history_of(&entries))
         .unwrap_or_default();
-    let mut total = 0usize;
-    for round in 0..GROUP_MAX_ROUNDS {
-        let responders = resolve_responders(&members, &history);
-        let mut this_round = 0usize;
-        for member in order_round_speakers(&responders, round) {
-            if total >= GROUP_MAX_MEMBER_TURNS {
-                return;
-            }
-            let peers: Vec<Member> = members
-                .iter()
-                .filter(|m| m.id != member.id)
-                .cloned()
-                .collect();
-            live::set_running(
-                &state,
-                &agent_id,
-                true,
-                json!({ "activeRemoteMemberId": member.id.as_str() }),
-            )
-            .await;
-            let room = Room {
-                id: &group_id,
-                name: &group.name,
-                description: &description,
-            };
-            let sent = run_member_turn(&state, &account_id, &room, &member, &peers, &history).await;
-            let mut hit_cap = false;
-            for content in sent {
-                post_member_message(&state, &group_id, &member, &content).await;
-                history.push(GroupMessage {
-                    speaker: Speaker::Member {
-                        id: member.id.as_str().to_string(),
-                        name: member.name.clone(),
-                    },
-                    content,
-                });
-                total += 1;
-                this_round += 1;
-                if total >= GROUP_MAX_MEMBER_TURNS {
-                    hit_cap = true;
-                    break;
-                }
-            }
-            if hit_cap {
-                return;
-            }
-        }
-        if this_round == 0 {
-            return;
-        }
+    // A new prompt abandons the pause an earlier one may be holding: that card can still be
+    // answered — the member then speaks — but its round is not continued.
+    if let Err(error) = state.agui.auth.store.clear_room_pause(&group_id).await {
+        tracing::warn!(%error, group = %agent_id, "group: an earlier pause could not be cleared");
     }
+    let room = Room {
+        id: &group_id,
+        name: &group.name,
+        description: &description,
+    };
+    let first: Vec<String> = order_round_speakers(&resolve_responders(&members, &history), 0)
+        .iter()
+        .map(|m| m.id.as_str().to_string())
+        .collect();
+    run_rounds(
+        &state,
+        &account_id,
+        &room,
+        &members,
+        &mut history,
+        RoundCursor {
+            round: 0,
+            total: 0,
+            this_round: 0,
+            remaining: first,
+        },
+    )
+    .await;
+}
+
+/// The answer on a member's card: resume THAT member's run inside the room — its words go to the
+/// room under its name — then finish the round where it stood. Spawned by the verbs that answer
+/// cards when the run's thread is a room's.
+pub async fn resume_member_turn(
+    state: GatewayState,
+    account_id: AccountId,
+    run_id: RunId,
+    group_id: CoworkerId,
+    pending: PendingApproval,
+    resumed_seq: u32,
+    outcome: ResumeOutcome,
+) {
+    let agent_id = group_id.as_str().to_string();
+    let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        return;
+    };
+    let Some(member_id) = run.coworker_id.clone() else {
+        return;
+    };
+    let Ok((group, _)) = state.agui.auth.store.load_coworker(&group_id).await else {
+        return;
+    };
+    let pause = state
+        .agui
+        .auth
+        .store
+        .take_room_pause_for_run(&run_id)
+        .await
+        .ok()
+        .flatten();
+    let _guard = RoomGuard {
+        state: state.clone(),
+        agent_id: agent_id.clone(),
+    };
+    let description = room_description(&state, &group_id).await;
+    let members = resolve_members(&state, &group).await;
+    let Some(member) = members.iter().find(|m| m.id == member_id).cloned() else {
+        tracing::warn!(member = %member_id.as_str(), group = %agent_id, "group: the member whose card was answered is no longer in the room");
+        return;
+    };
+    let peers: Vec<Member> = members
+        .iter()
+        .filter(|m| m.id != member.id)
+        .cloned()
+        .collect();
+    let room = Room {
+        id: &group_id,
+        name: &group.name,
+        description: &description,
+    };
+    let mut history = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(&group_id)
+        .await
+        .map(|entries| history_of(&entries))
+        .unwrap_or_default();
+    live::set_running(
+        &state,
+        &agent_id,
+        true,
+        json!({ "activeRemoteMemberId": member.id.as_str() }),
+    )
+    .await;
+
+    // The answered call rides the runner as a GATE yes (the machine owner's or the policy's
+    // card) or a REVIEW yes, by the suspension's reason — as a coworker's own resume does.
+    let (gate_yes, review_yes): (&[String], &[String]) = match pending.reason {
+        opengrok_core::run::SuspendReason::AutoReview => {
+            (&[], std::slice::from_ref(&pending.call_id))
+        }
+        _ => (std::slice::from_ref(&pending.call_id), &[]),
+    };
+    let (runner, sent) = member_runner(&state, &account_id, &member, gate_yes, review_yes).await;
+    let journal = StoreJournal {
+        state: state.agui.clone(),
+        thread_id: run.thread_id.clone(),
+        account_id: Some(account_id.clone()),
+        coworker_id: Some(member.id.clone()),
+        model: run.model.clone(),
+    };
+    // The room's system prompt again: the journal holds the conversation, not the instructions,
+    // and a member resumed without them would not know it is in a room.
+    let request = ModelRequest {
+        model: run.pin_for_resume(&member.model),
+        system: Some(member_system_prompt(
+            &member,
+            &group.name,
+            &description,
+            &peers,
+        )),
+        messages: crate::agui::routes::conversation_from(&run),
+        tools: Vec::new(),
+        gateway_key: crate::spend::key_for(&state.agui, &member.id).await,
+        spend_scope: Some(member.id.as_str().to_string()),
+    };
+    let events = resume_conversation(
+        state.agui.door.as_ref(),
+        &runner,
+        &journal,
+        request,
+        RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
+        Resumption {
+            approved: ToolCall {
+                id: pending.call_id,
+                name: pending.tool,
+                arguments: pending.arguments,
+            },
+            message_seq: resumed_seq,
+            outcome,
+        },
+    )
+    .await;
+
+    // Without a saved position (a newer prompt took the room, or the row was lost) the member's
+    // words still land, and the round is not continued.
+    let mut cursor = pause
+        .and_then(|pause| serde_json::from_value::<RoundCursor>(pause.cursor).ok())
+        .unwrap_or(RoundCursor {
+            round: GROUP_MAX_ROUNDS,
+            total: 0,
+            this_round: 0,
+            remaining: Vec::new(),
+        });
+    for content in spoken(&sent) {
+        post_member_message(&state, &group_id, &member, &content).await;
+        history.push(GroupMessage {
+            speaker: Speaker::Member {
+                id: member.id.as_str().to_string(),
+                name: member.name.clone(),
+            },
+            content,
+        });
+        cursor.total += 1;
+        cursor.this_round += 1;
+    }
+    // A resumed member may raise another card; it gets one exactly like the first.
+    if let Some(suspension) = super::conversation::find_suspension(&events)
+        && pause_room(&state, &room, &member, &run_id, &suspension, &cursor).await
+    {
+        return;
+    }
+    if cursor.total >= GROUP_MAX_MEMBER_TURNS || cursor.round >= GROUP_MAX_ROUNDS {
+        return;
+    }
+    run_rounds(&state, &account_id, &room, &members, &mut history, cursor).await;
 }
 
 /// Clears the group's running state on every way out, including a stopAgentTurn abort, and

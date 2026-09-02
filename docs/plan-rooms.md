@@ -64,9 +64,11 @@ one and the first is invented. Fix in the first slice below.
 
 ## 2. Groups on the server
 
-*Built 2 Sep 2026 (`gateway/group.rs`, `tests/against_groups.rs`) as written below, with one
-gap kept honest: a card raised inside a member's turn ends that member's turn with nothing said,
-and the room does not yet show the card.*
+*Built 2 Sep 2026 (`gateway/group.rs`, `tests/against_groups.rs`) as written below. The card
+raised inside a member's turn followed the same day (`tests/against_group_card.rs`): it is the
+member's card in the room's transcript, under its name; the room pauses where the round stood
+(`room_pause`); the answer, given naming the group as the desktop does, resumes that member
+inside the room and then the members still to speak.*
 
 ### 2.1 What a group is
 

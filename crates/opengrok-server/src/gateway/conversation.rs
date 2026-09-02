@@ -801,16 +801,16 @@ pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> 
 
 /// The suspension a run's events carry, if any: which call is waiting, with what, and WHY. The
 /// reason picks the card — the tool name no longer can, since two cards can come from one tool.
-struct Suspension {
-    call_id: String,
-    tool: String,
-    arguments: Value,
-    reason: opengrok_core::run::SuspendReason,
+pub(crate) struct Suspension {
+    pub(crate) call_id: String,
+    pub(crate) tool: String,
+    pub(crate) arguments: Value,
+    pub(crate) reason: opengrok_core::run::SuspendReason,
     /// The gate's sentence, when it gave one — a policy grant's reason.
-    why: Option<String>,
+    pub(crate) why: Option<String>,
 }
 
-fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
+pub(crate) fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
     for event in events {
         if event.event_type == opengrok_wire::agui::EventType::Custom
             && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
@@ -855,7 +855,7 @@ fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> 
 /// The card for a suspension, or `None` when this kind of pause has no card yet. requestId =
 /// callId for both cards, threaded back onto the run when the card is answered so every gate
 /// converges on one id.
-fn card_for(suspension: &Suspension) -> Option<Value> {
+pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
     use opengrok_core::run::SuspendReason;
     match suspension.reason {
         // The machine owner's consent: the four-button `local-tool-permission` card, byte-identical
@@ -1307,7 +1307,7 @@ pub async fn resolve_local_tool_permission(
     let mut found = None;
     for run_id in run_ids {
         if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
-            && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
+            && run_belongs_to(&run, &coworker_id)
             && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
             // The wrong verb must not settle the other card: this one answers the machine
             // owner's consent, never an auto-review ask and never a policy ask (both ride the
@@ -1447,7 +1447,7 @@ pub async fn resolve_local_tool_permission(
         "never" => "never",
         _ => "denied",
     };
-    let card = json!({
+    let mut card = json!({
         "kind": "send-message",
         "id": entry_id,
         "timestampMs": now_ms(),
@@ -1461,6 +1461,17 @@ pub async fn resolve_local_tool_permission(
             },
         },
     });
+    // A member's card in a room keeps its author through the flip.
+    if let Ok(Some((_, existing))) = state
+        .agui
+        .auth
+        .store
+        .find_gateway_entry(&coworker_id, &entry_id)
+        .await
+        && let Some(author) = existing.get("author")
+    {
+        card["author"] = author.clone();
+    }
     let _ = state
         .agui
         .auth
@@ -1482,7 +1493,8 @@ pub async fn resolve_local_tool_permission(
             )
         };
         let state = state.clone();
-        tokio::spawn(resume_gateway_run(
+        tokio::spawn(resume_where_it_lives(
+            in_a_room(&run, &coworker_id),
             state,
             account_id,
             run_id,
@@ -1555,7 +1567,7 @@ pub async fn resolve_auto_review_approval(
     let mut found = None;
     for run_id in run_ids {
         if let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await
-            && run.coworker_id.as_ref().map(|c| c.as_str()) == Some(coworker_id.as_str())
+            && run_belongs_to(&run, &coworker_id)
             && run.pending.as_ref().map(|p| p.call_id.as_str()) == Some(request_id.as_str())
             && matches!(
                 run.pending.as_ref().map(|p| p.reason),
@@ -1717,7 +1729,8 @@ pub async fn resolve_auto_review_approval(
             )
         };
         let state = state.clone();
-        tokio::spawn(resume_gateway_run(
+        tokio::spawn(resume_where_it_lives(
+            in_a_room(&run, &coworker_id),
             state,
             account_id,
             run_id,
@@ -1730,6 +1743,63 @@ pub async fn resolve_auto_review_approval(
     }
 
     (200, json!({ "ok": true }))
+}
+
+/// Whether a run is this agent's to answer: its own, or a member's run inside this ROOM. A
+/// member's turn in a group runs on the room's thread (`gateway-{group}`) under the member's own
+/// id, and its card sits in the room's transcript, so the desktop answers it naming the group.
+fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+    run.coworker_id
+        .as_ref()
+        .is_some_and(|owner| owner.as_str() == agent.as_str())
+        || run.thread_id == format!("gateway-{}", agent.as_str())
+}
+
+/// A run answered under an agent that is not its owner is a member's run inside that room.
+fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+    run.coworker_id
+        .as_ref()
+        .is_some_and(|owner| owner.as_str() != agent.as_str())
+}
+
+/// A resumed run continues where it lives: a coworker's own turn lands in its transcript; a
+/// member's turn goes back to the room, which then finishes its round (`group.rs`).
+#[allow(clippy::too_many_arguments)]
+async fn resume_where_it_lives(
+    in_a_room: bool,
+    state: GatewayState,
+    account_id: opengrok_core::id::AccountId,
+    run_id: RunId,
+    coworker_id: CoworkerId,
+    agent_id: String,
+    pending: opengrok_core::run::PendingApproval,
+    resumed_seq: u32,
+    outcome: opengrok_harness::ResumeOutcome,
+) {
+    if in_a_room {
+        super::group::resume_member_turn(
+            state,
+            account_id,
+            run_id,
+            coworker_id,
+            pending,
+            resumed_seq,
+            outcome,
+        )
+        .await;
+    } else {
+        resume_gateway_run(
+            state,
+            account_id,
+            run_id,
+            coworker_id,
+            agent_id,
+            pending,
+            resumed_seq,
+            outcome,
+        )
+        .await;
+    }
 }
 
 /// Resume an approved gateway run: re-run the conversation with the approved tool call (which makes
