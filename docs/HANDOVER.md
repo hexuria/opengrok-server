@@ -78,7 +78,8 @@ decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinat
    a separate deployment pin. Per-coworker spend limits are **three windows** — rolling 5 hours, rolling 7 days, calendar
    month, "like other LLM subscriptions" — refusing the turn at a limit; decided 2 Sep 2026,
    design in [`plan-spend-policy.md`](plan-spend-policy.md). Templates (coworker types with the
-   limits baked in) and org-wide per-model budgets follow it.
+   limits baked in) landed with it; org-wide per-model budgets and "apply a template edit to its
+   coworkers" follow.
 4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
    (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
    MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are

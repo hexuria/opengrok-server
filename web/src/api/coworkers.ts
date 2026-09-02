@@ -17,12 +17,30 @@ export function listCoworkers(): Promise<Coworker[]> {
   return getJson<Coworker[]>("/coworkers");
 }
 
-export function hireCoworker(name: string, model?: string): Promise<Coworker> {
+export function hireCoworker(name: string, model?: string, templateId?: string): Promise<Coworker> {
   return postJson<Coworker>("/coworkers", {
     name,
-    // Absent means "the deployment's default" — the server decides what that is.
+    // Absent means "the deployment's default" — the server decides what that is. With a
+    // template, absent means the template's pin.
     model: model && model.trim() ? model.trim() : undefined,
+    templateId: templateId && templateId.trim() ? templateId.trim() : undefined,
   });
+}
+
+/** A coworker type the org admin wrote; hiring from it copies what it says onto the coworker. */
+export interface CoworkerTemplate {
+  id: string;
+  name: string;
+  description: string;
+  model: string | null;
+  tools: string[];
+  needsApproval: string[];
+  limits: { fiveHourUsd?: string | null; sevenDayUsd?: string | null; monthUsd?: string | null };
+  updatedAtMs: number;
+}
+
+export function listTemplates(): Promise<{ templates: CoworkerTemplate[] }> {
+  return getJson<{ templates: CoworkerTemplate[] }>("/templates");
 }
 
 export async function repinCoworker(id: string, model: string): Promise<Coworker> {

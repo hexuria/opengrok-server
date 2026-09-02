@@ -28,6 +28,7 @@ pub mod migrations;
 pub mod postgres;
 pub mod replica;
 pub mod spend;
+pub mod templates;
 pub mod vault;
 
 pub use autonomy::{DueSchedule, LogEvent};
@@ -38,6 +39,7 @@ pub use gateway::{
 pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
+pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
 
 #[derive(Debug, thiserror::Error)]

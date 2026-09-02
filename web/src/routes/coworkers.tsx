@@ -5,6 +5,7 @@ import {
   getSpend,
   hireCoworker,
   listCoworkers,
+  listTemplates,
   listMcpCalls,
   listModels,
   probeModel,
@@ -245,16 +246,19 @@ export function CoworkersPage() {
   const queryClient = useQueryClient();
   const coworkers = useQuery({ queryKey: ["coworkers"], queryFn: listCoworkers, retry: false });
   const catalogue = useQuery({ queryKey: ["models"], queryFn: listModels, retry: false });
+  const templates = useQuery({ queryKey: ["templates"], queryFn: listTemplates, retry: false });
   const [name, setName] = useState("");
   const [model, setModel] = useState("");
+  const [templateId, setTemplateId] = useState("");
 
   const ids = catalogue.data?.models.map((model) => model.id) ?? [];
 
   const hire = useMutation({
-    mutationFn: () => hireCoworker(name, model),
+    mutationFn: () => hireCoworker(name, model, templateId),
     onSuccess: () => {
       setName("");
       setModel("");
+      setTemplateId("");
       queryClient.invalidateQueries({ queryKey: ["coworkers"] });
     },
   });
@@ -278,6 +282,21 @@ export function CoworkersPage() {
                 aria-label="Name"
               />
               <ModelField value={model} onChange={setModel} models={ids} label="Route" />
+              {templates.data && templates.data.templates.length > 0 ? (
+                <select
+                  value={templateId}
+                  onChange={(e) => setTemplateId(e.target.value)}
+                  aria-label="Template"
+                >
+                  <option value="">No template</option>
+                  {templates.data.templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                      {t.model ? ` · ${t.model}` : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <button onClick={() => hire.mutate()} disabled={!name.trim() || hire.isPending}>
                 Hire
               </button>

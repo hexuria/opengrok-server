@@ -23,6 +23,7 @@ pub mod recovery;
 pub mod seamb;
 pub mod seamb_send;
 pub mod spend;
+pub mod templates;
 
 pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};

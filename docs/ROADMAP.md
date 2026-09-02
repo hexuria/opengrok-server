@@ -491,6 +491,17 @@ REST ignored a requested model and stored the deployment default. Investigation:
   live noVNC desktop. Snapshots, environments, webhooks, ASCII's in-box prompt agent, secrets,
   repos, artifacts, events, and `/me` stay out until a coworker path needs them.
   *(this commit)*
+- [x] **18.templates** Coworker templates: a type the org admin writes once — route, tool
+  ceiling, what needs a human yes, the three spend limits, a description — that members pick
+  when they hire (`templates.rs`; `POST /coworkers {templateId}`, and the desktop's own
+  `createAgent {templateId?}` passes through to the same copy). Applied by COPY at hire: the
+  template's ceiling and approval set become the coworker's grant, its limits the coworker's
+  own `spend_limit` row, its description the profile; `coworker_template_use` remembers which.
+  Editing or deleting a template changes no running coworker (a linked template would let one
+  edit silently change fifty). A template names only tools this server implements and asks
+  approval only inside its own ceiling, refused at the door it came in through. Admin
+  dashboard "Coworker templates" card; a template picker on the hire form.
+  `tests/against_templates.rs`.
 
 **P11 is deliberately not here.** Sharing/rooms, teach recording, channels, memories and the
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.

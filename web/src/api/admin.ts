@@ -237,3 +237,42 @@ export function setMemberSpendLimit(accountId: string, limit: SpendLimit): Promi
 export function setCoworkerSpendLimit(coworkerId: string, limit: SpendLimit): Promise<void> {
   return putLimit(`/admin/spend/coworkers/${encodeURIComponent(coworkerId)}`, limit);
 }
+
+// ---- Coworker templates: types the admin writes, members hire from ----
+
+export interface TemplateInput {
+  name: string;
+  description: string;
+  model: string | null;
+  tools: string[];
+  needsApproval: string[];
+  limits: SpendLimit;
+}
+
+export interface CoworkerTemplate extends TemplateInput {
+  id: string;
+  updatedAtMs: number;
+}
+
+export function listTemplates(): Promise<{ templates: CoworkerTemplate[]; tools: string[] }> {
+  return getJson<{ templates: CoworkerTemplate[]; tools: string[] }>("/admin/templates");
+}
+
+export function createTemplate(input: TemplateInput): Promise<CoworkerTemplate> {
+  return postJson<CoworkerTemplate>("/admin/templates", input);
+}
+
+export async function updateTemplate(id: string, input: TemplateInput): Promise<CoworkerTemplate> {
+  const res = await request(`/admin/templates/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+  return (await res.json()) as CoworkerTemplate;
+}
+
+export async function deleteTemplate(id: string): Promise<void> {
+  const res = await request(`/admin/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}

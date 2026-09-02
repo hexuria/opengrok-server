@@ -428,6 +428,9 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/models", get(list_models))
+        // The org's coworker templates, for the hire picker. Written by the admin
+        // (`account_api.rs`, `/admin/templates`).
+        .route("/templates", get(list_templates))
         .route("/models/probe", post(probe_model))
         .route(
             "/coworkers/{coworker_id}",
@@ -598,6 +601,11 @@ pub struct HireRequest {
     /// A route through the gateway, never a key.
     #[serde(default)]
     pub model: Option<String>,
+    /// One of the org's coworker templates (`templates.rs`): its model when none is given here,
+    /// its tool ceiling and approval set, its spend limits — copied at hire. camelCase on the
+    /// wire like the rest of this API; the snake_case name once made the picker a silent no-op.
+    #[serde(default, rename = "templateId")]
+    pub template_id: Option<String>,
 }
 
 /// Hire a coworker, and optionally give it a computer.
@@ -615,14 +623,31 @@ pub async fn hire(
 
     let coworker_id = CoworkerId::new();
     let at_ms = now_ms();
+    // A template, when named, must be the hirer's org's: somebody else's reads as "no such
+    // template", never as a hire on the deployment's defaults.
+    let template = match request.template_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => {
+            match crate::templates::for_account(&state, &account_id, id).await {
+                Ok(Some(template)) => Some(template),
+                Ok(None) => return (StatusCode::NOT_FOUND, "no such template").into_response(),
+                Err(error) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+                }
+            }
+        }
+        _ => None,
+    };
     // Absent OR blank falls back: `unwrap_or_else` alone let `"model": ""` through, and the
     // aggregate would (now) refuse it rather than the caller getting the default they meant.
+    // The template's pin sits between the request's and the deployment's.
     let model = request
         .model
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .map_or_else(|| state.model.clone(), str::to_string);
+        .map(str::to_string)
+        .or_else(|| template.as_ref().and_then(|t| t.model.clone()))
+        .unwrap_or_else(|| state.model.clone());
 
     let mut coworker = opengrok_core::coworker::Coworker::default();
     let mut events = match coworker.decide(CoworkerCommand::Hire {
@@ -680,22 +705,32 @@ pub async fn hire(
     // "install a plugin" and "let this coworker use it" stay two decisions rather than one.
     let tools =
         opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
-    if let Err(error) = state
-        .auth
-        .store
-        // Nothing needs approval by default. A person who wants a second pair of eyes on `shell`
-        // sets it deliberately; defaulting to "approve everything" would make the prompt noise and
-        // teach people to click yes.
-        .grant_access(
-            &account_id,
-            &coworker_id,
-            &tools,
-            &tools,
-            &opengrok_policy::ToolSet::None,
-            at_ms,
-        )
-        .await
-    {
+    let granted = match template.as_ref() {
+        // Hired from a template: the template's ceiling, approval set and limits, copied.
+        Some(template) => {
+            crate::templates::apply_at_hire(&state, &account_id, &coworker_id, template, at_ms)
+                .await
+                .map_err(opengrok_store::StoreError::Corrupt)
+        }
+        None => {
+            state
+                .auth
+                .store
+                // Nothing needs approval by default. A person who wants a second pair of eyes on
+                // `shell` sets it deliberately; defaulting to "approve everything" would make the
+                // prompt noise and teach people to click yes.
+                .grant_access(
+                    &account_id,
+                    &coworker_id,
+                    &tools,
+                    &tools,
+                    &opengrok_policy::ToolSet::None,
+                    at_ms,
+                )
+                .await
+        }
+    };
+    if let Err(error) = granted {
         // A coworker nobody may use is worse than no coworker: fail the hire rather than leave one
         // that silently refuses everything.
         return (
@@ -889,6 +924,36 @@ async fn mint_bot_key(
         })),
     )
         .into_response()
+}
+
+/// `GET /templates` — the caller's org's coworker templates; `[]` outside any org.
+async fn list_templates(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let org_id = match state.auth.store.load_account(&account_id).await {
+        Ok((account, _)) => account.org_id.filter(|org| !org.is_empty()),
+        Err(error) => {
+            tracing::error!(%error, "could not load the account");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+        }
+    };
+    let Some(org_id) = org_id else {
+        return Json(serde_json::json!({ "templates": [] })).into_response();
+    };
+    match state.auth.store.templates_for_org(&org_id).await {
+        Ok(templates) => Json(serde_json::json!({
+            "templates": templates.iter().map(crate::templates::template_json).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not list templates");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
 }
 
 /// Is this coworker the caller's? `None` ⇒ 404: another account's coworker id must read as

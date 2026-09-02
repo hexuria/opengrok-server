@@ -574,6 +574,33 @@ create table if not exists spend_limit (
     updated_at_ms bigint not null,
     primary key (scope_kind, scope_id)
 );
+-- Coworker templates (`store/templates.rs`): a coworker TYPE an org admin writes once — model
+-- pin, tool ceiling, what needs a human yes, spend limits — that members hire from. What a
+-- template says is COPIED to the coworker at hire (`coworker_template_use` remembers which);
+-- editing a template changes no running coworker unless the admin applies it, and deleting
+-- one leaves its coworkers exactly as hired.
+create table if not exists coworker_template (
+    id             text   primary key,
+    org_id         text   not null,
+    name           text   not null,
+    description    text   not null default '',
+    model          text,
+    tool_ceiling   jsonb  not null,
+    needs_approval jsonb  not null,
+    five_hour_usd  text,
+    seven_day_usd  text,
+    month_usd      text,
+    created_at_ms  bigint not null,
+    updated_at_ms  bigint not null
+);
+create index if not exists coworker_template_org_idx on coworker_template (org_id, name);
+create table if not exists coworker_template_use (
+    coworker_id text   primary key,
+    template_id text   not null,
+    at_ms       bigint not null
+);
+create index if not exists coworker_template_use_template_idx
+    on coworker_template_use (template_id);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
