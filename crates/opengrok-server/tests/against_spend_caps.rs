@@ -73,6 +73,11 @@ struct StandIn {
     usage_reads: usize,
     /// When true the usage endpoint answers 500: the meter is down.
     meter_down: bool,
+    /// When true the mint endpoint answers 403, as the gateway does when the admin token it is
+    /// asked with is not an admin key (the dev server's state on 2 Sep 2026).
+    refuse_mints: bool,
+    /// Every mint asked for, refused or not.
+    mint_attempts: usize,
 }
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1_000;
@@ -132,6 +137,13 @@ async fn spawn_stand_in(shared: Shared) -> String {
                         return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
                     }
                     let mut stand_in = shared.lock().unwrap();
+                    stand_in.mint_attempts += 1;
+                    if stand_in.refuse_mints {
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(json!({"error": "not minted as an admin key"})),
+                        );
+                    }
                     let n = stand_in.keys.len() + 1;
                     let key = StandInKey {
                         id: uuid::Uuid::now_v7().to_string(),
@@ -780,4 +792,102 @@ async fn a_hirer_outside_any_org_hires_on_the_deployment_key_and_the_console_say
         vec![DEPLOYMENT_KEY.to_string()]
     );
     assert_eq!(h.usage_reads(), 0);
+}
+
+/// An org admin, signed in, with the stand-in refusing every mint from the start.
+async fn org_admin_with_mints_refused(database_url: &str) -> (Harness, String) {
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("late-{tag}.test");
+    let store = store_from(database_url).await;
+    let (_org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let account_id = store
+        .account_by_email(&admin_email)
+        .await
+        .expect("load")
+        .expect("the admin exists")
+        .id;
+    let h = harness(database_url, &admin_email).await;
+    let access = h.access_token(&account_id, &admin_email);
+    h.stand_in.lock().unwrap().refuse_mints = true;
+    (h, access)
+}
+
+async fn hire(h: &Harness, access: &str, name: &str) -> String {
+    let res = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("Authorization", format!("Bearer {access}"))
+        .json(&json!({ "name": name }))
+        .send()
+        .await
+        .expect("hire");
+    assert_eq!(res.status(), 201);
+    res.json::<Value>().await.expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_coworker_hired_while_the_gateway_would_not_mint_gets_its_key_on_its_next_turn() {
+    let database_url = database_or_skip!();
+    let (h, access) = org_admin_with_mints_refused(&database_url).await;
+
+    // The hire goes through — never a 4xx over a cap — with no key of its own.
+    let coworker = hire(&h, &access, "Ada").await;
+    {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.mint_attempts, 1, "the hire asked once");
+        assert!(stand_in.keys.is_empty(), "and was refused");
+    }
+    let (_, spend) = h.spend(&access, &coworker).await;
+    assert_eq!(spend["metered"], json!(false), "{spend}");
+
+    // The admin key is fixed: the next turn mints the key before it thinks, and thinks on it.
+    h.stand_in.lock().unwrap().refuse_mints = false;
+    let (status, failure) = h.turn(&coworker, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.keys.len(), 1, "minted late, on the turn");
+        assert_eq!(stand_in.keys[0].name, "coworker: Ada");
+        assert_eq!(
+            stand_in.bearers.last(),
+            Some(&stand_in.keys[0].key),
+            "the turn went out on the coworker's own key: {:?}",
+            stand_in.bearers
+        );
+    }
+    let (_, spend) = h.spend(&access, &coworker).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+}
+
+#[tokio::test]
+async fn a_gateway_that_keeps_refusing_is_asked_once_an_interval_and_the_deployment_key_carries_the_turn()
+ {
+    let database_url = database_or_skip!();
+    let (h, access) = org_admin_with_mints_refused(&database_url).await;
+    let coworker = hire(&h, &access, "Bo").await;
+
+    // Two turns while the gateway still refuses: both think on the deployment's key (no limits
+    // means no hold), and the gateway is asked once more, not once per turn.
+    let (status, failure) = h.turn(&coworker, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (status, failure) = h.turn(&coworker, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let stand_in = h.stand_in.lock().unwrap();
+    assert!(
+        stand_in.keys.is_empty(),
+        "still no key: {:?}",
+        stand_in.keys
+    );
+    assert_eq!(
+        stand_in.bearers,
+        vec![DEPLOYMENT_KEY.to_string(), DEPLOYMENT_KEY.to_string()],
+        "the deployment's key carried both turns"
+    );
+    assert_eq!(
+        stand_in.mint_attempts, 2,
+        "the hire asked, the first turn asked again, the second turn waited out the interval"
+    );
 }
