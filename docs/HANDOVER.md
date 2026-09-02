@@ -49,16 +49,41 @@ by drift.
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
 | The shell vouches, the console proves: a domain from `opengrok admin` admits signups at once; a console claim admits nothing until DNS says so. Verify is a live lookup on click, no poller | `opengrok-core/src/org.rs` module doc, `opengrok-server/src/domain_proof.rs` |
+| A coworker's spend cap is a gateway key of its own with the gateway's per-key quota on it — a wall on LIFETIME spend, shown as such; a key that cannot be opened holds the turn rather than falling back to the deployment's key | `opengrok-server/src/spend.rs` module doc, PR #32 |
+| What a second replica must see is a row taken once with `delete … returning`; budgets and caches stay per replica | `opengrok-store/src/replica.rs`, `auth/budget.rs` |
+| A PR is based on `main`, never stacked on a branch about to merge — GitHub closes a PR whose base branch is deleted and it cannot be reopened | this page, 2 Sep 2026 |
 
 ## What's left (do not relitigate "are we done")
 
 In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
 
-1. **`16.later`** — OAuth 2.1 metadata on `/mcp`. PolicyApproval still has no transcribed desktop card (AutoReview Ask does — `16.cards`). Reverse-exec stays excluded from MCP.
-2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation; mint idempotency; reconcile console listing vs gateway after a failed revoke; per-key admin scopes so a partner credential is not a full gateway admin. Per-member model pins are gateway-member pins, not coworker pins (those are slice 18).
-3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field + picker (console already has one). Roster `description = model` habit. `auto_review_model` is a separate deployment pin. Per-coworker spend caps.
-4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode` (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; rooms (provisioning shipped); mem0; artifacts; stdio MCP inside the box; graph harness; Redis after a measured hot query. ASCII endpoints not in the client yet (snapshots, environments, webhooks, ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) wait until a coworker path needs them.
-5. **P11 is not unfinished work** — sharing, teach recording, memories sit on no path a user takes; upstream deleted adjacent features in 0.30.
+**Landed or in review on 2 Sep 2026** (the operator merges; sessions never merge): #26 one
+spelling ("Open Grok"); #27 budgets on every unauthenticated door (`auth/budget.rs`); #30 a
+durable audit of every MCP door call (`mcp_call_audit`, console "Door calls"); #31 the three
+process maps a second replica would break, as rows (`opengrok_store::replica`); #32 per-coworker
+spend caps (a gateway key of the coworker's own, the cap on it, lifetime by the gateway's rule);
+open-ai-gateway #50 the per-key usage endpoint #32 reads. Each PR body carries its evidence and the
+decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinating-noodle.md`
+(session-local) — the order was hardening → caps → a rooms plan.
+
+1. **Rooms** — [`plan-rooms.md`](plan-rooms.md), a plan for review, no code: groups first (a
+   coworker with members, the client's own orchestrator transcribed), shared rooms parked. Its
+   first slice is a one-afternoon transcription fix to `getSharingState`.
+2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation;
+   per-key admin scopes so a partner credential is not a full gateway admin.
+3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +
+   picker (console already has one). Roster `description = model` habit. `auto_review_model` is
+   a separate deployment pin. A **monthly** per-coworker cap is a gateway change (a key quota is
+   lifetime); ask the operator before starting it.
+4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
+   (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
+   MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are
+   the one thing that stays per process when a second replica appears (by design — a limit that
+   costs a database write per unauthenticated request defeats itself); a shared limiter is Redis
+   work, after that measured hot query. ASCII endpoints not in the client yet wait until a
+   coworker path needs them.
+5. **P11 is not unfinished work** — teach recording and memories sit on no path a user takes;
+   upstream deleted adjacent features in 0.30. Sharing is now `plan-rooms.md` §3.
 
 The desktop app you verify against is **`/Applications/Open Grok.app`** (`bot.opengrok.app`). Do not run `just install` in the client repo — that justfile still writes `/Applications/Grok-0.27.app`. Install in place: `rsync -a --delete "dist/Open Grok.app/" "/Applications/Open Grok.app/"`. `setup/desktop-client.md`.
 
