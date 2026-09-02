@@ -113,12 +113,20 @@ issuer (`OG_PUBLIC_GATEWAY_URL`) and the address the app talks to disagree.
    the new address — the server's request log shows every call with its `X-Request-Id` and
    `events: stream opened`.
 
-Claude Code, once Part B ships:
+Claude Code (16.oauth is on main):
 
 ```sh
+# Claude Code is a Node process, and Node does NOT read the macOS keychain — its metadata fetch
+# of https://192.168.100.24:1447/.well-known/... fails UNABLE_TO_GET_ISSUER_CERT_LOCALLY unless
+# Caddy's root is handed to it. (The desktop app fixed the same thing for itself in
+# hexuria/opengrok#26.)
+export NODE_EXTRA_CA_CERTS="$HOME/Library/Application Support/Caddy/pki/authorities/local/root.crt"
 claude mcp add --transport http opengrok https://192.168.100.24:1447/mcp
-claude mcp login opengrok        # browser: sign in, pick the coworker, done
+claude mcp login opengrok        # browser: sign in, pick the coworker, Allow — done
 ```
+
+The key it receives lives a day and refreshes silently for 90 (16.cimd); revoke it from the
+coworker's key list, where it is labelled "<client> via OAuth".
 
 ## When the LAN address changes
 
