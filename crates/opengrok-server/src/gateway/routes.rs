@@ -199,6 +199,15 @@ async fn events(
     // the dangerous reply (CLAUDE.md #3): when the read fails the opener is the retry line alone,
     // said in the log, and the client's own listAgents — which answers 500, not an empty array —
     // is what it acts on.
+    //
+    // And a client that connected DURING the outage would otherwise never be seeded: nothing is
+    // emitted while the store is down (every emitter reads first and gives up), and when the
+    // store returns no frame says so — the page would sit on the retry line, refusing every
+    // unstamped roster, until the stream happened to reconnect. So a failed opener keeps trying
+    // for this stream alone (1 s, 2 s, 4 s, then every 5 s) and sends the snapshot the moment a
+    // read succeeds, stamped `current` like the opener's own. The task ends with the stream: it
+    // checks the channel before every read and the receiver is dropped with the body.
+    let (late_tx, late_rx) = tokio::sync::mpsc::channel::<String>(1);
     let snapshot = match super::live::roster_rows(&state).await {
         Ok(rows) => {
             let payload = json!({
@@ -215,11 +224,50 @@ async fn events(
                 %error,
                 "events: the roster could not be read; opening without a snapshot rather than with an empty one"
             );
+            let retry_state = state.clone();
+            let retry_wanted = wanted.clone();
+            let id = guard.id.clone();
+            tokio::spawn(async move {
+                let mut wait_secs = 1u64;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+                    if late_tx.is_closed() {
+                        return;
+                    }
+                    match super::live::roster_rows(&retry_state).await {
+                        Ok(rows) => {
+                            let payload = json!({
+                                "activeAgentId": retry_state.active_agent.lock().ok().and_then(|a| a.clone()),
+                                "agents": rows,
+                                "ordered": super::live::current(&retry_state, "roster"),
+                                "coverage": { "kind": "complete-roster" },
+                            });
+                            tracing::info!(
+                                id = %id,
+                                rows = payload["agents"].as_array().map_or(0, Vec::len),
+                                "events: the roster read recovered; late snapshot sent"
+                            );
+                            let _ = late_tx
+                                .send(frame("agents", &payload, retry_wanted.as_ref()))
+                                .await;
+                            return;
+                        }
+                        Err(_) => wait_secs = (wait_secs * 2).min(5),
+                    }
+                }
+            });
             String::new()
         }
     };
     let opening =
         stream::once(async move { Ok::<_, Infallible>(format!("retry: 1000\n\n{snapshot}")) });
+    // Ends when the retry task sends or the sender drops — at once on the Ok path above.
+    let late = stream::unfold(late_rx, |mut late_rx| async move {
+        late_rx
+            .recv()
+            .await
+            .map(|text| (Ok::<_, Infallible>(text), late_rx))
+    });
 
     // State is `(subscriber, guard)` in that order on purpose: tuple fields drop in order, so the
     // receiver is gone before the guard counts what is left.
@@ -260,7 +308,10 @@ async fn events(
             (header::CONTENT_TYPE, "text/event-stream"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        axum::body::Body::from_stream(opening.chain(futures::stream::select(live, pings))),
+        axum::body::Body::from_stream(opening.chain(futures::stream::select(
+            futures::stream::select(live, pings),
+            late,
+        ))),
     )
         .into_response()
 }
