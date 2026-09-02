@@ -171,7 +171,9 @@ function SpendCell({ coworker }: { coworker: Coworker }) {
           ) : null}
         </span>
       ))}
-      {!limited ? <span className="muted">No limits set; the org admin can set them.</span> : null}
+      {!limited ? (
+        <span className="muted">Unlimited — no spend limit at any layer. The org admin sets them.</span>
+      ) : null}
       {data.note ? <span className="muted">{data.note}</span> : null}
     </span>
   );
@@ -253,9 +255,11 @@ export function CoworkersPage() {
 
   const ids = catalogue.data?.models.map((model) => model.id) ?? [];
 
+  const [hireNote, setHireNote] = useState<string | null>(null);
   const hire = useMutation({
     mutationFn: () => hireCoworker(name, model, templateId),
-    onSuccess: () => {
+    onSuccess: (hired) => {
+      setHireNote(hired.templateNote ?? null);
       setName("");
       setModel("");
       setTemplateId("");
@@ -303,6 +307,7 @@ export function CoworkersPage() {
             </div>
             <TestButton model={model} />
             {hire.error ? <p className="error">{errorText(hire.error, "could not hire")}</p> : null}
+            {hireNote ? <p className="error">{hireNote}</p> : null}
             {catalogue.data?.note ? <p className="muted">{catalogue.data.note}</p> : null}
           </section>
 

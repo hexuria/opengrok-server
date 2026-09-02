@@ -11,6 +11,8 @@ export interface Coworker {
   /** The route this coworker thinks through. */
   model: string;
   boxId?: string | null;
+  /** A sentence when something the template promised did not land at hire (a limit, say). */
+  templateNote?: string | null;
 }
 
 export function listCoworkers(): Promise<Coworker[]> {

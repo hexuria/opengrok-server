@@ -91,14 +91,16 @@ pub async fn for_account(
 /// Copy what the template says onto a freshly hired coworker: the grant (ceiling = profile,
 /// needs-approval inside it), the spend limits as the coworker's own row, the profile
 /// description, and the memory of which template it was. The grant is the part that must not
-/// fail silently — a coworker nobody may use is worse than none.
+/// fail silently — a coworker nobody may use is worse than none. `Ok(Some(note))` is a hire
+/// that went through with something the template promised NOT copied: the note goes back to
+/// the hirer, so a limit that did not land is said, not logged and forgotten.
 pub async fn apply_at_hire(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     template: &CoworkerTemplate,
     at_ms: i64,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let store = &state.auth.store;
     store
         .grant_access(
@@ -111,6 +113,7 @@ pub async fn apply_at_hire(
         )
         .await
         .map_err(|error| format!("could not grant the template's tools: {error}"))?;
+    let mut note = None;
     if !template.limits.is_empty()
         && let Err(error) = store
             .put_spend_limit(
@@ -121,8 +124,14 @@ pub async fn apply_at_hire(
             )
             .await
     {
-        // Limits are the part a person can re-apply from the admin page; the grant is not.
+        // Limits are the part a person can re-apply from the admin page; the grant is not. But
+        // a coworker hired UNLIMITED where the template promised a limit is exactly the kind of
+        // thing that must not happen quietly: the hirer is told, in the reply.
         tracing::error!(%error, coworker = %coworker_id.as_str(), template = %template.id, "template: limits could not be copied");
+        note = Some(format!(
+            "The template's spend limits could not be copied ({error}); this coworker is \
+             unlimited until an admin sets its limits on the admin page."
+        ));
     }
     if !template.description.trim().is_empty() {
         let profile = serde_json::json!({
@@ -141,7 +150,7 @@ pub async fn apply_at_hire(
     {
         tracing::warn!(%error, coworker = %coworker_id.as_str(), "template: use not recorded");
     }
-    Ok(())
+    Ok(note)
 }
 
 /// The listing shape both the admin card and the member's hire picker read.
