@@ -183,6 +183,15 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   works once with no spent-token table. No mailer ⇒ the page says so and the operator runs
   `opengrok admin account password`. Console: Domains card; "Forgot your password?" on both
   sign-in cards. `slice17-identity-smoke.sh` steps 10–12. *(this commit)*
+- [x] **12.limits** The doors that take no credential each have a budget (`auth/budget.rs`, one
+  hit table per replica, fail-closed on a poisoned lock): password reset 5/hour per address AND
+  per mailbox (the reply stays constant), domain verify 12/hour per org, dynamic client
+  registration 20/hour per address (the DCR cap moved here), and wrong passwords 30/hour per
+  address on both `/auth/login` and `/loginDeepControl` — failures only, so a NAT full of people
+  signing in is not "guessing". Spent ⇒ 429 + `Retry-After` + a sentence; the address is
+  `X-Forwarded-For` from the HTTPS front, else one shared `unknown` bucket.
+  `tests/against_rate_limits.rs` walks all four over a socket. Per replica on purpose: a limit
+  that costs a database write per unauthenticated request defeats itself.
 
 ## Slice 13 — Web console
 

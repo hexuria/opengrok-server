@@ -108,8 +108,19 @@ pub async fn forgot_page(State(state): State<AuthState>) -> Response {
 /// known.
 pub async fn forgot_form(
     State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
     axum::Form(form): axum::Form<ForgotRequest>,
 ) -> Response {
+    if let Err(spent) = forgot_budget(&state, &headers, &form.email) {
+        return super::budget::with_retry_after(
+            super::pages::message(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests",
+                &too_many_resets(spent),
+            ),
+            spent,
+        );
+    }
     if state.resend_api_key.is_none() {
         return super::pages::forgot_password(false, None);
     }
@@ -126,8 +137,12 @@ pub async fn forgot_form(
 /// `mailer` tells the page whether to say "check your email" or "ask your administrator".
 pub async fn forgot_json(
     State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ForgotRequest>,
 ) -> Response {
+    if let Err(spent) = forgot_budget(&state, &headers, &req.email) {
+        return super::budget::too_many(spent, &too_many_resets(spent));
+    }
     let mailer = state.resend_api_key.is_some();
     if mailer {
         start_reset(&state, &req.email).await;
@@ -137,6 +152,25 @@ pub async fn forgot_json(
         Json(serde_json::json!({ "accepted": true, "mailer": mailer })),
     )
         .into_response()
+}
+
+/// The budget is on the REQUEST, not the mail: it is charged whether or not a mailer is wired
+/// and whether or not the address has an account, so the constant reply stays constant.
+fn forgot_budget(
+    state: &AuthState,
+    headers: &axum::http::HeaderMap,
+    email: &str,
+) -> Result<(), super::budget::Spent> {
+    use super::budget::{FORGOT, email_key, peer_key};
+    state.budgets.take(&FORGOT, &peer_key(headers))?;
+    state.budgets.take(&FORGOT, &email_key(email))
+}
+
+fn too_many_resets(spent: super::budget::Spent) -> String {
+    format!(
+        "Too many password-reset requests. Try again in {} minutes.",
+        spent.retry_after_secs.div_ceil(60).max(1)
+    )
 }
 
 #[derive(Debug, Deserialize)]

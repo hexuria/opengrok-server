@@ -56,9 +56,9 @@ pub const OAUTH_KEY_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 
 const CODE_TTL_MS: i64 = 10 * 60 * 1_000;
 const CONSENT_TTL_SECS: i64 = 10 * 60;
-/// Registrations one peer address may make in an hour, and the table's ceiling: dynamic client
-/// registration is unauthenticated by design, so this is what keeps it from filling the database.
-const DCR_PER_HOUR: usize = 20;
+/// The table's ceiling: dynamic client registration is unauthenticated by design, so beyond the
+/// per-address budget (`budget::CLIENT_REGISTRATION`) this is what keeps it from filling the
+/// database.
 const DCR_CEILING: i64 = 1_000;
 
 fn now_ms() -> i64 {
@@ -189,17 +189,6 @@ fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
         .into_response()
 }
 
-fn peer_of(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|ip| !ip.is_empty())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 /// `POST /oauth/mcp/register` — a public client registers its callback and name.
 async fn register(
     State(state): State<AuthState>,
@@ -207,23 +196,22 @@ async fn register(
     Json(request): Json<RegistrationRequest>,
 ) -> Response {
     // The cap: per peer per hour, and a ceiling on the table.
-    let peer = peer_of(&headers);
     let at_ms = now_ms();
-    let over = state.dcr_hits.lock().map(|mut hits| {
-        let list = hits.entry(peer.clone()).or_default();
-        list.retain(|t| at_ms - *t < 60 * 60 * 1_000);
-        if list.len() >= DCR_PER_HOUR {
-            true
-        } else {
-            list.push(at_ms);
-            false
-        }
-    });
-    if over.unwrap_or(true) {
-        return oauth_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "invalid_client_metadata",
-            "too many registrations from this address; try again later",
+    let peer = super::budget::peer_key(&headers);
+    if let Err(spent) = state
+        .budgets
+        .take(&super::budget::CLIENT_REGISTRATION, &peer)
+    {
+        return super::budget::with_retry_after(
+            oauth_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "invalid_client_metadata",
+                &format!(
+                    "too many registrations from this address; try again in {} seconds",
+                    spent.retry_after_secs
+                ),
+            ),
+            spent,
         );
     }
     match state.store.oauth_client_count().await {
