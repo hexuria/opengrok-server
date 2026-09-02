@@ -50,9 +50,11 @@ Three limits per coworker, all optional, all in USD:
 | monthly | calendar month, UTC | on the first |
 
 At any limit the turn is **refused**, before the model is called, with a sentence that names the
-window and when it resets: *"Ada has used its 5-hour allowance ($4.90 of $5.00); it resets at
-14:32. The 7-day and monthly allowances still have room."* "You are at your cap" alone is the
-wrong sentence for somebody whose window clears in ten minutes.
+window and when it resets: *"Ada has used its 5-hour allowance ($4.90 of $5.00); it begins to
+free up at 14:32. The 7-day and monthly allowances still have room."* "You are at your cap"
+alone is the wrong sentence for somebody whose window clears in ten minutes. The console shows
+the same three numbers as three meters per coworker — used, limit, and when each frees up or
+resets — so a person can see which window is the one in the way before they hit it.
 
 ## 3. Where the three limits are evaluated, and where the numbers come from
 
@@ -76,9 +78,25 @@ server decides, on every action) applied to money.
   path that already turns a refusal into the run's failure and the transcript's text. A guard
   that cannot read the numbers **holds** the turn with that reason; it never lets a turn through
   unmetered.
-- **Granularity.** A model call already in flight finishes; the next one is refused. Two calls
-  racing can both pass by one call's cost — the window is soft by one request, as every
-  subscription's is.
+- **Granularity, and what a mid-turn refusal looks like.** A model call already in flight
+  finishes; the next one is refused. The turn's run fails with the sentence, the transcript keeps
+  everything the turn already produced (text, tool results, cards) and ends with the sentence;
+  nothing is rolled back and nothing is lost. When the window has room again the person sends
+  the next prompt; there is no automatic resume. The guard also runs before the FIRST call, so a
+  coworker already over a limit never starts a turn only to fail at once. Two calls racing can
+  both pass by one call's cost — the window is soft by one request, as every subscription's is.
+- **When the meter cannot be read.** The read has a two-second timeout. A reading younger than
+  sixty seconds is used in its place (the fifteen-second cache, extended under failure); with
+  no such reading the turn is **held**, refused with "the spend meter could not be read; try
+  again", and the failure is logged at error. A meter that is down is a visible outage of the
+  coworkers that have limits, never an advisory cap: silently allowing turns would be the one
+  outcome an admin who wrote a limit did not ask for. Coworkers with no limits at any layer skip
+  the read entirely.
+- **"Resets at", defined.** A rolling window has no boundary, so its reset instant is the moment
+  the **oldest spend still inside the window ages out** — the earliest instant the used figure
+  drops at all. The gateway returns that instant (`oldest + window`) and the sentence says
+  "begins to free up at 14:32"; it does not claim the whole allowance is back then. The monthly
+  window resets on the first of the next UTC month, and the sentence says "resets on 1 Oct".
 
 ## 4. Who sets what: the policy ladder
 
