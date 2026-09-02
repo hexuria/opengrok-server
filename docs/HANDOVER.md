@@ -70,7 +70,7 @@ decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinat
 
 1. **Rooms** — [`plan-rooms.md`](plan-rooms.md): the sharing verbs answer in the client's
    shapes (#35) and groups are built (a coworker with members, the client's own orchestrator
-   transcribed, `gateway/group.rs`). Left: a card raised inside a member's turn, and shared
+   transcribed, `gateway/group.rs`). Left: shared
    rooms, parked until groups have been used.
 2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation;
    per-key admin scopes so a partner credential is not a full gateway admin.

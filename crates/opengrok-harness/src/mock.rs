@@ -37,6 +37,10 @@ pub struct MockDoor {
     /// it says "{name} here" through the `SendMessage` tool, then stops. Outside a room it
     /// echoes. What a test needs to see two members speak in turn, distinguishably.
     room_speaker: bool,
+    /// The one room member (by the name the system prompt gives it) that reaches for the shell
+    /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
+    /// round continue after the answer. The others behave as `room_speaker`.
+    room_tool_asker: Option<String>,
 }
 
 impl MockDoor {
@@ -61,6 +65,7 @@ impl MockDoor {
             once_then_answer: false,
             judge_verdict: None,
             room_speaker: false,
+            room_tool_asker: None,
         }
     }
 
@@ -72,6 +77,47 @@ impl MockDoor {
             room_speaker: true,
             ..Self::default()
         }
+    }
+
+    /// `room_speaker`, except that the member named `asker` asks to run `asking_for_a_tool`'s
+    /// shell command first and speaks — "{name} here, after the tool" — only once that call's
+    /// result is in the conversation. A refusal is a result too: the member speaks after a no.
+    pub fn room_speaker_asking_for_a_tool(asker: impl Into<String>) -> Self {
+        Self {
+            room_speaker: true,
+            room_tool_asker: Some(asker.into()),
+            ..Self::default()
+        }
+    }
+
+    /// The shell call `asking_for_a_tool` makes, as a script.
+    fn shell_script() -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::Text("let me check that".to_string()),
+            ModelDelta::ToolCallStart {
+                id: "mock-call-1".to_string(),
+                name: "shell".to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "mock-call-1".to_string(),
+                // Writes a marker a test can look for on the box, which is the only way to
+                // prove the command ran *there* rather than being reported as run.
+                delta: r#"{"command":"echo opengrok-tool-ran > /tmp/opengrok-tool-ran"}"#
+                    .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "mock-call-1".to_string(),
+            },
+        ]
+    }
+
+    /// Whether the conversation already holds the result of this call (`[tool <id> result]`).
+    fn saw_result(request: &ModelRequest, call_id: &str) -> bool {
+        let marker = format!("[tool {call_id} result]");
+        request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(&marker))
     }
 
     /// "You are Ada, one participant in a group chat …" → `Ada`.
@@ -91,28 +137,13 @@ impl MockDoor {
     /// green suite. `OG_MODEL_DOOR=mock-tools` selects it.
     pub fn asking_for_a_tool() -> Self {
         Self {
-            script: vec![
-                ModelDelta::Text("let me check that".to_string()),
-                ModelDelta::ToolCallStart {
-                    id: "mock-call-1".to_string(),
-                    name: "shell".to_string(),
-                },
-                ModelDelta::ToolCallArgs {
-                    id: "mock-call-1".to_string(),
-                    // Writes a marker a test can look for on the box, which is the only way to
-                    // prove the command ran *there* rather than being reported as run.
-                    delta: r#"{"command":"echo opengrok-tool-ran > /tmp/opengrok-tool-ran"}"#
-                        .to_string(),
-                },
-                ModelDelta::ToolCallEnd {
-                    id: "mock-call-1".to_string(),
-                },
-            ],
+            script: Self::shell_script(),
             fail_with: None,
             // Asks once, then answers — like a turn that actually ends.
             once_then_answer: true,
             judge_verdict: None,
             room_speaker: false,
+            room_tool_asker: None,
         }
     }
 
@@ -123,6 +154,7 @@ impl MockDoor {
             once_then_answer: false,
             judge_verdict: None,
             room_speaker: false,
+            room_tool_asker: None,
         }
     }
 
@@ -178,21 +210,29 @@ impl ModelDoor for MockDoor {
         let script = if self.room_speaker
             && let Some(name) = Self::room_member_name(&request)
         {
-            if already_ran {
+            let send_id = format!("room-{}", name.to_lowercase());
+            let asks_first = self.room_tool_asker.as_deref() == Some(name.as_str());
+            if Self::saw_result(&request, &send_id) {
+                // Its own message is delivered; the turn is over.
                 vec![ModelDelta::Text("(that is all from me)".to_string())]
+            } else if asks_first && !Self::saw_result(&request, "mock-call-1") {
+                Self::shell_script()
             } else {
+                let line = if asks_first {
+                    format!("{name} here, after the tool")
+                } else {
+                    format!("{name} here")
+                };
                 vec![
                     ModelDelta::ToolCallStart {
-                        id: format!("room-{}", name.to_lowercase()),
+                        id: send_id.clone(),
                         name: "SendMessage".to_string(),
                     },
                     ModelDelta::ToolCallArgs {
-                        id: format!("room-{}", name.to_lowercase()),
-                        delta: serde_json::json!({ "content": format!("{name} here") }).to_string(),
+                        id: send_id.clone(),
+                        delta: serde_json::json!({ "content": line }).to_string(),
                     },
-                    ModelDelta::ToolCallEnd {
-                        id: format!("room-{}", name.to_lowercase()),
-                    },
+                    ModelDelta::ToolCallEnd { id: send_id },
                 ]
             }
         } else if self.script.is_empty() {

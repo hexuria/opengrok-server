@@ -599,6 +599,19 @@ create table if not exists coworker_template_use (
     template_id text   not null,
     at_ms       bigint not null
 );
+
+-- A room paused on a member's card: where the round stood when a member's run suspended, so the
+-- yes (or no) on the card resumes THAT member inside the room and then the rest of the round.
+-- One per group: a new prompt to the room abandons an older pause (its card can still be
+-- answered — the member then speaks — but the round it belonged to is not continued).
+create table if not exists room_pause (
+    group_id  text   primary key,
+    run_id    text   not null,
+    member_id text   not null,
+    cursor    jsonb  not null,
+    at_ms     bigint not null
+);
+create index if not exists room_pause_run_idx on room_pause (run_id);
 create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
 -- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.

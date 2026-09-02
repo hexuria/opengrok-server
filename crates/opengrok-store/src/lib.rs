@@ -27,6 +27,7 @@ pub mod identity;
 pub mod migrations;
 pub mod postgres;
 pub mod replica;
+pub mod room;
 pub mod spend;
 pub mod templates;
 pub mod vault;
