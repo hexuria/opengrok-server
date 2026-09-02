@@ -453,6 +453,9 @@ REST ignored a requested model and stored the deployment default. Investigation:
   A coworker without a key of its own gets one on its next turn (`spend::mint_late`, asked once
   per ten minutes per coworker while the gateway refuses): minting only at hire left every
   coworker hired while the admin token was wrong unmetered for good. #45.
+  The coworker's key is minted on a principal the gateway is bound to first
+  (`ensure_org_principal` before the mint, as the member-key mint always did): a fresh gateway
+  refused every coworker mint "no principal with that email". #46.
 - [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
 - [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its

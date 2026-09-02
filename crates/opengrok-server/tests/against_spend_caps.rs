@@ -78,6 +78,9 @@ struct StandIn {
     refuse_mints: bool,
     /// Every mint asked for, refused or not.
     mint_attempts: usize,
+    /// Principals the gateway knows, by email. A mint on one it does not know is refused with
+    /// the real gateway's sentence: the org must be bound first (`ensure_org_principal`).
+    principals: Vec<String>,
 }
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1_000;
@@ -144,6 +147,13 @@ async fn spawn_stand_in(shared: Shared) -> String {
                             Json(json!({"error": "not minted as an admin key"})),
                         );
                     }
+                    let principal = body["principal_email"].as_str().unwrap_or_default().to_string();
+                    if !stand_in.principals.contains(&principal) {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({"error": "no principal with that email, or no route with that name"})),
+                        );
+                    }
                     let n = stand_in.keys.len() + 1;
                     let key = StandInKey {
                         id: uuid::Uuid::now_v7().to_string(),
@@ -157,6 +167,22 @@ async fn spawn_stand_in(shared: Shared) -> String {
                     let reply = json!({ "id": key.id, "key_prefix": key.prefix, "key": key.key });
                     stand_in.keys.push(key);
                     (StatusCode::CREATED, Json(reply))
+                },
+            ),
+        )
+        .route(
+            "/admin/api/principals",
+            post(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let email = body["email"].as_str().unwrap_or_default().to_string();
+                    let mut stand_in = shared.lock().unwrap();
+                    if !stand_in.principals.contains(&email) {
+                        stand_in.principals.push(email.clone());
+                    }
+                    (StatusCode::OK, Json(json!({ "email": email })))
                 },
             ),
         )
@@ -543,6 +569,11 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
             stand_in.keys[0].principal,
             GatewayAdmin::org_principal_email(org_id.as_str()),
             "minted on the org's principal"
+        );
+        assert_eq!(
+            stand_in.principals,
+            vec![GatewayAdmin::org_principal_email(org_id.as_str())],
+            "the org was bound to its principal before the mint"
         );
     }
     let (status, spend) = h.spend(&access, &coworker).await;
