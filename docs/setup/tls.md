@@ -112,6 +112,11 @@ issuer (`OG_PUBLIC_GATEWAY_URL`) and the address the app talks to disagree.
 3. Relaunch `/Applications/Open Grok.app` and confirm the roster paints and `/events` opens on
    the new address — the server's request log shows every call with its `X-Request-Id` and
    `events: stream opened`.
+4. Sign in through the browser. The dev sign-in shortcut
+   (`GET /auth/cursor_dev_session_token`) answers only when the request's `Host` is a loopback
+   address (`auth/routes.rs::is_loopback`); through the HTTPS LAN address, or from any other
+   machine, it refuses with "dev sign-in is loopback-only; use the browser login". This
+   surprised a capture mid-flow on 2 Sep 2026 — it is the intended posture, not a fault.
 
 Claude Code, once Part B ships:
 
