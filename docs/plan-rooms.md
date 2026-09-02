@@ -21,7 +21,7 @@ verbs and the two group verbs sit in different subsystems with different backend
 | Verbs | `createGroup {name, description, memberAgentIds}` → `{agent, transcript}`; `setGroupMembers {id, memberAgentIds}` → summary or `null` (`research/client-grok-bot.md` §D rows 30–31) | the ten in §F: `getSharingState`, `createRoomFromAgent`, `createRoomInvite`, `joinSharedRoom`, `respondToRoomJoinRequest`, `createSharedRoom`, `addOwnAgentToSharedRoom`, `removeOwnAgentFromSharedRoom`, `setSharedRoomTyping`, `leaveSharedRoom` |
 | What it is | **An agent that is a group.** The host creates an ordinary agent and writes a group config beside it (`{version, memberIds, remoteMembers?, sharedRoomId?}`, `group-chat-glue.ts:90-155`). The roster row carries `isGroup: true`, `memberIds` (`session-summaries.ts:16`); its transcript is the group's chat. A prompt to it runs the **group orchestrator** (below). | **One user's agents in another user's room**, relayed through the vendor backend: `POST /sand/share-rooms/*`, `/sand/xuser/poll`, `/sand/xuser/send`, `/sand/share-state` (`cross-user-sharing/*.ts`), behind the `sand_multiplayer` feature gate (default **off**, "evaluated on the backend for every sharing endpoint, fail closed"), with typing presence, invite links, join requests, tombstones and a relay queue. |
 | Who is in it | This user's own agents, no people other than the owner | Several *accounts* (`RoomMember {kind, authId, agentId?, displayName?}`), each bringing agents; a `hostAuthId` |
-| Server today | `createGroup`/`setGroupMembers` → `400 "groups are not supported by this server yet"` (`gateway/routes.rs:505`) | honest empties: `getSharingState` → `{rooms: [], invites: [], requests: []}` (`routes.rs:586`); the other nine are unrouted |
+| Server today | `createGroup`/`setGroupMembers` → `400 "groups are not supported by this server yet"` (`gateway/routes.rs:505`) | all ten answered in the client's own disabled shapes (the transcription fix, §4 step 1, landed 2 Sep 2026): the state verbs give `EMPTY_SAND_SHARING_STATE`, the room and invite verbs give the host's `{status: "error", message}`, typing gives nothing |
 
 **The group orchestrator is a fixed, transcribable policy** (`group-chat-orchestrator.ts`): up to
 `GROUP_MAX_ROUNDS` rounds; each round the responders are resolved from the history
@@ -148,6 +148,7 @@ risky part; none of it is worth starting before §2 has been used.
 ## 4. Order and size
 
 1. Fix `getSharingState`'s shape (an afternoon, its own PR — a transcription correction).
+   *Done: all ten verbs, `tests/against_sharing_verbs.rs`.*
 2. Groups: aggregate + wire (a day), orchestrator + tests (two days), packaged-app evidence.
 3. Shared rooms: decide, then plan again with the gate contract transcribed.
 

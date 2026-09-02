@@ -63,6 +63,22 @@ async fn avatar_bytes(
     }
 }
 
+/// The host's own words when sharing is off for the account (`cross-user-sharing/
+/// extension.ts:15`). The renderer shows it as the error of the room or invite it asked for.
+const SHARING_DISABLED_MESSAGE: &str = "Sharing isn't enabled for your account.";
+
+/// `EMPTY_SAND_SHARING_STATE` (`shared/agents/sharing.ts:43`), the state the host emits when
+/// the multiplayer gate is off — which it is, on this server, for everybody.
+fn sharing_disabled_state() -> Value {
+    json!({
+        "isEnabled": false,
+        "selfAuthId": Value::Null,
+        "pendingJoinRequests": [],
+        "rooms": [],
+        "typingUsers": [],
+    })
+}
+
 /// A JSON reply, stamped the way the client checks: `x-sand-mint-dedupe: 1` on every one.
 fn reply(status: StatusCode, body: Value) -> Response {
     (
@@ -580,11 +596,26 @@ async fn command(
         "getAgentMemories" => reply(StatusCode::OK, json!([])),
         "deleteAgentMemory" | "clearAgentMemories" => reply(StatusCode::OK, Value::Null),
 
-        // ---- P8-adjacent surfaces the boot may poke: empty, in the validated shapes ----
-        "getSharingState" => reply(
-            StatusCode::OK,
-            json!({ "rooms": [], "invites": [], "requests": [] }),
-        ),
+        // ---- Shared rooms (cross-account, `plan-rooms.md` §3): not served, said in the client's
+        // own shapes. The renderer projects every state reply through `projectSharingState`
+        // (`shared-room/model.ts`: isEnabled boolean, selfAuthId string|null, three arrays) and
+        // rejects anything else as "malformed"; the host answers the disabled case with the
+        // same empty state, `{status:"error", message}` for the verbs that make a room or an
+        // invite, and nothing for typing (`cross-user-sharing/extension.ts`). Transcribed, not
+        // invented: an invented `{rooms, invites, requests}` passed only because the bridge
+        // once required no more than a record.
+        "getSharingState"
+        | "respondToRoomJoinRequest"
+        | "addOwnAgentToSharedRoom"
+        | "removeOwnAgentFromSharedRoom"
+        | "leaveSharedRoom" => reply(StatusCode::OK, sharing_disabled_state()),
+        "createRoomFromAgent" | "createRoomInvite" | "joinSharedRoom" | "createSharedRoom" => {
+            reply(
+                StatusCode::OK,
+                json!({ "status": "error", "message": SHARING_DISABLED_MESSAGE }),
+            )
+        }
+        "setSharedRoomTyping" => reply(StatusCode::OK, Value::Null),
         "getAgentChannels" => reply(StatusCode::OK, json!({ "channels": [] })),
         "getListenerIntegrations" => reply(StatusCode::OK, json!({})),
         "listBoxMcpServers" => reply(StatusCode::OK, json!({ "servers": [] })),

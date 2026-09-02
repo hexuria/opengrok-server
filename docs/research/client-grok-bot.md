@@ -340,8 +340,14 @@ another surface (not found in tree: which one; `source/host/extensions/memory/` 
 `addOwnAgentToSharedRoom` (56/400), `removeOwnAgentFromSharedRoom` (57/402),
 `setSharedRoomTyping` (58/404), `leaveSharedRoom` (59/406). All in the renderer table.
 `getSharingState` is called by `frontend/src/recovered/features/agent-info/shared-room/bridge.ts:23`
-and **must return a record** (it calls `requireState`). A safe v1 answer is a record with
-empty collections, never `null`.
+and **must return the sharing state** — `requireState` projects it through
+`projectSharingState` (`shared-room/model.ts:36`): `isEnabled` boolean, `selfAuthId` string or
+null, `pendingJoinRequests`/`rooms`/`typingUsers` arrays; anything else throws "Sharing returned
+a malformed state". The disabled state the host itself emits is `EMPTY_SAND_SHARING_STATE`
+(`shared/agents/sharing.ts:43`), which is what we answer for it and for the four other verbs the
+bridge projects the same way. `createRoomFromAgent`, `createRoomInvite`, `joinSharedRoom` and
+`createSharedRoom` get the host's disabled reply `{status: "error", message: "Sharing isn't
+enabled for your account."}`; `setSharedRoomTyping` gets nothing. `gateway/routes.rs`.
 
 #### G. Settings, secrets, capabilities, feature gates — 9 commands
 
@@ -1290,7 +1296,7 @@ POST /api/isGlobalSearchEnabled  → false
 POST /api/getHostSettings        → <record, §9>
 POST /api/setHostSettings        → <same record>
 POST /api/getForeverBoxStatus    → null
-POST /api/getSharingState        → {}
+POST /api/getSharingState        → {isEnabled:false, selfAuthId:null, pendingJoinRequests:[], rooms:[], typingUsers:[]}
 POST /api/openAgentTail          → {"entries":[…]}
 POST /api/sendPrompt             → {"accepted":true}
 ```
