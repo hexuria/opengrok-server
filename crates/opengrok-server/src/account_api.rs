@@ -61,6 +61,15 @@ pub fn router(state: AuthState) -> Router {
             "/admin/spend/coworkers/{coworker_id}",
             put(set_coworker_spend_limit),
         )
+        // Coworker templates (`templates.rs`): types members hire from.
+        .route(
+            "/admin/templates",
+            get(list_templates).post(create_template),
+        )
+        .route(
+            "/admin/templates/{id}",
+            put(update_template).delete(delete_template),
+        )
         .with_state(state)
 }
 
@@ -1323,4 +1332,145 @@ async fn set_coworker_spend_limit(
         &limit,
     )
     .await
+}
+
+// ---- Coworker templates: written by the admin, hired from by members ----
+
+/// `GET /admin/templates` — the org's templates, plus the tools a template may name.
+async fn list_templates(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match state.store.templates_for_org(org_id.as_str()).await {
+        Ok(templates) => Json(json!({
+            "templates": templates.iter().map(crate::templates::template_json).collect::<Vec<_>>(),
+            "tools": opengrok_tools::Executor::builtin_tool_names(),
+        }))
+        .into_response(),
+        Err(error) => storage_failed(&error),
+    }
+}
+
+async fn write_template(
+    state: &AuthState,
+    org_id: &str,
+    id: String,
+    created_at_ms: i64,
+    input: &crate::templates::TemplateInput,
+) -> Response {
+    let (tool_ceiling, needs_approval) = match crate::templates::validate(input) {
+        Ok(sets) => sets,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    // A pin the catalogue does not advertise is refused here, where the admin is watching,
+    // rather than at some member's first turn. No catalogue (a mock door) ⇒ nothing to check.
+    if let Some(model) = input
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        && let Some(catalogue) = state.model_catalogue.as_ref()
+    {
+        let known = catalogue.list().await;
+        if !known.models.is_empty() && !known.models.iter().any(|m| m.id == model) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("model: '{model}' is not a route this gateway advertises"),
+            )
+                .into_response();
+        }
+    }
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let template = opengrok_store::CoworkerTemplate {
+        id,
+        org_id: org_id.to_string(),
+        name: input.name.trim().to_string(),
+        description: input.description.trim().to_string(),
+        model: input
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string),
+        tool_ceiling,
+        needs_approval,
+        limits: input.limits.clone(),
+        created_at_ms,
+        updated_at_ms: at_ms,
+    };
+    match state.store.put_template(&template).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(crate::templates::template_json(&template)),
+        )
+            .into_response(),
+        Err(error) => storage_failed(&error),
+    }
+}
+
+/// `POST /admin/templates` — a new type.
+async fn create_template(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<crate::templates::TemplateInput>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let id = format!("tpl_{}", uuid::Uuid::now_v7().simple());
+    let mut response = write_template(&state, org_id.as_str(), id, now, &input).await;
+    if response.status() == StatusCode::OK {
+        *response.status_mut() = StatusCode::CREATED;
+    }
+    response
+}
+
+/// `PUT /admin/templates/{id}` — replace what a type says. Coworkers already hired from it keep
+/// what they were hired with; applying a change to them is a separate, deliberate act.
+async fn update_template(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<crate::templates::TemplateInput>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let existing = match state.store.template_in_org(org_id.as_str(), &id).await {
+        Ok(Some(existing)) => existing,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such template").into_response(),
+        Err(error) => return storage_failed(&error),
+    };
+    write_template(
+        &state,
+        org_id.as_str(),
+        existing.id,
+        existing.created_at_ms,
+        &input,
+    )
+    .await
+}
+
+/// `DELETE /admin/templates/{id}` — the type is gone; its coworkers are exactly as hired.
+async fn delete_template(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match state.store.delete_template(org_id.as_str(), &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such template").into_response(),
+        Err(error) => storage_failed(&error),
+    }
 }

@@ -118,6 +118,8 @@ meters read-only. A member may never raise a limit.
    "the 5-hour window refuses while the month has room" and "the sentence names the reset". A day
    and a half.
 3. **Templates** (coworker types: model pin, tool ceiling, approval policy, limits): its own slice.
+   *Done 2 Sep 2026: `templates.rs`, `tests/against_templates.rs`; "apply to existing coworkers"
+   is not built yet — a template edit changes nobody until it is.*
 4. **Model budgets**: a route-budget endpoint on the gateway, a card here. Small, later.
 
 ## 6. Questions for the operator

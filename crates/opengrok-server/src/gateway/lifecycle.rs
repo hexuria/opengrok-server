@@ -122,12 +122,29 @@ async fn hire(
 
     let id = CoworkerId::new();
     let at_ms = now_ms();
-    // The caller's pin when there is one, the deployment's default when there is not. A blank
-    // string is "not one" — it would otherwise be stored and asked of the gateway verbatim.
+    let template = match args
+        .get("templateId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some(template_id) if !template_id.is_empty() => {
+            match crate::templates::for_account(&state.agui, account_id, template_id).await {
+                Ok(Some(template)) => Some(template),
+                Ok(None) => return (404, json!({ "error": "no such template" })),
+                Err(error) => return (503, json!({ "error": error })),
+            }
+        }
+        _ => None,
+    };
+    // The caller's pin when there is one, the template's when it has one, the deployment's
+    // default otherwise. A blank string is "not one" — it would otherwise be stored and asked of
+    // the gateway verbatim.
     let model = model
         .map(str::trim)
         .filter(|model| !model.is_empty())
-        .map_or_else(|| state.agui.model.clone(), str::to_string);
+        .map(str::to_string)
+        .or_else(|| template.as_ref().and_then(|t| t.model.clone()))
+        .unwrap_or_else(|| state.agui.model.clone());
     let mut events = match Coworker::default().decide(CoworkerCommand::Hire {
         name: name.to_string(),
         model,
@@ -169,23 +186,34 @@ async fn hire(
     }
 
     // Grant the builtin tools so a coworker with a box can actually use it — the same ceiling REST
-    // grants at hire. Without this a hired coworker silently refuses every tool.
+    // grants at hire. Without this a hired coworker silently refuses every tool. A `templateId`
+    // the desktop passes through (`createAgent {…, templateId?}`) that names one of the org's
+    // templates grants that template's ceiling and approval set instead, and copies its limits.
     let tools =
         opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .grant_access(
-            account_id,
-            &id,
-            &tools,
-            &tools,
-            &opengrok_policy::ToolSet::None,
-            at_ms,
-        )
-        .await
-    {
+    let granted = match template.as_ref() {
+        Some(template) => {
+            crate::templates::apply_at_hire(&state.agui, account_id, &id, template, at_ms)
+                .await
+                .map_err(opengrok_store::StoreError::Corrupt)
+        }
+        None => {
+            state
+                .agui
+                .auth
+                .store
+                .grant_access(
+                    account_id,
+                    &id,
+                    &tools,
+                    &tools,
+                    &opengrok_policy::ToolSet::None,
+                    at_ms,
+                )
+                .await
+        }
+    };
+    if let Err(error) = granted {
         tracing::error!(%error, "createAgent could not grant access");
         return (
             500,
@@ -194,7 +222,13 @@ async fn hire(
     }
 
     let profile = json!({
-        "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
+        "description": args
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|d| !d.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| template.as_ref().map(|t| t.description.clone()))
+            .unwrap_or_default(),
         "title": args.get("title").and_then(Value::as_str).unwrap_or(""),
         "avatarShape": args.get("avatarShape").and_then(Value::as_str).unwrap_or(""),
         "avatarColor": args.get("avatarColor").and_then(Value::as_str).unwrap_or(""),

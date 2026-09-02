@@ -434,6 +434,10 @@ pub struct GuardedDoor {
     store: PgStore,
     admin: Option<GatewayAdmin>,
     cache: Mutex<HashMap<String, Reading>>,
+    /// The resolved limits per coworker, for `fresh_ms`: resolving them is four or five reads,
+    /// and a tool loop of twenty calls would otherwise pay a hundred to learn "no limits"
+    /// twenty times. A limit written on the admin page shows up within the freshness window.
+    limits_cache: Mutex<HashMap<String, (SpendLimit, i64)>>,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
     /// a test that counts reads sets it to zero.
     fresh_ms: i64,
@@ -454,8 +458,24 @@ impl GuardedDoor {
             store,
             admin,
             cache: Mutex::new(HashMap::new()),
+            limits_cache: Mutex::new(HashMap::new()),
             fresh_ms: FRESH_MS,
         }
+    }
+
+    async fn limits_for(&self, coworker: &CoworkerId) -> Result<SpendLimit, String> {
+        if self.fresh_ms > 0
+            && let Ok(cache) = self.limits_cache.lock()
+            && let Some((limits, at_ms)) = cache.get(coworker.as_str())
+            && now_ms() - *at_ms <= self.fresh_ms
+        {
+            return Ok(limits.clone());
+        }
+        let limits = effective_limits(&self.store, coworker).await?;
+        if let Ok(mut cache) = self.limits_cache.lock() {
+            cache.insert(coworker.as_str().to_string(), (limits.clone(), now_ms()));
+        }
+        Ok(limits)
     }
 
     /// Reuse a reading for this long. Zero ⇒ every call reads the meter — for tests that assert
@@ -619,9 +639,7 @@ impl ModelDoor for GuardedDoor {
             return self.inner.stream(request).await;
         };
         let coworker = CoworkerId::from_stored(scope);
-        let limits = effective_limits(&self.store, &coworker)
-            .await
-            .map_err(|error| {
+        let limits = self.limits_for(&coworker).await.map_err(|error| {
                 tracing::error!(%error, coworker = %coworker.as_str(), "spend guard: limits could not be read");
                 ModelError::SpendCap(format!(
                     "This coworker's spend limits could not be read ({error}); the turn is held."

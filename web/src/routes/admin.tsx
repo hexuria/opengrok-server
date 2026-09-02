@@ -25,6 +25,12 @@ import {
   setMemberSpendLimit,
   setCoworkerSpendLimit,
   type SpendLimit,
+  listTemplates,
+  createTemplate,
+  updateTemplate,
+  deleteTemplate,
+  type CoworkerTemplate,
+  type TemplateInput,
   setGatewayKeyQuota,
   setOrgMode,
   testBoxConnection,
@@ -829,6 +835,263 @@ function SpendLimitsCard() {
   );
 }
 
+/** One template's fields; blank limits mean "this template says nothing about that window". */
+function TemplateEditor({
+  tools,
+  initial,
+  onSave,
+  saveLabel,
+}: {
+  tools: string[];
+  initial: TemplateInput;
+  onSave: (input: TemplateInput) => Promise<unknown>;
+  saveLabel: string;
+}) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState<TemplateInput>(initial);
+  const save = useMutation({
+    mutationFn: () =>
+      onSave({
+        ...draft,
+        name: draft.name.trim(),
+        description: draft.description.trim(),
+        model: draft.model && draft.model.trim() ? draft.model.trim() : null,
+        limits: {
+          fiveHourUsd: draft.limits.fiveHourUsd?.trim() ? draft.limits.fiveHourUsd.trim() : null,
+          sevenDayUsd: draft.limits.sevenDayUsd?.trim() ? draft.limits.sevenDayUsd.trim() : null,
+          monthUsd: draft.limits.monthUsd?.trim() ? draft.limits.monthUsd.trim() : null,
+        },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "templates"] });
+      queryClient.invalidateQueries({ queryKey: ["templates"] });
+      if (saveLabel === "Create") setDraft(initial);
+    },
+  });
+  const toggle = (list: string[], tool: string) =>
+    list.includes(tool) ? list.filter((t) => t !== tool) : [...list, tool];
+  return (
+    <div className="stack">
+      <span className="row">
+        <input
+          type="text"
+          value={draft.name}
+          onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+          placeholder="Name"
+          aria-label="Template name"
+        />
+        <input
+          type="text"
+          value={draft.model ?? ""}
+          onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+          placeholder="Route (blank = deployment default)"
+          aria-label="Template route"
+        />
+      </span>
+      <input
+        type="text"
+        value={draft.description}
+        onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+        placeholder="Description (the coworker's profile)"
+        aria-label="Template description"
+      />
+      <span className="row">
+        {tools.map((tool) => (
+          <label key={tool}>
+            <input
+              type="checkbox"
+              checked={draft.tools.includes(tool)}
+              onChange={() =>
+                setDraft({
+                  ...draft,
+                  tools: toggle(draft.tools, tool),
+                  needsApproval: draft.needsApproval.filter((t) => t !== tool || !draft.tools.includes(tool)),
+                })
+              }
+            />{" "}
+            {tool}
+            {draft.tools.includes(tool) ? (
+              <label className="muted">
+                {" "}
+                <input
+                  type="checkbox"
+                  checked={draft.needsApproval.includes(tool)}
+                  onChange={() => setDraft({ ...draft, needsApproval: toggle(draft.needsApproval, tool) })}
+                />{" "}
+                ask first
+              </label>
+            ) : null}
+          </label>
+        ))}
+      </span>
+      <span className="row">
+        <input
+          type="text"
+          value={draft.limits.fiveHourUsd ?? ""}
+          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, fiveHourUsd: e.target.value } })}
+          placeholder="5 h USD"
+          aria-label="Template 5-hour limit"
+          style={{ width: "6rem" }}
+        />
+        <input
+          type="text"
+          value={draft.limits.sevenDayUsd ?? ""}
+          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, sevenDayUsd: e.target.value } })}
+          placeholder="7 d USD"
+          aria-label="Template 7-day limit"
+          style={{ width: "6rem" }}
+        />
+        <input
+          type="text"
+          value={draft.limits.monthUsd ?? ""}
+          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, monthUsd: e.target.value } })}
+          placeholder="month USD"
+          aria-label="Template monthly limit"
+          style={{ width: "6rem" }}
+        />
+        <button onClick={() => save.mutate()} disabled={save.isPending || !draft.name.trim()}>
+          {saveLabel}
+        </button>
+        {save.error ? <span className="error">{errorText(save.error, "could not save")}</span> : null}
+      </span>
+    </div>
+  );
+}
+
+const EMPTY_TEMPLATE: TemplateInput = {
+  name: "",
+  description: "",
+  model: null,
+  tools: ["shell", "read_file", "write_file"],
+  needsApproval: [],
+  limits: {},
+};
+
+function TemplateRow({ template, tools }: { template: CoworkerTemplate; tools: string[] }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const remove = useMutation({
+    mutationFn: () => deleteTemplate(template.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "templates"] });
+      queryClient.invalidateQueries({ queryKey: ["templates"] });
+    },
+  });
+  const limits = [
+    template.limits.fiveHourUsd ? `$${template.limits.fiveHourUsd} / 5 h` : null,
+    template.limits.sevenDayUsd ? `$${template.limits.sevenDayUsd} / 7 d` : null,
+    template.limits.monthUsd ? `$${template.limits.monthUsd} / month` : null,
+  ].filter((x) => x != null);
+  return (
+    <>
+      <tr>
+        <td>
+          <strong>{template.name}</strong>
+          {template.description ? <span className="muted"> — {template.description}</span> : null}
+        </td>
+        <td>
+          <code>{template.model ?? "default"}</code>
+        </td>
+        <td>
+          {template.tools.join(", ") || "talk only"}
+          {template.needsApproval.length > 0 ? (
+            <span className="muted"> (ask first: {template.needsApproval.join(", ")})</span>
+          ) : null}
+        </td>
+        <td>{limits.length > 0 ? limits.join(", ") : <span className="muted">none</span>}</td>
+        <td>
+          <span className="row">
+            <button onClick={() => setEditing((open) => !open)}>{editing ? "Close" : "Edit"}</button>
+            <button onClick={() => remove.mutate()} disabled={remove.isPending}>
+              Delete
+            </button>
+          </span>
+          {remove.error ? <p className="error">{errorText(remove.error, "could not delete")}</p> : null}
+        </td>
+      </tr>
+      {editing ? (
+        <tr>
+          <td colSpan={5}>
+            <TemplateEditor
+              tools={tools}
+              initial={{
+                name: template.name,
+                description: template.description,
+                model: template.model,
+                tools: template.tools,
+                needsApproval: template.needsApproval,
+                limits: template.limits,
+              }}
+              onSave={(input) => updateTemplate(template.id, input)}
+              saveLabel="Save"
+            />
+            <p className="muted">
+              Coworkers already hired from this template keep what they were hired with.
+            </p>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Coworker templates: a type the admin writes once — route, tools, what needs a human yes,
+ * spend limits — that members pick when they hire. What it says is copied to the coworker at
+ * hire; editing or deleting the template changes no running coworker.
+ */
+function TemplatesCard() {
+  const templates = useQuery({ queryKey: ["admin", "templates"], queryFn: listTemplates, retry: false });
+  if (templates.error instanceof ApiError && templates.error.status === 403) {
+    return (
+      <section className="card">
+        <h2>Coworker templates</h2>
+        <p className="muted">Admins only — you do not manage this organization.</p>
+      </section>
+    );
+  }
+  const tools = templates.data?.tools ?? EMPTY_TEMPLATE.tools;
+  return (
+    <section className="card">
+      <h2>Coworker templates</h2>
+      <p className="muted">
+        A coworker type: route, tools, what needs a human yes, spend limits. Members pick one
+        when they hire; what it says is copied to the coworker then and there.
+      </p>
+      {templates.isLoading ? (
+        <p className="muted">Loading…</p>
+      ) : templates.error ? (
+        <p className="error">{errorText(templates.error, "could not load templates")}</p>
+      ) : (
+        <div className="stack">
+          {templates.data && templates.data.templates.length > 0 ? (
+            <table>
+              <thead>
+                <tr>
+                  <th>Template</th>
+                  <th>Route</th>
+                  <th>Tools</th>
+                  <th>Limits</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {templates.data.templates.map((t) => (
+                  <TemplateRow key={t.id} template={t} tools={tools} />
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">No templates yet.</p>
+          )}
+          <h3>New template</h3>
+          <TemplateEditor tools={tools} initial={EMPTY_TEMPLATE} onSave={createTemplate} saveLabel="Create" />
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function AdminPage() {
   return (
     <AuthedFrame requireAdmin>
@@ -837,6 +1100,7 @@ export function AdminPage() {
           <UsersCard />
           <GatewayAccessCard />
           <SpendLimitsCard />
+          <TemplatesCard />
           <ComputersCard />
           <DomainsCard />
           <InvitesCard />
