@@ -1564,6 +1564,14 @@ pub async fn resolve_auto_review_approval(
     if let Some(pending) = pending {
         let outcome = if approved {
             opengrok_harness::ResumeOutcome::Approved
+        } else if pending.reason == opengrok_core::run::SuspendReason::PolicyApproval {
+            // The refusal names the rule, so the model (and the transcript) say why rather than
+            // "declined" alone: this was the coworker's policy asking, not the judge.
+            opengrok_harness::ResumeOutcome::Refused(format!(
+                "the user declined this on the approval card: the coworker's policy needs a \
+                 person's yes before it may run {}",
+                pending.tool
+            ))
         } else {
             opengrok_harness::ResumeOutcome::Refused(
                 "the user declined this on the auto-review card".to_string(),

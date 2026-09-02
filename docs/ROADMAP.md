@@ -277,7 +277,12 @@ the proof, not construction.
   the gate; `resolveLocalToolPermission` settles exec-consent only. The MCP door raises the same
   card for a policy ask and remembers its yes as a GATE yes for the retry.
   `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → desktop verb → finished
-  run → gate yes remembered. Plan: `plan-slice16-later.md` Part A. *(this commit)*
+  run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
+  computer: hire → grant → turn suspends → card in the transcript → approved runs the command
+  on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
+  runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
+  `verification/policy-card/` (the card with the grant's reason verbatim, Allow once, the run
+  continues). Plan: `plan-slice16-later.md` Part A. (`8580a54` + follow-up)
 - [ ] **16.later** OAuth 2.1 on /mcp — `plan-slice16-later.md` Part B: an embedded authorization
   server under `/oauth/mcp/*` whose token is a bot key; waits on TLS in front of the dev server
   (`setup/tls.md`). Reverse-exec stays excluded from MCP. The org-key mint console surface
@@ -468,4 +473,8 @@ Listing them as pending would make this tracker lie about how far away done is.
 - [ ] **Rights review — now OVERDUE rather than blocking**: the operator published the repo on
   1 Sep 2026 with the review still outstanding (`LEGAL.md` status note).
 - [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
-  verified working through the same gateway.
+  verified working through the same gateway. **And it does not tool-call through the gateway**
+  (found 2 Sep 2026 capturing the policy card: five runs, zero `TOOL_*` events, shell requests
+  answered from text with made-up output). A coworker pinned to it cannot use its computer, and
+  no policy or auto-review gate ever fires for it. xai/grok-4.6 emits real tool calls; pin a
+  coworker there (slice 18) until this is resolved upstream.

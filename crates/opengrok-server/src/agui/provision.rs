@@ -61,6 +61,20 @@ pub async fn lookup_provider(
     org_id: Option<&str>,
     kind: &str,
 ) -> ProviderLookup {
+    // The deployment's own local-docker provider (OG_COMPUTER at boot; a stand-in in tests)
+    // serves that kind directly: a Docker provider carries no per-org state, so this is the same
+    // computer the arm below would build, and a test can hand the run path one that records what
+    // ran. NEVER for "ascii": that provider is built from the ORG's sealed key, and the boot-time
+    // one (from OG_BOX_API_KEY) would silently run one org's boxes on another's account.
+    if let Some(computer) = state.computer.as_ref()
+        && kind == "local-docker"
+        && computer.kind() == kind
+    {
+        return ProviderLookup {
+            computer: Some(computer.clone()),
+            error: None,
+        };
+    }
     match kind {
         "ascii" => lookup_ascii(state, org_id).await,
         "local-docker" => ProviderLookup {
