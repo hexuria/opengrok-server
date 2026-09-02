@@ -93,6 +93,10 @@ The milestone that proves the port; everything after it is breadth, not risk.
 - [x] **8.reply** A reply keeps its link (`replyToId` on `sendPrompt` → `replyTo` on the user's
   entry, the echo, and the answer through every rebuild), and the model reads the quoted message
   as one line ahead of the prompt; a room member sees the same. `against_reply_to.rs`. #42.
+  Proven on the desktop over CDP against the 2 Sep 10:11Z dev server: the sent bubble keeps its
+  "↩ quoted" header after the stream echo, the answer carries the same header, and the model,
+  asked "in five words: what did I ask for in the message I am replying to?", answered "You asked
+  for dad jokes." Evidence with screenshots: hexuria/opengrok#51.
 - [x] **8.2** The two SSE shapes that carry an answer: `transcript` `appended`/`updated` (user
   echo carrying `clientNonce`, streaming placeholder, final update) and `agent-upserted` pulsing
   `isRunning` — every frame stamped `ordered: {replicaKey, epoch, sequence}`, plus an `agents`
