@@ -68,9 +68,10 @@ open-ai-gateway #50 the per-key usage endpoint #32 reads. Each PR body carries i
 decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinating-noodle.md`
 (session-local) — the order was hardening → caps → a rooms plan.
 
-1. **Rooms** — [`plan-rooms.md`](plan-rooms.md), a plan for review, no code: groups first (a
-   coworker with members, the client's own orchestrator transcribed), shared rooms parked. Its
-   first slice is a one-afternoon transcription fix to `getSharingState`.
+1. **Rooms** — [`plan-rooms.md`](plan-rooms.md): the sharing verbs answer in the client's
+   shapes (#35) and groups are built (a coworker with members, the client's own orchestrator
+   transcribed, `gateway/group.rs`). Left: a card raised inside a member's turn, and shared
+   rooms, parked until groups have been used.
 2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation;
    per-key admin scopes so a partner credential is not a full gateway admin.
 3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +

@@ -581,6 +581,7 @@ pub async fn repin_coworker(
         model: after.model.clone(),
         box_id: after.box_id.clone(),
         retired: after.retired,
+        members: after.members.clone(),
         updated_at_ms: at_ms,
     };
     if state
@@ -681,6 +682,7 @@ pub async fn hire(
         model: coworker.model.clone(),
         box_id: coworker.computer().cloned(),
         retired: coworker.retired,
+        members: coworker.members.clone(),
         updated_at_ms: at_ms,
     };
 

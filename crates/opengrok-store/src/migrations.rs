@@ -601,6 +601,8 @@ create table if not exists coworker_template_use (
 );
 create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
+-- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.
+alter table coworker_view add column if not exists members jsonb not null default '[]'::jsonb;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

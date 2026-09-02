@@ -47,8 +47,8 @@ pub fn summary(view: &CoworkerView) -> serde_json::Value {
         "notifyOnUpdatesEnabled": true,
         "isHiddenFromSidebar": false,
         "origin": "user",
-        "isGroup": false,
-        "memberIds": [],
+        "isGroup": !view.members.is_empty(),
+        "memberIds": view.members.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
         "conversationPartnerIds": []
     })
 }
@@ -68,6 +68,7 @@ mod tests {
             model: "gpt-5.6-luna".to_string(),
             box_id: None,
             retired: false,
+            members: Vec::new(),
             updated_at_ms: 1_000,
         });
         assert_eq!(row["id"], "cw_1");

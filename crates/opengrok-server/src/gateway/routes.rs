@@ -517,9 +517,10 @@ async fn command(
         | "setAgentNotifyOnUpdates"
         | "setAgentHiddenFromSidebar"
         | "kickstartAgent" => reply(StatusCode::OK, Value::Null),
-        // Groups are not modelled yet; a readable refusal beats a summary that lies about one.
-        "createGroup" | "setGroupMembers" => {
-            refusal(400, "groups are not supported by this server yet")
+        // Groups (`plan-rooms.md` §2): a coworker with members; the createAgent reply shape.
+        "createGroup" => wrap(super::lifecycle::create_group(&state, &args, &caller).await),
+        "setGroupMembers" => {
+            wrap(super::lifecycle::set_group_members(&state, &args, &caller).await)
         }
 
         // ---- P6: entry mutation ----

@@ -64,6 +64,10 @@ one and the first is invented. Fix in the first slice below.
 
 ## 2. Groups on the server
 
+*Built 2 Sep 2026 (`gateway/group.rs`, `tests/against_groups.rs`) as written below, with one
+gap kept honest: a card raised inside a member's turn ends that member's turn with nothing said,
+and the room does not yet show the card.*
+
 ### 2.1 What a group is
 
 **A group is a coworker with members** — not a new aggregate. Reasons: the client already treats it

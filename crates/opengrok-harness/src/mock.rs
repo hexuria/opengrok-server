@@ -33,6 +33,10 @@ pub struct MockDoor {
     /// starts with `JUDGE_MARKER`). Ordinary requests are unaffected, so a mock-driven turn can
     /// reach every rung of the ladder with no provider and no spend.
     judge_verdict: Option<String>,
+    /// A group member: on a room turn (a system prompt that begins "You are …, one participant")
+    /// it says "{name} here" through the `SendMessage` tool, then stops. Outside a room it
+    /// echoes. What a test needs to see two members speak in turn, distinguishably.
+    room_speaker: bool,
 }
 
 impl MockDoor {
@@ -56,7 +60,28 @@ impl MockDoor {
             fail_with: None,
             once_then_answer: false,
             judge_verdict: None,
+            room_speaker: false,
         }
+    }
+
+    /// A door that behaves as a group member: on a room turn it delivers "{name} here" with the
+    /// room's `SendMessage` tool and then stops; anywhere else it echoes. The name comes from the
+    /// system prompt the orchestrator wrote, so two members speak distinguishably from ONE door.
+    pub fn room_speaker() -> Self {
+        Self {
+            room_speaker: true,
+            ..Self::default()
+        }
+    }
+
+    /// "You are Ada, one participant in a group chat …" → `Ada`.
+    fn room_member_name(request: &ModelRequest) -> Option<String> {
+        let system = request.system.as_deref()?;
+        let rest = system.strip_prefix("You are ")?;
+        let (name, tail) = rest.split_once(',')?;
+        tail.trim_start()
+            .starts_with("one participant")
+            .then(|| name.to_string())
     }
 
     /// A door that asks to run a shell command, then stops.
@@ -87,6 +112,7 @@ impl MockDoor {
             // Asks once, then answers — like a turn that actually ends.
             once_then_answer: true,
             judge_verdict: None,
+            room_speaker: false,
         }
     }
 
@@ -96,6 +122,7 @@ impl MockDoor {
             fail_with: Some(message.into()),
             once_then_answer: false,
             judge_verdict: None,
+            room_speaker: false,
         }
     }
 
@@ -148,7 +175,27 @@ impl ModelDoor for MockDoor {
             .iter()
             .any(|message| message.content.contains("[tool "));
 
-        let script = if self.script.is_empty() {
+        let script = if self.room_speaker
+            && let Some(name) = Self::room_member_name(&request)
+        {
+            if already_ran {
+                vec![ModelDelta::Text("(that is all from me)".to_string())]
+            } else {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: format!("room-{}", name.to_lowercase()),
+                        name: "SendMessage".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: format!("room-{}", name.to_lowercase()),
+                        delta: serde_json::json!({ "content": format!("{name} here") }).to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: format!("room-{}", name.to_lowercase()),
+                    },
+                ]
+            }
+        } else if self.script.is_empty() {
             Self::echo_script(&request)
         } else if self.once_then_answer && already_ran {
             // The second round reads the tool result and replies, which is what ends the run.

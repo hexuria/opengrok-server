@@ -545,15 +545,19 @@ impl PgStore {
             .await?;
         }
 
+        let members = serde_json::to_value(&view.members)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         sqlx::query(
-            "insert into coworker_view (id, account_id, name, model, box_id, retired, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7)
+            "insert into coworker_view
+                (id, account_id, name, model, box_id, retired, updated_at_ms, members)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
              on conflict (id) do update set
                name = excluded.name,
                model = excluded.model,
                box_id = excluded.box_id,
                retired = excluded.retired,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               members = excluded.members",
         )
         .bind(view.id.as_str())
         .bind(account_id.as_str())
@@ -562,6 +566,7 @@ impl PgStore {
         .bind(view.box_id.as_ref().map(|id| id.as_str()))
         .bind(view.retired)
         .bind(view.updated_at_ms)
+        .bind(&members)
         .execute(&mut *tx)
         .await?;
 
@@ -572,7 +577,7 @@ impl PgStore {
     /// The roster, newest first — the order the client sorts by.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
-            "select id, name, model, box_id, retired, updated_at_ms
+            "select id, name, model, box_id, retired, updated_at_ms, members
              from coworker_view
              where account_id = $1 and retired = false
              order by updated_at_ms desc",
@@ -592,6 +597,10 @@ impl PgStore {
                         .map(BoxId::from_stored),
                     retired: row.try_get("retired")?,
                     updated_at_ms: row.try_get("updated_at_ms")?,
+                    members: serde_json::from_value(
+                        row.try_get::<serde_json::Value, _>("members")?,
+                    )
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                 })
             })
             .collect()

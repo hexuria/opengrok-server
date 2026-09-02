@@ -112,6 +112,7 @@ async fn seed_computerless_coworker(store: &PgStore, account: &AccountId) -> Cow
         model: coworker.model.clone(),
         box_id: None,
         retired: false,
+        members: Vec::new(),
         updated_at_ms: 2,
     };
     store

@@ -172,6 +172,7 @@ async fn hire(
         model: coworker.model.clone(),
         box_id: coworker.computer().cloned(),
         retired: false,
+        members: Vec::new(),
         updated_at_ms: at_ms,
     };
     if let Err(error) = state
@@ -311,6 +312,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
             model: after.model.clone(),
             box_id: after.box_id.clone(),
             retired: after.retired,
+            members: after.members.clone(),
             updated_at_ms: now_ms(),
         };
         let _ = state
@@ -349,6 +351,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
             model: after.model.clone(),
             box_id: after.box_id.clone(),
             retired: after.retired,
+            members: after.members.clone(),
             updated_at_ms: now_ms(),
         };
         let _ = state
@@ -415,6 +418,7 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
                 model: after.model.clone(),
                 box_id: after.box_id.clone(),
                 retired: after.retired,
+                members: after.members.clone(),
                 updated_at_ms: at_ms,
             };
             if state
@@ -1178,6 +1182,224 @@ pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Val
     ));
     emit_automations(state, coworker_id.as_str()).await;
     (200, Value::Null)
+}
+
+// ---- Groups (`plan-rooms.md` §2): a coworker with members ----
+
+/// The member list a group may hold, from what the client sent: de-duplicated, the group itself
+/// dropped, only the account's own living coworkers kept, no group inside a group (the client's
+/// own `assertMembersAreNotGroups`), capped at the client's `GROUP_MAX_MEMBERS`.
+async fn group_members(
+    state: &GatewayState,
+    account_id: &opengrok_core::id::AccountId,
+    requested: &[String],
+    exclude: Option<&str>,
+) -> Result<Vec<CoworkerId>, (u16, Value)> {
+    let Ok(roster) = state.agui.auth.store.coworkers_for(account_id).await else {
+        return Err((500, json!({ "error": "roster unavailable" })));
+    };
+    let mut nested = Vec::new();
+    let mut members: Vec<CoworkerId> = Vec::new();
+    for id in requested {
+        if exclude == Some(id.as_str()) || members.iter().any(|m| m.as_str() == id) {
+            continue;
+        }
+        let Some(view) = roster.iter().find(|view| view.id.as_str() == id) else {
+            // Somebody else's, retired, or made up: not a member, not an error — the client's
+            // own filter (`existing.has(id)`), transcribed.
+            continue;
+        };
+        if !view.members.is_empty() {
+            nested.push(id.clone());
+            continue;
+        }
+        members.push(view.id.clone());
+    }
+    if !nested.is_empty() {
+        return Err((
+            400,
+            json!({
+                "error": format!(
+                    "A group chat can only contain individual agents, not other group chats. \
+                     Remove the group chat{} from the member list.",
+                    if nested.len() == 1 { "" } else { "s" }
+                ),
+                "nestedGroupIds": nested,
+            }),
+        ));
+    }
+    members.truncate(opengrok_core::coworker::GROUP_MAX_MEMBERS);
+    Ok(members)
+}
+
+/// `createGroup {name, description, memberAgentIds}` → `{agent, transcript}`, the createAgent
+/// shape. A second create with the same member set answers the EXISTING group (the client's
+/// own rule: `isSameMemberSet`). A group has no computer, no key and no model of its own.
+pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    use opengrok_core::coworker::{Coworker, CoworkerCommand};
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Group")
+        .to_string();
+    let requested: Vec<String> = args
+        .get("memberAgentIds")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let members = match group_members(state, &account.id, &requested, None).await {
+        Ok(members) => members,
+        Err(refusal) => return refusal,
+    };
+    if members.is_empty() {
+        return (
+            400,
+            json!({ "error": "A group needs at least one existing member agent." }),
+        );
+    }
+    // The same members already make a group: that group, not a twin.
+    if let Ok(roster) = state.agui.auth.store.coworkers_for(&account.id).await
+        && let Some(existing) = roster.iter().find(|view| {
+            view.members.len() == members.len() && members.iter().all(|m| view.members.contains(m))
+        })
+    {
+        return agent_reply(state, existing.id.as_str()).await;
+    }
+    let id = CoworkerId::new();
+    let at_ms = now_ms();
+    let events = match Coworker::default().decide(CoworkerCommand::HireGroup {
+        name,
+        members,
+        at_ms,
+    }) {
+        Ok(events) => events,
+        Err(reason) => return (400, json!({ "error": reason.to_string() })),
+    };
+    let group = Coworker::replay(&events);
+    let view = opengrok_core::coworker::CoworkerView {
+        id: id.clone(),
+        name: group.name.clone(),
+        model: group.model.clone(),
+        box_id: None,
+        retired: false,
+        updated_at_ms: at_ms,
+        members: group.members.clone(),
+    };
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_coworker(&id, &account.id, 0, &events, &view)
+        .await
+    {
+        tracing::error!(%error, "createGroup could not hire the group");
+        return (500, json!({ "error": "hire failed" }));
+    }
+    let profile = json!({
+        "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
+        "title": "",
+        "avatarShape": "",
+        "avatarColor": "",
+    });
+    let _ = state
+        .agui
+        .auth
+        .store
+        .put_seamb_profile(&id, &profile, now_ms())
+        .await;
+    live::emit_roster(state).await;
+    agent_reply(state, id.as_str()).await
+}
+
+/// `setGroupMembers {id, memberAgentIds}` → the group's summary, or `null` when `id` is not one
+/// of the caller's groups. An empty cleaned list changes nothing (the client's rule) and still
+/// answers the summary.
+pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    use opengrok_core::coworker::CoworkerCommand;
+    let Some(id) = args.get("id").and_then(Value::as_str) else {
+        return (400, json!({ "error": "id is required" }));
+    };
+    let Some(account) = account(state, caller).await else {
+        return (200, Value::Null);
+    };
+    let coworker_id = CoworkerId::from_stored(id.to_string());
+    let Ok(roster) = state.agui.auth.store.coworkers_for(&account.id).await else {
+        return (500, json!({ "error": "roster unavailable" }));
+    };
+    if !roster
+        .iter()
+        .any(|view| view.id == coworker_id && !view.members.is_empty())
+    {
+        return (200, Value::Null);
+    }
+    let requested: Vec<String> = args
+        .get("memberAgentIds")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let members = match group_members(state, &account.id, &requested, Some(id)).await {
+        Ok(members) => members,
+        Err(refusal) => return refusal,
+    };
+    if !members.is_empty() {
+        let Ok((group, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
+            return (200, Value::Null);
+        };
+        let at_ms = now_ms();
+        let events = match group.decide(CoworkerCommand::SetMembers { members, at_ms }) {
+            Ok(events) => events,
+            Err(reason) => return (400, json!({ "error": reason.to_string() })),
+        };
+        let mut after = group;
+        for event in &events {
+            after.apply(event);
+        }
+        let view = opengrok_core::coworker::CoworkerView {
+            id: coworker_id.clone(),
+            name: after.name.clone(),
+            model: after.model.clone(),
+            box_id: None,
+            retired: false,
+            updated_at_ms: at_ms,
+            members: after.members.clone(),
+        };
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_coworker(&coworker_id, &account.id, seq, &events, &view)
+            .await
+        {
+            tracing::error!(%error, "setGroupMembers could not save");
+            return (500, json!({ "error": "save failed" }));
+        }
+        live::emit_roster(state).await;
+    }
+    let Ok(rows) = live::roster_rows(state).await else {
+        return (500, json!({ "error": "roster unavailable" }));
+    };
+    match rows.into_iter().find(|row| row["id"] == id) {
+        Some(summary) => (200, summary),
+        None => (200, Value::Null),
+    }
 }
 
 #[cfg(test)]

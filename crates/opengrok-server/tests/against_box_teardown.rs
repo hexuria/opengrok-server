@@ -119,6 +119,7 @@ async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (Cowo
         model: coworker.model.clone(),
         box_id: coworker.computer().cloned(),
         retired: false,
+        members: Vec::new(),
         updated_at_ms: 2,
     };
     state
@@ -145,6 +146,7 @@ async fn retire(state: &AgUiState, account: &AccountId, id: &CoworkerId) {
         model: after.model.clone(),
         box_id: after.box_id.clone(),
         retired: true,
+        members: Vec::new(),
         updated_at_ms: 9,
     };
     state
