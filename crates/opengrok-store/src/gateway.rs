@@ -398,6 +398,19 @@ pub struct NewMcpCall<'a> {
     pub at_ms: i64,
 }
 
+/// A coworker's own gateway key as WE record it: which key, whose coworker, and the cap as last
+/// set. The secret is sealed elsewhere (`secret_store`); this row is what the console and the
+/// run path look up first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoworkerKeyView {
+    pub coworker_id: String,
+    pub account_id: String,
+    pub key_id: String,
+    pub key_prefix: String,
+    pub quota_usd: Option<String>,
+    pub created_at_ms: i64,
+}
+
 /// A freshly minted key to record — attribution only; the secret is not here and never was.
 #[derive(Debug, Clone)]
 pub struct NewGatewayKey<'a> {
@@ -423,6 +436,17 @@ pub struct GatewayKeyView {
     pub label: String,
     pub revoked: bool,
     pub created_at_ms: i64,
+}
+
+fn coworker_key_row(row: sqlx::postgres::PgRow) -> StoreResult<CoworkerKeyView> {
+    Ok(CoworkerKeyView {
+        coworker_id: row.try_get("coworker_id")?,
+        account_id: row.try_get("account_id")?,
+        key_id: row.try_get("key_id")?,
+        key_prefix: row.try_get("key_prefix")?,
+        quota_usd: row.try_get("quota_usd")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+    })
 }
 
 fn gateway_key_row(row: sqlx::postgres::PgRow) -> StoreResult<GatewayKeyView> {
@@ -521,6 +545,27 @@ impl PgStore {
         Ok(())
     }
 
+    pub async fn insert_coworker_key(&self, view: &CoworkerKeyView) -> StoreResult<()> {
+        sqlx::query(
+            "insert into coworker_gateway_key
+                (coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (coworker_id) do update
+                set account_id = excluded.account_id, key_id = excluded.key_id,
+                    key_prefix = excluded.key_prefix, quota_usd = excluded.quota_usd,
+                    created_at_ms = excluded.created_at_ms",
+        )
+        .bind(&view.coworker_id)
+        .bind(&view.account_id)
+        .bind(&view.key_id)
+        .bind(&view.key_prefix)
+        .bind(&view.quota_usd)
+        .bind(view.created_at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// One coworker's door calls, newest first, scoped by the owning account so another
     /// account's coworker id answers nothing rather than somebody else's history.
     pub async fn mcp_calls_for(
@@ -551,6 +596,36 @@ impl PgStore {
                 })
             })
             .collect()
+    }
+
+    pub async fn coworker_key(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Option<CoworkerKeyView>> {
+        let row = sqlx::query(
+            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms
+             from coworker_gateway_key where coworker_id = $1",
+        )
+        .bind(coworker.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(coworker_key_row).transpose()
+    }
+
+    /// Forget the coworker's key row (retirement); the caller revokes on the gateway and drops
+    /// the sealed secret. Returns what was there so the caller knows which key to revoke.
+    pub async fn delete_coworker_key(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Option<CoworkerKeyView>> {
+        let row = sqlx::query(
+            "delete from coworker_gateway_key where coworker_id = $1
+             returning coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms",
+        )
+        .bind(coworker.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(coworker_key_row).transpose()
     }
 
     pub async fn insert_gateway_key(&self, key: &NewGatewayKey<'_>) -> StoreResult<()> {

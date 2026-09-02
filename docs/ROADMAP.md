@@ -429,21 +429,20 @@ REST ignored a requested model and stored the deployment default. Investigation:
   app's own create/update model field + picker; `auto_review_model` is a second deployment model
   a pin deliberately does not move; per-coworker spend caps (the gateway has no per-day cap, and
   metering a coworker natively means giving each its own gateway key).
-
-**Corrections this slice made to `plan-coworker-model-pins.md`** (kept because the doc is still
-the reference): its recommended default `oag/auto` is **refused on this deployment** — advertised
-in the catalogue, unservable on a route whose ladder has no matching credential, which is exactly
-why the probe exists; `Hire` had no validation to "follow"; `duplicateAgent` was an unlisted
-fourth create path; six sites read the pin (incl. autonomy and seam-B send), none cached, so
-`Repin` needed no change at any of them.
-
-## Slice 11+ — breadth (P5 → P10, in order)
-
-Per-tier, verified against the running client. Most of it adapts work that exists:
-P6 approvals ride slice 4's exactly-once answers, P8 MCP/skills ride `opengrok-plugins` and the
-vault, P9 automations ride slice 6's scheduler and monitor, P10 box lifecycle rides
-`opengrok-box`.
-
+- [x] **18.caps** Per-coworker spend limits (`plan-spend-policy.md`). A coworker hired by an org
+  member gets a gateway key of its OWN at hire (`spend.rs::ensure_key_for`; minted on the org's
+  principal as "coworker: Ada", sealed in the vault, attributed in `coworker_gateway_key` and
+  the org's key listing), so the gateway meters its spend apart from everybody else's. Limits
+  are the operator's three windows — rolling 5 hours, rolling 7 days, calendar month — authored
+  here (`spend_limit`: org default → member override → the coworker; the most specific value
+  per window wins; nothing set anywhere means nothing is metered) and evaluated by
+  `spend::GuardedDoor` before EACH model call from the gateway's windowed usage
+  (open-ai-gateway #50: sums and when each window frees up). At a limit the call is refused
+  with a sentence naming the window and when it frees up; a meter that cannot be read holds the
+  turn (two-second wait, a reading under a minute old stands in); a key that cannot be opened
+  holds it too. Admin dashboard "Spend limits" card writes them; the coworker page shows three
+  meters read-only. Retirement revokes the key. `tests/against_spend_caps.rs` walks it over a
+  stand-in gateway with the real `GatewayDoor` under the guard.
 - [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
 - [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its

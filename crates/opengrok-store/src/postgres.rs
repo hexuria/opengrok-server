@@ -1008,6 +1008,15 @@ impl PgStore {
     ///
     /// Used for the refresh token, which lives in its own row: it outlives the access token, and
     /// keeping them apart means rotating one does not disturb the other.
+    /// Drop a sealed secret by id. Idempotent: a secret already gone is the outcome asked for.
+    pub async fn delete_secret(&self, id: &str) -> StoreResult<()> {
+        sqlx::query("delete from secret_store where id = $1")
+            .bind(id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
     pub async fn put_secret(&self, id: &str, sealed: &Sealed, at_ms: i64) -> StoreResult<()> {
         sqlx::query(
             "insert into secret_store (id, nonce, ciphertext, updated_at_ms)

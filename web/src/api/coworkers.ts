@@ -50,6 +50,38 @@ export function listMcpCalls(id: string, limit = 20): Promise<McpCall[]> {
   return getJson<McpCall[]>(`/coworkers/${encodeURIComponent(id)}/mcp-calls?limit=${limit}`);
 }
 
+/** The three limits, each optional; an absent one means "that layer says nothing". */
+export interface SpendLimit {
+  fiveHourUsd?: string | null;
+  sevenDayUsd?: string | null;
+  monthUsd?: string | null;
+}
+
+/** One window's meter: used, the limit it is under, and when it next frees up (RFC 3339). */
+export interface WindowMeter {
+  window: "5h" | "7d" | "month";
+  usedUsd?: string | null;
+  limitUsd?: string | null;
+  freesAt?: string | null;
+}
+
+/**
+ * A coworker's spend: whether it is metered at all (a key of its own), why not when it is not,
+ * the limits it is under (org default → member → its own, most specific wins) and the three
+ * meters. Read-only here; the org admin writes limits on the admin page.
+ */
+export interface CoworkerSpend {
+  metered: boolean;
+  note?: string | null;
+  keyPrefix?: string | null;
+  limits: SpendLimit;
+  windows: WindowMeter[];
+}
+
+export function getSpend(id: string): Promise<CoworkerSpend> {
+  return getJson<CoworkerSpend>(`/coworkers/${encodeURIComponent(id)}/spend`);
+}
+
 export interface Catalogue {
   models: { id: string }[];
   /** Why the list is empty, when it is. An empty list is never silently "there are no models". */

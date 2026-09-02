@@ -197,3 +197,43 @@ export async function setGatewayBudget(monthlyBudgetUsd: string | null): Promise
 export function gatewayUsage(): Promise<GatewayUsage> {
   return getJson<GatewayUsage>("/admin/gateway/usage");
 }
+
+// ---- Spend limits: three windows, three scopes, the admin writes them ----
+
+/** The three limits, each optional; null or absent means "this layer says nothing". */
+export interface SpendLimit {
+  fiveHourUsd?: string | null;
+  sevenDayUsd?: string | null;
+  monthUsd?: string | null;
+}
+
+export interface SpendLimits {
+  org: SpendLimit | null;
+  members: { id: string; email: string; limits: SpendLimit | null }[];
+  coworkers: { id: string; name: string; ownerEmail: string; limits: SpendLimit | null }[];
+}
+
+export function getSpendLimits(): Promise<SpendLimits> {
+  return getJson<SpendLimits>("/admin/spend");
+}
+
+async function putLimit(path: string, limit: SpendLimit): Promise<void> {
+  const res = await request(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(limit),
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+}
+
+export function setOrgSpendLimit(limit: SpendLimit): Promise<void> {
+  return putLimit("/admin/spend/org", limit);
+}
+
+export function setMemberSpendLimit(accountId: string, limit: SpendLimit): Promise<void> {
+  return putLimit(`/admin/spend/members/${encodeURIComponent(accountId)}`, limit);
+}
+
+export function setCoworkerSpendLimit(coworkerId: string, limit: SpendLimit): Promise<void> {
+  return putLimit(`/admin/spend/coworkers/${encodeURIComponent(coworkerId)}`, limit);
+}

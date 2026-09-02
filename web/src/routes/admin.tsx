@@ -20,6 +20,11 @@ import {
   setAccountMode,
   setBoxKey,
   setGatewayBudget,
+  getSpendLimits,
+  setOrgSpendLimit,
+  setMemberSpendLimit,
+  setCoworkerSpendLimit,
+  type SpendLimit,
   setGatewayKeyQuota,
   setOrgMode,
   testBoxConnection,
@@ -30,6 +35,12 @@ import {
   type SharingMode,
 } from "../api/admin";
 import { ApiError } from "../api/client";
+
+function errorText(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) return error.message || fallback;
+  if (error instanceof Error) return error.message || fallback;
+  return fallback;
+}
 import type { Account } from "../api/account";
 import { AuthedFrame } from "../components/authed-frame";
 
@@ -680,6 +691,144 @@ function GatewayAccessCard() {
   );
 }
 
+/** Three inputs and a Save: the row's limits, or blank for "follows the layer above". */
+function LimitEditor({
+  label,
+  current,
+  onSave,
+}: {
+  label: string;
+  current: SpendLimit | null;
+  onSave: (limit: SpendLimit) => Promise<void>;
+}) {
+  const queryClient = useQueryClient();
+  const [five, setFive] = useState(current?.fiveHourUsd ?? "");
+  const [seven, setSeven] = useState(current?.sevenDayUsd ?? "");
+  const [month, setMonth] = useState(current?.monthUsd ?? "");
+  const save = useMutation({
+    mutationFn: () =>
+      onSave({
+        fiveHourUsd: five.trim() ? five.trim() : null,
+        sevenDayUsd: seven.trim() ? seven.trim() : null,
+        monthUsd: month.trim() ? month.trim() : null,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "spend"] });
+      queryClient.invalidateQueries({ queryKey: ["spend"] });
+    },
+  });
+  const field = (value: string, set: (v: string) => void, name: string) => (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => set(e.target.value)}
+      placeholder="—"
+      aria-label={`${name} limit for ${label}`}
+      style={{ width: "6rem" }}
+    />
+  );
+  return (
+    <span className="row">
+      {field(five, setFive, "5-hour")}
+      {field(seven, setSeven, "7-day")}
+      {field(month, setMonth, "monthly")}
+      <button onClick={() => save.mutate()} disabled={save.isPending}>
+        Save
+      </button>
+      {save.error ? <span className="error">{errorText(save.error, "could not save")}</span> : null}
+    </span>
+  );
+}
+
+/**
+ * Spend limits: a rolling 5-hour window, a rolling 7-day window and the calendar month, in
+ * USD, at three scopes. The org default applies to every coworker; a member's row overrides it
+ * for that member's coworkers; a coworker's row overrides both. Per window, the most specific
+ * value wins and a blank means "follows the layer above". No limits anywhere means nothing is
+ * metered and nothing is refused. Enforced before every model call from the gateway's ledger.
+ */
+function SpendLimitsCard() {
+  const limits = useQuery({ queryKey: ["admin", "spend"], queryFn: getSpendLimits, retry: false });
+  if (limits.error instanceof ApiError && limits.error.status === 403) {
+    return (
+      <section className="card">
+        <h2>Spend limits</h2>
+        <p className="muted">Admins only — you do not manage this organization.</p>
+      </section>
+    );
+  }
+  return (
+    <section className="card">
+      <h2>Spend limits</h2>
+      <p className="muted">
+        USD per rolling 5 hours, per rolling 7 days, and per calendar month. Blank follows the
+        layer above; nothing set anywhere means no limit. A coworker at a limit has its turn
+        refused with a sentence that names the window and when it frees up.
+      </p>
+      {limits.isLoading ? (
+        <p className="muted">Loading…</p>
+      ) : limits.error ? (
+        <p className="error">{errorText(limits.error, "could not load limits")}</p>
+      ) : limits.data ? (
+        <div className="stack">
+          <div>
+            <h3>Org default</h3>
+            <LimitEditor label="the org" current={limits.data.org} onSave={setOrgSpendLimit} />
+          </div>
+          <div>
+            <h3>Members</h3>
+            <table>
+              <thead>
+                <tr>
+                  <th>Member</th>
+                  <th>5 h / 7 d / month</th>
+                </tr>
+              </thead>
+              <tbody>
+                {limits.data.members.map((m) => (
+                  <tr key={m.id}>
+                    <td>{m.email}</td>
+                    <td>
+                      <LimitEditor label={m.email} current={m.limits} onSave={(l) => setMemberSpendLimit(m.id, l)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h3>Coworkers</h3>
+            {limits.data.coworkers.length === 0 ? (
+              <p className="muted">No coworkers hired yet.</p>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Coworker</th>
+                    <th>Hired by</th>
+                    <th>5 h / 7 d / month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {limits.data.coworkers.map((c) => (
+                    <tr key={c.id}>
+                      <td>{c.name}</td>
+                      <td>{c.ownerEmail}</td>
+                      <td>
+                        <LimitEditor label={c.name} current={c.limits} onSave={(l) => setCoworkerSpendLimit(c.id, l)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function AdminPage() {
   return (
     <AuthedFrame requireAdmin>
@@ -687,6 +836,7 @@ export function AdminPage() {
         <div className="stack">
           <UsersCard />
           <GatewayAccessCard />
+          <SpendLimitsCard />
           <ComputersCard />
           <DomainsCard />
           <InvitesCard />

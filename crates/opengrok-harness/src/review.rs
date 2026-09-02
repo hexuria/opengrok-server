@@ -120,6 +120,8 @@ pub fn parse_verdict(text: &str) -> ReviewVerdict {
 impl ReviewJudge for ModelJudge {
     async fn judge(&self, ask: ReviewAsk<'_>) -> ReviewVerdict {
         let request = ModelRequest {
+            gateway_key: None,
+            spend_scope: None,
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage {

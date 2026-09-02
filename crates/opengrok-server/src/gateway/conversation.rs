@@ -869,6 +869,8 @@ pub(crate) async fn run_turn(
         model: Some(model.clone()),
     };
     let request = ModelRequest {
+        gateway_key: crate::spend::key_for(&state.agui, &coworker_id).await,
+        spend_scope: Some(coworker_id.as_str().to_string()),
         model,
         // A coworker gets a computer of its own, and the user has theirs. Nothing else told the model
         // these are different machines, so it would run a command on its box and call the box "your
@@ -1648,6 +1650,8 @@ async fn resume_gateway_run(
         model: run.model.clone(),
     };
     let request = ModelRequest {
+        gateway_key: crate::spend::key_for(&state.agui, &coworker_id).await,
+        spend_scope: Some(coworker_id.as_str().to_string()),
         model: run.pin_for_resume(&coworker.model),
         system: None,
         messages: crate::agui::routes::conversation_from(&run),

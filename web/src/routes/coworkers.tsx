@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  getSpend,
   hireCoworker,
   listCoworkers,
   listMcpCalls,
@@ -125,6 +126,56 @@ function McpCalls({ coworker }: { coworker: Coworker }) {
   );
 }
 
+/** "14:32 UTC" for a rolling window, "1 Oct" for the month. */
+function whenText(window: string, iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  if (window === "month") {
+    return `resets ${at.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`;
+  }
+  return `frees up ${at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+const WINDOW_LABEL: Record<string, string> = { "5h": "5 h", "7d": "7 d", month: "month" };
+
+/**
+ * The coworker's three meters. Limits are the admin's to write (admin page); a member sees
+ * used / limit and when each window next frees up, so the window in the way is visible before
+ * it is hit. A coworker with no key of its own says why it is not metered.
+ */
+function SpendCell({ coworker }: { coworker: Coworker }) {
+  const spend = useQuery({
+    queryKey: ["spend", coworker.id],
+    queryFn: () => getSpend(coworker.id),
+    retry: false,
+  });
+  if (spend.isLoading) return <span className="muted">…</span>;
+  if (spend.error) return <span className="error">{errorText(spend.error, "could not load spend")}</span>;
+  const data = spend.data;
+  if (!data) return null;
+  const limited = data.windows.some((w) => w.limitUsd);
+  if (!data.metered) {
+    return <span className="muted">Not metered: {data.note ?? "no key of its own"}</span>;
+  }
+  return (
+    <span className="stack">
+      {data.windows.map((w) => (
+        <span key={w.window}>
+          <strong>{WINDOW_LABEL[w.window] ?? w.window}</strong>{" "}
+          ${w.usedUsd ?? "?"}
+          {w.limitUsd ? ` / $${w.limitUsd}` : limited ? " / no limit" : ""}
+          {w.limitUsd && whenText(w.window, w.freesAt) ? (
+            <span className="muted"> ({whenText(w.window, w.freesAt)})</span>
+          ) : null}
+        </span>
+      ))}
+      {!limited ? <span className="muted">No limits set; the org admin can set them.</span> : null}
+      {data.note ? <span className="muted">{data.note}</span> : null}
+    </span>
+  );
+}
+
 function CoworkerRow({ coworker, models }: { coworker: Coworker; models: string[] }) {
   const queryClient = useQueryClient();
   const [model, setModel] = useState(coworker.model);
@@ -168,10 +219,13 @@ function CoworkerRow({ coworker, models }: { coworker: Coworker; models: string[
           </button>
         </span>
       </td>
+      <td>
+        <SpendCell coworker={coworker} />
+      </td>
     </tr>
     {showCalls ? (
       <tr>
-        <td colSpan={4}>
+        <td colSpan={5}>
           <McpCalls coworker={coworker} />
         </td>
       </tr>
@@ -245,6 +299,7 @@ export function CoworkersPage() {
                     <th>Route</th>
                     <th>Change to</th>
                     <th />
+                    <th>Spend</th>
                   </tr>
                 </thead>
                 <tbody>
