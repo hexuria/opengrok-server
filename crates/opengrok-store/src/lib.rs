@@ -29,6 +29,7 @@ pub mod postgres;
 pub mod vault;
 
 pub use autonomy::{DueSchedule, LogEvent};
+pub use gateway::NewGatewayKey;
 pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use vault::{Sealed, Vault};
 

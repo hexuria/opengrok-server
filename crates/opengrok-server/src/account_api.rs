@@ -739,31 +739,80 @@ async fn list_gateway_keys(
         Ok(pair) => pair,
         Err(refusal) => return refusal,
     };
-    match state.store.gateway_keys_for_org(org_id.as_str()).await {
-        Ok(rows) => {
-            let keys: Vec<Value> = rows
-                .into_iter()
-                .map(|row| {
-                    json!({
-                        "id": row.key_id,
-                        "memberId": row.member_account_id,
-                        // The prefix is the only part of a key that is safe to show, and it is
-                        // what an operator can match against a gateway log during an incident.
-                        "keyPrefix": row.key_prefix,
-                        "label": row.label,
-                        "revoked": row.revoked,
-                        "createdAtMs": row.created_at_ms,
-                    })
-                })
-                .collect();
-            Json(json!({ "keys": keys })).into_response()
-        }
-        Err(_) => (
+    let Ok(rows) = state.store.gateway_keys_for_org(org_id.as_str()).await else {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             "could not list gateway keys",
         )
-            .into_response(),
+            .into_response();
+    };
+
+    // RECONCILE AGAINST THE AUTHORITY. Our rows are attribution (which member a key belongs
+    // to); whether a key still authenticates is the gateway's fact. A revoke that landed in the
+    // gateway but failed to mirror here left the console reading "active" (ROADMAP 17.later);
+    // now the listing asks the gateway, heals its own rows, and also shows keys the gateway
+    // holds for this org's principal that we never recorded (a mint whose attribution insert
+    // failed). Unreachable gateway ⇒ the local rows, marked `reconciled: false`, rather than an
+    // empty list that reads as "no keys" (CLAUDE.md #3).
+    let mut keys: Vec<Value> = Vec::with_capacity(rows.len());
+    let mut reconciled = false;
+    let mut listed = None;
+    if let Some(admin) = state.gateway_admin.as_ref() {
+        match admin.org_keys(org_id.as_str()).await {
+            Ok(remote) => {
+                reconciled = true;
+                listed = Some(remote);
+            }
+            Err(error) => {
+                tracing::warn!(%error, org = %org_id, "key listing served unreconciled: the gateway did not answer");
+            }
+        }
     }
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        let mut revoked = row.revoked;
+        if let Some(remote) = listed.as_ref() {
+            seen.insert(row.key_id.clone());
+            if let Some(key) = remote.iter().find(|key| key.id == row.key_id)
+                && !key.active
+                && !row.revoked
+            {
+                // The gateway already refuses this key; the row is what was stale.
+                tracing::info!(key_id = %row.key_id, "healing a key the gateway revoked but the mirror missed");
+                let _ = state
+                    .store
+                    .mark_gateway_key_revoked(&row.key_id, org_id.as_str())
+                    .await;
+                revoked = true;
+            }
+        }
+        keys.push(json!({
+            "id": row.key_id,
+            "memberId": row.member_account_id,
+            // The prefix is the only part of a key that is safe to show, and it is
+            // what an operator can match against a gateway log during an incident.
+            "keyPrefix": row.key_prefix,
+            "label": row.label,
+            "revoked": revoked,
+            "createdAtMs": row.created_at_ms,
+            "unattributed": false,
+        }));
+    }
+    if let Some(remote) = listed {
+        for key in remote.into_iter().filter(|key| !seen.contains(&key.id)) {
+            // Real in the gateway, unknown here: shown so it can be revoked, never hidden.
+            keys.push(json!({
+                "id": key.id,
+                "memberId": Value::Null,
+                "keyPrefix": key.key_prefix,
+                "label": key.name,
+                "revoked": !key.active,
+                "createdAtMs": Value::Null,
+                "unattributed": true,
+            }));
+        }
+    }
+    Json(json!({ "keys": keys, "reconciled": reconciled })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -774,6 +823,11 @@ struct MintKeyRequest {
     /// only by the org's own monthly budget.
     #[serde(rename = "quotaUsd")]
     quota_usd: Option<String>,
+    /// The console's nonce for this press. A repeat with the same nonce (a reply lost to a
+    /// timeout, a double click) finds the key that press already minted instead of minting a
+    /// second real one. Optional: a caller that sends none gets the old non-idempotent mint.
+    #[serde(rename = "clientNonce")]
+    client_nonce: Option<String>,
 }
 
 /// `POST /admin/gateway/keys` — mint one member a key. Shown ONCE, exactly like a bot key.
@@ -807,6 +861,35 @@ async fn mint_gateway_key(
         }
     };
 
+    // The same press again: answer with what it minted, and say the secret is gone. The
+    // plaintext existed only in the reply that was lost; handing it out twice is not possible,
+    // and minting again would be the duplicate this nonce exists to prevent.
+    let nonce = request
+        .client_nonce
+        .as_deref()
+        .map(str::trim)
+        .filter(|nonce| !nonce.is_empty() && nonce.len() <= 128);
+    if let Some(nonce) = nonce
+        && let Ok(Some(existing)) = state
+            .store
+            .gateway_key_by_nonce(org_id.as_str(), nonce)
+            .await
+    {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "id": existing.key_id,
+                "memberId": existing.member_account_id,
+                "keyPrefix": existing.key_prefix,
+                "label": existing.label,
+                "key": Value::Null,
+                "alreadyMinted": true,
+                "note": "this press already minted a key; its secret was shown once and cannot be shown again — revoke it and mint anew if it was lost",
+            })),
+        )
+            .into_response();
+    }
+
     // Idempotent, and cheap: binding the org to its principal before every mint means we never
     // have to remember whether we already did.
     if let Err(error) = admin.ensure_org_principal(org_id.as_str(), None).await {
@@ -825,27 +908,29 @@ async fn mint_gateway_key(
     // exist. If this insert fails the key is real but unattributed — the operator is told, rather
     // than being handed a key the console will never list.
     //
-    // MINTING IS NOT IDEMPOTENT, and cannot be while the gateway assigns the id: a reply lost to a
-    // timeout means the admin sees no key and may press again, minting a second real one. That is
-    // survivable in a way the reverse would not be — every key is listed and individually
-    // revocable, so a duplicate is visible and removable, whereas silently reusing one would hand
-    // two people the same credential. An idempotency key on the mint is ROADMAP 17.later.
+    // The gateway assigns the id, so the mint itself cannot be replayed; the nonce recorded
+    // with the row is what makes a repeat of the SAME press find this key (above) rather than
+    // mint another. A press that carried no nonce stays non-idempotent — survivable, because
+    // every key is listed and individually revocable, and the reconciled listing shows even a
+    // key whose attribution insert failed.
     if let Err(error) = state
         .store
-        .insert_gateway_key(
-            &minted.id,
-            org_id.as_str(),
-            member.id.as_str(),
-            &minted.key_prefix,
-            &label,
-            now_ms(),
-        )
+        .insert_gateway_key(&opengrok_store::NewGatewayKey {
+            key_id: &minted.id,
+            org_id: org_id.as_str(),
+            member_account_id: member.id.as_str(),
+            key_prefix: &minted.key_prefix,
+            label: &label,
+            mint_nonce: nonce,
+            at_ms: now_ms(),
+        })
         .await
     {
         tracing::error!(%error, key_id = %minted.id, "minted a gateway key but could not record it");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "the key was minted but could not be recorded; revoke it in the gateway and retry",
+            "the key was minted but could not be recorded; it will appear unattributed in the \
+             listing — revoke it there and mint again",
         )
             .into_response();
     }
@@ -859,6 +944,7 @@ async fn mint_gateway_key(
             "label": label,
             // Shown exactly once. We never store it; the gateway has only its hash.
             "key": minted.key,
+            "alreadyMinted": false,
         })),
     )
         .into_response()

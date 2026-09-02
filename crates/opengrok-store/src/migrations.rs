@@ -310,6 +310,11 @@ create table if not exists gateway_key_view (
     created_at_ms     bigint  not null
 );
 create index if not exists gateway_key_org_idx on gateway_key_view (org_id);
+-- 17.later: the console's mint carries a nonce, so a press whose reply was lost can be repeated
+-- without minting a second real key. Unique per org; NULL for rows minted before nonces.
+alter table gateway_key_view add column if not exists mint_nonce text;
+create unique index if not exists gateway_key_nonce_idx
+    on gateway_key_view (org_id, mint_nonce) where mint_nonce is not null;
 
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
 -- and colour). A wire-format projection like gateway_entry: the client is the only reader.
