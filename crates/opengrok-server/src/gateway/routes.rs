@@ -190,15 +190,33 @@ async fn events(
     // ignores one older than what it has, so "current" is exactly right for the opener and
     // invisible to everyone else. `coverage.kind` stays `complete-roster`: it is what the replica
     // checks first.
-    let snapshot = {
-        let rows = super::live::roster_rows(&state).await.unwrap_or_default();
-        let payload = json!({
-            "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
-            "agents": rows,
-            "ordered": super::live::current(&state, "roster"),
-            "coverage": { "kind": "complete-roster" },
-        });
-        frame("agents", &payload, wanted.as_ref())
+    //
+    // NEVER A ROSTER THE SERVER DID NOT READ. With the database down the read fails, and a
+    // failure turned into "zero rows, complete, current" told every reconnecting desktop that
+    // it has no coworkers — it installed the empty snapshot as its baseline and dropped the
+    // roster it was showing (timed twice on 2 Sep 2026: the page painted its cache within a
+    // second of a reload and lost it the instant the stream reconnected). An empty success is
+    // the dangerous reply (CLAUDE.md #3): when the read fails the opener is the retry line alone,
+    // said in the log, and the client's own listAgents — which answers 500, not an empty array —
+    // is what it acts on.
+    let snapshot = match super::live::roster_rows(&state).await {
+        Ok(rows) => {
+            let payload = json!({
+                "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
+                "agents": rows,
+                "ordered": super::live::current(&state, "roster"),
+                "coverage": { "kind": "complete-roster" },
+            });
+            frame("agents", &payload, wanted.as_ref())
+        }
+        Err(error) => {
+            tracing::error!(
+                id = %guard.id,
+                %error,
+                "events: the roster could not be read; opening without a snapshot rather than with an empty one"
+            );
+            String::new()
+        }
     };
     let opening =
         stream::once(async move { Ok::<_, Infallible>(format!("retry: 1000\n\n{snapshot}")) });
