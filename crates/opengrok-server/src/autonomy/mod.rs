@@ -164,10 +164,13 @@ async fn announce_finished(
     }
     let head: String = text.trim().chars().take(200).collect();
     let content = if head.is_empty() {
-        format!(
-            "Routine {} ran and produced no answer. Its run log has the reason.",
-            announce.name
-        )
+        match crate::gateway::conversation::failure_sentence(events) {
+            Some(why) => format!("Routine {} failed: {why}", announce.name),
+            None => format!(
+                "Routine {} ran and produced no answer. Its run log has the reason.",
+                announce.name
+            ),
+        }
     } else if head.chars().count() < text.trim().chars().count() {
         format!("Routine {} ran: {head}…", announce.name)
     } else {
