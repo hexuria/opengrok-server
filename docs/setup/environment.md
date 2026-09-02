@@ -16,7 +16,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** | where everything listens: the Sand gateway, AG-UI, auth, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server) |
+| `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** — or `127.0.0.1:1447` behind Caddy | where everything listens: the Sand gateway, AG-UI, auth, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server). With TLS in front (`setup/tls.md`) the server binds loopback and Caddy takes the LAN address on the same port |
 | `OG_GRPC_BIND` | unset (off) | opt-in tonic listener for seam-B gRPC. Unset means no gRPC socket — an unused open port is a liability |
 | `OG_PUBLIC_GATEWAY_URL` | unset | the address `EnsureSandBox` mints to clients (e.g. `http://192.168.100.24:1447`). Unset ⇒ the mint refuses. Must be non-loopback because the *client* refuses a loopback host — the mint itself does not check that (`seamb.rs`; `slice13-seamb-smoke.sh` is the loopback assertion) |
 | `OG_GATEWAY_BEARER` | unset | the shared bearer the desktop client presents on every gateway call. The client-side counterpart is the token field beside its OpenGrok gateway URL setting |
@@ -39,7 +39,8 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise. The ASCII adapter is `opengrok_box::ascii::Client` (shapes from `docs/box/`); `AsciiBoxes` is the `Computer` trait on top of it |
+| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise. `none` means none: a new coworker is hired computerless (and so is every hire in an integration test, which brings no provider). The ASCII adapter is `opengrok_box::ascii::Client` (shapes from `docs/box/`); `AsciiBoxes` is the `Computer` trait on top of it |
+| `OG_BOX_RUN_TAG` | unset | a second label on every Docker box this process creates (`dev.opengrok.run=<tag>`). `scripts/gate.sh` sets one per run and removes every box carrying it on exit — the smokes used to leave a container per hire behind |
 | `OG_BOX_API_KEY` | unset | box.ascii.dev (`box_…`), for computers that outlive this machine. A running box's desktop URL (`getForeverBoxStatus.vncUrl`) comes from `POST /boxes/{id}/desktop?vnc=1` — do not log it |
 | `OG_BOX_IDLE_STOP_SECONDS` | `0` (off) | stop an idle box after this many seconds |
 | `OG_DOCKER_IMAGE` | `debian:stable-slim` | the image a Docker computer is built from; any image with a shell |

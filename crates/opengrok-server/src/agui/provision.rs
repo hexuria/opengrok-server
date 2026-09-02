@@ -170,7 +170,17 @@ pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static s
             .is_some()
     {
         "ascii"
-    } else if local_docker_allowed() {
+    } else if local_docker_allowed()
+        && state
+            .computer
+            .as_ref()
+            .is_some_and(|computer| computer.kind() == "local-docker")
+    {
+        // The deployment brought a Docker provider (OG_COMPUTER, or the default when no ascii
+        // key is set). Without one there is nothing to give: `OG_COMPUTER=none` now means what
+        // the boot log says, and an integration test with no provider hires computerless —
+        // which is how test runs stopped leaving hundreds of `sleep infinity` containers on the
+        // dev Mac (192 found on 2 Sep 2026, none mapped to any scope).
         "local-docker"
     } else {
         "none"

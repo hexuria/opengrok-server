@@ -77,7 +77,9 @@ async fn test_state(database_url: &str) -> AgUiState {
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: None,
+        // These tests are ABOUT real Docker boxes, so the state brings the Docker provider the
+        // way a dev deployment does; a state with no provider hires computerless.
+        computer: Some(Arc::new(opengrok_box::DockerComputer::new())),
         // No vault ⇒ no org box key ⇒ the provider is a Local VM (server Docker).
         vault: None,
         connectors: Connectors {
