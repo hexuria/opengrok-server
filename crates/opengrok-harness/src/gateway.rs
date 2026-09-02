@@ -45,6 +45,21 @@ impl GatewayDoor {
     }
 }
 
+/// The gateway's 402 names the scope in its own words ("the quota on this API key is
+/// exhausted", "the monthly budget for this principal is exhausted"); the sentence a person reads
+/// keeps those words and says what to do about them. A key cap does not reset — it is a wall at
+/// the number written on it — so "raise it" is the only way through that one.
+fn spend_cap_sentence(body: &str) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "a spend cap is reached".to_string());
+    format!(
+        "This coworker cannot take a turn: {detail}. Raise its cap in the console (a key's cap \
+         does not reset), or wait for a monthly budget to reset."
+    )
+}
+
 /// One `data:` frame of an OpenAI-dialect stream. Only the fields we act on are named; the rest
 /// are ignored rather than rejected, because a provider adding a field must not break a run.
 #[derive(Debug, Deserialize)]
@@ -174,10 +189,23 @@ impl ModelDoor for GatewayDoor {
             object.insert("tool_choice".to_string(), serde_json::json!("auto"));
         }
 
+        // The coworker's own key when it has one; the deployment's otherwise. A key that could not
+        // be produced refuses here, before any request: running on the deployment's key would step
+        // around the cap the coworker's key exists to enforce.
+        let key = match &request.gateway_key {
+            None => self.key.as_str(),
+            Some(crate::model::GatewayKey::Own(key)) => key.as_str(),
+            Some(crate::model::GatewayKey::Unavailable(reason)) => {
+                return Err(ModelError::SpendCap(format!(
+                    "This coworker's own gateway key could not be used: {reason}. Its turns are \
+                     held rather than run on the deployment's key, which would step around its cap."
+                )));
+            }
+        };
         let response = self
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
-            .bearer_auth(&self.key)
+            .bearer_auth(key)
             .json(&payload)
             .send()
             .await
@@ -186,6 +214,9 @@ impl ModelDoor for GatewayDoor {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 402 {
+                return Err(ModelError::SpendCap(spend_cap_sentence(&body)));
+            }
             return Err(ModelError::Refused {
                 status: status.as_u16(),
                 // Bounded: an upstream error page must not become a megabyte in our logs.

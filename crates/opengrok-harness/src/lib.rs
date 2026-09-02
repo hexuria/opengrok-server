@@ -21,7 +21,9 @@ pub mod tools;
 pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
-pub use model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
+pub use model::{
+    ChatMessage, DeltaStream, GatewayKey, ModelDelta, ModelDoor, ModelError, ModelRequest,
+};
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
 pub use rig_door::RigDoor;
@@ -452,6 +454,8 @@ mod tests {
 
     fn request(text: &str) -> ModelRequest {
         ModelRequest {
+            gateway_key: None,
+            spend_scope: None,
             model: "mock".to_string(),
             system: None,
             tools: Vec::new(),

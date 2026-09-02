@@ -146,6 +146,8 @@ async fn hire(
     let provisioned =
         provision::ensure_computer_for(&state.agui, account_id, &id, &mut coworker, at_ms).await;
     events.extend(provisioned.events);
+    // A key of its own, so a cap can be written on it (never fails the hire).
+    let _key = crate::spend::ensure_key_for(&state.agui, account_id, &id, &coworker.name).await;
 
     let view = opengrok_core::coworker::CoworkerView {
         id: id.clone(),
@@ -395,6 +397,8 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
             // per-account destroys the account box once its last agent is gone; per-org leaves it).
             crate::agui::provision::teardown_computer_for(&state.agui, &account.id, &coworker_id)
                 .await;
+            // Its key goes with it: a retired coworker must not keep a live credential.
+            crate::spend::revoke_for(&state.agui, &coworker_id).await;
         }
     }
     live::emit_roster(state).await;

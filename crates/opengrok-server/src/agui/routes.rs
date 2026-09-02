@@ -21,7 +21,7 @@ use opengrok_wire::agui::{Event, RunAgentInput};
 use super::provision;
 use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
-use opengrok_core::id::{CoworkerId, RunId};
+use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
 use serde::Deserialize;
@@ -434,6 +434,9 @@ pub fn router(state: AgUiState) -> Router {
             axum::routing::patch(repin_coworker),
         )
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
+        // Spend limits: the coworker's three meters, read-only here; limits are written by the
+        // org admin (`account_api.rs`, `/admin/spend`).
+        .route("/coworkers/{coworker_id}/spend", get(get_spend))
         .route(
             "/coworkers/{coworker_id}/keys",
             post(mint_bot_key).get(list_bot_keys),
@@ -642,6 +645,10 @@ pub async fn hire(
             .await;
     events.extend(provisioned.events);
     let computer_error = provisioned.error;
+    // A key of its own, so a cap can be written on it. Never fails the hire; the console says
+    // why when it could not be minted.
+    let _key =
+        crate::spend::ensure_key_for(&state, &account_id, &coworker_id, &coworker.name).await;
 
     let view = CoworkerView {
         id: coworker_id.clone(),
@@ -884,6 +891,43 @@ async fn mint_bot_key(
         .into_response()
 }
 
+/// Is this coworker the caller's? `None` ⇒ 404: another account's coworker id must read as
+/// "no such coworker", never as an empty or refused one.
+async fn owned_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<bool, Response> {
+    match state.auth.store.coworkers_for(account_id).await {
+        Ok(coworkers) => Ok(coworkers.iter().any(|c| c.id == *coworker_id)),
+        Err(error) => {
+            tracing::error!(%error, "could not list coworkers");
+            Err((StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response())
+        }
+    }
+}
+
+/// `GET /coworkers/{id}/spend` — the coworker's three meters and the limits it is under.
+async fn get_spend(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    match crate::spend::spend_for(&state, &account_id, &coworker_id).await {
+        Ok(spend) => Json(spend).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    }
+}
+
 async fn list_bot_keys(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -1085,6 +1129,8 @@ pub async fn run(
     }
 
     let request = ModelRequest {
+        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref()).await,
+        spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
         model,
         system: None,
         messages: to_chat_messages(&input),
@@ -1600,6 +1646,8 @@ async fn continue_run(
     };
 
     let request = ModelRequest {
+        gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref()).await,
+        spend_scope: run.coworker_id.as_ref().map(|c| c.as_str().to_string()),
         // The pin the turn started on, not the coworker's current one. A coworker that was
         // repinned while this run waited on a card must not change what the continuation thinks
         // with. Logs written before the pin was stored fall back to the current pin.
@@ -1788,6 +1836,8 @@ mod tests {
             None,
             &opengrok_harness::MemoryJournal::new(),
             ModelRequest {
+                gateway_key: None,
+                spend_scope: None,
                 model: "mock".to_string(),
                 system: None,
                 messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),

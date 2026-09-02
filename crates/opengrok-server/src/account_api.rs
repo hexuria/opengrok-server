@@ -50,6 +50,17 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/gateway/keys/{id}/quota", put(set_gateway_key_quota))
         .route("/admin/gateway/budget", put(set_gateway_budget))
         .route("/admin/gateway/usage", get(gateway_usage))
+        // Spend limits (`spend.rs`): the org default, per-member overrides, per-coworker limits.
+        .route("/admin/spend", get(spend_limits))
+        .route("/admin/spend/org", put(set_org_spend_limit))
+        .route(
+            "/admin/spend/members/{account_id}",
+            put(set_member_spend_limit),
+        )
+        .route(
+            "/admin/spend/coworkers/{coworker_id}",
+            put(set_coworker_spend_limit),
+        )
         .with_state(state)
 }
 
@@ -1148,4 +1159,168 @@ async fn gateway_usage(State(state): State<AuthState>, headers: axum::http::Head
         .into_response(),
         Err(error) => gateway_refusal(&error),
     }
+}
+
+// ---- Spend limits: authored here by the admin, evaluated by `spend::GuardedDoor` ----
+
+/// `GET /admin/spend` — the org default, every member with their override, every coworker in
+/// the org with its own limits. Absent limits are `null`, which means "follows the layer above".
+async fn spend_limits(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let store = &state.store;
+    let org_limit = match store
+        .spend_limit(opengrok_store::SpendScope::Org, org_id.as_str())
+        .await
+    {
+        Ok(limit) => limit,
+        Err(error) => return storage_failed(&error),
+    };
+    let accounts = match store.accounts_by_org(org_id.as_str()).await {
+        Ok(accounts) => accounts,
+        Err(error) => return storage_failed(&error),
+    };
+    let member_limits: std::collections::HashMap<String, opengrok_store::SpendLimit> = match store
+        .spend_limits_at(opengrok_store::SpendScope::Member)
+        .await
+    {
+        Ok(rows) => rows.into_iter().collect(),
+        Err(error) => return storage_failed(&error),
+    };
+    let coworker_limits: std::collections::HashMap<String, opengrok_store::SpendLimit> = match store
+        .spend_limits_at(opengrok_store::SpendScope::Coworker)
+        .await
+    {
+        Ok(rows) => rows.into_iter().collect(),
+        Err(error) => return storage_failed(&error),
+    };
+    let mut members = Vec::with_capacity(accounts.len());
+    let mut coworkers = Vec::new();
+    for account in &accounts {
+        members.push(json!({
+            "id": account.id.as_str(),
+            "email": account.email,
+            "limits": member_limits.get(account.id.as_str()),
+        }));
+        match store.coworkers_for(&account.id).await {
+            Ok(list) => {
+                for coworker in list {
+                    coworkers.push(json!({
+                        "id": coworker.id.as_str(),
+                        "name": coworker.name,
+                        "ownerEmail": account.email,
+                        "limits": coworker_limits.get(coworker.id.as_str()),
+                    }));
+                }
+            }
+            Err(error) => return storage_failed(&error),
+        }
+    }
+    Json(json!({
+        "org": org_limit,
+        "members": members,
+        "coworkers": coworkers,
+    }))
+    .into_response()
+}
+
+fn storage_failed(error: &opengrok_store::StoreError) -> Response {
+    tracing::error!(%error, "spend limits: storage failed");
+    (StatusCode::SERVICE_UNAVAILABLE, "storage failed").into_response()
+}
+
+/// A limit body: any amount may be absent or null (that layer says nothing about that
+/// window); an amount that is present must parse as money.
+async fn write_limit(
+    state: &AuthState,
+    scope: opengrok_store::SpendScope,
+    id: &str,
+    limit: &opengrok_store::SpendLimit,
+) -> Response {
+    if let Err(message) = crate::spend::validate_limit(limit) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
+    match state
+        .store
+        .put_spend_limit(scope, id, limit, chrono::Utc::now().timestamp_millis())
+        .await
+    {
+        Ok(()) => Json(json!({ "limits": limit })).into_response(),
+        Err(error) => storage_failed(&error),
+    }
+}
+
+/// `PUT /admin/spend/org` — the default every coworker in the org inherits.
+async fn set_org_spend_limit(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(limit): Json<opengrok_store::SpendLimit>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    write_limit(
+        &state,
+        opengrok_store::SpendScope::Org,
+        org_id.as_str(),
+        &limit,
+    )
+    .await
+}
+
+/// `PUT /admin/spend/members/{account_id}` — one member's coworkers, over the org default.
+async fn set_member_spend_limit(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(account_id): Path<String>,
+    Json(limit): Json<opengrok_store::SpendLimit>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let member = match state
+        .store
+        .load_account(&AccountId::from_stored(account_id.clone()))
+        .await
+    {
+        Ok((account, _)) if account.org_id.as_deref() == Some(org_id.as_str()) => account_id,
+        // Somebody else's member reads as "no such member": the reply confirms nothing.
+        _ => return (StatusCode::NOT_FOUND, "no such member").into_response(),
+    };
+    write_limit(&state, opengrok_store::SpendScope::Member, &member, &limit).await
+}
+
+/// `PUT /admin/spend/coworkers/{coworker_id}` — one coworker, over its hirer's and the org's.
+async fn set_coworker_spend_limit(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    Json(limit): Json<opengrok_store::SpendLimit>,
+) -> Response {
+    let (org_id, _org, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let coworker = opengrok_core::id::CoworkerId::from_stored(coworker_id);
+    let in_org = match state.store.coworker_owner(&coworker).await {
+        Ok(Some(owner)) => matches!(
+            state.store.load_account(&owner).await,
+            Ok((account, _)) if account.org_id.as_deref() == Some(org_id.as_str())
+        ),
+        _ => false,
+    };
+    if !in_org {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+    write_limit(
+        &state,
+        opengrok_store::SpendScope::Coworker,
+        coworker.as_str(),
+        &limit,
+    )
+    .await
 }

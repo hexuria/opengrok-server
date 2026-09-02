@@ -549,6 +549,31 @@ create table if not exists mcp_allow_once (
     at_ms       bigint  not null
 );
 create index if not exists mcp_allow_once_lookup_idx on mcp_allow_once (coworker_id, tool);
+
+-- 18.later: a coworker's own gateway key, so its spend lands on its own cap. Attribution only —
+-- the secret is sealed in secret_store under `coworker-gateway-key:{coworker_id}` and the
+-- gateway keeps its hash. `quota_usd` mirrors the cap as we last set it; the gateway is the
+-- authority on what is enforced.
+create table if not exists coworker_gateway_key (
+    coworker_id   text   primary key,
+    account_id    text   not null,
+    key_id        text   not null,
+    key_prefix    text   not null,
+    quota_usd     text,
+    created_at_ms bigint not null
+);
+-- Spend limits as WE author them (`store/spend.rs`): three windows at three scopes. The
+-- gateway keeps the ledger; the server evaluates these before each model call. Money as text
+-- (up to six decimals), never a float; NULL means "this layer says nothing".
+create table if not exists spend_limit (
+    scope_kind    text   not null,
+    scope_id      text   not null,
+    five_hour_usd text,
+    seven_day_usd text,
+    month_usd     text,
+    updated_at_ms bigint not null,
+    primary key (scope_kind, scope_id)
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

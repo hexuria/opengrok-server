@@ -298,6 +298,9 @@ async fn grok_bot(
             )
             .await;
             events.extend(provisioned.events);
+            // A key of its own, so a cap can be written on it (never fails the hire).
+            let _key =
+                crate::spend::ensure_key_for(&state.agui, &account_id, &id, &coworker.name).await;
 
             let view = opengrok_core::coworker::CoworkerView {
                 id: id.clone(),
@@ -454,6 +457,8 @@ async fn grok_bot(
                     let _ = store
                         .append_coworker(&coworker_id, &account_id, seq, &events, &view)
                         .await;
+                    // Its key goes with it: a retired coworker must not keep a live credential.
+                    crate::spend::revoke_for(&state.agui, &coworker_id).await;
                 }
             }
             crate::agui::provision::teardown_computer_for(&state.agui, &account_id, &coworker_id)

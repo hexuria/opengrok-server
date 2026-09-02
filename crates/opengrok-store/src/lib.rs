@@ -27,14 +27,17 @@ pub mod identity;
 pub mod migrations;
 pub mod postgres;
 pub mod replica;
+pub mod spend;
 pub mod vault;
 
 pub use autonomy::{DueSchedule, LogEvent};
 pub use gateway::{
-    McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim, RefreshTokenRow,
+    CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
+    RefreshTokenRow,
 };
 pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use replica::{AllowOnce, OAuthCodeRow};
+pub use spend::{SpendLimit, SpendScope};
 pub use vault::{Sealed, Vault};
 
 #[derive(Debug, thiserror::Error)]

@@ -56,6 +56,34 @@ pub struct PrincipalUsage {
     pub requests: i64,
 }
 
+/// One key's cap and spend as the gateway reports it (`GET /admin/api/keys/{id}/usage`). Two
+/// spend figures on purpose: `spent_usd` is what the cap is enforced against (lifetime, the
+/// gateway's counter); `month_to_date_usd` is the ledger this month. Money as strings, as the
+/// gateway sends it — never a float.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyUsage {
+    #[serde(rename = "quota_usd")]
+    pub quota_usd: Option<String>,
+    #[serde(rename = "spent_usd")]
+    pub spent_usd: String,
+    #[serde(rename = "month_to_date_usd")]
+    pub month_to_date_usd: String,
+    /// RFC 3339: the first of the next UTC month.
+    #[serde(rename = "month_resets_at", default)]
+    pub month_resets_at: Option<String>,
+    pub requests: i64,
+    /// The rolling windows: the sum, and when the window next frees up (its oldest spend
+    /// ageing out), RFC 3339 or absent for an empty window.
+    #[serde(rename = "five_hour_usd", default)]
+    pub five_hour_usd: Option<String>,
+    #[serde(rename = "five_hour_frees_at", default)]
+    pub five_hour_frees_at: Option<String>,
+    #[serde(rename = "seven_day_usd", default)]
+    pub seven_day_usd: Option<String>,
+    #[serde(rename = "seven_day_frees_at", default)]
+    pub seven_day_frees_at: Option<String>,
+}
+
 /// Why a call to the gateway's admin API did not do what was asked. There is no
 /// "not configured" case here on purpose: a deployment with no admin connection has
 /// no `GatewayAdmin` at all, so the refusal happens before a call is attempted.
@@ -120,11 +148,24 @@ impl GatewayAdmin {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, AdminError> {
+        self.send_within(method, path, body, std::time::Duration::from_secs(15))
+            .await
+    }
+
+    /// `send` with the caller's patience: a read on a turn's critical path waits two seconds,
+    /// a console press fifteen.
+    async fn send_within(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AdminError> {
         let mut request = self
             .http
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(&self.token)
-            .timeout(std::time::Duration::from_secs(15));
+            .timeout(timeout);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -242,6 +283,35 @@ impl GatewayAdmin {
         )
         .await
         .map(|_| ())
+    }
+
+    /// One key's cap and spend. `None` when the gateway no longer knows the key.
+    pub async fn key_usage(&self, key_id: &str) -> Result<Option<KeyUsage>, AdminError> {
+        self.key_usage_within(key_id, std::time::Duration::from_secs(15))
+            .await
+    }
+
+    /// The same read with a bounded wait — what the spend guard uses before a model call.
+    pub async fn key_usage_within(
+        &self,
+        key_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<KeyUsage>, AdminError> {
+        match self
+            .send_within(
+                reqwest::Method::GET,
+                &format!("/admin/api/keys/{key_id}/usage"),
+                None,
+                timeout,
+            )
+            .await
+        {
+            Ok(value) => serde_json::from_value(value)
+                .map(Some)
+                .map_err(|error| AdminError::Refused(format!("unexpected usage reply: {error}"))),
+            Err(AdminError::Refused(detail)) if detail.contains("no key") => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// The org's budget and month-to-date spend. `None` when the org has no principal yet — which

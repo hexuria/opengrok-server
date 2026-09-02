@@ -119,6 +119,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Every model call goes through the spend guard first: a coworker with limits is checked
+    // against the gateway's windowed usage before each call, and one without limits passes
+    // straight through. Wrapped here so the mock doors are guarded exactly like the real one.
+    let door: Arc<dyn ModelDoor> = Arc::new(opengrok_server::spend::GuardedDoor::new(
+        door,
+        auth.store.clone(),
+        auth.gateway_admin.clone(),
+    ));
+
     // Where a coworker's computer comes from. box.ascii.dev when a key is present, otherwise local
     // Docker — so a coworker gets a computer on a laptop with no account anywhere, and the hosted
     // one is an upgrade rather than a prerequisite. `OG_COMPUTER=none` turns computers off.

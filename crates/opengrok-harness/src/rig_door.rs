@@ -180,6 +180,8 @@ mod tests {
 
     fn request(messages: &[(&str, &str)]) -> ModelRequest {
         ModelRequest {
+            gateway_key: None,
+            spend_scope: None,
             model: "oag/cheap".to_string(),
             system: None,
             tools: Vec::new(),
