@@ -926,6 +926,39 @@ async fn mint_gateway_key(
         })
         .await
     {
+        // Two presses with one nonce racing: both passed the lookup above, both minted, and the
+        // second insert hit the (org, nonce) unique index. Its key is real, live, and nobody has
+        // seen its secret — so it is revoked in the gateway here and now, and this press is
+        // answered exactly as a repeat of the winner would be. Without this the loser's key sat
+        // in the listing as "unattributed" until somebody noticed (review of #21).
+        if matches!(error, opengrok_store::StoreError::Conflict)
+            && let Some(nonce) = nonce
+        {
+            if let Err(revoke) = admin.revoke_key(&minted.id).await {
+                tracing::error!(%revoke, key_id = %minted.id, "a raced mint's key could not be revoked; it will list as unattributed");
+            } else {
+                tracing::info!(key_id = %minted.id, "a raced mint lost to its twin; its key is revoked");
+            }
+            if let Ok(Some(existing)) = state
+                .store
+                .gateway_key_by_nonce(org_id.as_str(), nonce)
+                .await
+            {
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "id": existing.key_id,
+                        "memberId": existing.member_account_id,
+                        "keyPrefix": existing.key_prefix,
+                        "label": existing.label,
+                        "key": Value::Null,
+                        "alreadyMinted": true,
+                        "note": "this press already minted a key; its secret was shown once and cannot be shown again — revoke it and mint anew if it was lost",
+                    })),
+                )
+                    .into_response();
+            }
+        }
         tracing::error!(%error, key_id = %minted.id, "minted a gateway key but could not record it");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
