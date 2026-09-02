@@ -36,6 +36,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(gateway::routes::router(gateway.clone()))
         .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
+        .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))

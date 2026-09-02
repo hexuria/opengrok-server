@@ -283,10 +283,21 @@ the proof, not construction.
   runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
   `verification/policy-card/` (the card with the grant's reason verbatim, Allow once, the run
   continues). Plan: `plan-slice16-later.md` Part A. (`8580a54` + follow-up)
-- [ ] **16.later** OAuth 2.1 on /mcp — `plan-slice16-later.md` Part B: an embedded authorization
-  server under `/oauth/mcp/*` whose token is a bot key; waits on TLS in front of the dev server
-  (`setup/tls.md`). Reverse-exec stays excluded from MCP. The org-key mint console surface
-  shipped as slice 17.
+- [x] **16.oauth** OAuth 2.1 on `/mcp` — "mint a bot key from the browser". An embedded
+  authorization server (`auth/oauth_mcp.rs`) under `/oauth/mcp/*`, never `/oauth/token` (that is
+  the desktop's refresh): RFC 9728 metadata at both `/.well-known/oauth-protected-resource[/mcp]`
+  paths, RFC 8414 at `/.well-known/oauth-authorization-server`, RFC 7591 registration for public
+  clients (loopback or https redirects, per-peer cap, table ceiling), PKCE S256 with `resource`
+  required and equal to our `/mcp`, sign-in + consent cards offering the person's own coworkers,
+  a ten-minute one-shot code bound to client + redirect + challenge + resource, `iss` on the
+  response, and a token that IS a bot key (`aud` = the resource, 90 days, no refresh — Claude
+  Code re-runs the browser flow on its 401). The door's every 401 carries `resource_metadata` +
+  `scope`, and a key minted for another server's `/mcp` is refused. Hand-minted keys and the
+  static header keep working. `against_mcp_oauth.rs` walks the flow the way Claude Code does.
+  Behind TLS (`setup/tls.md`). Reverse-exec stays excluded from MCP. *(this commit)*
+- [ ] **16.later** Client ID Metadata Documents (the spec's SHOULD; Claude Code registers
+  dynamically today); refresh tokens if quarterly re-consent proves annoying; the org-key mint
+  console surface shipped as slice 17.
 
 ## Slice 17 — one identity across both doors
 

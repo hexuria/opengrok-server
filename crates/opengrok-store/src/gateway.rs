@@ -566,3 +566,59 @@ impl PgStore {
         Ok(done.rows_affected() == 1)
     }
 }
+
+/// An OAuth client registered against the MCP door's authorization server (RFC 7591). Public:
+/// no secret exists to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthClient {
+    pub client_id: String,
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+    pub created_at_ms: i64,
+}
+
+impl PgStore {
+    pub async fn insert_oauth_client(&self, client: &OAuthClient) -> StoreResult<()> {
+        let uris = serde_json::to_value(&client.redirect_uris)
+            .map_err(|error| crate::StoreError::Corrupt(error.to_string()))?;
+        sqlx::query(
+            "insert into oauth_client (client_id, client_name, redirect_uris, created_at_ms)
+             values ($1, $2, $3, $4)",
+        )
+        .bind(&client.client_id)
+        .bind(&client.client_name)
+        .bind(uris)
+        .bind(client.created_at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn oauth_client(&self, client_id: &str) -> StoreResult<Option<OAuthClient>> {
+        let row = sqlx::query(
+            "select client_id, client_name, redirect_uris, created_at_ms
+             from oauth_client where client_id = $1",
+        )
+        .bind(client_id)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(|row| {
+            Ok(OAuthClient {
+                client_id: row.try_get("client_id")?,
+                client_name: row.try_get("client_name")?,
+                redirect_uris: serde_json::from_value(row.try_get("redirect_uris")?)
+                    .map_err(|error| crate::StoreError::Corrupt(error.to_string()))?,
+                created_at_ms: row.try_get("created_at_ms")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// How many clients have registered — the ceiling on an unauthenticated endpoint.
+    pub async fn oauth_client_count(&self) -> StoreResult<i64> {
+        let row = sqlx::query("select count(*) as n from oauth_client")
+            .fetch_one(self.pool())
+            .await?;
+        Ok(row.try_get::<i64, _>("n")?)
+    }
+}
