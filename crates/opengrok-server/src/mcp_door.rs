@@ -367,7 +367,7 @@ impl ServerHandler for McpDoor {
                 "Tools run on the coworker this key names, on that coworker's own computer, \
                  under the account's policy. A call that needs a person's approval (the \
                  account's auto-review, or the coworker's policy) is refused with a requestId; \
-                 a card is waiting in the OpenGrok app — answer it there, then retry. \
+                 a card is waiting in the Open Grok app — answer it there, then retry. \
                  Reverse-exec (your own machine) is not available over MCP.",
             )
     }
@@ -427,7 +427,7 @@ impl ServerHandler for McpDoor {
         if request.name.as_ref() == USER_MACHINE_SHELL {
             return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "the reverse-exec channel (running on your own machine) is not available over \
-                 MCP — use the OpenGrok app for that",
+                 MCP — use the Open Grok app for that",
             )])
             .into());
         }
@@ -465,7 +465,7 @@ impl ServerHandler for McpDoor {
                     tracing::error!(%error, "mcp door: could not look up a pending ask");
                     return Ok(CallToolResult::error(vec![ContentBlock::text(
                         "approval is needed, but the card could not be raised; grant this \
-                         tool to the coworker in the OpenGrok app or console, or retry.",
+                         tool to the coworker in the Open Grok app or console, or retry.",
                     )])
                     .into());
                 }
@@ -554,7 +554,7 @@ impl ServerHandler for McpDoor {
 
 fn ask_waiting_text(content: &str, request_id: &str) -> String {
     format!(
-        "{content} — a card is waiting in the OpenGrok app (requestId: {request_id}). \
+        "{content} — a card is waiting in the Open Grok app (requestId: {request_id}). \
          Answer it there, then retry this call."
     )
 }
@@ -577,7 +577,7 @@ pub async fn reply_to_ask(
         _ => {
             return format!(
                 "{} — approval is not available over MCP; grant this tool to the coworker in the \
-                 OpenGrok app or console, or run it from the app.",
+                 Open Grok app or console, or run it from the app.",
                 result.content
             );
         }
@@ -595,7 +595,7 @@ pub async fn reply_to_ask(
                     tracing::error!(%error, "mcp door: could not raise an approval card");
                     format!(
                         "{} — approval is needed, but the card could not be raised; grant this \
-                         tool to the coworker in the OpenGrok app or console, or retry.",
+                         tool to the coworker in the Open Grok app or console, or retry.",
                         result.content
                     )
                 }
@@ -603,7 +603,7 @@ pub async fn reply_to_ask(
         }
         _ => format!(
             "{} — approval is not available over MCP; grant this tool to the coworker in the \
-             OpenGrok app or console, or run it from the app.",
+             Open Grok app or console, or run it from the app.",
             result.content
         ),
     }

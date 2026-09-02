@@ -130,7 +130,7 @@ async fn protected_resource(State(state): State<AuthState>) -> Response {
         "authorization_servers": [public],
         "bearer_methods_supported": ["header"],
         "scopes_supported": [SCOPE],
-        "resource_name": "OpenGrok MCP door",
+        "resource_name": "Open Grok MCP door",
     }))
     .into_response()
 }

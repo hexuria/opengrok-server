@@ -16,9 +16,9 @@ pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
     send(
         api_key,
         to,
-        "Verify your OpenGrok email",
+        "Verify your Open Grok email",
         &format!(
-            "<p>Welcome to OpenGrok. Confirm this address to finish signing up:</p>\
+            "<p>Welcome to Open Grok. Confirm this address to finish signing up:</p>\
              <p><a href=\"{link}\">Verify my email</a></p>\
              <p style=\"color:#888;font-size:13px\">If you did not sign up, ignore this email.</p>"
         ),
@@ -31,9 +31,9 @@ pub async fn send_password_reset(api_key: &str, to: &str, link: &str) -> bool {
     send(
         api_key,
         to,
-        "Reset your OpenGrok password",
+        "Reset your Open Grok password",
         &format!(
-            "<p>Somebody asked to reset the password for this OpenGrok account.</p>\
+            "<p>Somebody asked to reset the password for this Open Grok account.</p>\
              <p><a href=\"{link}\">Choose a new password</a></p>\
              <p style=\"color:#888;font-size:13px\">The link works once and expires in an hour. \
              If this was not you, ignore this email — your password has not changed.</p>"
