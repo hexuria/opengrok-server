@@ -938,6 +938,48 @@ async fn emit_suspension(
     true
 }
 
+/// The sentence a failed run leaves for the person, from the run's own failure event: the
+/// gateway's words when it refused (the `error.message` inside its JSON body, when it carries
+/// one — "no subscription credential for xai on this route" rather than the whole body), the
+/// harness's otherwise; capped. `None` when the run did not fail.
+pub(crate) fn failure_sentence(events: &[opengrok_wire::agui::Event]) -> Option<String> {
+    let message = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == opengrok_wire::agui::EventType::RunError)?
+        .extra
+        .get("message")
+        .and_then(Value::as_str)?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    let said = match message.find('{') {
+        Some(at) => {
+            let inner = serde_json::from_str::<Value>(&message[at..])
+                .ok()
+                .and_then(|body| {
+                    body.pointer("/error/message")
+                        .or_else(|| body.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            match inner {
+                Some(inner) => format!("{} {inner}", message[..at].trim_end()),
+                None => message.to_string(),
+            }
+        }
+        None => message.to_string(),
+    };
+    let said = said.trim().trim_end_matches('.');
+    let capped: String = said.chars().take(300).collect();
+    Some(if capped.chars().count() < said.chars().count() {
+        format!("{capped}…")
+    } else {
+        capped
+    })
+}
+
 /// The answer entry a turn grows into: appended as a streaming placeholder before the turn
 /// starts, updated in place as it ends. `reply_to` is the turn's reply link, carried by every
 /// rebuild of the entry so the page's "quoted" header survives each update.
@@ -1073,7 +1115,14 @@ pub(crate) async fn run_turn(
     }
 
     if text.is_empty() {
-        text = "The turn produced no answer. Its run log has the reason.".to_string();
+        // The reason in the bubble, not a pointer to the run log: a refusal from the gateway is
+        // one sentence the person can act on ("no subscription credential for xai on this
+        // route"), and the log line would otherwise be a database dig away.
+        text = failure_sentence(&events)
+            .map(|why| format!("The turn failed: {why}"))
+            .unwrap_or_else(|| {
+                "The turn produced no answer. Its run log has the reason.".to_string()
+            });
     }
 
     let final_entry = answer_entry(&answer_id, &text, reply_to.as_deref());
@@ -1885,6 +1934,11 @@ async fn resume_gateway_run(
         {
             text.push_str(delta);
         }
+    }
+    if text.is_empty()
+        && let Some(why) = failure_sentence(&events)
+    {
+        text = format!("The turn failed: {why}");
     }
     if !text.is_empty() {
         let reply_to = reply_link_of_the_turn(&state, &coworker_id).await;
