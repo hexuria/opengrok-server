@@ -1525,15 +1525,21 @@ pub async fn resolve_auto_review_approval(
     // spend this yes). Finish it here; an approved allow-once is remembered so the retry
     // reuses the answered call id and the judge skip actually fires.
     if run.thread_id.starts_with("mcp-") {
-        if approved && let Some(pending) = pending.as_ref() {
-            crate::mcp_door::remember_mcp_allow_once(
+        if approved
+            && let Some(pending) = pending.as_ref()
+            && let Err(error) = crate::mcp_door::remember_mcp_allow_once(
+                &state.agui.auth.store,
                 &coworker_id,
                 &pending.tool,
                 &pending.arguments,
-                pending.call_id.clone(),
+                &pending.call_id,
                 // A policy yes releases the GATE on the retry; a judge yes skips the judge.
                 pending.reason != opengrok_core::run::SuspendReason::AutoReview,
-            );
+            )
+            .await
+        {
+            // The card is answered either way; a lost yes means the retry asks again.
+            tracing::error!(%error, call_id = %pending.call_id, "approve: the yes could not be remembered for the MCP retry");
         }
         if let Ok(finished) = run.decide(opengrok_core::run::RunCommand::Finish { at_ms }) {
             for event in &finished {

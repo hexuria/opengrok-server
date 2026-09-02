@@ -17,8 +17,7 @@
 //! always send one. Falling back would make the client hold an access token as its refresh token,
 //! and `cursorSessionPresent` would report a session that cannot survive its own first refresh.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,21 +31,11 @@ use serde::{Deserialize, Serialize};
 
 use super::token::{ACCESS_TOKEN_TTL_SECONDS, TokenMinter, hash_refresh_token, mint_refresh_token};
 
-/// One in-flight browser login: a challenge registered by `/loginDeepControl`, waiting for the
-/// client to poll with the matching verifier. In memory on purpose — a login that does not
-/// complete within its TTL is meant to be forgotten, and a restart just means signing in again.
-#[derive(Clone)]
-struct PendingLogin {
-    challenge: String,
-    /// The authenticated account's email — `None` until credential login succeeds. `/auth/poll`
-    /// releases a token only once this is `Some`, so a registered-but-unauthenticated challenge
-    /// never completes.
-    email: Option<String>,
-    at_ms: i64,
-}
-
 /// How long a registered challenge is good for. Long enough for a person to finish in the
-/// browser, short enough that an abandoned one does not linger.
+/// browser, short enough that an abandoned one does not linger. The challenge lives in
+/// `pending_login` (`opengrok_store::replica`), so the page can be served by one replica and
+/// the poll answered by another; `/auth/poll` releases a token only once credentials bound an
+/// email to the row, so a registered-but-unauthenticated challenge never completes.
 const LOGIN_TTL_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Clone)]
@@ -61,8 +50,6 @@ pub struct AuthState {
     pub resend_api_key: Option<String>,
     /// The base URL a verification link points back at (this server, as the client reaches it).
     pub public_url: String,
-    /// uuid → the challenge waiting to be completed. Guarded, swept on each poll.
-    logins: Arc<Mutex<HashMap<String, PendingLogin>>>,
     /// The reverse-exec transport broker — the live meeting point of a machine's daemon stream and
     /// a caller waiting for one command's result. One per replica, shared by the `/local-exec/*`
     /// routes.
@@ -76,10 +63,6 @@ pub struct AuthState {
     /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
     /// there is no gateway to ask and the picker says so.
     pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
-    /// The MCP door's OAuth authorization codes, waiting to be exchanged: one-shot, ten
-    /// minutes, bound to the client, redirect, PKCE challenge and resource they were issued
-    /// for. In memory like `logins` — a single replica today; both move to a table together.
-    pub oauth_codes: Arc<Mutex<HashMap<String, super::oauth_mcp::PendingCode>>>,
     /// The hit table behind every door that takes no credential (`budget.rs`): reset mail,
     /// client registration, wrong passwords, domain lookups. Per replica by design.
     pub budgets: Arc<super::budget::Budgets>,
@@ -97,12 +80,10 @@ impl AuthState {
             login_email,
             resend_api_key: None,
             public_url: String::new(),
-            logins: Arc::new(Mutex::new(HashMap::new())),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
             dns: Arc::new(crate::domain_proof::NoResolver),
-            oauth_codes: Arc::new(Mutex::new(HashMap::new())),
             budgets: Arc::new(super::budget::Budgets::default()),
         }
     }
@@ -215,17 +196,13 @@ pub async fn login_deep_control(
     // where real credentials bind the account. Until then this uuid can be polled forever and
     // completes nothing — the same closed-hole property 9.1b established, now with a login step
     // instead of "whoever opened the URL is host".
-    let at_ms = now_ms();
-    if let Ok(mut logins) = state.logins.lock() {
-        logins.retain(|_, pending| at_ms - pending.at_ms < LOGIN_TTL_MS);
-        logins.insert(
-            query.uuid.clone(),
-            PendingLogin {
-                challenge: query.challenge.clone(),
-                email: None,
-                at_ms,
-            },
-        );
+    if let Err(error) = state
+        .store
+        .register_login(&query.uuid, &query.challenge, now_ms(), LOGIN_TTL_MS)
+        .await
+    {
+        tracing::error!(%error, uuid = %query.uuid, "loginDeepControl: could not register the challenge");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "login store unavailable").into_response();
     }
     tracing::info!(uuid = %query.uuid, "loginDeepControl: served the browser login page");
     super::pages::login(&query.challenge, &query.uuid, None)
@@ -269,19 +246,20 @@ pub async fn login_submit(
 
     // Authenticated. Bind the uuid to this account — poll will now complete for the matching
     // verifier. The challenge was registered on GET; if it has expired, ask them to retry.
-    let at_ms = now_ms();
-    let bound = if let Ok(mut logins) = state.logins.lock() {
-        match logins.get_mut(&form.uuid) {
-            Some(pending) if pending.challenge == form.challenge => {
-                pending.email = Some(view.email.clone());
-                pending.at_ms = at_ms;
-                true
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
+    let bound = state
+        .store
+        .bind_login(
+            &form.uuid,
+            &form.challenge,
+            &view.email,
+            now_ms(),
+            LOGIN_TTL_MS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, uuid = %form.uuid, "loginDeepControl: could not bind the login");
+            false
+        });
     if !bound {
         return refuse("This sign-in link expired. Return to the app and try again.");
     }
@@ -477,25 +455,23 @@ pub async fn auth_poll(
     State(state): State<AuthState>,
     Query(query): Query<AuthPollQuery>,
 ) -> Response {
-    let matched = {
-        let at_ms = now_ms();
-        let Ok(mut logins) = state.logins.lock() else {
+    // The PKCE check: the verifier the client holds must hash to the challenge the browser
+    // registered. A mismatch reads as pending, never as a distinct error, so a uuid-guesser
+    // learns nothing and completes nothing. The take is one-shot on whichever replica it lands.
+    let matched = match state
+        .store
+        .take_login(
+            &query.uuid,
+            &challenge_for(&query.verifier),
+            now_ms(),
+            LOGIN_TTL_MS,
+        )
+        .await
+    {
+        Ok(matched) => matched,
+        Err(error) => {
+            tracing::error!(%error, uuid = %query.uuid, "auth/poll: could not read the login");
             return (StatusCode::INTERNAL_SERVER_ERROR, "login store unavailable").into_response();
-        };
-        logins.retain(|_, pending| at_ms - pending.at_ms < LOGIN_TTL_MS);
-        match logins.get(&query.uuid) {
-            // The PKCE check: the verifier the client holds must hash to the challenge the
-            // browser registered. A mismatch reads as pending, never as a distinct error, so a
-            // uuid-guesser learns nothing and completes nothing.
-            Some(pending)
-                if pending.email.is_some()
-                    && challenge_for(&query.verifier) == pending.challenge =>
-            {
-                let email = pending.email.clone();
-                logins.remove(&query.uuid);
-                email
-            }
-            _ => None,
         }
     };
 
