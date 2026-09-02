@@ -49,7 +49,7 @@ by drift.
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
 | The shell vouches, the console proves: a domain from `opengrok admin` admits signups at once; a console claim admits nothing until DNS says so. Verify is a live lookup on click, no poller | `opengrok-core/src/org.rs` module doc, `opengrok-server/src/domain_proof.rs` |
-| A coworker's spend cap is a gateway key of its own with the gateway's per-key quota on it — a wall on LIFETIME spend, shown as such; a key that cannot be opened holds the turn rather than falling back to the deployment's key | `opengrok-server/src/spend.rs` module doc, PR #32 |
+| A coworker's spend is metered on a gateway key of its own, and its limits are three windows — rolling 5 hours, rolling 7 days, calendar month — evaluated by the server before each model call from the gateway's ledger; at a limit the turn is refused with a sentence that names the window and when it resets; a key that cannot be opened holds the turn rather than falling back to the deployment's key | [`plan-spend-policy.md`](plan-spend-policy.md), `opengrok-server/src/spend.rs` |
 | What a second replica must see is a row taken once with `delete … returning`; budgets and caches stay per replica | `opengrok-store/src/replica.rs`, `auth/budget.rs` |
 | A PR is based on `main`, never stacked on a branch about to merge — GitHub closes a PR whose base branch is deleted and it cannot be reopened | this page, 2 Sep 2026 |
 
@@ -57,11 +57,13 @@ by drift.
 
 In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
 
-**Landed or in review on 2 Sep 2026** (the operator merges; sessions never merge): #26 one
+**Landed or in review on 2 Sep 2026** (the operator decides and the peer session merges on their
+explicit go, PR by PR — no human presses the button, and no session merges without the go): #26 one
 spelling ("Open Grok"); #27 budgets on every unauthenticated door (`auth/budget.rs`); #30 a
 durable audit of every MCP door call (`mcp_call_audit`, console "Door calls"); #31 the three
 process maps a second replica would break, as rows (`opengrok_store::replica`); #32 per-coworker
-spend caps (a gateway key of the coworker's own, the cap on it, lifetime by the gateway's rule);
+spend caps (a gateway key of the coworker's own; being reworked to the three-window shape the
+operator decided, [`plan-spend-policy.md`](plan-spend-policy.md));
 open-ai-gateway #50 the per-key usage endpoint #32 reads. Each PR body carries its evidence and the
 decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinating-noodle.md`
 (session-local) — the order was hardening → caps → a rooms plan.
@@ -73,8 +75,10 @@ decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinat
    per-key admin scopes so a partner credential is not a full gateway admin.
 3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +
    picker (console already has one). Roster `description = model` habit. `auto_review_model` is
-   a separate deployment pin. A **monthly** per-coworker cap is a gateway change (a key quota is
-   lifetime); ask the operator before starting it.
+   a separate deployment pin. Per-coworker spend limits are **three windows** — rolling 5 hours, rolling 7 days, calendar
+   month, "like other LLM subscriptions" — refusing the turn at a limit; decided 2 Sep 2026,
+   design in [`plan-spend-policy.md`](plan-spend-policy.md). Templates (coworker types with the
+   limits baked in) and org-wide per-model budgets follow it.
 4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
    (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
    MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are
