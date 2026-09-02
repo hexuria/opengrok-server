@@ -278,10 +278,14 @@ the proof, not construction.
   with `delete … returning` and bounded by a TTL, so a browser login served by one replica
   completes on another, an OAuth code consented on one is exchanged once on another, and a yes
   answered on one is spent by the retry that lands on another (ten-minute TTL replaces "a
-  restart forgets it"). The per-coworker MCP lock stays per process — it serialises a retry
-  against an approve on ONE replica; across replicas the take is the whole race. Budgets and
-  caches stay per replica by design. `tests/against_two_replicas.rs`: two servers, two pools,
-  one Postgres, every request sent to the replica that did not create what it needs.
+  restart forgets it"; a give-back keeps the original stamp). The per-coworker MCP lock stays per
+  process — it serialises a retry against an approve on ONE replica; across replicas the take is
+  the whole race. Budgets and caches stay per replica by design. **Not yet multi-replica**: the
+  SSE broadcast channel and its sequence counters, the host-settings mutex and the reverse-exec
+  broker are per process, so a second replica behind a balancer still breaks the event stream
+  and lets sequences go backwards — this makes the three handoffs correct, not the server.
+  `tests/against_two_replicas.rs`: two servers, two pools, one Postgres, every request sent to
+  the replica that did not create what it needs.
 - [x] **16.v** Validated on Claude Code itself: `claude mcp list` shows the live door
   connected, and one invocation with both doors configured answered via the gateway, called
   `mcp__opengrok__shell`, and ran it on the coworker's own container — the tool's hostname

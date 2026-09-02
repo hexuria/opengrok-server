@@ -286,6 +286,29 @@ pub async fn remember_mcp_allow_once(
     call_id: &str,
     gate: bool,
 ) -> Result<(), opengrok_store::StoreError> {
+    remember_mcp_allow_once_at(
+        store,
+        coworker,
+        tool,
+        arguments,
+        call_id,
+        gate,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+}
+
+/// The same, stamped by the caller: a give-back keeps the yes's ORIGINAL stamp, so a retry loop
+/// against a down computer does not renew an approval every time it fails to run.
+async fn remember_mcp_allow_once_at(
+    store: &opengrok_store::PgStore,
+    coworker: &CoworkerId,
+    tool: &str,
+    arguments: &serde_json::Value,
+    call_id: &str,
+    gate: bool,
+    at_ms: i64,
+) -> Result<(), opengrok_store::StoreError> {
     store
         .remember_mcp_allow_once(
             opengrok_store::AllowOnce {
@@ -294,7 +317,7 @@ pub async fn remember_mcp_allow_once(
                 arguments,
                 call_id,
                 gate,
-                at_ms: chrono::Utc::now().timestamp_millis(),
+                at_ms,
             },
             ALLOW_ONCE_TTL_MS,
         )
@@ -310,6 +333,18 @@ pub async fn take_mcp_allow_once(
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Option<(String, bool)> {
+    take_mcp_allow_once_stamped(store, coworker, tool, arguments)
+        .await
+        .map(|(call_id, gate, _)| (call_id, gate))
+}
+
+/// The take with the yes's original stamp, for the door: what it gives back must carry it.
+async fn take_mcp_allow_once_stamped(
+    store: &opengrok_store::PgStore,
+    coworker: &CoworkerId,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<(String, bool, i64)> {
     match store
         .take_mcp_allow_once(
             coworker,
@@ -514,8 +549,9 @@ impl McpDoor {
         let _guard = lock.lock().await;
         let store = &self.state.agui.auth.store;
         let once =
-            take_mcp_allow_once(store, &principal.coworker, &call.name, &call.arguments).await;
-        if let Some((id, _)) = once.as_ref() {
+            take_mcp_allow_once_stamped(store, &principal.coworker, &call.name, &call.arguments)
+                .await;
+        if let Some((id, _, _)) = once.as_ref() {
             call.id = id.clone();
         } else {
             match existing_mcp_ask(&self.state, &principal.account, &principal.coworker, &call)
@@ -548,15 +584,15 @@ impl McpDoor {
         // Which gate the remembered yes opens: a policy yes releases the gate, a judge yes skips
         // the judge. The same call id, never both lists.
         let (gate_yes, review_yes): (Vec<String>, Vec<String>) = match once.as_ref() {
-            Some((id, true)) => (vec![id.clone()], Vec::new()),
-            Some((id, false)) => (Vec::new(), vec![id.clone()]),
+            Some((id, true, _)) => (vec![id.clone()], Vec::new()),
+            Some((id, false, _)) => (Vec::new(), vec![id.clone()]),
             None => (Vec::new(), Vec::new()),
         };
         let runner = match self.toolbox_for(principal, &gate_yes, &review_yes).await {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => {
-                if let Some((id, gate)) = once {
-                    Self::give_back(store, principal, &call, &id, gate).await;
+                if let Some((id, gate, at_ms)) = once {
+                    Self::give_back(store, principal, &call, &id, gate, at_ms).await;
                 }
                 return Dispatch::said(
                     call,
@@ -567,8 +603,8 @@ impl McpDoor {
                 );
             }
             Toolbox::Unavailable => {
-                if let Some((id, gate)) = once {
-                    Self::give_back(store, principal, &call, &id, gate).await;
+                if let Some((id, gate, at_ms)) = once {
+                    Self::give_back(store, principal, &call, &id, gate, at_ms).await;
                 }
                 return Dispatch::failed(
                     call,
@@ -596,10 +632,10 @@ impl McpDoor {
             );
         }
         if !result.ok
-            && let Some((id, gate)) = once
+            && let Some((id, gate, at_ms)) = once
         {
             // A failed execute must not spend the yes — the client will retry.
-            Self::give_back(store, principal, &call, &id, gate).await;
+            Self::give_back(store, principal, &call, &id, gate, at_ms).await;
         }
         // The durable row is written by `audit` once this returns; this line is the same fact
         // in the request log, greppable by the request id. Arguments redacted the way the judge
@@ -629,22 +665,26 @@ impl McpDoor {
         }
     }
 
-    /// Put a taken yes back: the call did not run, so the retry may spend it. A failed write
-    /// loses the yes — the retry asks again, which is the narrow side — and says so.
+    /// Put a taken yes back: the call did not run, so the retry may spend it — under the yes's
+    /// ORIGINAL stamp, so a retry loop against a down computer does not renew the approval each
+    /// time it fails to run. A failed write loses the yes — the retry asks again, which is the
+    /// narrow side — and says so.
     async fn give_back(
         store: &opengrok_store::PgStore,
         principal: &McpPrincipal,
         call: &ToolCall,
         call_id: &str,
         gate: bool,
+        at_ms: i64,
     ) {
-        if let Err(error) = remember_mcp_allow_once(
+        if let Err(error) = remember_mcp_allow_once_at(
             store,
             &principal.coworker,
             &call.name,
             &call.arguments,
             call_id,
             gate,
+            at_ms,
         )
         .await
         {

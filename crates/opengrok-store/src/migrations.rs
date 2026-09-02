@@ -523,6 +523,7 @@ create table if not exists mcp_allow_once (
     gate        boolean not null,
     at_ms       bigint  not null
 );
+create index if not exists mcp_allow_once_lookup_idx on mcp_allow_once (coworker_id, tool);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

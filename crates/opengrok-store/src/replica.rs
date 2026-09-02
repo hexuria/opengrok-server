@@ -10,6 +10,12 @@
 //! What stays in the process, on purpose: rate-limit budgets and caches (per replica by
 //! nature, `auth/budget.rs`), and the per-coworker MCP lock, which serialises a retry against
 //! an approve on ONE replica; across replicas the take below is the whole race.
+//!
+//! What stays in the process and is NOT yet right for a second replica: the SSE broadcast
+//! channel and its ordered sequence counters (`gateway/live.rs`), the host-settings mutex and
+//! the reverse-exec broker. Behind a balancer a second replica still breaks the event stream
+//! and lets sequences go backwards. This module makes the three one-shot handoffs correct; it
+//! does not make the server multi-replica. That is the roadmap's next line, not this one.
 
 use opengrok_core::id::CoworkerId;
 use serde_json::Value;
@@ -203,10 +209,13 @@ impl PgStore {
         Ok(())
     }
 
-    /// TAKE the pending yes for this coworker+tool+arguments: `(call_id, gate)`. Matched as
-    /// jsonb, which is equality of VALUE — key order is not part of it, which is what a yes
-    /// that round-tripped through the card needs. Oldest first; `skip locked` so two replicas
-    /// taking at once get two different rows or one gets none, never the same one twice.
+    /// TAKE the pending yes for this coworker+tool+arguments: `(call_id, gate, at_ms)` — the
+    /// `at_ms` is the yes's ORIGINAL stamp, which a give-back must carry so a retry loop against
+    /// a down computer cannot keep one approval alive past its TTL. Matched as jsonb, which is
+    /// equality of VALUE — key order is not part of it, which is what a yes that round-tripped
+    /// through the card needs (and looser than Rust `Value` equality: `1` and `1.0` are one
+    /// number to Postgres). Oldest first; `skip locked` so two replicas taking at once get two
+    /// different rows or one gets none, never the same one twice.
     pub async fn take_mcp_allow_once(
         &self,
         coworker: &CoworkerId,
@@ -214,13 +223,13 @@ impl PgStore {
         arguments: &Value,
         at_ms: i64,
         ttl_ms: i64,
-    ) -> StoreResult<Option<(String, bool)>> {
+    ) -> StoreResult<Option<(String, bool, i64)>> {
         let row = sqlx::query(
             "delete from mcp_allow_once where id = (
                  select id from mcp_allow_once
                  where coworker_id = $1 and tool = $2 and arguments = $3 and at_ms > $4
                  order by id limit 1 for update skip locked)
-             returning call_id, gate",
+             returning call_id, gate, at_ms",
         )
         .bind(coworker.as_str())
         .bind(tool)
@@ -228,7 +237,13 @@ impl PgStore {
         .bind(at_ms - ttl_ms)
         .fetch_optional(self.pool())
         .await?;
-        row.map(|row| Ok((row.try_get("call_id")?, row.try_get("gate")?)))
-            .transpose()
+        row.map(|row| {
+            Ok((
+                row.try_get("call_id")?,
+                row.try_get("gate")?,
+                row.try_get("at_ms")?,
+            ))
+        })
+        .transpose()
     }
 }
