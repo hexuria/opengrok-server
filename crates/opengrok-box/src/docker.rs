@@ -39,6 +39,10 @@ pub struct DockerComputer {
     pub image: String,
     /// Marks the containers we made, so `destroy` cannot remove somebody else's.
     pub label: String,
+    /// A second label naming the RUN that made the box (`dev.opengrok.run=<tag>`), from
+    /// `OG_BOX_RUN_TAG`. The gate sets one per invocation and removes everything carrying it on
+    /// exit, so a smoke that hires and forgets leaves nothing behind. `None` outside such runs.
+    pub run_tag: Option<String>,
 }
 
 impl Default for DockerComputer {
@@ -52,6 +56,9 @@ impl DockerComputer {
         Self {
             image: std::env::var("OG_DOCKER_IMAGE").unwrap_or_else(|_| DEFAULT_IMAGE.to_string()),
             label: "dev.opengrok.box".to_string(),
+            run_tag: std::env::var("OG_BOX_RUN_TAG")
+                .ok()
+                .filter(|tag| !tag.is_empty()),
         }
     }
 
@@ -94,6 +101,10 @@ impl DockerComputer {
             "--label".to_string(),
             format!("{}=1", self.label),
         ];
+        if let Some(tag) = &self.run_tag {
+            args.push("--label".to_string());
+            args.push(format!("dev.opengrok.run={tag}"));
+        }
         for port in PUBLISHED_PORTS {
             // Bound to loopback: a coworker's box must not be reachable from the network by
             // accident, and a person opening a preview is on this machine.
@@ -364,6 +375,20 @@ mod tests {
         assert!(args.contains(&"-d".to_string()));
         // Labelled, so destroy cannot remove a container somebody else made.
         assert!(args.iter().any(|arg| arg == "dev.opengrok.box=1"));
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("dev.opengrok.run=")),
+            "no run tag unless one was given"
+        );
+        let tagged = DockerComputer {
+            run_tag: Some("gate-42".to_string()),
+            ..DockerComputer::new()
+        };
+        assert!(
+            tagged
+                .create_args(None)
+                .iter()
+                .any(|arg| arg == "dev.opengrok.run=gate-42")
+        );
         // Every published port bound to loopback, never 0.0.0.0.
         for port in PUBLISHED_PORTS {
             assert!(

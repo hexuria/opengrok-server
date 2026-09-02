@@ -48,6 +48,22 @@ for pid in $(pgrep -f "target/debug/opengrok" 2>/dev/null || true); do
     fail "another opengrok is running on $OG_DATABASE_URL; it would race the smokes — use a separate database"
   fi
 done
+# Every Docker box a gate server creates carries this run's tag, and the trap below removes them
+# all on exit — passing or failing. Learned from 192 orphaned `sleep infinity` containers on the
+# dev Mac (2 Sep 2026): the tool-door smokes remove their own boxes, but every other hire on a
+# Docker deployment made one too, and nothing ever collected them.
+export OG_BOX_RUN_TAG="gate-$$"
+cleanup_boxes() {
+  if command -v docker >/dev/null 2>&1; then
+    ids=$(docker ps -aq --filter "label=dev.opengrok.run=$OG_BOX_RUN_TAG" 2>/dev/null || true)
+    if [ -n "$ids" ]; then
+      echo "=== removing $(echo "$ids" | wc -l | tr -d ' ') box(es) this gate created"
+      # shellcheck disable=SC2086
+      docker rm -f $ids >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
 # Not 1337: grok-bot's local-docker box binds that port, and a clash here looks like a broken
 # server rather than a taken port.
 PORT="${OG_PORT:-1447}"
@@ -69,7 +85,7 @@ OG_MODEL_DOOR=mock \
 RUST_LOG=warn \
 ./target/debug/opengrok >/dev/null 2>&1 &
 SERVER_PID=$!
-trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+trap 'kill "$SERVER_PID" 2>/dev/null || true; cleanup_boxes' EXIT
 
 for _ in $(seq 1 30); do
   curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 && break
