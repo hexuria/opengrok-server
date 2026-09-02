@@ -183,8 +183,11 @@ only if re-consent every quarter proves annoying.
   because a registration must survive a restart or Claude Code reports "incompatible auth server".
 - Authorization codes: in memory with a TTL, the same way `logins` holds `loginDeepControl`
   challenges. Single replica today; a multi-replica deployment moves both to a table together.
+  *(Done 2 Sep 2026: `oauth_code` and `pending_login` rows, `opengrok_store::replica`,
+  `tests/against_two_replicas.rs`.)*
 - The DCR rate cap needs a home (*review*): the same in-memory map keyed by peer address, with a
-  ceiling on registrations per hour and on total live registrations.
+  ceiling on registrations per hour and on total live registrations. *(Done: `auth/budget.rs`,
+  one budget module for every unauthenticated door.)*
 - Bot keys: unchanged (`insert_bot_key` with the client name as label; `aud` in the claims).
 
 ### 2.4 Security, stated up front

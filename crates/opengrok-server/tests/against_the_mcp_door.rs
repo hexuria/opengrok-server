@@ -578,10 +578,12 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert!(run.answered.contains(&call.id));
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(
+            &store,
             &coworker,
             "write_file",
             &json!({ "path": "/tmp/other", "content": "nope" }),
-        ),
+        )
+        .await,
         None,
         "a different command of the same tool cannot spend this yes"
     );
@@ -589,12 +591,19 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     // other key order so a string-hash of to_string would miss and Value equality hits.
     let reordered = json!({ "content": "hi", "path": "/tmp/from-mcp" });
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &reordered),
+        opengrok_server::mcp_door::take_mcp_allow_once(&store, &coworker, "write_file", &reordered)
+            .await,
         Some((call.id.clone(), false)),
         "allow-once matches by Value equality, not key insertion order; a judge yes is not a gate yes"
     );
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "write_file", &call.arguments),
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &store,
+            &coworker,
+            "write_file",
+            &call.arguments
+        )
+        .await,
         None,
         "the yes is one-shot"
     );
@@ -702,7 +711,8 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
     assert_eq!(run.status, RunStatus::Finished);
 
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&coworker, "shell", &call.arguments),
+        opengrok_server::mcp_door::take_mcp_allow_once(&store, &coworker, "shell", &call.arguments)
+            .await,
         Some((call.id.clone(), true)),
         "a policy yes is remembered as a GATE yes for the retry"
     );

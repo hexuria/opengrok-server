@@ -493,6 +493,36 @@ create table if not exists mcp_call_audit (
 );
 create index if not exists mcp_call_audit_coworker_idx
     on mcp_call_audit (coworker_id, at_ms desc);
+
+-- Multi-replica: the three maps that lived in one process (`replica.rs`). Each row is taken
+-- once with `delete … returning`; a TTL bounds every table. No index beyond the key: the
+-- tables hold what is in flight in the last minutes, not history.
+create table if not exists pending_login (
+    uuid      text   primary key,
+    challenge text   not null,
+    email     text,
+    at_ms     bigint not null
+);
+create table if not exists oauth_code (
+    code           text   primary key,
+    client_id      text   not null,
+    client_name    text   not null,
+    redirect_uri   text   not null,
+    code_challenge text   not null,
+    resource       text   not null,
+    account_id     text   not null,
+    coworker_id    text   not null,
+    at_ms          bigint not null
+);
+create table if not exists mcp_allow_once (
+    id          bigserial primary key,
+    coworker_id text    not null,
+    tool        text    not null,
+    arguments   jsonb   not null,
+    call_id     text    not null,
+    gate        boolean not null,
+    at_ms       bigint  not null
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

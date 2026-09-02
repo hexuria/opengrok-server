@@ -269,65 +269,63 @@ pub fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-/// One allow-once from an answered MCP card, waiting for the client's retry. Process-local on
-/// purpose: a restart means the retry is judged again (narrower than silently running).
-/// Matched with `Value` equality (not `to_string`): arguments round-trip through jsonb, which
-/// does not keep object key order, and the executor's skip is per call, never per tool.
-struct McpAllowOnce {
-    arguments: serde_json::Value,
-    call_id: String,
-    /// `true` when the yes answered a policy (gate) ask, `false` for the judge's. The retry
-    /// releases the gate or skips the judge accordingly — never both.
-    gate: bool,
-}
-
-static MCP_ALLOW_ONCE: LazyLock<Mutex<HashMap<String, Vec<McpAllowOnce>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn coworker_tool_key(coworker: &CoworkerId, tool: &str) -> String {
-    format!("{}:{tool}", coworker.as_str())
-}
+/// How long an answered yes waits for its retry. The process-local map this replaced forgot a
+/// yes on restart (narrower than silently running); a row forgets it by the clock instead, and
+/// ten minutes is longer than any client's retry and shorter than anybody's memory of why
+/// they said yes.
+pub const ALLOW_ONCE_TTL_MS: i64 = 10 * 60 * 1_000;
 
 /// Record that this coworker may retry this exact tool+args once under `call_id`. `gate` says
 /// which ask the yes answered: a policy grant's (release the gate) or the judge's (skip it).
-pub fn remember_mcp_allow_once(
+/// A row, not a map: the retry lands on whichever replica the client reaches.
+pub async fn remember_mcp_allow_once(
+    store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
     tool: &str,
     arguments: &serde_json::Value,
-    call_id: String,
+    call_id: &str,
     gate: bool,
-) {
-    let mut map = match MCP_ALLOW_ONCE.lock() {
-        Ok(map) => map,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    map.entry(coworker_tool_key(coworker, tool))
-        .or_default()
-        .push(McpAllowOnce {
-            arguments: arguments.clone(),
-            call_id,
-            gate,
-        });
+) -> Result<(), opengrok_store::StoreError> {
+    store
+        .remember_mcp_allow_once(
+            opengrok_store::AllowOnce {
+                coworker,
+                tool,
+                arguments,
+                call_id,
+                gate,
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            },
+            ALLOW_ONCE_TTL_MS,
+        )
+        .await
 }
 
-/// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate)`.
-pub fn take_mcp_allow_once(
+/// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate)`. Matched
+/// by jsonb value (key order is not part of it — the arguments round-tripped through the card).
+/// A store error reads as "no yes": the call is judged again, which is the narrow side.
+pub async fn take_mcp_allow_once(
+    store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Option<(String, bool)> {
-    let mut map = match MCP_ALLOW_ONCE.lock() {
-        Ok(map) => map,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let key = coworker_tool_key(coworker, tool);
-    let list = map.get_mut(&key)?;
-    let index = list.iter().position(|yes| yes.arguments == *arguments)?;
-    let yes = list.remove(index);
-    if list.is_empty() {
-        map.remove(&key);
+    match store
+        .take_mcp_allow_once(
+            coworker,
+            tool,
+            arguments,
+            chrono::Utc::now().timestamp_millis(),
+            ALLOW_ONCE_TTL_MS,
+        )
+        .await
+    {
+        Ok(yes) => yes,
+        Err(error) => {
+            tracing::error!(%error, coworker = %coworker.as_str(), tool, "mcp door: could not read the remembered yes; judging the call again");
+            None
+        }
     }
-    Some((yes.call_id, yes.gate))
 }
 
 /// One OpenAI-function-shape schema → an rmcp `Tool`, or `None` (logged) if it is malformed. A tool
@@ -514,7 +512,9 @@ impl McpDoor {
         // a leftover yes.
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
-        let once = take_mcp_allow_once(&principal.coworker, &call.name, &call.arguments);
+        let store = &self.state.agui.auth.store;
+        let once =
+            take_mcp_allow_once(store, &principal.coworker, &call.name, &call.arguments).await;
         if let Some((id, _)) = once.as_ref() {
             call.id = id.clone();
         } else {
@@ -556,13 +556,7 @@ impl McpDoor {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => {
                 if let Some((id, gate)) = once {
-                    remember_mcp_allow_once(
-                        &principal.coworker,
-                        &call.name,
-                        &call.arguments,
-                        id,
-                        gate,
-                    );
+                    Self::give_back(store, principal, &call, &id, gate).await;
                 }
                 return Dispatch::said(
                     call,
@@ -574,13 +568,7 @@ impl McpDoor {
             }
             Toolbox::Unavailable => {
                 if let Some((id, gate)) = once {
-                    remember_mcp_allow_once(
-                        &principal.coworker,
-                        &call.name,
-                        &call.arguments,
-                        id,
-                        gate,
-                    );
+                    Self::give_back(store, principal, &call, &id, gate).await;
                 }
                 return Dispatch::failed(
                     call,
@@ -611,7 +599,7 @@ impl McpDoor {
             && let Some((id, gate)) = once
         {
             // A failed execute must not spend the yes — the client will retry.
-            remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id, gate);
+            Self::give_back(store, principal, &call, &id, gate).await;
         }
         // The durable row is written by `audit` once this returns; this line is the same fact
         // in the request log, greppable by the request id. Arguments redacted the way the judge
@@ -638,6 +626,29 @@ impl McpDoor {
                 Outcome::Failed,
                 CallToolResult::error(vec![ContentBlock::text(result.content)]),
             )
+        }
+    }
+
+    /// Put a taken yes back: the call did not run, so the retry may spend it. A failed write
+    /// loses the yes — the retry asks again, which is the narrow side — and says so.
+    async fn give_back(
+        store: &opengrok_store::PgStore,
+        principal: &McpPrincipal,
+        call: &ToolCall,
+        call_id: &str,
+        gate: bool,
+    ) {
+        if let Err(error) = remember_mcp_allow_once(
+            store,
+            &principal.coworker,
+            &call.name,
+            &call.arguments,
+            call_id,
+            gate,
+        )
+        .await
+        {
+            tracing::error!(%error, call_id, "mcp door: could not give a taken yes back; the retry will ask again");
         }
     }
 

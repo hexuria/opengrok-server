@@ -28,11 +28,12 @@
 //! the metadata name any token endpoint and Claude Code follows it, so two unrelated contracts
 //! never share a path.
 //!
-//! CODES ARE IN MEMORY, CLIENTS ARE IN POSTGRES. A code is a ten-minute one-shot bound to the
-//! client, redirect, PKCE challenge, resource and the chosen coworker — the same bargain
-//! `loginDeepControl`'s pending logins make, and it moves to a table with them when replicas do.
-//! A registration must survive a restart: Claude Code keeps its client_id and reports
-//! "incompatible auth server" if it vanishes.
+//! CODES AND CLIENTS ARE BOTH IN POSTGRES, FOR DIFFERENT REASONS. A code is a ten-minute
+//! one-shot bound to the client, redirect, PKCE challenge, resource and the chosen coworker; it
+//! is a row (`oauth_code`, `opengrok_store::replica`) so the exchange can land on a replica
+//! other than the one that gave consent, and `delete … returning` is what makes "once" true
+//! across them. A registration must survive a restart: Claude Code keeps its client_id and
+//! reports "incompatible auth server" if it vanishes.
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -84,9 +85,9 @@ pub fn protected_resource_metadata_url(public_url: &str) -> String {
     )
 }
 
-/// An authorization code waiting to be exchanged.
+/// An authorization code waiting to be exchanged — the `oauth_code` row with its ids typed.
 #[derive(Debug, Clone)]
-pub struct PendingCode {
+struct PendingCode {
     pub client_id: String,
     pub client_name: String,
     pub redirect_uri: String,
@@ -592,22 +593,19 @@ async fn authorize_submit(
         }
         let code = format!("ac_{}", uuid::Uuid::now_v7().simple());
         let at_ms = now_ms();
-        if let Ok(mut codes) = state.oauth_codes.lock() {
-            codes.retain(|_, pending| at_ms - pending.at_ms < CODE_TTL_MS);
-            codes.insert(
-                code.clone(),
-                PendingCode {
-                    client_id: client.client_id.clone(),
-                    client_name: client.client_name.clone(),
-                    redirect_uri: request.redirect_uri.clone(),
-                    code_challenge: request.code_challenge.clone(),
-                    resource: request.resource.clone(),
-                    account: account.clone(),
-                    coworker: coworker_id.clone(),
-                    at_ms,
-                },
-            );
-        } else {
+        let row = opengrok_store::OAuthCodeRow {
+            code: code.clone(),
+            client_id: client.client_id.clone(),
+            client_name: client.client_name.clone(),
+            redirect_uri: request.redirect_uri.clone(),
+            code_challenge: request.code_challenge.clone(),
+            resource: request.resource.clone(),
+            account_id: account.as_str().to_string(),
+            coworker_id: coworker_id.as_str().to_string(),
+            at_ms,
+        };
+        if let Err(error) = state.store.insert_oauth_code(&row, CODE_TTL_MS).await {
+            tracing::error!(%error, "mcp oauth: could not record the authorization code");
             return super::pages::message(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Cannot continue",
@@ -694,18 +692,34 @@ async fn token(State(state): State<AuthState>, Form(form): Form<TokenForm>) -> R
             "code, code_verifier and client_id are required",
         );
     }
-    // TAKE the code: one exchange, ever. A second presentation — replay, retry — finds nothing.
-    let pending = state
-        .oauth_codes
-        .lock()
-        .ok()
-        .and_then(|mut codes| codes.remove(&form.code));
-    let Some(pending) = pending else {
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_grant",
-            "unknown, expired or already used code",
-        );
+    // TAKE the code: one exchange, ever, on whichever replica this lands. A second
+    // presentation — replay, retry — finds nothing.
+    let pending = match state.store.take_oauth_code(&form.code).await {
+        Ok(Some(row)) => PendingCode {
+            client_id: row.client_id,
+            client_name: row.client_name,
+            redirect_uri: row.redirect_uri,
+            code_challenge: row.code_challenge,
+            resource: row.resource,
+            account: AccountId::from_stored(row.account_id),
+            coworker: CoworkerId::from_stored(row.coworker_id),
+            at_ms: row.at_ms,
+        },
+        Ok(None) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "unknown, expired or already used code",
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, "mcp oauth: could not take the code");
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "the code could not be checked right now; try again",
+            );
+        }
     };
     let at_ms = now_ms();
     if at_ms - pending.at_ms >= CODE_TTL_MS {
