@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -80,9 +80,9 @@ pub struct AuthState {
     /// minutes, bound to the client, redirect, PKCE challenge and resource they were issued
     /// for. In memory like `logins` — a single replica today; both move to a table together.
     pub oauth_codes: Arc<Mutex<HashMap<String, super::oauth_mcp::PendingCode>>>,
-    /// Dynamic client registration is unauthenticated by design; this is its ceiling — recent
-    /// registrations per peer address.
-    pub dcr_hits: Arc<Mutex<HashMap<String, Vec<i64>>>>,
+    /// The hit table behind every door that takes no credential (`budget.rs`): reset mail,
+    /// client registration, wrong passwords, domain lookups. Per replica by design.
+    pub budgets: Arc<super::budget::Budgets>,
     /// The TXT lookup behind domain-ownership proof. A seam, not a resolver: production binds the
     /// system resolver at boot, tests answer from a map. The default refuses every lookup with a
     /// reason, so a state that was never given one answers 503 rather than "not verified".
@@ -103,7 +103,7 @@ impl AuthState {
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
             dns: Arc::new(crate::domain_proof::NoResolver),
             oauth_codes: Arc::new(Mutex::new(HashMap::new())),
-            dcr_hits: Arc::new(Mutex::new(HashMap::new())),
+            budgets: Arc::new(super::budget::Budgets::default()),
         }
     }
 
@@ -244,13 +244,27 @@ pub struct LoginForm {
 /// (not verified / not enabled / wrong credentials) so the page can say which.
 pub async fn login_submit(
     State(state): State<AuthState>,
+    headers: HeaderMap,
     axum::Form(form): axum::Form<LoginForm>,
 ) -> Response {
     let refuse = |message: &str| super::pages::login(&form.challenge, &form.uuid, Some(message));
 
+    // Wrong passwords are budgeted per address; the check comes BEFORE the hash so a spent
+    // budget costs nothing more, and the credentials are not even looked at.
+    let peer = super::budget::peer_key(&headers);
+    if let Err(spent) = state.budgets.check(&super::budget::LOGIN_FAILURES, &peer) {
+        // The styled page re-renders with its message at 200 for an ordinary refusal (a form
+        // post that stays on the page); a spent budget is a 429 so a client reads it as one.
+        let mut page = refuse(&too_many_attempts(spent));
+        *page.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        return super::budget::with_retry_after(page, spent);
+    }
     let view = match authenticate(&state, &form.email, &form.password).await {
         Ok(view) => view,
-        Err((_, message)) => return refuse(&message),
+        Err((_, message)) => {
+            state.budgets.hit(&super::budget::LOGIN_FAILURES, &peer);
+            return refuse(&message);
+        }
     };
 
     // Authenticated. Bind the uuid to this account — poll will now complete for the matching
@@ -280,6 +294,15 @@ pub async fn login_submit(
             "Signed in as {}. Return to the app — it will pick up your session automatically.",
             view.email
         ),
+    )
+}
+
+/// The sentence a spent login budget shows — the same on the styled page and in the console's
+/// JSON, and it names the wait so nobody keeps trying blind.
+fn too_many_attempts(spent: super::budget::Spent) -> String {
+    format!(
+        "Too many failed sign-in attempts from this address. Try again in {} minutes.",
+        spent.retry_after_secs.div_ceil(60).max(1)
     )
 }
 
@@ -341,11 +364,17 @@ pub struct CookieLoginRequest {
 /// from the desktop client's PKCE `/loginDeepControl`, which is untouched.
 pub async fn login_cookie(
     State(state): State<AuthState>,
+    headers: HeaderMap,
     Json(req): Json<CookieLoginRequest>,
 ) -> Response {
+    let peer = super::budget::peer_key(&headers);
+    if let Err(spent) = state.budgets.check(&super::budget::LOGIN_FAILURES, &peer) {
+        return super::budget::too_many(spent, &too_many_attempts(spent));
+    }
     let view = match authenticate(&state, &req.email, &req.password).await {
         Ok(view) => view,
         Err((status, message)) => {
+            state.budgets.hit(&super::budget::LOGIN_FAILURES, &peer);
             return (status, Json(serde_json::json!({ "error": message }))).into_response();
         }
     };

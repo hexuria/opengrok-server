@@ -4,6 +4,7 @@
 //! variable, so this module is the entire sign-in story for the desktop app.
 
 pub mod bot_keys;
+pub mod budget;
 pub mod cookies;
 pub mod identity;
 pub mod oauth_mcp;
