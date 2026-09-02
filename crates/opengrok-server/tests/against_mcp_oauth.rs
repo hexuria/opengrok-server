@@ -589,6 +589,49 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
     assert_eq!(status, 401, "the rotated-out key is revoked");
     let (status, init) = initialize(&base, &key2).await;
     assert_eq!(status, 200, "{init}");
+
+    // The owner revokes the rotated key from the key list: its refresh token dies with it in
+    // the same transaction, so a refresh afterwards mints nothing and the key stays dead.
+    let jti2 = store
+        .bot_keys_for(&account, &mine)
+        .await
+        .expect("keys")
+        .into_iter()
+        .find(|k| !k.revoked && k.label.contains("Claude Code"))
+        .expect("the rotated key is listed")
+        .jti;
+    let owner = _auth
+        .minter
+        .mint_access(
+            account.as_str(),
+            "sess-test",
+            &email,
+            "ultra",
+            chrono::Utc::now().timestamp(),
+            3600,
+        )
+        .expect("owner access");
+    let res = reqwest::Client::new()
+        .delete(format!("{base}/coworkers/{}/keys/{jti2}", mine.as_str()))
+        .header("Authorization", format!("Bearer {owner}"))
+        .send()
+        .await
+        .expect("owner revoke");
+    assert_eq!(res.status(), 204);
+    let res = client
+        .post(format!("{base}/oauth/mcp/token"))
+        .form(&refresh_form(&refresh2))
+        .send()
+        .await
+        .expect("refresh after owner revoke");
+    assert_eq!(
+        res.status(),
+        400,
+        "a revoked key's refresh token mints nothing"
+    );
+    let (status, _) = initialize(&base, &key2).await;
+    assert_eq!(status, 401, "and the key stays dead");
+
     let res = client
         .post(format!("{base}/oauth/mcp/token"))
         .form(&refresh_form(&refresh))
@@ -652,9 +695,42 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
     assert_eq!(res.status(), 200);
     let page = res.text().await.expect("page");
     assert!(
-        page.contains("Doc Tool (127.0.0.1)"),
-        "the card names the document's host: {page}"
+        page.contains("<b>Doc Tool</b>") && page.contains("From <code>127.0.0.1</code>"),
+        "the card names the document's host as its own element: {page}"
     );
+    // A document that dresses its name up as a host: the name is cut first and the real host
+    // is still its own element, so the card cannot be made to say "evil.example".
+    let res = client
+        .get(authorize_cimd(&format!("{doc_server}/spoof/client.json")))
+        .send()
+        .await
+        .expect("spoof authorize");
+    assert_eq!(res.status(), 200);
+    let spoof = res.text().await.expect("page");
+    assert!(spoof.contains("From <code>127.0.0.1</code>"), "{spoof}");
+    assert!(
+        !spoof.contains("evil.example"),
+        "the host pushed past the cut: {spoof}"
+    );
+    assert!(
+        !spoof.contains('\u{202e}'),
+        "bidi override stripped: {spoof}"
+    );
+    // Documents that are too big — declared, or streamed without a length — are refused
+    // with the same sentence as every other failed fetch.
+    for path in ["/big/client.json", "/stream/client.json"] {
+        let res = client
+            .get(authorize_cimd(&format!("{doc_server}{path}")))
+            .send()
+            .await
+            .expect("big doc");
+        assert_eq!(res.status(), 400, "{path}");
+        let text = res.text().await.expect("text");
+        assert!(
+            text.contains("could not be used") && !text.contains("KB") && !text.contains("JSON"),
+            "one sentence, no oracle: {text}"
+        );
+    }
     let consent = consent_of(&page);
     let mut allow = vec![
         ("response_type", "code".to_string()),
@@ -693,15 +769,47 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
         .send()
         .await
         .expect("cimd token");
+    assert_eq!(res.status(), 200);
+    let cimd_pair: Value = res.json().await.expect("json");
+    let cimd_refresh = cimd_pair["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_string();
+    let (status, init) = initialize(&base, cimd_pair["access_token"].as_str().unwrap()).await;
     assert_eq!(
-        res.status(),
-        200,
-        "{}",
-        res.text().await.unwrap_or_default()
+        status, 200,
+        "a document client's key opens the door: {init}"
     );
-    let issued: Value = res.json().await.expect("json");
-    let (status, init) = initialize(&base, issued["access_token"].as_str().unwrap()).await;
-    assert_eq!(status, 200, "{init}");
+    // Two presentations of one refresh token at the same instant: the claim is a single
+    // statement, so exactly one mints. The loser reads a spent token — the replay case.
+    let cimd_refresh_form = |token: &str| {
+        vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", token.to_string()),
+            ("client_id", good.clone()),
+            ("resource", format!("{base}/mcp")),
+        ]
+    };
+    let (first, second) = tokio::join!(
+        client
+            .post(format!("{base}/oauth/mcp/token"))
+            .form(&cimd_refresh_form(&cimd_refresh))
+            .send(),
+        client
+            .post(format!("{base}/oauth/mcp/token"))
+            .form(&cimd_refresh_form(&cimd_refresh))
+            .send(),
+    );
+    let statuses = [
+        first.expect("first").status().as_u16(),
+        second.expect("second").status().as_u16(),
+    ];
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 200).count(),
+        1,
+        "exactly one of two concurrent refreshes mints: {statuses:?}"
+    );
+    assert!(statuses.contains(&400), "{statuses:?}");
 
     // A console session skips the sign-in card: the consent card comes straight up.
     let res = reqwest::Client::new()
@@ -766,6 +874,8 @@ async fn spawn_cimd_document() -> String {
         listener.local_addr().expect("addr").port()
     );
     let good = base.clone();
+    let spoof = base.clone();
+    let big = base.clone();
     let app = axum::Router::new()
         .route(
             "/good/client.json",
@@ -788,6 +898,45 @@ async fn spawn_cimd_document() -> String {
                     "client_id": "https://somebody.else/client.json",
                     "redirect_uris": [CALLBACK],
                 }))
+            }),
+        )
+        .route(
+            "/spoof/client.json",
+            get(move || {
+                let id = format!("{spoof}/spoof/client.json");
+                async move {
+                    axum::Json(json!({
+                        "client_id": id,
+                        "client_name": format!("{}\u{202e} (evil.example)", "A".repeat(300)),
+                        "redirect_uris": [CALLBACK],
+                        "token_endpoint_auth_method": "none",
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/big/client.json",
+            get(move || {
+                let id = format!("{big}/big/client.json");
+                async move {
+                    axum::Json(json!({
+                        "client_id": id,
+                        "client_name": "Big",
+                        "pad": "x".repeat(6 * 1024),
+                        "redirect_uris": [CALLBACK],
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/stream/client.json",
+            get(|| async {
+                // Chunked, no Content-Length: only a cap applied while reading catches it.
+                let chunks = (0..8).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 1024]));
+                axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from_stream(futures::stream::iter(chunks)))
+                    .expect("response")
             }),
         );
     tokio::spawn(async move {

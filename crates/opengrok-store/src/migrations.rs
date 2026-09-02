@@ -347,6 +347,9 @@ create index if not exists oauth_refresh_jti_idx on oauth_refresh_token (jti);
 -- `create table if not exists` does not evolve a table that already exists (a database that ran
 -- the branch before the column did): the ALTER is what makes the index below possible.
 alter table oauth_refresh_token add column if not exists family text not null default '';
+-- A row from before the column has no chain of its own: it IS its own chain. Left as '' every
+-- legacy token across every account would be one family, and one replay would end them all.
+update oauth_refresh_token set family = jti where family = '';
 create index if not exists oauth_refresh_family_idx on oauth_refresh_token (family);
 
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape

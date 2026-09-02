@@ -17,7 +17,8 @@
 //! always send one. Falling back would make the client hold an access token as its refresh token,
 //! and `cursorSessionPresent` would report a session that cannot survive its own first refresh.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
