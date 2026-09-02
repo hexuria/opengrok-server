@@ -450,6 +450,9 @@ REST ignored a requested model and stored the deployment default. Investigation:
   holds it too. Admin dashboard "Spend limits" card writes them; the coworker page shows three
   meters read-only. Retirement revokes the key. `tests/against_spend_caps.rs` walks it over a
   stand-in gateway with the real `GatewayDoor` under the guard.
+  A coworker without a key of its own gets one on its next turn (`spend::mint_late`, asked once
+  per ten minutes per coworker while the gateway refuses): minting only at hire left every
+  coworker hired while the admin token was wrong unmetered for good. #45.
 - [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
 - [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its

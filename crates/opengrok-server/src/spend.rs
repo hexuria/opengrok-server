@@ -19,7 +19,7 @@
 //! deployment's key and the console says which.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::{DeltaStream, GatewayKey, ModelDoor, ModelError, ModelRequest};
@@ -173,13 +173,69 @@ pub async fn ensure_key_for(
     }
 }
 
+/// How long the run path waits after a failed late mint before asking the gateway again for
+/// that coworker: a gateway that refuses (a wrong admin key, a principal gone) is asked once an
+/// interval, not once a turn. Per process, like every cache in this module.
+const MINT_RETRY_MS: i64 = 10 * 60 * 1_000;
+static MINT_ATTEMPTS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+/// A coworker without a key of its own gets one on its next turn. Minting is a hire-time step,
+/// and a hire while the admin connection was wrong left the coworker unmetered for good —
+/// nothing ever tried again. That was the dev server on 2 Sep 2026: OG_GATEWAY_ADMIN_TOKEN was
+/// an inference key, every mint answered 403, and every coworker hired that day ran on the
+/// deployment's key with no meter, cap or not. `true` when a key now exists.
+async fn mint_late(state: &AgUiState, coworker_id: &CoworkerId) -> bool {
+    let now = now_ms();
+    {
+        let Ok(mut attempts) = MINT_ATTEMPTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+        else {
+            return false;
+        };
+        if let Some(last) = attempts.get(coworker_id.as_str())
+            && now - last < MINT_RETRY_MS
+        {
+            return false;
+        }
+        attempts.insert(coworker_id.as_str().to_string(), now);
+    }
+    let Ok(Some(account_id)) = state.auth.store.coworker_owner(coworker_id).await else {
+        return false;
+    };
+    let Ok((coworker, _)) = state.auth.store.load_coworker(coworker_id).await else {
+        return false;
+    };
+    if coworker.retired || coworker.is_group() {
+        return false;
+    }
+    match ensure_key_for(state, &account_id, coworker_id, &coworker.name).await {
+        KeyOutcome::Minted { key_prefix } => {
+            tracing::info!(coworker = %coworker_id.as_str(), %key_prefix, "spend cap: minted the coworker's own key late, on its turn");
+            true
+        }
+        KeyOutcome::Unavailable(reason) => {
+            tracing::info!(coworker = %coworker_id.as_str(), reason, "spend cap: still no key of its own; the deployment's key carries this turn");
+            false
+        }
+    }
+}
+
 /// The credential this coworker's next request goes out with. `None` ⇒ the deployment's key
 /// (no key of its own). A row whose secret cannot be opened is `Unavailable`, which the door
 /// refuses — fail closed, and say why.
 pub async fn key_for(state: &AgUiState, coworker_id: &CoworkerId) -> Option<GatewayKey> {
     let row = match state.auth.store.coworker_key(coworker_id).await {
         Ok(Some(row)) => row,
-        Ok(None) => return None,
+        Ok(None) => {
+            if !mint_late(state, coworker_id).await {
+                return None;
+            }
+            match state.auth.store.coworker_key(coworker_id).await {
+                Ok(Some(row)) => row,
+                _ => return None,
+            }
+        }
         Err(error) => {
             tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be read");
             return Some(GatewayKey::unavailable(format!(
