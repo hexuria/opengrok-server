@@ -232,7 +232,9 @@ pub async fn roster_rows_for(
     let mut rows = Vec::new();
     for view in coworkers.iter().filter(|view| !view.retired) {
         let mut row = live_summary(state, view).await;
-        row["computerError"] = if view.box_id.is_none() {
+        // A group has members instead of a computer: the account's provisioning error is not
+        // its problem, and a "no computer" note on a group would send a person chasing one.
+        row["computerError"] = if view.box_id.is_none() && view.members.is_empty() {
             crate::agui::provision::error_json(&account_error)
         } else {
             Value::Null

@@ -58,7 +58,23 @@ pub enum CoworkerEvent {
     Retired {
         at_ms: i64,
     },
+    /// A GROUP was hired: a coworker whose members do the thinking. It has no computer and no
+    /// model of its own — its transcript is the room, and each member's turn runs on that
+    /// member's model, key, tools and policy (`plan-rooms.md` §2).
+    GroupHired {
+        name: String,
+        members: Vec<CoworkerId>,
+        at_ms: i64,
+    },
+    MembersSet {
+        members: Vec<CoworkerId>,
+        at_ms: i64,
+    },
 }
+
+/// The most members a group holds — the client's own `GROUP_MAX_MEMBERS`
+/// (`shared/agents/agents.ts:53`), transcribed, not chosen.
+pub const GROUP_MAX_MEMBERS: usize = 6;
 
 impl CoworkerEvent {
     pub fn event_type(&self) -> &'static str {
@@ -69,6 +85,8 @@ impl CoworkerEvent {
             Self::ComputerAssigned { .. } => "computer-assigned",
             Self::ComputerReleased { .. } => "computer-released",
             Self::Retired { .. } => "coworker-retired",
+            Self::GroupHired { .. } => "group-hired",
+            Self::MembersSet { .. } => "members-set",
         }
     }
 }
@@ -81,6 +99,8 @@ pub struct Coworker {
     pub model: String,
     pub box_id: Option<BoxId>,
     pub box_mode: Option<BoxMode>,
+    /// Non-empty ⇒ this coworker is a group of these. Order is the order they were named.
+    pub members: Vec<CoworkerId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -100,6 +120,12 @@ pub enum CoworkerError {
     /// wrote were unreachable, so the invalid value simply got stored.
     #[error("a coworker needs a model to think with")]
     EmptyModel,
+    #[error("a group needs at least one member")]
+    NoMembers,
+    #[error("a group holds at most {GROUP_MAX_MEMBERS} members")]
+    TooManyMembers,
+    #[error("that coworker is not a group")]
+    NotAGroup,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +154,18 @@ pub enum CoworkerCommand {
         at_ms: i64,
     },
     Retire {
+        at_ms: i64,
+    },
+    /// Hire a group of existing coworkers. Whether the members EXIST, are not retired and are
+    /// not groups themselves is the server's to check (it takes other rows); this aggregate
+    /// keeps the list de-duplicated and bounded.
+    HireGroup {
+        name: String,
+        members: Vec<CoworkerId>,
+        at_ms: i64,
+    },
+    SetMembers {
+        members: Vec<CoworkerId>,
         at_ms: i64,
     },
 }
@@ -159,7 +197,39 @@ impl Coworker {
                 self.box_mode = None;
             }
             CoworkerEvent::Retired { .. } => self.retired = true,
+            CoworkerEvent::GroupHired { name, members, .. } => {
+                self.hired = true;
+                self.name = name.clone();
+                // A sentinel, never a route: a group takes no model call of its own, and a
+                // caller that asked the gateway for "group" would be told so in plain words.
+                self.model = "group".to_string();
+                self.members = members.clone();
+            }
+            CoworkerEvent::MembersSet { members, .. } => self.members = members.clone(),
         }
+    }
+
+    /// A group is a coworker with members. Everything a group cannot do (take a model call,
+    /// own a computer, hold a key) follows from this one predicate.
+    pub fn is_group(&self) -> bool {
+        !self.members.is_empty()
+    }
+
+    /// De-duplicated in the order given, one to `GROUP_MAX_MEMBERS` of them.
+    fn member_list(members: Vec<CoworkerId>) -> Result<Vec<CoworkerId>, CoworkerError> {
+        let mut seen: Vec<CoworkerId> = Vec::with_capacity(members.len());
+        for member in members {
+            if !seen.contains(&member) {
+                seen.push(member);
+            }
+        }
+        if seen.is_empty() {
+            return Err(CoworkerError::NoMembers);
+        }
+        if seen.len() > GROUP_MAX_MEMBERS {
+            return Err(CoworkerError::TooManyMembers);
+        }
+        Ok(seen)
     }
 
     /// The computer a run must use. Read from here, never from a request.
@@ -247,6 +317,28 @@ impl Coworker {
                 self.alive()?;
                 Ok(vec![CoworkerEvent::Retired { at_ms }])
             }
+
+            CoworkerCommand::HireGroup {
+                name,
+                members,
+                at_ms,
+            } => {
+                let members = Self::member_list(members)?;
+                Ok(vec![CoworkerEvent::GroupHired {
+                    name,
+                    members,
+                    at_ms,
+                }])
+            }
+
+            CoworkerCommand::SetMembers { members, at_ms } => {
+                self.alive()?;
+                if !self.is_group() {
+                    return Err(CoworkerError::NotAGroup);
+                }
+                let members = Self::member_list(members)?;
+                Ok(vec![CoworkerEvent::MembersSet { members, at_ms }])
+            }
         }
     }
 }
@@ -261,6 +353,9 @@ pub struct CoworkerView {
     pub retired: bool,
     /// The client's sort key — see `research/client-grok-bot.md` §8.1.
     pub updated_at_ms: i64,
+    /// A group's members; empty for an ordinary coworker. The roster's `isGroup`/`memberIds`.
+    #[serde(default)]
+    pub members: Vec<CoworkerId>,
 }
 
 #[cfg(test)]
@@ -519,5 +614,74 @@ mod tests {
             coworker.apply(&event);
         }
         assert_eq!(coworker.computer(), Some(&BoxId::from_stored("box_1")));
+    }
+
+    #[test]
+    fn a_group_is_a_coworker_with_members_bounded_and_deduplicated() {
+        let a = CoworkerId::from_stored("cw_a");
+        let b = CoworkerId::from_stored("cw_b");
+        let events = Coworker::default()
+            .decide(CoworkerCommand::HireGroup {
+                name: "Pair".to_string(),
+                members: vec![a.clone(), b.clone(), a.clone()],
+                at_ms: 1,
+            })
+            .unwrap_or_default();
+        let group = Coworker::replay(&events);
+        assert!(group.is_group());
+        assert_eq!(
+            group.members,
+            vec![a.clone(), b.clone()],
+            "de-duplicated, in order"
+        );
+        assert_eq!(group.model, "group", "a sentinel, never a route");
+        assert!(matches!(
+            Coworker::default().decide(CoworkerCommand::HireGroup {
+                name: "Empty".to_string(),
+                members: Vec::new(),
+                at_ms: 1,
+            }),
+            Err(CoworkerError::NoMembers)
+        ));
+        let many: Vec<CoworkerId> = (0..=GROUP_MAX_MEMBERS)
+            .map(|n| CoworkerId::from_stored(format!("cw_{n}")))
+            .collect();
+        assert!(matches!(
+            Coworker::default().decide(CoworkerCommand::HireGroup {
+                name: "Crowd".to_string(),
+                members: many,
+                at_ms: 1,
+            }),
+            Err(CoworkerError::TooManyMembers)
+        ));
+        // Members can be reset; an ordinary coworker cannot be given members after the fact.
+        let reset = group
+            .decide(CoworkerCommand::SetMembers {
+                members: vec![b.clone()],
+                at_ms: 2,
+            })
+            .unwrap_or_default();
+        let mut group = group;
+        for event in &reset {
+            group.apply(event);
+        }
+        assert_eq!(group.members, vec![b]);
+        let solo = Coworker::replay(
+            &Coworker::default()
+                .decide(CoworkerCommand::Hire {
+                    name: "Solo".to_string(),
+                    model: "oag/cheap".to_string(),
+                    at_ms: 1,
+                })
+                .unwrap_or_default(),
+        );
+        assert!(!solo.is_group());
+        assert!(matches!(
+            solo.decide(CoworkerCommand::SetMembers {
+                members: vec![a],
+                at_ms: 2,
+            }),
+            Err(CoworkerError::NotAGroup)
+        ));
     }
 }

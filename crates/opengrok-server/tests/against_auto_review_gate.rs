@@ -109,6 +109,7 @@ async fn seed_coworker(store: &PgStore, account: &AccountId) -> CoworkerId {
         model: coworker.model.clone(),
         box_id: None,
         retired: false,
+        members: Vec::new(),
         updated_at_ms: 2,
     };
     store

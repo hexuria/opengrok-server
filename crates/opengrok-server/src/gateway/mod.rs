@@ -17,6 +17,7 @@
 
 pub mod cards;
 pub mod conversation;
+pub mod group;
 pub mod lifecycle;
 pub mod live;
 pub mod routes;

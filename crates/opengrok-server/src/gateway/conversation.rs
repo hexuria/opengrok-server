@@ -248,6 +248,22 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     }
     live::emit_transcript(state, &agent_id, "appended", user_entry.clone());
 
+    // A group answers as a ROOM: its members take turns (`group.rs`), each posting under its
+    // own name, so there is no single answer bubble to grow into.
+    if coworker.is_group() {
+        live::set_running(state, &agent_id, true, json!({})).await;
+        let handle = tokio::spawn(super::group::run_group_turn(
+            state.clone(),
+            account.id,
+            coworker_id,
+            coworker,
+        ));
+        if let Ok(mut cancels) = state.cancels.lock() {
+            cancels.insert(agent_id.clone(), handle.abort_handle());
+        }
+        return (200, json!({ "accepted": true }));
+    }
+
     // The streaming placeholder the answer will grow into.
     let answer_id = entry_id();
     let placeholder = json!({
@@ -620,6 +636,7 @@ async fn reprovision(
         model: coworker.model.clone(),
         box_id: coworker.computer().cloned(),
         retired: false,
+        members: Vec::new(),
         updated_at_ms: at_ms,
     };
     let _ = state

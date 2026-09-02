@@ -27,7 +27,7 @@ pub use model::{
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
 pub use rig_door::RigDoor;
-pub use tools::{ToolRunner, collect_tool_calls};
+pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
 use futures::StreamExt;
 use opengrok_wire::agui::Event;

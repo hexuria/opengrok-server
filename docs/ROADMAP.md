@@ -515,8 +515,20 @@ Listing them as pending would make this tracker lie about how far away done is.
   Auto-review (the consent judge) is a different product and already shipped.
 - [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
   `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
-- [ ] Channels / multi-party rooms (phases 3–4 of `archive/plan-bots-computers-channels.md`) —
-  the provisioning half shipped (`41245b5`); the rooms half deliberately waits with P11.
+- [x] **Groups** (`plan-rooms.md` §2; the rooms half of the old channels plan, as the client
+  actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
+  `SetMembers`, roster `isGroup`/`memberIds`), no computer, key or model of its own;
+  `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules
+  (same member set ⇒ the existing group, no group inside a group, at most 6). A prompt to it
+  runs the client's orchestrator transcribed (`gateway/group.rs`): three rounds, responders
+  from `@mentions` since the last user message, order rotating by round, each member's turn on
+  its own model, key, tools and policy with the room's prompts word for word, speaking only
+  through the room's `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per
+  prompt, `activeRemoteMemberId` on the row while a member speaks. Not yet: a card raised
+  inside a member's turn (the member says nothing; the room shows no card).
+  `tests/against_groups.rs`.
+- [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
+  client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
 - [ ] Artifacts/uploads — parked on purpose; lands with or after the harness produces files worth
   storing (design notes in GOAL.md).

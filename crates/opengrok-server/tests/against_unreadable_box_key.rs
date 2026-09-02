@@ -121,6 +121,7 @@ async fn unreadable_ascii_key_is_an_error_not_absent() {
                 model: coworker.model.clone(),
                 box_id: None,
                 retired: false,
+                members: Vec::new(),
                 updated_at_ms: at_ms,
             },
         )

@@ -11,29 +11,82 @@
 use opengrok_tools::{Executor, ToolCall, ToolContext, ToolResult};
 use opengrok_wire::agui::{Event, EventType};
 
+/// A tool the SERVER answers in-process rather than the coworker's computer — a group's
+/// `SendMessage`, which posts to the room. Synchronous on purpose: it records, it does not
+/// reach out.
+pub type LocalTool = std::sync::Arc<dyn Fn(&ToolCall) -> ToolResult + Send + Sync>;
+
 /// The executor plus the identity to run as. Assembled by the server from the session.
 pub struct ToolRunner {
-    executor: Executor,
-    context: ToolContext,
+    /// `None` for a coworker with no computer that still has local tools (a group member
+    /// speaking to the room): every other call is refused in words, never run elsewhere.
+    executor: Option<(Executor, ToolContext)>,
+    local: Vec<(serde_json::Value, LocalTool)>,
 }
 
 impl ToolRunner {
     pub fn new(executor: Executor, context: ToolContext) -> Self {
-        Self { executor, context }
+        Self {
+            executor: Some((executor, context)),
+            local: Vec::new(),
+        }
+    }
+
+    /// A runner with no computer behind it: only the local tools added to it can run.
+    pub fn local_only() -> Self {
+        Self {
+            executor: None,
+            local: Vec::new(),
+        }
+    }
+
+    /// Offer one more tool, answered in-process. `schema` is the OpenAI function definition
+    /// (`{type, function: {name, …}}`) the model is shown; the handler runs when it is called.
+    #[must_use]
+    pub fn with_local(mut self, schema: serde_json::Value, handler: LocalTool) -> Self {
+        self.local.push((schema, handler));
+        self
+    }
+
+    fn local_for(&self, name: &str) -> Option<&LocalTool> {
+        self.local
+            .iter()
+            .find(|(schema, _)| schema["function"]["name"] == name)
+            .map(|(_, handler)| handler)
     }
 
     /// The OpenAI tool definitions to advertise to the model this turn — the offering that pairs
     /// with `run_all`'s execution. The harness fills `ModelRequest.tools` from this before each door
     /// call, so the model actually knows the tools exist.
     pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
-        self.executor
-            .tool_schemas(&self.context.account_id, &self.context.coworker_id)
+        let mut schemas = self
+            .executor
+            .as_ref()
+            .map(|(executor, context)| {
+                executor.tool_schemas(&context.account_id, &context.coworker_id)
+            })
+            .unwrap_or_default();
+        schemas.extend(self.local.iter().map(|(schema, _)| schema.clone()));
+        schemas
     }
 
     /// Run a single call — the MCP door's shape, where each request is one call with no turn
-    /// around it. Same executor, same identity: the door gets no path around the gates.
+    /// around it. Same executor, same identity: the door gets no path around the gates. A local
+    /// tool answers here; a computer tool with no computer is refused, never run elsewhere.
     pub async fn run_one(&self, call: &ToolCall) -> ToolResult {
-        self.executor.execute(&self.context, call).await
+        if let Some(handler) = self.local_for(&call.name) {
+            return handler(call);
+        }
+        match self.executor.as_ref() {
+            Some((executor, context)) => executor.execute(context, call).await,
+            None => ToolResult {
+                call_id: call.id.clone(),
+                ok: false,
+                content: "this coworker has no computer, so it has no tools to run".to_string(),
+                awaiting_approval: false,
+                awaiting_reason: None,
+            },
+        }
     }
 
     pub async fn run_all(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
@@ -41,7 +94,7 @@ impl ToolRunner {
         for call in calls {
             // Sequentially: a model's calls in one turn frequently depend on each other (write a
             // file, then run it), and running them concurrently would race on the same filesystem.
-            results.push(self.executor.execute(&self.context, call).await);
+            results.push(self.run_one(call).await);
         }
         results
     }

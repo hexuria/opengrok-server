@@ -308,6 +308,7 @@ async fn grok_bot(
                 model: coworker.model.clone(),
                 box_id: coworker.computer().cloned(),
                 retired: false,
+                members: Vec::new(),
                 updated_at_ms: at_ms,
             };
             if let Err(error) = store
@@ -397,6 +398,7 @@ async fn grok_bot(
                     model: after.model.clone(),
                     box_id: after.box_id.clone(),
                     retired: after.retired,
+                    members: after.members.clone(),
                     updated_at_ms: now_ms(),
                 };
                 let _ = store
@@ -452,6 +454,7 @@ async fn grok_bot(
                         model: after.model.clone(),
                         box_id: after.box_id.clone(),
                         retired: after.retired,
+                        members: after.members.clone(),
                         updated_at_ms: at_ms,
                     };
                     let _ = store
