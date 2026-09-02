@@ -111,6 +111,16 @@ pub async fn ensure_key_for(
             return KeyOutcome::Unavailable(reason);
         }
     };
+    // Bind the org to its principal first — idempotent, and the same step the member-key mint
+    // takes. Skipping it worked only on a gateway that had already seen the org: on the dev
+    // gateway on 2 Sep 2026 (a fresh gateway, the org created while the admin connection was
+    // wrong) every coworker mint was refused "no principal with that email", at hire and late.
+    if let Err(error) = admin.ensure_org_principal(&org_id, None).await {
+        tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the gateway would not bind the org's principal");
+        return KeyOutcome::Unavailable(format!(
+            "the gateway would not bind the org's principal: {error}"
+        ));
+    }
     let label = format!("coworker: {name}");
     let minted = match admin.mint_member_key(&org_id, &label, None).await {
         Ok(minted) => minted,
