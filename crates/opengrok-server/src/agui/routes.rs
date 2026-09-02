@@ -705,13 +705,25 @@ pub async fn hire(
     // "install a plugin" and "let this coworker use it" stay two decisions rather than one.
     let tools =
         opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
+    let mut template_note: Option<String> = None;
     let granted = match template.as_ref() {
-        // Hired from a template: the template's ceiling, approval set and limits, copied.
-        Some(template) => {
-            crate::templates::apply_at_hire(&state, &account_id, &coworker_id, template, at_ms)
-                .await
-                .map_err(opengrok_store::StoreError::Corrupt)
-        }
+        // Hired from a template: the template's ceiling, approval set and limits, copied. A
+        // limit that could not be copied comes back as a note for the hirer.
+        Some(template) => match crate::templates::apply_at_hire(
+            &state,
+            &account_id,
+            &coworker_id,
+            template,
+            at_ms,
+        )
+        .await
+        {
+            Ok(note) => {
+                template_note = note;
+                Ok(())
+            }
+            Err(error) => Err(opengrok_store::StoreError::Corrupt(error)),
+        },
         None => {
             state
                 .auth
@@ -748,6 +760,8 @@ pub async fn hire(
             "model": view.model,
             "boxId": view.box_id.as_ref().map(|id| id.as_str()),
             "computerError": provision::error_json(&computer_error),
+            // A sentence when something the template promised did not land; null otherwise.
+            "templateNote": template_note,
         })),
     )
         .into_response()

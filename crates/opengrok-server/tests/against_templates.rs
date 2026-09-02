@@ -620,6 +620,10 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         json!("oag/cheap"),
         "the template's pin: {hired}"
     );
+    assert!(
+        hired["templateNote"].is_null(),
+        "nothing failed to land: {hired}"
+    );
     let coworker = CoworkerId::from_stored(hired["id"].as_str().expect("id").to_string());
     let policy = store
         .policy_for(&member_id, &coworker)

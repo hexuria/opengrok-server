@@ -191,11 +191,20 @@ async fn hire(
     // templates grants that template's ceiling and approval set instead, and copies its limits.
     let tools =
         opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
+    let mut template_note: Option<String> = None;
     let granted = match template.as_ref() {
+        // Hired from a template: the template's ceiling, approval set and limits, copied. A
+        // limit that could not be copied comes back as a note for the hirer.
         Some(template) => {
-            crate::templates::apply_at_hire(&state.agui, account_id, &id, template, at_ms)
+            match crate::templates::apply_at_hire(&state.agui, account_id, &id, template, at_ms)
                 .await
-                .map_err(opengrok_store::StoreError::Corrupt)
+            {
+                Ok(note) => {
+                    template_note = note;
+                    Ok(())
+                }
+                Err(error) => Err(opengrok_store::StoreError::Corrupt(error)),
+            }
         }
         None => {
             state
@@ -251,6 +260,12 @@ async fn hire(
             "computerError".to_string(),
             provision::error_json(&provisioned.error),
         );
+    }
+    if code == 200
+        && let Some(note) = template_note
+        && let Some(object) = reply.as_object_mut()
+    {
+        object.insert("templateNote".to_string(), json!(note));
     }
     (code, reply)
 }
