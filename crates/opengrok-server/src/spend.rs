@@ -388,6 +388,12 @@ pub struct WindowMeter {
     /// RFC 3339: when the rolling window next frees up (its oldest spend ageing out), or when
     /// the month resets. Absent when the window is empty.
     pub frees_at: Option<String>,
+    /// Requests inside the window. Absent when the coworker is not metered or the gateway is
+    /// older than open-ai-gateway #51.
+    pub requests: Option<i64>,
+    /// What the window's tokens would have cost at the model's list API price — a subscription
+    /// seat's "12 requests · would have cost $0.41 on API". Absent as `requests` is.
+    pub counterfactual_usd: Option<String>,
 }
 
 /// What the console shows next to a coworker: whether it is metered at all, why not when it
@@ -400,6 +406,11 @@ pub struct CoworkerSpend {
     pub key_prefix: Option<String>,
     pub limits: SpendLimit,
     pub windows: Vec<WindowMeter>,
+    /// How the coworker's usage is paid for, read off the month: `"subscription"` when it
+    /// carries a bill it displaced and no cost of its own, `"api"` when it carries cost. Absent
+    /// when not metered, when nothing has run this month, or on an older gateway — the block
+    /// then infers, or says nothing.
+    pub seat: Option<&'static str>,
 }
 
 fn windows_of(usage: Option<&KeyUsage>, limits: &SpendLimit) -> Vec<WindowMeter> {
@@ -409,20 +420,41 @@ fn windows_of(usage: Option<&KeyUsage>, limits: &SpendLimit) -> Vec<WindowMeter>
             used_usd: usage.and_then(|u| u.five_hour_usd.clone()),
             limit_usd: limits.five_hour_usd.clone(),
             frees_at: usage.and_then(|u| u.five_hour_frees_at.clone()),
+            requests: usage.and_then(|u| u.five_hour_requests),
+            counterfactual_usd: usage.and_then(|u| u.five_hour_counterfactual_usd.clone()),
         },
         WindowMeter {
             window: "7d",
             used_usd: usage.and_then(|u| u.seven_day_usd.clone()),
             limit_usd: limits.seven_day_usd.clone(),
             frees_at: usage.and_then(|u| u.seven_day_frees_at.clone()),
+            requests: usage.and_then(|u| u.seven_day_requests),
+            counterfactual_usd: usage.and_then(|u| u.seven_day_counterfactual_usd.clone()),
         },
         WindowMeter {
             window: "month",
             used_usd: usage.map(|u| u.month_to_date_usd.clone()),
             limit_usd: limits.month_usd.clone(),
             frees_at: usage.and_then(|u| u.month_resets_at.clone()),
+            requests: usage.map(|u| u.requests),
+            counterfactual_usd: usage.and_then(|u| u.month_counterfactual_usd.clone()),
         },
     ]
+}
+
+/// `"api"` when this month carries cost, `"subscription"` when it carries only the bill a seat
+/// displaced, nothing when it carries neither or the gateway does not say.
+fn seat_of(usage: Option<&KeyUsage>) -> Option<&'static str> {
+    let usage = usage?;
+    let displaced = micros(usage.month_counterfactual_usd.as_deref()?)?;
+    let cost = micros(&usage.month_to_date_usd)?;
+    if cost > 0 {
+        Some("api")
+    } else if displaced > 0 {
+        Some("subscription")
+    } else {
+        None
+    }
 }
 
 /// What the console shows. The coworker must be this account's (the caller checks ownership).
@@ -449,6 +481,7 @@ pub async fn spend_for(
             key_prefix: None,
             limits: limits.clone(),
             windows: windows_of(None, &limits),
+            seat: None,
         });
     };
     let (usage, note) = match state.auth.gateway_admin.as_ref() {
@@ -473,6 +506,7 @@ pub async fn spend_for(
         note,
         key_prefix: Some(row.key_prefix),
         windows: windows_of(usage.as_ref(), &limits),
+        seat: seat_of(usage.as_ref()),
         limits,
     })
 }
@@ -837,6 +871,11 @@ mod tests {
             five_hour_frees_at: Some("2026-09-02T14:32:10Z".into()),
             seven_day_usd: Some(seven.into()),
             seven_day_frees_at: Some("2026-09-09T05:12:44Z".into()),
+            five_hour_requests: None,
+            seven_day_requests: None,
+            month_counterfactual_usd: None,
+            five_hour_counterfactual_usd: None,
+            seven_day_counterfactual_usd: None,
         }
     }
 

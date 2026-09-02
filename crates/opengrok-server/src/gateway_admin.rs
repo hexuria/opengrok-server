@@ -82,6 +82,21 @@ pub struct KeyUsage {
     pub seven_day_usd: Option<String>,
     #[serde(rename = "seven_day_frees_at", default)]
     pub seven_day_frees_at: Option<String>,
+    /// Requests inside the rolling windows (the month's are `requests`). Absent on a gateway
+    /// older than open-ai-gateway #51.
+    #[serde(rename = "five_hour_requests", default)]
+    pub five_hour_requests: Option<i64>,
+    #[serde(rename = "seven_day_requests", default)]
+    pub seven_day_requests: Option<i64>,
+    /// What the same tokens would have cost at the model's list API price: a subscription
+    /// seat's usage against the bill it displaced, its own cost being truthfully zero. Absent on
+    /// an older gateway.
+    #[serde(rename = "month_counterfactual_usd", default)]
+    pub month_counterfactual_usd: Option<String>,
+    #[serde(rename = "five_hour_counterfactual_usd", default)]
+    pub five_hour_counterfactual_usd: Option<String>,
+    #[serde(rename = "seven_day_counterfactual_usd", default)]
+    pub seven_day_counterfactual_usd: Option<String>,
 }
 
 /// Why a call to the gateway's admin API did not do what was asked. There is no
