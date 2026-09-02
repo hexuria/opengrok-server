@@ -392,8 +392,23 @@ fn cimd_url_allowed(client_id: &str, allow_loopback: bool) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    // A host written as an address is judged here, where it is knowable; a name is judged at
+    // fetch time, after it resolves (`fetch_cimd`). The review that moved the check to the
+    // fetch left the literal case behind: `https://10.0.0.5/c.json` was accepted at
+    // registration and refused only when fetched — fail closed still, but the door said yes
+    // to a client id it would never honour.
+    // `host_str` keeps a v6 literal in its brackets; whatever does not parse is a name.
+    let literal_ok = match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(ip) => address_permitted(ip, allow_loopback),
+        Err(_) => true,
+    };
     let scheme_ok = url.scheme() == "https" || (allow_loopback && url.scheme() == "http");
     scheme_ok
+        && literal_ok
         && !host.is_empty()
         && url.path().len() > 1
         && url.fragment().is_none()
