@@ -1,0 +1,17 @@
+2026-09-02T04:19:32.841235Z INFO opengrok_server: request id=adccd06d-dbf0-4c81-be86-5f5a75e19e2b method=POST uri=/mcp status=401 origin=false auth_len=0 ms=0
+2026-09-02T04:19:32.843506Z INFO opengrok_server: request id=4e995f7a-f726-4541-bd7f-4145c6cb5d75 method=GET uri=/.well-known/oauth-protected-resource/mcp status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:19:32.845038Z INFO opengrok_server: request id=7a519519-609b-407d-8a43-bf81819c04a2 method=GET uri=/.well-known/oauth-authorization-server status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:19:32.932252Z INFO http{id=a4cdbbda-90ef-4874-8dd4-61fa07ac7dec}: opengrok_server::auth::oauth_mcp: mcp oauth: client registered client_id=mc_01a06057f7bc7590908048bbf357230a peer="peer:192.168.100.24"
+2026-09-02T04:19:32.932392Z INFO opengrok_server: request id=a4cdbbda-90ef-4874-8dd4-61fa07ac7dec method=POST uri=/oauth/mcp/register status=201 origin=false auth_len=0 ms=10
+2026-09-02T04:20:01.380314Z INFO opengrok_server: request id=3029595a-2597-4d2e-bc7e-9542e3c59b0f method=GET uri=/.well-known/oauth-protected-resource/mcp status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:20:01.383499Z INFO opengrok_server: request id=dec7b7f8-f88b-4758-bc6e-592b18ef5558 method=GET uri=/.well-known/oauth-authorization-server status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:20:01.391015Z INFO opengrok_server: request id=75b2f926-0a68-4fac-9ae7-029716f4a05c method=GET uri=/.well-known/oauth-authorization-server status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:20:01.392211Z INFO opengrok_server: request id=3d0d1cb3-4a7c-47fe-bc32-e5541d72367e method=GET uri=/.well-known/oauth-protected-resource/mcp status=200 origin=false auth_len=0 ms=0
+2026-09-02T04:20:01.680121Z INFO opengrok_server: request id=30f14f4d-a73c-4609-ae29-af6dac0de262 method=GET uri=/oauth/mcp/authorize?response_type=code&client_id=mc_01a06057f7bc7590908048bbf357230a&code_challenge=vkMwAa67HinyUCSc
+2026-09-02T04:20:30.222474Z INFO opengrok_server: request id=e2c41aee-6578-474a-9b09-fbd2f39403ea method=POST uri=/oauth/mcp/authorize status=200 origin=true auth_len=0 ms=348
+2026-09-02T04:20:35.928258Z INFO http{id=fa2a8bf2-3a7c-4ec2-a309-11f4ed50b585}: opengrok_server::auth::oauth_mcp: mcp oauth: consent given client_id=mc_01a06057f7bc7590908048bbf357230a account=acct_01a0551e-29ad-74b3-b1d6-236a8122
+2026-09-02T04:20:35.931182Z INFO opengrok_server: request id=fa2a8bf2-3a7c-4ec2-a309-11f4ed50b585 method=POST uri=/oauth/mcp/authorize status=303 origin=true auth_len=0 ms=18
+2026-09-02T04:20:35.991885Z INFO http{id=b3403c79-46fb-459d-9595-58f1da69ec94}: opengrok_server::auth::oauth_mcp: mcp oauth: key issued client_id=mc_01a06057f7bc7590908048bbf357230a coworker=cw_01a058dd-0052-7db2-a116-4c62276a9113
+2026-09-02T04:20:35.992191Z INFO opengrok_server: request id=b3403c79-46fb-459d-9595-58f1da69ec94 method=POST uri=/oauth/mcp/token status=200 origin=false auth_len=0 ms=7
+2026-09-02T04:25:23.611325Z INFO opengrok_server: request id=c54fda01-b549-42b7-872a-bb56ddda091e method=POST uri=/mcp status=200 origin=false auth_len=388 ms=39
+2026-09-02T04:25:24.692750Z INFO opengrok_server: request id=f077c79d-5fa0-48ad-9b44-5afd448d0b55 method=POST uri=/mcp status=200 origin=false auth_len=388 ms=1079
