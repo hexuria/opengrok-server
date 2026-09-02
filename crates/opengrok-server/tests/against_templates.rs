@@ -738,3 +738,127 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         "the copy outlives the template"
     );
 }
+
+/// The note is the point: a coworker hired unlimited where the template promised a limit must
+/// be said, in the reply, on both hire paths. Postgres is made to refuse the limits row for a
+/// sentinel amount (a trigger the test installs and removes), which is the only honest way to
+/// make `put_spend_limit` fail without touching the code under test.
+#[tokio::test]
+async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
+    let database_url = database_or_skip!();
+    let tag = now_ms().to_string();
+    let domain = format!("tplnote-{tag}.test");
+    let store = store_from(&database_url).await;
+    let (_org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let admin_id = store
+        .account_by_email(&admin_email)
+        .await
+        .expect("load")
+        .expect("the admin exists")
+        .id;
+    let h = harness(&database_url, &admin_email).await;
+    let admin = h.access_token(&admin_id, &admin_email);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect");
+    let sentinel = "13.130000";
+    sqlx::query(
+        "create or replace function og_test_refuse_spend_limit() returns trigger as $$
+         begin
+           if new.month_usd = '13.130000' then
+             raise exception 'the test says no to this limit';
+           end if;
+           return new;
+         end $$ language plpgsql",
+    )
+    .execute(&pool)
+    .await
+    .expect("trigger fn");
+    sqlx::query("drop trigger if exists og_test_refuse_spend_limit on spend_limit")
+        .execute(&pool)
+        .await
+        .expect("drop old trigger");
+    sqlx::query(
+        "create trigger og_test_refuse_spend_limit before insert or update on spend_limit
+         for each row execute function og_test_refuse_spend_limit()",
+    )
+    .execute(&pool)
+    .await
+    .expect("trigger");
+
+    let res = h
+        .client
+        .post(format!("{}/admin/templates", h.base))
+        .header("Authorization", format!("Bearer {admin}"))
+        .json(&json!({ "name": "Capped", "tools": ["read_file"], "limits": { "monthUsd": sentinel } }))
+        .send()
+        .await
+        .expect("template");
+    assert_eq!(res.status(), 201);
+    let template_id = res.json::<Value>().await.expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    // REST hire: hired, granted, but the limit did not land — and the reply says so.
+    let res = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("Authorization", format!("Bearer {admin}"))
+        .json(&json!({ "name": "Ada", "templateId": template_id }))
+        .send()
+        .await
+        .expect("hire");
+    assert_eq!(
+        res.status(),
+        201,
+        "{}",
+        res.text().await.unwrap_or_default()
+    );
+    let hired: Value = res.json().await.expect("json");
+    let note = hired["templateNote"].as_str().unwrap_or("");
+    assert!(
+        note.contains("could not be copied") && note.contains("unlimited"),
+        "the hirer is told, in the reply: {hired}"
+    );
+    let coworker = CoworkerId::from_stored(hired["id"].as_str().expect("id").to_string());
+    assert!(
+        store
+            .spend_limit(opengrok_store::SpendScope::Coworker, coworker.as_str())
+            .await
+            .expect("limits")
+            .is_none(),
+        "the limit really did not land"
+    );
+    assert!(
+        store
+            .policy_for(&admin_id, &coworker)
+            .await
+            .expect("policy")
+            .grant
+            .is_some(),
+        "the grant still did"
+    );
+
+    // The desktop's createAgent: the same note, on its own reply shape.
+    let (status, created) = h
+        .api(
+            "createAgent",
+            json!({ "name": "Cara", "templateId": template_id, "clientNonce": format!("tplnote-{tag}") }),
+        )
+        .await;
+    assert_eq!(status, 200, "{created}");
+    let note = created["templateNote"].as_str().unwrap_or("");
+    assert!(note.contains("could not be copied"), "{created}");
+
+    sqlx::query("drop trigger if exists og_test_refuse_spend_limit on spend_limit")
+        .execute(&pool)
+        .await
+        .expect("drop trigger");
+    sqlx::query("drop function if exists og_test_refuse_spend_limit()")
+        .execute(&pool)
+        .await
+        .expect("drop fn");
+}
