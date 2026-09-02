@@ -90,6 +90,9 @@ The milestone that proves the port; everything after it is breadth, not risk.
   tail/window/page reads, the array forms, `openAgent`, `promptAcceptanceStatus`) backed by the
   harness we already have; turns run on the coworker's own model and are journaled like every
   other run. *(this commit)*
+- [x] **8.reply** A reply keeps its link (`replyToId` on `sendPrompt` → `replyTo` on the user's
+  entry, the echo, and the answer through every rebuild), and the model reads the quoted message
+  as one line ahead of the prompt; a room member sees the same. `against_reply_to.rs`. #42.
 - [x] **8.2** The two SSE shapes that carry an answer: `transcript` `appended`/`updated` (user
   echo carrying `clientNonce`, streaming placeholder, final update) and `agent-upserted` pulsing
   `isRunning` — every frame stamped `ordered: {replicaKey, epoch, sequence}`, plus an `agents`

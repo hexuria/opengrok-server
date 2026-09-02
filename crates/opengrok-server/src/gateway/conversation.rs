@@ -227,7 +227,15 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
 
     // The user's own message, durably in the transcript and echoed over SSE carrying the
     // clientNonce — that echo is what settles the optimistic bubble in the renderer.
-    let user_entry = json!({
+    // The reply link (`replyToId` on the send, `replyTo` on the entry — `transcript.rs:53`): the
+    // page draws its "quoted" header from the entry, so the echo that replaces the optimistic
+    // bubble must carry it, or the header vanishes the moment the send is accepted.
+    let reply_to = args
+        .get("replyToId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string);
+    let mut user_entry = json!({
         "kind": "message",
         "id": entry_id(),
         "role": "user",
@@ -236,6 +244,9 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         "timestampMs": now_ms(),
         "clientNonce": nonce,
     });
+    if let Some(id) = &reply_to {
+        user_entry["replyTo"] = json!(id);
+    }
     if let Err(error) = state
         .agui
         .auth
@@ -266,13 +277,16 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
 
     // The streaming placeholder the answer will grow into.
     let answer_id = entry_id();
-    let placeholder = json!({
+    let mut placeholder = json!({
         "kind": "send-message",
         "id": answer_id,
         "message": { "type": "text", "content": "" },
         "timestampMs": now_ms(),
         "streaming": true,
     });
+    if let Some(id) = &reply_to {
+        placeholder["replyTo"] = json!(id);
+    }
     let answer_seq = match state
         .agui
         .auth
@@ -300,8 +314,11 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         coworker_id,
         coworker.model.clone(),
         history,
-        answer_id,
-        answer_seq,
+        Answer {
+            id: answer_id,
+            seq: answer_seq,
+            reply_to,
+        },
     ));
     if let Ok(mut cancels) = state.cancels.lock() {
         cancels.insert(agent_id.clone(), handle.abort_handle());
@@ -648,6 +665,95 @@ async fn reprovision(
     Ok(())
 }
 
+/// How much of a quoted message the model is shown; a reply to a long answer names the answer,
+/// it does not replay it.
+const REPLY_QUOTE_CHARS: usize = 1_000;
+
+/// The message a reply points at, as one bracketed line the model reads ahead of the prompt —
+/// who said it and what, capped — or nothing when there is no link or it names an entry that is
+/// not in this transcript (deleted, or from another coworker's history). Shared with the room's
+/// history (`group.rs`) so a group member sees the same context.
+pub(crate) fn reply_context(entries: &[Value], entry: &Value) -> Option<String> {
+    let id = entry.get("replyTo").and_then(Value::as_str)?;
+    let quoted = entries
+        .iter()
+        .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(id))?;
+    let (who, text) = match quoted.get("kind").and_then(Value::as_str) {
+        Some("message") => (
+            if quoted.get("role").and_then(Value::as_str) == Some("user") {
+                "their own earlier message".to_string()
+            } else {
+                "your earlier message".to_string()
+            },
+            quoted
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        Some("send-message") => (
+            quoted
+                .pointer("/author/name")
+                .and_then(Value::as_str)
+                .map_or_else(
+                    || "your earlier message".to_string(),
+                    |name| format!("{name}'s earlier message"),
+                ),
+            quoted
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        ),
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
+        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
+        format!("{head}…")
+    } else {
+        text.to_string()
+    };
+    Some(format!("[Replying to {who}: \"{clipped}\"]"))
+}
+
+/// An answer entry, carrying the turn's reply link when it has one — every rebuild of the answer
+/// (the suspension, the final text, the resumed turn) goes through here so no update drops it.
+fn answer_entry(id: &str, text: &str, reply_to: Option<&str>) -> Value {
+    let mut entry = json!({
+        "kind": "send-message",
+        "id": id,
+        "message": { "type": "text", "content": text },
+        "timestampMs": now_ms(),
+    });
+    if let Some(reply_to) = reply_to {
+        entry["replyTo"] = json!(reply_to);
+    }
+    entry
+}
+
+/// The reply link of the turn in progress: the latest user message's `replyTo`. For the path
+/// that answers after an approval card, which has no `sendPrompt` arguments in hand.
+async fn reply_link_of_the_turn(state: &GatewayState, coworker: &CoworkerId) -> Option<String> {
+    let entries = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(coworker)
+        .await
+        .ok()?;
+    entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.get("kind").and_then(Value::as_str) == Some("message")
+                && entry.get("role").and_then(Value::as_str) == Some("user")
+        })
+        .and_then(|entry| entry.get("replyTo").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
 /// The transcript so far, as chat messages — so a coworker remembers its own conversation
 /// rather than greeting every message as its first.
 pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> Vec<ChatMessage> {
@@ -657,18 +763,23 @@ pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> 
     entries
         .iter()
         .filter_map(|entry| match entry.get("kind").and_then(Value::as_str) {
-            Some("message") => Some(ChatMessage {
-                role: entry
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("user")
-                    .to_string(),
-                content: entry
+            Some("message") => {
+                let content = entry
                     .get("content")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            }),
+                    .unwrap_or_default();
+                Some(ChatMessage {
+                    role: entry
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or("user")
+                        .to_string(),
+                    content: match reply_context(&entries, entry) {
+                        Some(context) => format!("{context}\n\n{content}"),
+                        None => content.to_string(),
+                    },
+                })
+            }
             Some("send-message") => {
                 let content = entry
                     .pointer("/message/content")
@@ -827,15 +938,28 @@ async fn emit_suspension(
     true
 }
 
+/// The answer entry a turn grows into: appended as a streaming placeholder before the turn
+/// starts, updated in place as it ends. `reply_to` is the turn's reply link, carried by every
+/// rebuild of the entry so the page's "quoted" header survives each update.
+pub(crate) struct Answer {
+    pub id: String,
+    pub seq: i64,
+    pub reply_to: Option<String>,
+}
+
 pub(crate) async fn run_turn(
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,
     coworker_id: CoworkerId,
     model: String,
     messages: Vec<ChatMessage>,
-    answer_id: String,
-    answer_seq: i64,
+    answer: Answer,
 ) {
+    let Answer {
+        id: answer_id,
+        seq: answer_seq,
+        reply_to,
+    } = answer;
     let agent_id = coworker_id.as_str().to_string();
     let run_id = RunId::new();
     let thread_id = format!("gateway-{agent_id}");
@@ -934,12 +1058,7 @@ pub(crate) async fn run_turn(
     // journal, so resolveLocalToolPermission can resume it. requestId = callId, threaded onto the
     // exec frame when the run resumes so both gates converge on one id.
     if let Some(suspension) = find_suspension(&events) {
-        let answer_entry = json!({
-            "kind": "send-message",
-            "id": answer_id.clone(),
-            "message": { "type": "text", "content": text.clone() },
-            "timestampMs": now_ms(),
-        });
+        let answer_entry = answer_entry(&answer_id, &text, reply_to.as_deref());
         let _ = state
             .agui
             .auth
@@ -957,12 +1076,7 @@ pub(crate) async fn run_turn(
         text = "The turn produced no answer. Its run log has the reason.".to_string();
     }
 
-    let final_entry = json!({
-        "kind": "send-message",
-        "id": answer_id,
-        "message": { "type": "text", "content": text },
-        "timestampMs": now_ms(),
-    });
+    let final_entry = answer_entry(&answer_id, &text, reply_to.as_deref());
     if let Err(error) = state
         .agui
         .auth
@@ -1703,12 +1817,8 @@ async fn resume_gateway_run(
         }
     }
     if !text.is_empty() {
-        let answer = json!({
-            "kind": "send-message",
-            "id": entry_id(),
-            "message": { "type": "text", "content": text.clone() },
-            "timestampMs": now_ms(),
-        });
+        let reply_to = reply_link_of_the_turn(&state, &coworker_id).await;
+        let answer = answer_entry(&entry_id(), &text, reply_to.as_deref());
         if let Ok(_seq) = state
             .agui
             .auth

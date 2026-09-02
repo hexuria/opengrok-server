@@ -362,7 +362,10 @@ pub fn history_of(entries: &[Value]) -> Vec<GroupMessage> {
                     .map(str::to_string);
                 history.push(GroupMessage {
                     speaker: Speaker::User { name },
-                    content: content.to_string(),
+                    content: match super::conversation::reply_context(entries, entry) {
+                        Some(context) => format!("{context}\n\n{content}"),
+                        None => content.to_string(),
+                    },
                 });
             }
             Some("send-message")
