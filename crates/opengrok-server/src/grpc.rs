@@ -56,7 +56,7 @@ impl pb::dashboard_service_server::DashboardService for SeamBGrpc {
             .await
             .map(|(account, _)| account.email.clone())
             .unwrap_or_default();
-        let first_name = email.split('@').next().unwrap_or("OpenGrok").to_string();
+        let first_name = email.split('@').next().unwrap_or("Open Grok").to_string();
         Ok(Response::new(pb::GetMeResponse {
             auth_id: account_id.as_str().to_string(),
             user_id: 1,
@@ -73,7 +73,7 @@ impl pb::dashboard_service_server::DashboardService for SeamBGrpc {
         self.account_from(&request)?;
         Ok(Response::new(pb::GetTeamsResponse {
             teams: vec![pb::Team {
-                name: "OpenGrok".to_string(),
+                name: "Open Grok".to_string(),
                 id: 1,
                 seats: 1,
                 has_billing: true,

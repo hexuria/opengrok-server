@@ -130,7 +130,7 @@ async fn dashboard(
         .await
         .map(|(account, _)| account.email.clone())
         .unwrap_or_default();
-    let first_name = email.split('@').next().unwrap_or("OpenGrok").to_string();
+    let first_name = email.split('@').next().unwrap_or("Open Grok").to_string();
 
     match method.as_str() {
         // Field names from `dashboard_pb.ts` GetMeResponse.
@@ -145,7 +145,7 @@ async fn dashboard(
         "GetTeams" => connect_ok(json!({
             "teams": [{
                 "id": 1,
-                "name": "OpenGrok",
+                "name": "Open Grok",
                 "role": "TEAM_ROLE_OWNER",
                 "seats": 1,
                 "hasBilling": true,
