@@ -34,6 +34,14 @@ if [ "${1:-}" != "--smoke" ]; then
   exit 0
 fi
 
+# THE SMOKES RUN ./target/debug/opengrok, AND NOTHING ABOVE BUILDS IT. `cargo test --workspace`
+# compiles the crates' test harnesses, not this package's binary, so a local gate used to smoke
+# whatever binary the developer last built — found 2 Sep 2026 when a box carried no run tag
+# because the server was 40 minutes older than the code. CI always built first (ci.yml); now
+# the script does too, so the two agree.
+step "cargo build -p opengrok"
+cargo build -p opengrok || fail "build"
+
 : "${OG_DATABASE_URL:?--smoke needs OG_DATABASE_URL, e.g. postgres://oag:oag@127.0.0.1:5452/opengrok}"
 
 # THE GATE OWNS ITS DATABASE. The autonomy sweeps claim work with `for update skip locked`, so a
