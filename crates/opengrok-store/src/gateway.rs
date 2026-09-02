@@ -372,6 +372,32 @@ pub struct BotKeyView {
     pub created_at_ms: i64,
 }
 
+/// One MCP door call as the audit reports it. `arguments` are already redacted — the row never
+/// held the raw ones. `outcome`: `ok`, `failed` (the tool ran and said no — a policy refusal
+/// reads the same way to the model), `refused` (the door itself said no: reverse-exec, no
+/// computer), `awaiting` (a card is up), `error` (the computer or the store could not answer).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCallView {
+    pub call_id: String,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub outcome: String,
+    pub request_id: String,
+    pub at_ms: i64,
+}
+
+/// One door call to record, arguments ALREADY redacted by the caller.
+#[derive(Debug, Clone)]
+pub struct NewMcpCall<'a> {
+    pub call_id: &'a str,
+    pub tool: &'a str,
+    pub arguments: serde_json::Value,
+    pub outcome: &'a str,
+    pub request_id: &'a str,
+    pub at_ms: i64,
+}
+
 /// A freshly minted key to record — attribution only; the secret is not here and never was.
 #[derive(Debug, Clone)]
 pub struct NewGatewayKey<'a> {
@@ -471,6 +497,62 @@ impl PgStore {
 
     /// Record which gateway key belongs to which org member. The secret is NOT stored — the
     /// gateway holds its hash and the plaintext was shown once.
+    pub async fn insert_mcp_call(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        coworker: &CoworkerId,
+        call: &NewMcpCall<'_>,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into mcp_call_audit
+                (account_id, coworker_id, call_id, tool, arguments, outcome, request_id, at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(account.as_str())
+        .bind(coworker.as_str())
+        .bind(call.call_id)
+        .bind(call.tool)
+        .bind(&call.arguments)
+        .bind(call.outcome)
+        .bind(call.request_id)
+        .bind(call.at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// One coworker's door calls, newest first, scoped by the owning account so another
+    /// account's coworker id answers nothing rather than somebody else's history.
+    pub async fn mcp_calls_for(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        coworker: &CoworkerId,
+        limit: i64,
+    ) -> StoreResult<Vec<McpCallView>> {
+        let rows = sqlx::query(
+            "select call_id, tool, arguments, outcome, request_id, at_ms from mcp_call_audit
+             where account_id = $1 and coworker_id = $2
+             order by at_ms desc, id desc limit $3",
+        )
+        .bind(account.as_str())
+        .bind(coworker.as_str())
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(McpCallView {
+                    call_id: row.try_get("call_id")?,
+                    tool: row.try_get("tool")?,
+                    arguments: row.try_get("arguments")?,
+                    outcome: row.try_get("outcome")?,
+                    request_id: row.try_get("request_id")?,
+                    at_ms: row.try_get("at_ms")?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn insert_gateway_key(&self, key: &NewGatewayKey<'_>) -> StoreResult<()> {
         sqlx::query(
             "insert into gateway_key_view

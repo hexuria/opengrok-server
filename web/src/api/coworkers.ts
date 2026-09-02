@@ -35,6 +35,21 @@ export async function repinCoworker(id: string, model: string): Promise<Coworker
   return (await res.json()) as Coworker;
 }
 
+/** One call through the MCP door, as the server's audit recorded it (arguments already redacted). */
+export interface McpCall {
+  callId: string;
+  tool: string;
+  arguments: unknown;
+  /** ok | failed | refused | awaiting | error — see the server's McpCallView. */
+  outcome: string;
+  requestId: string;
+  atMs: number;
+}
+
+export function listMcpCalls(id: string, limit = 20): Promise<McpCall[]> {
+  return getJson<McpCall[]>(`/coworkers/${encodeURIComponent(id)}/mcp-calls?limit=${limit}`);
+}
+
 export interface Catalogue {
   models: { id: string }[];
   /** Why the list is empty, when it is. An empty list is never silently "there are no models". */

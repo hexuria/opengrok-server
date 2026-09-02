@@ -26,10 +26,12 @@
 //! - **A computerless coworker lists an EMPTY toolbox; an unreachable computer is an ERROR.** An
 //!   empty success is the dangerous reply (CLAUDE.md §3): a KEK/credential/DB failure must not
 //!   masquerade as "this coworker simply has no tools".
-//! - **Allowed calls still have no durable per-call audit.** Box and plugin tool calls in a
-//!   normal run are journaled by the harness; a successful `run_one` is still only a redacted
-//!   tracing line. An Ask now has a run row (that is the card); a full audit of every door call
-//!   is still later.
+//! - **Every door call leaves a durable row** (`mcp_call_audit`): tool, redacted arguments,
+//!   outcome, the request id, written after the call by `McpDoor::audit`. A run journals its
+//!   own tool calls; a door call has no run (an Ask makes one — that is the card), so without
+//!   this row a bot key's use was a tracing line and nothing else. The row is written AFTER the
+//!   call because the outcome is part of it; a failed write is logged at error and does not
+//!   turn a finished call into a refusal — the tool has already run.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -71,6 +73,9 @@ use opengrok_tools::{AwaitingReason, ToolCall, USER_MACHINE_SHELL, redact_argume
 struct McpPrincipal {
     account: AccountId,
     coworker: CoworkerId,
+    /// The request id the tracing layer stamped, so an audit row and the request log line
+    /// that produced it can be found by the same handle.
+    request_id: String,
 }
 
 /// The `/mcp` surface: the rmcp streamable-HTTP service behind the auth-and-origin guard.
@@ -133,8 +138,12 @@ async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) 
     let public_url = state.agui.auth.public_url.clone();
     match principal_from_bearer(&state.agui, req.headers()).await {
         Ok(Some((account, Some(coworker)))) => {
-            req.extensions_mut()
-                .insert(McpPrincipal { account, coworker });
+            let request_id = crate::request_id(req.headers());
+            req.extensions_mut().insert(McpPrincipal {
+                account,
+                coworker,
+                request_id,
+            });
             next.run(req).await
         }
         Ok(Some((_, None))) => unauthorized(
@@ -423,15 +432,7 @@ impl ServerHandler for McpDoor {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let principal = Self::principal(&context)?;
-        // Reverse-exec is not reachable over MCP; refuse it by name rather than dispatching.
-        if request.name.as_ref() == USER_MACHINE_SHELL {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                "the reverse-exec channel (running on your own machine) is not available over \
-                 MCP — use the Open Grok app for that",
-            )])
-            .into());
-        }
-        let mut call = ToolCall {
+        let call = ToolCall {
             id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
             name: request.name.to_string(),
             arguments: request
@@ -439,6 +440,75 @@ impl ServerHandler for McpDoor {
                 .map(serde_json::Value::Object)
                 .unwrap_or_else(|| serde_json::json!({})),
         };
+        let done = self.dispatch(&principal, call).await;
+        self.audit(&principal, &done).await;
+        done.reply
+    }
+}
+
+/// What one door call came to — the audit row's word for it. See `McpCallView` for the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Failed,
+    Refused,
+    Awaiting,
+    Error,
+}
+
+impl Outcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Failed => "failed",
+            Self::Refused => "refused",
+            Self::Awaiting => "awaiting",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// A dispatched call: the reply for the client, and what the audit needs to say about it. The
+/// call travels with it because a retry that spends a remembered yes takes over that yes's id.
+struct Dispatch {
+    reply: Result<CallToolResponse, McpError>,
+    outcome: Outcome,
+    call: ToolCall,
+}
+
+impl Dispatch {
+    fn said(call: ToolCall, outcome: Outcome, result: CallToolResult) -> Self {
+        Self {
+            reply: Ok(result.into()),
+            outcome,
+            call,
+        }
+    }
+
+    fn failed(call: ToolCall, error: McpError) -> Self {
+        Self {
+            reply: Err(error),
+            outcome: Outcome::Error,
+            call,
+        }
+    }
+}
+
+impl McpDoor {
+    /// The call itself: take, pending-card check, execute, persist, remember — every path a
+    /// `tools/call` can take, each ending in a `Dispatch` so the audit sees all of them.
+    async fn dispatch(&self, principal: &McpPrincipal, mut call: ToolCall) -> Dispatch {
+        // Reverse-exec is not reachable over MCP; refuse it by name rather than dispatching.
+        if call.name == USER_MACHINE_SHELL {
+            return Dispatch::said(
+                call,
+                Outcome::Refused,
+                CallToolResult::error(vec![ContentBlock::text(
+                    "the reverse-exec channel (running on your own machine) is not available \
+                     over MCP — use the Open Grok app for that",
+                )]),
+            );
+        }
         // Take, pending-card check, execute, persist, and remember all sit under this lock
         // so a retry cannot run while a card is pending, and an Approve cannot interleave
         // a leftover yes.
@@ -452,22 +522,26 @@ impl ServerHandler for McpDoor {
                 .await
             {
                 Ok(Some(request_id)) => {
-                    return Ok(
+                    return Dispatch::said(
+                        call,
+                        Outcome::Awaiting,
                         CallToolResult::error(vec![ContentBlock::text(ask_waiting_text(
                             "waiting for approval",
                             &request_id,
-                        ))])
-                        .into(),
+                        ))]),
                     );
                 }
                 Ok(None) => {}
                 Err(error) => {
                     tracing::error!(%error, "mcp door: could not look up a pending ask");
-                    return Ok(CallToolResult::error(vec![ContentBlock::text(
-                        "approval is needed, but the card could not be raised; grant this \
-                         tool to the coworker in the Open Grok app or console, or retry.",
-                    )])
-                    .into());
+                    return Dispatch::said(
+                        call,
+                        Outcome::Error,
+                        CallToolResult::error(vec![ContentBlock::text(
+                            "approval is needed, but the card could not be raised; grant this \
+                             tool to the coworker in the Open Grok app or console, or retry.",
+                        )]),
+                    );
                 }
             }
         }
@@ -478,7 +552,7 @@ impl ServerHandler for McpDoor {
             Some((id, false)) => (Vec::new(), vec![id.clone()]),
             None => (Vec::new(), Vec::new()),
         };
-        let runner = match self.toolbox_for(&principal, &gate_yes, &review_yes).await {
+        let runner = match self.toolbox_for(principal, &gate_yes, &review_yes).await {
             Toolbox::Ready(runner) => runner,
             Toolbox::NoComputer => {
                 if let Some((id, gate)) = once {
@@ -490,10 +564,13 @@ impl ServerHandler for McpDoor {
                         gate,
                     );
                 }
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "this coworker has no computer, so it has no tools to run",
-                )])
-                .into());
+                return Dispatch::said(
+                    call,
+                    Outcome::Refused,
+                    CallToolResult::error(vec![ContentBlock::text(
+                        "this coworker has no computer, so it has no tools to run",
+                    )]),
+                );
             }
             Toolbox::Unavailable => {
                 if let Some((id, gate)) = once {
@@ -505,25 +582,30 @@ impl ServerHandler for McpDoor {
                         gate,
                     );
                 }
-                return Err(McpError::internal_error(
-                    "this coworker's computer could not be reached right now",
-                    None,
-                ));
+                return Dispatch::failed(
+                    call,
+                    McpError::internal_error(
+                        "this coworker's computer could not be reached right now",
+                        None,
+                    ),
+                );
             }
         };
         let result = runner.run_one(&call).await;
         if result.awaiting_approval {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(
-                reply_to_ask(
-                    &self.state,
-                    &principal.account,
-                    &principal.coworker,
-                    &call,
-                    &result,
-                )
-                .await,
-            )])
-            .into());
+            let text = reply_to_ask(
+                &self.state,
+                &principal.account,
+                &principal.coworker,
+                &call,
+                &result,
+            )
+            .await;
+            return Dispatch::said(
+                call,
+                Outcome::Awaiting,
+                CallToolResult::error(vec![ContentBlock::text(text)]),
+            );
         }
         if !result.ok
             && let Some((id, gate)) = once
@@ -531,8 +613,9 @@ impl ServerHandler for McpDoor {
             // A failed execute must not spend the yes — the client will retry.
             remember_mcp_allow_once(&principal.coworker, &call.name, &call.arguments, id, gate);
         }
-        // Allowed calls still have no durable audit (see the module note). An Ask is persisted
-        // above, under the lock. Arguments are redacted the way the judge redacts them.
+        // The durable row is written by `audit` once this returns; this line is the same fact
+        // in the request log, greppable by the request id. Arguments redacted the way the judge
+        // redacts them.
         tracing::info!(
             coworker = %principal.coworker.as_str(),
             tool = %call.name,
@@ -541,14 +624,55 @@ impl ServerHandler for McpDoor {
             arguments = %redact_arguments(&call.arguments),
             "mcp door call"
         );
-        let response = if result.ok {
-            CallToolResult::success(vec![ContentBlock::text(result.content)])
+        if result.ok {
+            Dispatch::said(
+                call,
+                Outcome::Ok,
+                CallToolResult::success(vec![ContentBlock::text(result.content)]),
+            )
         } else {
             // A refusal is content the model can reason about, exactly as in a run.
             // Ask is handled inside the lock above so persist is serialized per coworker.
-            CallToolResult::error(vec![ContentBlock::text(result.content)])
+            Dispatch::said(
+                call,
+                Outcome::Failed,
+                CallToolResult::error(vec![ContentBlock::text(result.content)]),
+            )
+        }
+    }
+
+    /// The durable row. Written after the call because the outcome is part of it; a failed
+    /// write is an error-level line, not a refusal — the tool has already run, and turning a
+    /// finished call into "no" would make the client retry something that happened.
+    async fn audit(&self, principal: &McpPrincipal, done: &Dispatch) {
+        // The judge's redaction is JSON text, clipped with a stated cut when long; a clipped
+        // one no longer parses, and is kept as the string it is rather than dropped.
+        let redacted = redact_arguments(&done.call.arguments);
+        let arguments =
+            serde_json::from_str(&redacted).unwrap_or_else(|_| serde_json::Value::String(redacted));
+        let row = opengrok_store::NewMcpCall {
+            call_id: &done.call.id,
+            tool: &done.call.name,
+            arguments,
+            outcome: done.outcome.as_str(),
+            request_id: &principal.request_id,
+            at_ms: chrono::Utc::now().timestamp_millis(),
         };
-        Ok(response.into())
+        if let Err(error) = self
+            .state
+            .agui
+            .auth
+            .store
+            .insert_mcp_call(&principal.account, &principal.coworker, &row)
+            .await
+        {
+            tracing::error!(
+                %error,
+                call_id = %done.call.id,
+                tool = %done.call.name,
+                "mcp door: the call finished but its audit row was not written"
+            );
+        }
     }
 }
 

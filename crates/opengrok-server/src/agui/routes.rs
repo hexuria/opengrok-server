@@ -442,6 +442,7 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/keys/{jti}",
             axum::routing::delete(revoke_bot_key),
         )
+        .route("/coworkers/{coworker_id}/mcp-calls", get(list_mcp_calls))
         .with_state(state)
 }
 
@@ -901,6 +902,49 @@ async fn list_bot_keys(
         Ok(keys) => Json(keys).into_response(),
         Err(error) => {
             tracing::error!(%error, "could not list bot keys");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct McpCallsQuery {
+    limit: Option<i64>,
+}
+
+/// `GET /coworkers/{id}/mcp-calls?limit=` — what this coworker's bot keys have been used for,
+/// newest first. The owner only: another account's coworker id is a 404, not an empty list
+/// (an empty success is the dangerous reply).
+async fn list_mcp_calls(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<McpCallsQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    let owned = match state.auth.store.coworkers_for(&account_id).await {
+        Ok(coworkers) => coworkers.iter().any(|c| c.id == coworker_id),
+        Err(error) => {
+            tracing::error!(%error, "could not list coworkers");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+        }
+    };
+    if !owned {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    match state
+        .auth
+        .store
+        .mcp_calls_for(&account_id, &coworker_id, limit)
+        .await
+    {
+        Ok(calls) => Json(calls).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not list mcp door calls");
             (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
         }
     }
