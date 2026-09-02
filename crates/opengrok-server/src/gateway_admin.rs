@@ -25,6 +25,27 @@ pub struct MintedKey {
 }
 
 /// An org's spend against its cap, read live from the gateway's ledger.
+/// One key as the gateway lists it (`GET /admin/api/keys`): enough to reconcile our attribution
+/// against the authority — which keys exist for the org's principal, and whether each still
+/// authenticates. No secret, no hash.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayKeyListing {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub key_prefix: String,
+    /// The principal's email — `org_principal_email(org)` for keys minted through the console.
+    #[serde(default)]
+    pub principal: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrincipalUsage {
     pub email: String,
@@ -165,6 +186,23 @@ impl GatewayAdmin {
             .await?;
         serde_json::from_value(value)
             .map_err(|error| AdminError::Refused(format!("unexpected mint reply: {error}")))
+    }
+
+    /// Every key the gateway holds for this org's principal. The gateway lists all keys and
+    /// names each one's principal; the filter is ours, so another org's keys never leave this
+    /// function. The listing is accepted as a bare array or `{"keys": [...]}`.
+    pub async fn org_keys(&self, org_id: &str) -> Result<Vec<GatewayKeyListing>, AdminError> {
+        let body = self
+            .send(reqwest::Method::GET, "/admin/api/keys", None)
+            .await?;
+        let rows = body.get("keys").cloned().unwrap_or(body);
+        let listed: Vec<GatewayKeyListing> = serde_json::from_value(rows)
+            .map_err(|error| AdminError::Refused(format!("unreadable key listing: {error}")))?;
+        let principal = Self::org_principal_email(org_id);
+        Ok(listed
+            .into_iter()
+            .filter(|key| key.principal == principal)
+            .collect())
     }
 
     pub async fn revoke_key(&self, key_id: &str) -> Result<(), AdminError> {

@@ -372,6 +372,20 @@ pub struct BotKeyView {
     pub created_at_ms: i64,
 }
 
+/// A freshly minted key to record — attribution only; the secret is not here and never was.
+#[derive(Debug, Clone)]
+pub struct NewGatewayKey<'a> {
+    pub key_id: &'a str,
+    pub org_id: &'a str,
+    pub member_account_id: &'a str,
+    pub key_prefix: &'a str,
+    pub label: &'a str,
+    /// The console's nonce for this press, so a repeat of the same press finds this row instead
+    /// of minting again. `None` for mints that carried none.
+    pub mint_nonce: Option<&'a str>,
+    pub at_ms: i64,
+}
+
 /// One org member's open-ai-gateway key, as WE record it. The secret is not here and never was:
 /// the gateway keeps its hash, and the plaintext existed only in the reply that minted it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,29 +471,40 @@ impl PgStore {
 
     /// Record which gateway key belongs to which org member. The secret is NOT stored — the
     /// gateway holds its hash and the plaintext was shown once.
-    pub async fn insert_gateway_key(
-        &self,
-        key_id: &str,
-        org_id: &str,
-        member_account_id: &str,
-        key_prefix: &str,
-        label: &str,
-        at_ms: i64,
-    ) -> StoreResult<()> {
+    pub async fn insert_gateway_key(&self, key: &NewGatewayKey<'_>) -> StoreResult<()> {
         sqlx::query(
             "insert into gateway_key_view
-                (key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms)
-             values ($1, $2, $3, $4, $5, false, $6)",
+                (key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms,
+                 mint_nonce)
+             values ($1, $2, $3, $4, $5, false, $6, $7)",
         )
-        .bind(key_id)
-        .bind(org_id)
-        .bind(member_account_id)
-        .bind(key_prefix)
-        .bind(label)
-        .bind(at_ms)
+        .bind(key.key_id)
+        .bind(key.org_id)
+        .bind(key.member_account_id)
+        .bind(key.key_prefix)
+        .bind(key.label)
+        .bind(key.at_ms)
+        .bind(key.mint_nonce)
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    /// The key an earlier press with this nonce minted, if any — the idempotency lookup.
+    pub async fn gateway_key_by_nonce(
+        &self,
+        org_id: &str,
+        mint_nonce: &str,
+    ) -> StoreResult<Option<GatewayKeyView>> {
+        let row = sqlx::query(
+            "select key_id, org_id, member_account_id, key_prefix, label, revoked, created_at_ms
+             from gateway_key_view where org_id = $1 and mint_nonce = $2",
+        )
+        .bind(org_id)
+        .bind(mint_nonce)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(gateway_key_row).transpose()
     }
 
     /// One org's keys, newest first. Scoped by org so a listing can never show another org's.

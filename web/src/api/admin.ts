@@ -128,16 +128,22 @@ export async function clearAccountMode(id: string): Promise<void> {
 
 export interface GatewayKey {
   id: string;
-  memberId: string;
+  /** null for a key the gateway holds for this org that the console never recorded. */
+  memberId: string | null;
   keyPrefix: string;
   label: string;
   revoked: boolean;
-  createdAtMs: number;
+  createdAtMs: number | null;
+  /** True when the gateway knows the key and we do not — revoke it there, or mint anew. */
+  unattributed: boolean;
 }
 
-export interface MintedGatewayKey extends Omit<GatewayKey, "revoked" | "createdAtMs"> {
-  /** Shown once. Never fetchable again. */
-  key: string;
+export interface MintedGatewayKey extends Omit<GatewayKey, "revoked" | "createdAtMs" | "unattributed"> {
+  /** Shown once. Never fetchable again. null when this press had already minted (alreadyMinted). */
+  key: string | null;
+  /** The same press again: the key exists, its secret was shown the first time. */
+  alreadyMinted: boolean;
+  note?: string;
 }
 
 export interface GatewayUsage {
@@ -147,14 +153,21 @@ export interface GatewayUsage {
   provisioned: boolean;
 }
 
-export function listGatewayKeys(): Promise<{ keys: GatewayKey[] }> {
-  return getJson<{ keys: GatewayKey[] }>("/admin/gateway/keys");
+/** `reconciled` is false when the gateway did not answer and the rows are our own record only. */
+export function listGatewayKeys(): Promise<{ keys: GatewayKey[]; reconciled: boolean }> {
+  return getJson<{ keys: GatewayKey[]; reconciled: boolean }>("/admin/gateway/keys");
 }
 
-export function mintGatewayKey(memberId: string, quotaUsd?: string): Promise<MintedGatewayKey> {
+/**
+ * `clientNonce` names THIS press: a retry of the same press (a lost reply, a double click) sends
+ * the same nonce and gets the key it already minted back — without the secret — instead of a
+ * second real key.
+ */
+export function mintGatewayKey(memberId: string, quotaUsd: string | undefined, clientNonce: string): Promise<MintedGatewayKey> {
   return postJson<MintedGatewayKey>("/admin/gateway/keys", {
     memberId,
     quotaUsd: quotaUsd && quotaUsd.trim() ? quotaUsd.trim() : undefined,
+    clientNonce,
   });
 }
 

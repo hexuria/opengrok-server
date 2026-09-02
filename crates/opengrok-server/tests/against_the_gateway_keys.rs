@@ -67,6 +67,10 @@ struct GatewayLog {
     revoked: Vec<String>,
     budgets: Vec<(String, Option<String>)>,
     quotas: Vec<(String, Option<String>)>,
+    /// Every key the stand-in minted: (id, principal, name). Listed by GET /admin/api/keys.
+    minted_ids: Vec<(String, String, String)>,
+    /// Keys the test plants in the gateway that the console never minted (attribution lost).
+    planted: Vec<(String, String, String)>,
 }
 
 type SharedLog = Arc<Mutex<GatewayLog>>;
@@ -96,14 +100,40 @@ async fn spawn_stand_in_gateway(log: SharedLog) -> String {
                         let name = body["name"].as_str().unwrap_or_default().to_string();
                         let quota = body["quota_usd"].as_str().map(str::to_string);
                         let id = format!("key-{}", uuid::Uuid::now_v7().simple());
-                        log.lock().unwrap().mints.push((principal, name, quota));
+                        let mut guard = log.lock().unwrap();
+                        guard.mints.push((principal.clone(), name.clone(), quota));
+                        guard.minted_ids.push((id.clone(), principal, name));
+                        drop(guard);
                         Json(json!({
                             "id": id,
                             "key_prefix": "oag_live_abc1234",
                             "key": "oag_live_abc1234567890_the_only_time_this_exists",
                         }))
                     },
-                ),
+                )
+                .get(|State(log): State<SharedLog>| async move {
+                    // The gateway's listing: every key, its principal, and whether it still
+                    // authenticates — the shape `GatewayAdmin::org_keys` reads.
+                    let guard = log.lock().unwrap();
+                    let rows: Vec<Value> = guard
+                        .minted_ids
+                        .iter()
+                        .chain(guard.planted.iter())
+                        .map(|(id, principal, name)| {
+                            json!({
+                                "id": id,
+                                "name": name,
+                                "key_prefix": "oag_live_abc1234",
+                                "principal": principal,
+                                "route": "openai/gpt-5.5",
+                                "active": !guard.revoked.contains(id),
+                                "admin": false,
+                                "last_used_at": Value::Null,
+                            })
+                        })
+                        .collect();
+                    Json(Value::Array(rows))
+                }),
             )
             .route(
                 "/admin/api/keys/{id}/revoke",
@@ -517,4 +547,132 @@ async fn a_member_cannot_mint_and_another_orgs_key_is_not_found() {
     )
     .await;
     assert_eq!(status, 404, "an admin cannot mint for another org's member");
+}
+
+/// 17.later: a press whose reply was lost must not mint a second real key, and the listing must
+/// tell the truth the gateway holds — a revoke that missed our mirror reads revoked, and a key the
+/// gateway has for this org that we never recorded is shown, not hidden.
+#[tokio::test]
+async fn a_repeated_press_finds_its_key_and_the_listing_heals_against_the_gateway() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let (org_id, admin, member) = seed_org(&store).await;
+    let log: SharedLog = Arc::new(Mutex::new(GatewayLog::default()));
+    let gateway = spawn_stand_in_gateway(log.clone()).await;
+    let (app, state) = app_with(store.clone(), "host@acme.test", &gateway);
+    let base = spawn(app).await;
+    let admin_token = token_for(&state, &admin, "admin@acme.test");
+    let mint = |nonce: &'static str| {
+        let base = base.clone();
+        let admin_token = admin_token.clone();
+        let member = member.clone();
+        async move {
+            call(
+                &base,
+                reqwest::Method::POST,
+                "/admin/gateway/keys",
+                &admin_token,
+                Some(json!({ "memberId": member.as_str(), "clientNonce": nonce })),
+            )
+            .await
+        }
+    };
+
+    // First press: a real key, shown once.
+    let (status, first) = mint("press-1").await;
+    assert_eq!(status, 201, "{first}");
+    assert_eq!(first["alreadyMinted"], json!(false));
+    let first_id = first["id"].as_str().expect("id").to_string();
+    assert!(first["key"].as_str().is_some_and(|k| !k.is_empty()));
+
+    // The same press again (the reply was lost): the same key, no secret, no second mint.
+    let (status, again) = mint("press-1").await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["alreadyMinted"], json!(true));
+    assert_eq!(again["id"], first_id);
+    assert_eq!(again["key"], Value::Null);
+    assert_eq!(log.lock().unwrap().mints.len(), 1, "one press, one mint");
+
+    // A different press mints a different key.
+    let (status, second) = mint("press-2").await;
+    assert_eq!(status, 201, "{second}");
+    let second_id = second["id"].as_str().expect("id").to_string();
+    assert_ne!(second_id, first_id);
+    assert_eq!(log.lock().unwrap().mints.len(), 2);
+
+    // The gateway revokes the first key behind our back (a mirror that failed, an operator in
+    // the gateway's own console): the listing reads revoked, and heals the row.
+    log.lock().unwrap().revoked.push(first_id.clone());
+    let (status, listed) = call(
+        &base,
+        reqwest::Method::GET,
+        "/admin/gateway/keys",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["reconciled"], json!(true));
+    let keys = listed["keys"].as_array().expect("keys");
+    let first_row = keys
+        .iter()
+        .find(|k| k["id"] == first_id)
+        .expect("first key listed");
+    assert_eq!(
+        first_row["revoked"],
+        json!(true),
+        "healed against the gateway: {first_row}"
+    );
+    let healed = store
+        .gateway_key_in_org(&first_id, org_id.as_str())
+        .await
+        .expect("row")
+        .expect("row exists");
+    assert!(
+        healed.revoked,
+        "the row itself was corrected, not only the reply"
+    );
+    let second_row = keys
+        .iter()
+        .find(|k| k["id"] == second_id)
+        .expect("second key listed");
+    assert_eq!(second_row["revoked"], json!(false));
+    assert_eq!(second_row["unattributed"], json!(false));
+
+    // A key the gateway holds for THIS org that we never recorded is shown, unattributed;
+    // another org's key is not.
+    let ours = format!("org-{}@gateway.local", org_id.as_str());
+    {
+        let mut guard = log.lock().unwrap();
+        guard.planted.push((
+            "key-lost-attribution".to_string(),
+            ours,
+            "lost@acme.test".to_string(),
+        ));
+        guard.planted.push((
+            "key-somebody-elses".to_string(),
+            "org-other@gateway.local".to_string(),
+            "them".to_string(),
+        ));
+    }
+    let (_, listed) = call(
+        &base,
+        reqwest::Method::GET,
+        "/admin/gateway/keys",
+        &admin_token,
+        None,
+    )
+    .await;
+    let keys = listed["keys"].as_array().expect("keys");
+    let lost = keys
+        .iter()
+        .find(|k| k["id"] == "key-lost-attribution")
+        .expect("the unattributed key is shown");
+    assert_eq!(lost["unattributed"], json!(true));
+    assert_eq!(lost["memberId"], Value::Null);
+    assert_eq!(lost["label"], "lost@acme.test");
+    assert!(
+        keys.iter().all(|k| k["id"] != "key-somebody-elses"),
+        "another org's key never leaves the filter: {listed}"
+    );
 }

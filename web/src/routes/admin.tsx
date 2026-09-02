@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -520,12 +520,19 @@ function GatewayAccessCard() {
   const [member, setMember] = useState("");
   const [quota, setQuota] = useState("");
   const [budget, setBudget] = useState("");
-  const [revealed, setRevealed] = useState<{ email: string; key: string } | null>(null);
+  const [revealed, setRevealed] = useState<{ email: string; key: string; note?: string } | null>(null);
 
+  // One nonce per PRESS, kept until the press succeeds: a retry after a lost reply carries the
+  // same nonce and the server answers with the key that press already minted.
+  const pressNonce = useRef<string | null>(null);
   const mint = useMutation({
-    mutationFn: () => mintGatewayKey(member, quota),
+    mutationFn: () => {
+      pressNonce.current ??= crypto.randomUUID();
+      return mintGatewayKey(member, quota, pressNonce.current);
+    },
     onSuccess: (minted) => {
-      setRevealed({ email: minted.label, key: minted.key });
+      pressNonce.current = null;
+      setRevealed({ email: minted.label, key: minted.key ?? "", note: minted.note });
       setQuota("");
       queryClient.invalidateQueries({ queryKey: ["admin", "gateway"] });
     },
@@ -626,11 +633,18 @@ function GatewayAccessCard() {
       {revealed ? (
         <div className="card inset">
           <p>
-            <strong>{revealed.email}</strong>&rsquo;s key. Copy it now — it is not shown again.
+            <strong>{revealed.email}</strong>&rsquo;s key.{" "}
+            {revealed.key ? "Copy it now — it is not shown again." : "This press had already minted a key."}
           </p>
-          <code className="wrap">{revealed.key}</code>
+          {revealed.key ? (
+            <code className="wrap">{revealed.key}</code>
+          ) : (
+            <p className="muted">{revealed.note ?? "Its secret was shown once and cannot be shown again."}</p>
+          )}
           <div className="row">
-            <button onClick={() => void navigator.clipboard?.writeText(revealed.key)}>Copy</button>
+            {revealed.key ? (
+              <button onClick={() => void navigator.clipboard?.writeText(revealed.key)}>Copy</button>
+            ) : null}
             <button onClick={() => setRevealed(null)}>Done</button>
           </div>
         </div>
@@ -651,7 +665,11 @@ function GatewayAccessCard() {
           </thead>
           <tbody>
             {keys.data.keys.map((k) => (
-              <GatewayKeyRow key={k.id} gkey={k} email={emailFor(k.memberId)} />
+              <GatewayKeyRow
+                key={k.id}
+                gkey={k}
+                email={k.memberId ? emailFor(k.memberId) : `unattributed (${k.label || "no name"})`}
+              />
             ))}
           </tbody>
         </table>

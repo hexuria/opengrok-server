@@ -321,11 +321,20 @@ key that opens the model door, sets the org's budget and that member's cap, and 
   all-or-nothing, so the key handed to a partner service is a FULL gateway admin credential.
   Ours: the mint's non-idempotence and the revoke mirror are documented where they bite.
   *(this commit)*
+- [x] **17.keys** The mint is idempotent per press and the listing tells the gateway's truth.
+  The console sends a `clientNonce` per press (kept across a retry of that press); a repeat
+  answers 200 `alreadyMinted` with the key's id and prefix and no secret — the plaintext existed
+  only in the lost reply, and minting again is the duplicate the nonce prevents. `GET
+  /admin/gateway/keys` reconciles against `GET /admin/api/keys` on the gateway (filtered to the
+  org's principal here, never there): a revoke the mirror missed reads revoked and the row is
+  healed; a key the gateway holds for this org that we never recorded is listed `unattributed`
+  (revocable, never hidden); an unreachable gateway serves the local rows with
+  `reconciled: false` rather than an empty list. `against_the_gateway_keys.rs` walks all of it
+  against the stand-in. *(this commit)*
 - [ ] **17.later** Per-member model pins (slice 18), SSO/SCIM mapping onto the gateway's
-  `oidc_subject` hook, self-service key rotation, an idempotency key on the mint, reconciling
-  the console's key listing against the gateway (a failed revoke mirror leaves it reading
-  stale), and per-key admin scopes in the gateway so a partner service's credential is not a
-  full operator credential.
+  `oidc_subject` hook, self-service key rotation, and per-key admin scopes in the gateway so a
+  partner service's credential is not a full operator credential (the last two are gateway-repo
+  work).
 
 ## Slice 18 — per-coworker model pins
 
