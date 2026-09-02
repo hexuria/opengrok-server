@@ -195,8 +195,11 @@ pub async fn send(
         coworker_id,
         coworker.model.clone(),
         history,
-        answer_id,
-        answer_seq,
+        conversation::Answer {
+            id: answer_id,
+            seq: answer_seq,
+            reply_to: None,
+        },
     ));
 
     accepted_response(&message_id)
