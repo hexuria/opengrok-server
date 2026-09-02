@@ -316,6 +316,17 @@ alter table gateway_key_view add column if not exists mint_nonce text;
 create unique index if not exists gateway_key_nonce_idx
     on gateway_key_view (org_id, mint_nonce) where mint_nonce is not null;
 
+-- 16.later Part B: OAuth clients that registered against the MCP door's authorization server
+-- (RFC 7591). Public clients only — no secret is stored because none is issued. The row must
+-- survive a restart: Claude Code keeps its client_id and would report "incompatible auth server"
+-- if it vanished.
+create table if not exists oauth_client (
+    client_id     text  primary key,
+    client_name   text  not null,
+    redirect_uris jsonb not null,
+    created_at_ms bigint not null
+);
+
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
 -- and colour). A wire-format projection like gateway_entry: the client is the only reader.
 create table if not exists seamb_profile (

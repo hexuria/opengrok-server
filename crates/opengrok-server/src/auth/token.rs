@@ -102,7 +102,12 @@ impl TokenMinter {
         &self,
         token: &str,
     ) -> Result<T, TokenError> {
-        let validation = Validation::new(Algorithm::HS256);
+        let mut validation = Validation::new(Algorithm::HS256);
+        // `aud` is checked by the caller that knows its resource (the MCP door, for an
+        // OAuth-minted bot key). jsonwebtoken would otherwise reject ANY token carrying `aud`
+        // because no expected audience is configured here — which is how an OAuth key first
+        // read as "unrecognised bearer".
+        validation.validate_aud = false;
         decode::<T>(token, &self.decoding, &validation)
             .map(|data| data.claims)
             .map_err(|error| TokenError::Invalid(error.to_string()))

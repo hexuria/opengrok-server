@@ -113,6 +113,24 @@ async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) 
     if req.headers().contains_key(header::ORIGIN) {
         return (StatusCode::FORBIDDEN, "browser origins are not served").into_response();
     }
+    // RFC 8707: a key the OAuth door minted names the resource it is for. One minted for
+    // another server's `/mcp` must not open this one, however valid its signature. Hand-minted
+    // keys carry no audience and stay accepted — they are ours.
+    if let Some(token) = bearer_of(req.headers())
+        && let Ok(claims) = state
+            .agui
+            .auth
+            .minter
+            .verify_claims::<crate::auth::bot_keys::BotKeyClaims>(token)
+        && let Some(aud) = claims.aud.as_deref()
+        && aud != crate::auth::oauth_mcp::resource_uri(&state.agui.auth.public_url)
+    {
+        return unauthorized(
+            &state.agui.auth.public_url,
+            "this token was issued for another server",
+        );
+    }
+    let public_url = state.agui.auth.public_url.clone();
     match principal_from_bearer(&state.agui, req.headers()).await {
         Ok(Some((account, Some(coworker)))) => {
             req.extensions_mut()
@@ -120,21 +138,40 @@ async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) 
             next.run(req).await
         }
         Ok(Some((_, None))) => unauthorized(
+            &public_url,
             "this token names a person, not a coworker — mint a bot key \
-             (POST /coworkers/{id}/keys) and use that as the bearer",
+             (POST /coworkers/{id}/keys) or sign in through OAuth and use that as the bearer",
         ),
-        Ok(None) => unauthorized("missing or unrecognised bearer — use a coworker's bot key"),
+        Ok(None) => unauthorized(
+            &public_url,
+            "missing or unrecognised bearer — use a coworker's bot key, or sign in through OAuth",
+        ),
         // `principal_from_bearer`'s only Err today is a revoked key; a revoked key must be named
         // revoked, never silently downgraded to anonymous.
-        Err(_) => unauthorized("this bot key has been revoked"),
+        Err(_) => unauthorized(&public_url, "this bot key has been revoked"),
     }
 }
 
-fn unauthorized(message: &'static str) -> Response {
+fn bearer_of(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// Every unauthenticated answer — the initial `initialize` included — carries the challenge an
+/// OAuth-capable client discovers the authorization server from (RFC 9728 via MCP authorization,
+/// 2026-07-28): where the protected-resource metadata is, and the scope to ask for.
+fn unauthorized(public_url: &str, message: &str) -> Response {
+    let challenge = format!(
+        "Bearer resource_metadata=\"{}\", scope=\"{}\"",
+        crate::auth::oauth_mcp::protected_resource_metadata_url(public_url),
+        crate::auth::oauth_mcp::SCOPE,
+    );
     (
         StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Bearer")],
-        message,
+        [(header::WWW_AUTHENTICATE, challenge)],
+        message.to_string(),
     )
         .into_response()
 }

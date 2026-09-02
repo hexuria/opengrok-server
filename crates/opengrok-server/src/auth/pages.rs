@@ -9,7 +9,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-fn escape(value: &str) -> String {
+pub(crate) fn escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -191,6 +191,69 @@ pub fn reset_password(token: &str, error: Option<&str>) -> Response {
     html(
         StatusCode::OK,
         shell("Reset password", "Choose a new password.", &body),
+    )
+}
+
+/// The MCP door's OAuth sign-in card: a client (Claude Code) is asking to use a coworker, and the
+/// person signs in first. `hidden` is the authorization request carried through as hidden inputs
+/// (already escaped by the caller), so the POST re-validates exactly what the client asked for.
+pub fn oauth_login(client_name: &str, hidden: &str, error: Option<&str>) -> Response {
+    let err = error
+        .map(|message| format!("<p class=err>{}</p>", escape(message)))
+        .unwrap_or_default();
+    let body = format!(
+        r##"<form method=post action="/oauth/mcp/authorize">
+  {hidden}
+  {err}
+  <p class=msg><b>{client}</b> wants to use one of your coworkers. Sign in to choose which.</p>
+  <label for=email>Email</label>
+  <input id=email name=email type=email autocomplete=username required autofocus>
+  <label for=password>Password</label>
+  <input id=password name=password type=password autocomplete=current-password required>
+  <button type=submit>Sign in <span aria-hidden=true>&rarr;</span></button>
+</form>"##,
+        client = escape(client_name),
+    );
+    html(
+        StatusCode::OK,
+        shell("Sign in", "Connect a tool to your coworker.", &body),
+    )
+}
+
+/// The consent card: pick the coworker whose toolbox the client gets. `consent` is the signed
+/// token that says who is choosing; `coworkers` are (id, name) pairs from the person's own roster.
+pub fn oauth_consent(
+    client_name: &str,
+    hidden: &str,
+    consent: &str,
+    coworkers: &[(String, String)],
+) -> Response {
+    let options: String = coworkers
+        .iter()
+        .map(|(id, name)| format!("<option value=\"{}\">{}</option>", escape(id), escape(name)))
+        .collect();
+    let body = if coworkers.is_empty() {
+        "<p class=msg>You have no coworkers yet. Hire one in Open Grok, then try again.</p>"
+            .to_string()
+    } else {
+        format!(
+            r##"<form method=post action="/oauth/mcp/authorize">
+  {hidden}
+  <input type=hidden name=consent value="{consent}">
+  <p class=msg><b>{client}</b> will run tools as the coworker you choose, on that coworker's own
+  computer, under your policy. You can revoke this key any time from the coworker's key list.</p>
+  <label for=coworker>Coworker</label>
+  <select id=coworker name=coworker required style="width:100%;padding:.7rem .8rem;font-size:1rem;color:#f5f5f7;background:#0e0e10;border:1px solid #2a2a31;border-radius:10px">{options}</select>
+  <button type=submit>Allow <span aria-hidden=true>&rarr;</span></button>
+</form>
+<p class=foot>Not you? Close this tab; nothing has been granted.</p>"##,
+            consent = escape(consent),
+            client = escape(client_name),
+        )
+    };
+    html(
+        StatusCode::OK,
+        shell("Allow access", "Connect a tool to your coworker.", &body),
     )
 }
 

@@ -76,6 +76,13 @@ pub struct AuthState {
     /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
     /// there is no gateway to ask and the picker says so.
     pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
+    /// The MCP door's OAuth authorization codes, waiting to be exchanged: one-shot, ten
+    /// minutes, bound to the client, redirect, PKCE challenge and resource they were issued
+    /// for. In memory like `logins` — a single replica today; both move to a table together.
+    pub oauth_codes: Arc<Mutex<HashMap<String, super::oauth_mcp::PendingCode>>>,
+    /// Dynamic client registration is unauthenticated by design; this is its ceiling — recent
+    /// registrations per peer address.
+    pub dcr_hits: Arc<Mutex<HashMap<String, Vec<i64>>>>,
     /// The TXT lookup behind domain-ownership proof. A seam, not a resolver: production binds the
     /// system resolver at boot, tests answer from a map. The default refuses every lookup with a
     /// reason, so a state that was never given one answers 503 rather than "not verified".
@@ -95,6 +102,8 @@ impl AuthState {
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
             dns: Arc::new(crate::domain_proof::NoResolver),
+            oauth_codes: Arc::new(Mutex::new(HashMap::new())),
+            dcr_hits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -278,7 +287,7 @@ pub async fn login_submit(
 /// message))` is a client-readable refusal naming which distinct reason applied — unverified, not
 /// enabled, or wrong credentials — the same distinctions the styled login shows. Shared by the
 /// desktop PKCE form and the browser console's cookie login.
-async fn authenticate(
+pub(crate) async fn authenticate(
     state: &AuthState,
     email: &str,
     password: &str,

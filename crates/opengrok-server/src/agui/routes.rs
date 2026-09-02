@@ -852,33 +852,25 @@ async fn mint_bot_key(
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     }
 
-    let jti = format!("bk_{}", uuid::Uuid::now_v7());
-    let at_ms = now_ms();
-    let claims = BotKeyClaims {
-        purpose: "bot-key".to_string(),
-        sub: account_id.as_str().to_string(),
-        coworker: coworker_id.as_str().to_string(),
-        jti: jti.clone(),
-        // Ten years: the row is the real lifecycle; the exp only bounds a leaked key whose
-        // revocation row was somehow lost with it.
-        exp: at_ms / 1_000 + 10 * 365 * 24 * 60 * 60,
-    };
-    let Ok(token) = state.auth.minter.mint_claims(&claims) else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "could not mint").into_response();
-    };
-    if let Err(error) = state
-        .auth
-        .store
-        .insert_bot_key(&jti, &account_id, &coworker_id, "bot key", at_ms)
-        .await
+    let minted = match crate::auth::bot_keys::mint(
+        &state.auth.store,
+        &state.auth.minter,
+        &account_id,
+        &coworker_id,
+        "bot key",
+        None,
+        crate::auth::bot_keys::HAND_MINTED_TTL_SECS,
+    )
+    .await
     {
-        tracing::error!(%error, "could not record a bot key");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not record the key",
-        )
-            .into_response();
-    }
+        Ok(minted) => minted,
+        Err(error) => {
+            tracing::error!(%error, "could not mint a bot key");
+            return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
+        }
+    };
+    let jti = minted.jti;
+    let token = minted.token;
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -934,15 +926,7 @@ async fn revoke_bot_key(
 
 /// What a bot key says about itself. The `use` claim is the discriminator the minter's own
 /// documentation demands: without it, a stolen access token would verify here too.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BotKeyClaims {
-    #[serde(rename = "use")]
-    pub purpose: String,
-    pub sub: String,
-    pub coworker: String,
-    pub jti: String,
-    pub exp: i64,
-}
+pub(crate) use crate::auth::bot_keys::BotKeyClaims;
 
 /// Who is calling, and — when the credential is a bot key — AS which coworker.
 ///

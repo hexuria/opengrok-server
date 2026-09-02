@@ -55,6 +55,12 @@ lists the ladder (`oag/auto`…`oag/frontier`), `openai/gpt-5.5`, and every id d
 Built and verified 1 Sep 2026. The door is `POST /mcp` on opengrok-server: the bearer is a
 slice-10 bot key naming the coworker, and every call runs through the same executor as a run.
 
+**Since 16.oauth (2 Sep 2026):** the header is optional. With TLS in front of the server
+(`docs/setup/tls.md`), `claude mcp add --transport http opengrok https://<lan>:1447/mcp` and then
+`claude mcp login opengrok` opens the browser: sign in, pick the coworker, done — the key it
+receives is a bot key like the one below, listed and revocable on the coworker's key list.
+
+
 **The full Door 1 loop, on the real client.** In one Claude Code invocation with both doors
 configured — `ANTHROPIC_BASE_URL` → open-ai-gateway, plus
 `claude mcp add --transport http opengrok http://192.168.100.24:<port>/mcp --header
