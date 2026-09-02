@@ -319,6 +319,52 @@ async fn a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolb
         !reverse_text.contains("no computer"),
         "must not masquerade as a missing box: {reverse_text}"
     );
+
+    // Both refusals left a durable row the owner can read, newest first, with the door's own
+    // word for what happened and the request id the log line carries.
+    let calls = mcp_calls(&base, &access, &coworker).await;
+    assert_eq!(calls.status().as_u16(), 200);
+    let calls: Value = calls.json().await.expect("calls json");
+    let rows = calls.as_array().expect("an array");
+    assert_eq!(rows.len(), 2, "one row per call: {calls}");
+    assert_eq!(rows[0]["tool"], json!(USER_MACHINE_SHELL));
+    assert_eq!(rows[0]["outcome"], json!("refused"));
+    assert_eq!(rows[1]["tool"], json!("shell"));
+    assert_eq!(rows[1]["outcome"], json!("refused"));
+    assert_eq!(rows[1]["arguments"]["command"], json!("echo hi"));
+    assert!(
+        rows[1]["callId"].as_str().unwrap_or("").starts_with("mcp_"),
+        "{calls}"
+    );
+    assert!(
+        !rows[1]["requestId"].as_str().unwrap_or("").is_empty(),
+        "{calls}"
+    );
+    assert!(rows[1]["atMs"].as_i64().unwrap_or(0) > 0, "{calls}");
+
+    // Another account's view of this coworker is a 404, not an empty list.
+    let stranger_email = format!("mcp-stranger-{}@og.local", uuid::Uuid::now_v7().simple());
+    let stranger = seed_account(&store, &stranger_email).await;
+    let stranger_access = mint_access_for(&state, &stranger, &stranger_email);
+    let refused = mcp_calls(&base, &stranger_access, &coworker).await;
+    assert_eq!(refused.status().as_u16(), 404);
+    // And no bearer at all is a 401.
+    let anonymous = reqwest::Client::new()
+        .get(format!("{base}/coworkers/{}/mcp-calls", coworker.as_str()))
+        .send()
+        .await
+        .expect("anonymous");
+    assert_eq!(anonymous.status().as_u16(), 401);
+}
+
+/// `GET /coworkers/{id}/mcp-calls` as the owner's console would.
+async fn mcp_calls(base: &str, access: &str, coworker: &CoworkerId) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/coworkers/{}/mcp-calls", coworker.as_str()))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .expect("mcp-calls")
 }
 
 #[tokio::test]
@@ -395,7 +441,7 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     let host_email = format!("mcp-ask-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_computerless_coworker(&store, &account).await;
-    let (app, _state, gateway) = app_with(store.clone(), &host_email);
+    let (app, state, gateway) = app_with(store.clone(), &host_email);
     let base = spawn(app).await;
 
     let call = ToolCall {
@@ -422,6 +468,39 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert!(
         error_again.contains(&format!("requestId: {}", call.id)),
         "a retry before answer reuses the same requestId: {error_again}"
+    );
+
+    // The same call through the door itself, while the card is up: the door finds the pending
+    // Ask before it reaches the toolbox, answers "waiting", and the audit says so.
+    let access = mint_access_for(&state, &account, &host_email);
+    let (bot_key, _) = mint_bot_key(&base, &access, &coworker).await;
+    let (_, waiting) = rpc(
+        &base,
+        Some(&bot_key),
+        7,
+        "tools/call",
+        json!({ "name": call.name, "arguments": call.arguments }),
+    )
+    .await;
+    assert_eq!(waiting["result"]["isError"], json!(true), "{waiting}");
+    assert!(
+        waiting["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&format!("requestId: {}", call.id)),
+        "the door names the same card: {waiting}"
+    );
+    let rows: Value = mcp_calls(&base, &access, &coworker)
+        .await
+        .json()
+        .await
+        .expect("calls json");
+    assert_eq!(rows[0]["tool"], json!("write_file"), "{rows}");
+    assert_eq!(rows[0]["outcome"], json!("awaiting"), "{rows}");
+    assert_eq!(
+        rows[0]["arguments"]["path"],
+        json!("/tmp/from-mcp"),
+        "{rows}"
     );
 
     let awaiting = store.awaiting_approval(&account).await.expect("awaiting");
