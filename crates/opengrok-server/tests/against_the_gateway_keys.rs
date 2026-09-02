@@ -676,3 +676,81 @@ async fn a_repeated_press_finds_its_key_and_the_listing_heals_against_the_gatewa
         "another org's key never leaves the filter: {listed}"
     );
 }
+
+/// Two presses with one nonce at the same instant — a double click, a retry racing its own
+/// timeout. Both pass the idempotency lookup, both mint in the gateway, one insert loses to the
+/// (org, nonce) unique index. Exactly one key may stay live: the loser's is revoked in the
+/// gateway before its press is answered, and that press is answered like a repeat of the winner.
+#[tokio::test]
+async fn two_presses_with_one_nonce_leave_exactly_one_live_key() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let (org_id, admin, member) = seed_org(&store).await;
+    let log: SharedLog = Arc::new(Mutex::new(GatewayLog::default()));
+    let gateway = spawn_stand_in_gateway(log.clone()).await;
+    let (app, state) = app_with(store.clone(), "host@acme.test", &gateway);
+    let base = spawn(app).await;
+    let admin_token = token_for(&state, &admin, "admin@acme.test");
+
+    let rounds = 8;
+    let mut winners = std::collections::HashSet::new();
+    for round in 0..rounds {
+        let nonce = format!("race-{round}");
+        let press = || {
+            let base = base.clone();
+            let admin_token = admin_token.clone();
+            let member = member.clone();
+            let nonce = nonce.clone();
+            async move {
+                call(
+                    &base,
+                    reqwest::Method::POST,
+                    "/admin/gateway/keys",
+                    &admin_token,
+                    Some(json!({ "memberId": member.as_str(), "clientNonce": nonce })),
+                )
+                .await
+            }
+        };
+        let ((s1, b1), (s2, b2)) = tokio::join!(press(), press());
+        let mut statuses = [s1, s2];
+        statuses.sort_unstable();
+        assert_eq!(statuses, [200, 201], "round {round}: {b1} / {b2}");
+        let (won, lost) = if s1 == 201 { (&b1, &b2) } else { (&b2, &b1) };
+        assert_eq!(lost["alreadyMinted"], json!(true), "round {round}: {lost}");
+        assert_eq!(
+            lost["id"], won["id"],
+            "round {round}: the loser is told the winner's key"
+        );
+        assert_eq!(lost["key"], Value::Null);
+        winners.insert(won["id"].as_str().expect("id").to_string());
+    }
+
+    // Every key the gateway minted is either a winner or revoked; live keys == rounds.
+    let (minted_count, revoked_count, live) = {
+        let guard = log.lock().unwrap();
+        let live: Vec<String> = guard
+            .minted_ids
+            .iter()
+            .map(|(id, _, _)| id.clone())
+            .filter(|id| !guard.revoked.contains(id))
+            .collect();
+        (guard.minted_ids.len(), guard.revoked.len(), live)
+    };
+    assert_eq!(
+        live.len(),
+        rounds,
+        "one live key per nonce: minted={minted_count} revoked={revoked_count}"
+    );
+    for id in &live {
+        assert!(
+            winners.contains(id),
+            "a live key that no press was told about: {id}"
+        );
+    }
+    let listed = store
+        .gateway_keys_for_org(org_id.as_str())
+        .await
+        .expect("rows");
+    assert_eq!(listed.len(), rounds, "one row per nonce");
+}
