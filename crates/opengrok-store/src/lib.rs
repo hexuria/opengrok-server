@@ -30,7 +30,7 @@ pub mod replica;
 pub mod vault;
 
 pub use autonomy::{DueSchedule, LogEvent};
-pub use gateway::{McpCallView, NewGatewayKey, NewMcpCall, OAuthClient};
+pub use gateway::{McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshTokenRow};
 pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use vault::{Sealed, Vault};

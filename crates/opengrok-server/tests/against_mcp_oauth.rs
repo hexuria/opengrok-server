@@ -125,7 +125,8 @@ async fn spawn(store: PgStore, email: &str) -> (String, AuthState) {
         Arc::new(TokenMinter::new(b"mcp-oauth-test-secret")),
         email.to_string(),
     )
-    .with_resend(None, base.clone());
+    .with_resend(None, base.clone())
+    .with_cimd_loopback();
     let agui = AgUiState {
         auth: auth.clone(),
         door: Arc::new(MockDoor::echoing()),
@@ -511,8 +512,12 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
     let issued: Value = res.json().await.expect("json");
     assert_eq!(issued["token_type"], "Bearer");
     assert_eq!(issued["scope"], "mcp:tools");
-    assert_eq!(issued["expires_in"], json!(90 * 24 * 60 * 60));
+    assert_eq!(issued["expires_in"], json!(24 * 60 * 60));
     let key = issued["access_token"].as_str().expect("key").to_string();
+    let refresh = issued["refresh_token"]
+        .as_str()
+        .expect("refresh")
+        .to_string();
 
     // The door accepts it as the chosen coworker; the key is listed and revocable like any
     // other bot key.
@@ -548,6 +553,155 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
     .token;
     let (status, body) = initialize(&base, &foreign).await;
     assert_eq!(status, 401, "{body}");
+
+    // Refresh: the pair rotates. The old refresh token is spent, the old key is dead, the new
+    // pair works, and presenting the spent token again revokes the new key too — a replay means
+    // somebody else has it.
+    let refresh_form = |token: &str| {
+        vec![
+            ("grant_type", "refresh_token".to_string()),
+            ("refresh_token", token.to_string()),
+            ("client_id", client_id.clone()),
+            ("resource", format!("{base}/mcp")),
+        ]
+    };
+    let res = client
+        .post(format!("{base}/oauth/mcp/token"))
+        .form(&refresh_form(&refresh))
+        .send()
+        .await
+        .expect("refresh");
+    assert_eq!(
+        res.status(),
+        200,
+        "{}",
+        res.text().await.unwrap_or_default()
+    );
+    let rotated: Value = res.json().await.expect("json");
+    let key2 = rotated["access_token"].as_str().expect("key2").to_string();
+    let refresh2 = rotated["refresh_token"]
+        .as_str()
+        .expect("refresh2")
+        .to_string();
+    assert_ne!(key2, key);
+    assert_ne!(refresh2, refresh);
+    let (status, _) = initialize(&base, &key).await;
+    assert_eq!(status, 401, "the rotated-out key is revoked");
+    let (status, init) = initialize(&base, &key2).await;
+    assert_eq!(status, 200, "{init}");
+    let res = client
+        .post(format!("{base}/oauth/mcp/token"))
+        .form(&refresh_form(&refresh))
+        .send()
+        .await
+        .expect("replayed refresh");
+    assert_eq!(res.status(), 400, "a spent refresh token is refused");
+    let (status, _) = initialize(&base, &key2).await;
+    assert_eq!(status, 401, "a replayed refresh revokes the whole family");
+    let res = client
+        .post(format!("{base}/oauth/mcp/token"))
+        .form(&refresh_form(&refresh2))
+        .send()
+        .await
+        .expect("refresh after replay");
+    assert_eq!(res.status(), 400, "the family is dead");
+
+    // Client ID Metadata Documents: a client that is a URL, no registration. The document must
+    // name itself; its redirect_uris are the registration; the consent card shows its host.
+    let doc_server = spawn_cimd_document().await;
+    let good = format!("{doc_server}/good/client.json");
+    let bad_id = format!("{doc_server}/mismatch/client.json");
+    let missing = format!("{doc_server}/nowhere/client.json");
+    let authorize_cimd = |cid: &str| {
+        format!(
+            "{base}/oauth/mcp/authorize?response_type=code&client_id={}&redirect_uri={}&code_challenge={CHALLENGE}&code_challenge_method=S256&state=c&resource={}",
+            urlencoding(cid),
+            urlencoding(CALLBACK),
+            urlencoding(&format!("{base}/mcp")),
+        )
+    };
+    let res = client
+        .get(authorize_cimd(&missing))
+        .send()
+        .await
+        .expect("missing doc");
+    assert_eq!(res.status(), 400);
+    let res = client
+        .get(authorize_cimd(&bad_id))
+        .send()
+        .await
+        .expect("mismatched doc");
+    assert_eq!(res.status(), 400);
+    let res = client
+        .get(authorize_cimd(&good))
+        .header(
+            "cookie",
+            format!("og_access={}", {
+                let res = reqwest::Client::new()
+                    .post(format!("{base}/auth/login"))
+                    .json(&json!({ "email": email, "password": "password1" }))
+                    .send()
+                    .await
+                    .expect("cookie login");
+                cookie_value(&res, "og_access").expect("cookie")
+            }),
+        )
+        .send()
+        .await
+        .expect("cimd authorize");
+    assert_eq!(res.status(), 200);
+    let page = res.text().await.expect("page");
+    assert!(
+        page.contains("Doc Tool (127.0.0.1)"),
+        "the card names the document's host: {page}"
+    );
+    let consent = consent_of(&page);
+    let mut allow = vec![
+        ("response_type", "code".to_string()),
+        ("client_id", good.clone()),
+        ("redirect_uri", CALLBACK.to_string()),
+        ("code_challenge", CHALLENGE.to_string()),
+        ("code_challenge_method", "S256".to_string()),
+        ("state", "c".to_string()),
+        ("resource", format!("{base}/mcp")),
+    ];
+    allow.push(("consent", consent));
+    allow.push(("coworker", mine.as_str().to_string()));
+    let res = client
+        .post(format!("{base}/oauth/mcp/authorize"))
+        .form(&allow)
+        .send()
+        .await
+        .expect("cimd consent");
+    assert_eq!(
+        res.status(),
+        303,
+        "{}",
+        res.text().await.unwrap_or_default()
+    );
+    let code = query_param(res.headers()["location"].to_str().unwrap(), "code").expect("code");
+    let res = client
+        .post(format!("{base}/oauth/mcp/token"))
+        .form(&[
+            ("grant_type", "authorization_code".to_string()),
+            ("code", code),
+            ("redirect_uri", CALLBACK.to_string()),
+            ("client_id", good.clone()),
+            ("code_verifier", VERIFIER.to_string()),
+            ("resource", format!("{base}/mcp")),
+        ])
+        .send()
+        .await
+        .expect("cimd token");
+    assert_eq!(
+        res.status(),
+        200,
+        "{}",
+        res.text().await.unwrap_or_default()
+    );
+    let issued: Value = res.json().await.expect("json");
+    let (status, init) = initialize(&base, issued["access_token"].as_str().unwrap()).await;
+    assert_eq!(status, 200, "{init}");
 
     // A console session skips the sign-in card: the consent card comes straight up.
     let res = reqwest::Client::new()
@@ -598,4 +752,46 @@ fn percent_decode(value: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A stand-in for a tool that publishes its client id metadata document. `/good/client.json`
+/// names itself and the loopback callback; `/mismatch/client.json` names somebody else.
+async fn spawn_cimd_document() -> String {
+    use axum::routing::get;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!(
+        "http://127.0.0.1:{}",
+        listener.local_addr().expect("addr").port()
+    );
+    let good = base.clone();
+    let app = axum::Router::new()
+        .route(
+            "/good/client.json",
+            get(move || {
+                let id = format!("{good}/good/client.json");
+                async move {
+                    axum::Json(json!({
+                        "client_id": id,
+                        "client_name": "Doc Tool",
+                        "redirect_uris": [CALLBACK],
+                        "token_endpoint_auth_method": "none",
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/mismatch/client.json",
+            get(|| async {
+                axum::Json(json!({
+                    "client_id": "https://somebody.else/client.json",
+                    "redirect_uris": [CALLBACK],
+                }))
+            }),
+        );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    base
 }

@@ -14,13 +14,18 @@
 //!   (`/.well-known/oauth-protected-resource/mcp`) and root forms — clients probe both.
 //! - RFC 8414 authorization-server metadata at `/.well-known/oauth-authorization-server`.
 //! - RFC 7591 dynamic client registration for PUBLIC clients (no secret): Claude Code speaks it
-//!   by default. Client ID Metadata Documents (the spec's SHOULD) are the follow-up.
+//!   by default. Client ID Metadata Documents (the spec's SHOULD,
+//!   draft-ietf-oauth-client-id-metadata-document): a client id that is an https URL is fetched,
+//!   must name itself as `client_id`, and its `redirect_uris` are the registration — no table
+//!   row. Fetched documents are cached; errors and malformed documents never are; private and
+//!   loopback addresses are never fetched (SSRF), except by a test that says so.
 //! - PKCE S256 only; `resource` (RFC 8707) required on both legs and must be OUR `/mcp`; the
 //!   token carries it as `aud`, and the door refuses a key minted for another server.
 //! - `iss` on the authorization response (RFC 9207), advertised in the metadata.
-//! - No refresh tokens in v1: the key lives 90 days (`OAUTH_KEY_TTL_SECS`), and on its 401
-//!   Claude Code re-runs the browser flow — the right behaviour for a key that leaked or a
-//!   machine that changed hands.
+//! - Refresh tokens: the access key lives a day (`ACCESS_TTL_SECS`); the refresh token — opaque,
+//!   stored hashed — lives 90 days and is ROTATED on every use, the old access key revoked with
+//!   it. Revoking the key from the coworker's list revokes its refresh tokens too. A revoked
+//!   refresh token presented again is a replay: the whole family is revoked and logged.
 //!
 //! THE ENDPOINTS LIVE UNDER `/oauth/mcp/*`, NOT `/oauth/token`. That path is the desktop client's
 //! refresh (`cursor-auth.ts:450`, JSON `{client_id, grant_type: "refresh_token", refresh_token}`);
@@ -50,10 +55,19 @@ use super::routes::AuthState;
 /// grants exactly this.
 pub const SCOPE: &str = "mcp:tools";
 
-/// How long an OAuth-minted bot key authenticates: 90 days, then the browser flow again. Shorter
-/// than a hand-minted key's ten years on purpose — this one was handed to a tool, not typed by a
-/// person.
-pub const OAUTH_KEY_TTL_SECS: i64 = 90 * 24 * 60 * 60;
+/// How long an OAuth-minted access key authenticates before the client must refresh: a day.
+/// Short on purpose — this one was handed to a tool, not typed by a person — and painless,
+/// because the refresh below is silent.
+pub const ACCESS_TTL_SECS: i64 = 24 * 60 * 60;
+
+/// How long a refresh token lives: 90 days, then the browser flow again — the right cadence for
+/// a key that leaked or a machine that changed hands.
+pub const REFRESH_TTL_SECS: i64 = 90 * 24 * 60 * 60;
+
+/// How long a fetched client id metadata document is trusted before it is fetched again.
+const CIMD_CACHE_MS: i64 = 60 * 60 * 1_000;
+/// The draft's recommended maximum size of a metadata document.
+const CIMD_MAX_BYTES: usize = 5 * 1024;
 
 const CODE_TTL_MS: i64 = 10 * 60 * 1_000;
 const CONSENT_TTL_SECS: i64 = 10 * 60;
@@ -145,7 +159,7 @@ async fn server_metadata(State(state): State<AuthState>) -> Response {
         "token_endpoint": format!("{public}/oauth/mcp/token"),
         "registration_endpoint": format!("{public}/oauth/mcp/register"),
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": [SCOPE],
@@ -287,7 +301,7 @@ async fn register(
             "client_id_issued_at": at_ms / 1_000,
             "client_name": client.client_name,
             "redirect_uris": client.redirect_uris,
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
             "scope": SCOPE,
@@ -354,17 +368,163 @@ enum AuthorizeRefusal {
     Redirect(String),
 }
 
-/// Validate the request against the registered client. Returns the client on success.
+/// A client id that is a URL, in the shape the draft requires: https, a path, no fragment, no
+/// dot segments, no credentials. Loopback http only when a test allows it.
+fn cimd_url_allowed(client_id: &str, allow_loopback: bool) -> bool {
+    // The parser resolves dot segments away, so the RAW string is what the draft's rule is
+    // checked against.
+    if client_id.contains("/./") || client_id.contains("/../") || client_id.ends_with("/..") {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(client_id) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default();
+    let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1";
+    let private = host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || (host.starts_with("172.")
+            && host
+                .split('.')
+                .nth(1)
+                .and_then(|o| o.parse::<u8>().ok())
+                .is_some_and(|o| (16..=31).contains(&o)));
+    let scheme_ok =
+        url.scheme() == "https" || (allow_loopback && loopback && url.scheme() == "http");
+    scheme_ok
+        && !host.is_empty()
+        && (!loopback || allow_loopback)
+        && !private
+        && url.path().len() > 1
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+/// Fetch a client id metadata document and turn it into the same shape a registration row has.
+/// `Err` is a sentence for the page; nothing about a failed or malformed fetch is cached.
+async fn fetch_cimd(
+    state: &AuthState,
+    client_id: &str,
+) -> Result<opengrok_store::OAuthClient, String> {
+    let at_ms = now_ms();
+    if let Some((client, fetched_at)) = state
+        .cimd_cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(client_id).cloned())
+        && at_ms - fetched_at < CIMD_CACHE_MS
+    {
+        return Ok(client);
+    }
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("could not build a fetcher: {error}"))?;
+    let response = http
+        .get(client_id)
+        .header(header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("the tool's client id document could not be fetched: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the tool's client id document answered {}",
+            response.status()
+        ));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("the tool's client id document could not be read: {error}"))?;
+    if body.len() > CIMD_MAX_BYTES {
+        return Err("the tool's client id document is larger than 5 KB".to_string());
+    }
+    let doc: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| "the tool's client id document is not JSON".to_string())?;
+    // RFC 3986 §6.2.1 simple string comparison: the document must name itself, exactly.
+    if doc.get("client_id").and_then(serde_json::Value::as_str) != Some(client_id) {
+        return Err(
+            "the tool's client id document does not name its own URL as client_id".to_string(),
+        );
+    }
+    if let Some(method) = doc
+        .get("token_endpoint_auth_method")
+        .and_then(serde_json::Value::as_str)
+        && method != "none"
+    {
+        return Err(
+            "only public clients are served (token_endpoint_auth_method must be none)".to_string(),
+        );
+    }
+    let redirect_uris: Vec<String> = doc
+        .get("redirect_uris")
+        .and_then(serde_json::Value::as_array)
+        .map(|uris| {
+            uris.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if redirect_uris.is_empty() || redirect_uris.iter().any(|uri| !redirect_allowed(uri)) {
+        return Err(
+            "the tool's client id document registers no acceptable redirect_uris".to_string(),
+        );
+    }
+    let host = reqwest::Url::parse(client_id)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default();
+    // The hostname is shown with the name (draft §security: the person must see WHERE the
+    // client comes from, not only what it calls itself).
+    let name = doc
+        .get("client_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("{name} ({host})"))
+        .unwrap_or(host);
+    let client = opengrok_store::OAuthClient {
+        client_id: client_id.to_string(),
+        client_name: name.chars().take(160).collect(),
+        redirect_uris,
+        created_at_ms: at_ms,
+    };
+    if let Ok(mut cache) = state.cimd_cache.lock() {
+        cache.insert(client_id.to_string(), (client.clone(), at_ms));
+    }
+    Ok(client)
+}
+
+/// The client behind a client id: a registered row, or a client id metadata document.
+async fn resolve_client(
+    state: &AuthState,
+    client_id: &str,
+) -> Result<opengrok_store::OAuthClient, String> {
+    if let Ok(Some(client)) = state.store.oauth_client(client_id).await {
+        return Ok(client);
+    }
+    if cimd_url_allowed(client_id, state.cimd_allow_loopback) {
+        return fetch_cimd(state, client_id).await;
+    }
+    Err(
+        "This tool is not registered with this server (unknown client_id). Register it again \
+         from the tool."
+            .to_string(),
+    )
+}
+
+/// Validate the request against the client. Returns the client on success.
 async fn validate_authorize(
     state: &AuthState,
     request: &AuthorizeRequest,
 ) -> Result<opengrok_store::OAuthClient, AuthorizeRefusal> {
-    let Ok(Some(client)) = state.store.oauth_client(&request.client_id).await else {
-        return Err(AuthorizeRefusal::Page(
-            "This tool is not registered with this server (unknown client_id). Register it \
-             again from the tool."
-                .to_string(),
-        ));
+    let client = match resolve_client(state, &request.client_id).await {
+        Ok(client) => client,
+        Err(message) => return Err(AuthorizeRefusal::Page(message)),
     };
     if !client
         .redirect_uris
@@ -663,6 +823,177 @@ struct TokenForm {
     code_verifier: String,
     #[serde(default)]
     resource: Option<String>,
+    #[serde(default)]
+    refresh_token: String,
+}
+
+fn hash_refresh(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Mint the access key and its refresh token for (client, account, coworker), recording the
+/// refresh hashed. One place for both grants, so rotation issues exactly what consent did.
+async fn issue_pair(
+    state: &AuthState,
+    client_id: &str,
+    client_name: &str,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    resource: &str,
+    // The rotation chain this pair continues; `None` starts one (the new key's jti).
+    family: Option<&str>,
+) -> Result<Response, Response> {
+    let label = format!("{client_name} via OAuth");
+    let minted = super::bot_keys::mint(
+        &state.store,
+        &state.minter,
+        account,
+        coworker,
+        &label,
+        Some(resource),
+        ACCESS_TTL_SECS,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "mcp oauth: could not mint the key");
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "could not mint the key",
+        )
+    })?;
+    let refresh = {
+        use rand::RngExt;
+        let bytes: [u8; 32] = rand::rng().random();
+        format!(
+            "rt_{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        )
+    };
+    let at_ms = now_ms();
+    let row = opengrok_store::RefreshTokenRow {
+        token_hash: hash_refresh(&refresh),
+        jti: minted.jti.clone(),
+        client_id: client_id.to_string(),
+        account_id: account.as_str().to_string(),
+        coworker_id: coworker.as_str().to_string(),
+        created_at_ms: at_ms,
+        expires_at_ms: at_ms + REFRESH_TTL_SECS * 1_000,
+        revoked: false,
+        family: family.unwrap_or(&minted.jti).to_string(),
+    };
+    if let Err(error) = state.store.insert_refresh_token(&row).await {
+        // The access key stands (it is recorded and works for a day); only the silent renewal
+        // is missing, and the log says so. Not worth failing a flow that already succeeded.
+        tracing::error!(%error, jti = %minted.jti, "mcp oauth: key issued but its refresh token could not be recorded");
+    }
+    tracing::info!(client_id, coworker = %coworker, jti = %minted.jti, "mcp oauth: key issued");
+    Ok((
+        StatusCode::OK,
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(json!({
+            "access_token": minted.token,
+            "token_type": "Bearer",
+            "expires_in": ACCESS_TTL_SECS,
+            "refresh_token": refresh,
+            "scope": SCOPE,
+        })),
+    )
+        .into_response())
+}
+
+/// `grant_type=refresh_token`: rotate. The presented token is spent, its access key revoked,
+/// and a fresh pair issued. A revoked token presented again is a replay — somebody has the old
+/// token — so the whole family (the key and every refresh for it) is revoked and logged.
+async fn refresh(state: &AuthState, form: &TokenForm) -> Response {
+    if form.refresh_token.is_empty() || form.client_id.is_empty() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "refresh_token and client_id are required",
+        );
+    }
+    let Ok(Some(row)) = state
+        .store
+        .refresh_token(&hash_refresh(&form.refresh_token))
+        .await
+    else {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "unknown refresh token",
+        );
+    };
+    if row.client_id != form.client_id {
+        return oauth_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "this refresh token belongs to a different client",
+        );
+    }
+    if row.revoked {
+        tracing::warn!(family = %row.family, client_id = %row.client_id, "mcp oauth: a spent refresh token was presented again; revoking its whole chain");
+        match state.store.revoke_refresh_family(&row.family).await {
+            Ok(jtis) => {
+                tracing::info!(family = %row.family, keys = jtis.len(), "mcp oauth: chain revoked")
+            }
+            Err(error) => {
+                tracing::error!(%error, family = %row.family, "mcp oauth: could not revoke the chain")
+            }
+        }
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "this refresh token was already used; sign in again",
+        );
+    }
+    if now_ms() >= row.expires_at_ms {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "this refresh token has expired; sign in again",
+        );
+    }
+    let resource = resource_uri(&state.public_url);
+    if let Some(asked) = form.resource.as_deref()
+        && asked != resource
+    {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "resource must be this server's MCP door",
+        );
+    }
+    // Rotate: the old pair dies before the new one exists, so a crash in between leaves the
+    // client signing in again rather than holding two live keys.
+    let _ = state.store.revoke_refresh_tokens_for(&row.jti).await;
+    let _ = state.store.revoke_bot_key_by_jti(&row.jti).await;
+    let client_name = state
+        .store
+        .oauth_client(&row.client_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|client| client.client_name)
+        .unwrap_or_else(|| row.client_id.clone());
+    match issue_pair(
+        state,
+        &row.client_id,
+        &client_name,
+        &AccountId::from_stored(row.account_id.clone()),
+        &CoworkerId::from_stored(row.coworker_id.clone()),
+        &resource,
+        Some(&row.family),
+    )
+    .await
+    {
+        Ok(response) | Err(response) => response,
+    }
 }
 
 /// `code_challenge == base64url(sha256(code_verifier))`, no padding (RFC 7636 §4.6).
@@ -676,13 +1007,16 @@ fn pkce_matches(verifier: &str, challenge: &str) -> bool {
     expected.as_bytes().ct_eq(challenge.as_bytes()).into()
 }
 
-/// `POST /oauth/mcp/token` — the code, the verifier, the key.
+/// `POST /oauth/mcp/token` — the code, the verifier, the key; or a refresh token, rotated.
 async fn token(State(state): State<AuthState>, Form(form): Form<TokenForm>) -> Response {
+    if form.grant_type == "refresh_token" {
+        return refresh(&state, &form).await;
+    }
     if form.grant_type != "authorization_code" {
         return oauth_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "only authorization_code is supported (no refresh tokens: sign in again when the key expires)",
+            "only authorization_code and refresh_token are supported",
         );
     }
     if form.code.is_empty() || form.code_verifier.is_empty() || form.client_id.is_empty() {
@@ -759,43 +1093,19 @@ async fn token(State(state): State<AuthState>, Form(form): Form<TokenForm>) -> R
             "code_verifier does not match the code_challenge",
         );
     }
-    let label = format!("{} via OAuth", pending.client_name);
-    let minted = match super::bot_keys::mint(
-        &state.store,
-        &state.minter,
+    match issue_pair(
+        &state,
+        &pending.client_id,
+        &pending.client_name,
         &pending.account,
         &pending.coworker,
-        &label,
-        Some(&pending.resource),
-        OAUTH_KEY_TTL_SECS,
+        &pending.resource,
+        None,
     )
     .await
     {
-        Ok(minted) => minted,
-        Err(error) => {
-            tracing::error!(%error, "mcp oauth: could not mint the key");
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "could not mint the key",
-            );
-        }
-    };
-    tracing::info!(client_id = %pending.client_id, coworker = %pending.coworker, jti = %minted.jti, "mcp oauth: key issued");
-    (
-        StatusCode::OK,
-        [
-            (header::CACHE_CONTROL, "no-store"),
-            (header::PRAGMA, "no-cache"),
-        ],
-        Json(json!({
-            "access_token": minted.token,
-            "token_type": "Bearer",
-            "expires_in": OAUTH_KEY_TTL_SECS,
-            "scope": SCOPE,
-        })),
-    )
-        .into_response()
+        Ok(response) | Err(response) => response,
+    }
 }
 
 #[cfg(test)]
@@ -810,6 +1120,29 @@ mod tests {
         assert!(!redirect_allowed("http://tool.example/cb"));
         assert!(!redirect_allowed("http://localhost.evil.example/cb"));
         assert!(!redirect_allowed("ftp://localhost/cb"));
+    }
+
+    #[test]
+    fn a_client_id_url_is_https_with_a_path_and_never_private() {
+        assert!(cimd_url_allowed(
+            "https://tool.example/oauth/client.json",
+            false
+        ));
+        assert!(
+            !cimd_url_allowed("https://tool.example", false),
+            "a path is required"
+        );
+        assert!(!cimd_url_allowed("https://tool.example/c.json#x", false));
+        assert!(!cimd_url_allowed("https://u:p@tool.example/c.json", false));
+        assert!(!cimd_url_allowed("https://tool.example/a/../c.json", false));
+        assert!(!cimd_url_allowed("http://tool.example/c.json", false));
+        assert!(!cimd_url_allowed("https://10.0.0.5/c.json", false));
+        assert!(!cimd_url_allowed("https://172.20.1.1/c.json", false));
+        assert!(!cimd_url_allowed("http://127.0.0.1:9/c.json", false));
+        assert!(
+            cimd_url_allowed("http://127.0.0.1:9/c.json", true),
+            "tests may allow loopback"
+        );
     }
 
     #[test]

@@ -327,6 +327,28 @@ create table if not exists oauth_client (
     created_at_ms bigint not null
 );
 
+-- Refresh tokens the MCP door's authorization server issued: opaque, stored HASHED (a leaked
+-- table yields nothing usable), one per access key (`jti`), rotated on every use. Revoking the
+-- key from the coworker's list revokes these with it.
+create table if not exists oauth_refresh_token (
+    token_hash    text    primary key,
+    jti           text    not null,
+    client_id     text    not null,
+    account_id    text    not null,
+    coworker_id   text    not null,
+    created_at_ms bigint  not null,
+    expires_at_ms bigint  not null,
+    revoked       boolean not null default false,
+    -- The first access key's jti of this chain of rotations. A spent token presented again
+    -- means somebody else holds the chain; the whole family goes.
+    family        text    not null
+);
+create index if not exists oauth_refresh_jti_idx on oauth_refresh_token (jti);
+-- `create table if not exists` does not evolve a table that already exists (a database that ran
+-- the branch before the column did): the ALTER is what makes the index below possible.
+alter table oauth_refresh_token add column if not exists family text not null default '';
+create index if not exists oauth_refresh_family_idx on oauth_refresh_token (family);
+
 -- Seam B keeps profile fields our aggregate does not model (description, title, avatar shape
 -- and colour). A wire-format projection like gateway_entry: the client is the only reader.
 create table if not exists seamb_profile (

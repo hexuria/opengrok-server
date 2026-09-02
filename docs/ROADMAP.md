@@ -319,14 +319,22 @@ the proof, not construction.
   clients (loopback or https redirects, per-peer cap, table ceiling), PKCE S256 with `resource`
   required and equal to our `/mcp`, sign-in + consent cards offering the person's own coworkers,
   a ten-minute one-shot code bound to client + redirect + challenge + resource, `iss` on the
-  response, and a token that IS a bot key (`aud` = the resource, 90 days, no refresh — Claude
-  Code re-runs the browser flow on its 401). The door's every 401 carries `resource_metadata` +
-  `scope`, and a key minted for another server's `/mcp` is refused. Hand-minted keys and the
-  static header keep working. `against_mcp_oauth.rs` walks the flow the way Claude Code does.
-  Behind TLS (`setup/tls.md`). Reverse-exec stays excluded from MCP. *(this commit)*
-- [ ] **16.later** Client ID Metadata Documents (the spec's SHOULD; Claude Code registers
-  dynamically today); refresh tokens if quarterly re-consent proves annoying; the org-key mint
-  console surface shipped as slice 17.
+  response, and a token that IS a bot key (`aud` = the resource). The door's every 401 carries
+  `resource_metadata` + `scope`, and a key minted for another server's `/mcp` is refused.
+  Hand-minted keys and the static header keep working. `against_mcp_oauth.rs` walks the flow
+  the way Claude Code does. Behind TLS (`setup/tls.md`). Reverse-exec stays excluded from MCP.
+  (`#23`)
+- [x] **16.cimd** The rest of the door's OAuth. Client ID Metadata Documents
+  (draft-ietf-oauth-client-id-metadata-document, the spec's SHOULD): an https client id with a
+  path is fetched (5 KB, 5 s, no redirects, never a private or loopback address), must name
+  itself as `client_id`, its `redirect_uris` are the registration, its host is shown on the
+  consent card; cached an hour, errors and malformed documents never. Refresh tokens: the
+  access key lives a day, the refresh token (opaque, stored hashed) 90 days, rotated on every
+  use with the old key revoked; a spent refresh presented again revokes the whole family;
+  revoking the key from the coworker's list revokes its refresh tokens. `against_mcp_oauth.rs`
+  covers rotation, replay, and a stand-in document server. *(this commit)*
+- [ ] **16.later** The org-key mint console surface shipped as slice 17; nothing else pending on
+  the door.
 
 ## Slice 17 — one identity across both doors
 

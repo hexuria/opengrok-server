@@ -959,7 +959,14 @@ async fn revoke_bot_key(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     match state.auth.store.revoke_bot_key(&account_id, &jti).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            // An OAuth-minted key has refresh tokens that would mint it a successor; they die
+            // with it, or "revoke" would mean "revoke until the next refresh".
+            if let Err(error) = state.auth.store.revoke_refresh_tokens_for(&jti).await {
+                tracing::error!(%error, jti, "the key is revoked but its refresh tokens could not be");
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, "no such key").into_response(),
         Err(error) => {
             tracing::error!(%error, "could not revoke a bot key");
