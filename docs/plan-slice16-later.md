@@ -1,6 +1,7 @@
 # Slice 16.later — a PolicyApproval card, and OAuth 2.1 on the MCP door
 
-Status: **Parts A and B implemented (ROADMAP 16.policy, 16.oauth).** Written 2 Sep 2026 from
+Status: **Parts A and B implemented (ROADMAP 16.policy, 16.oauth), plus the follow-ups this plan
+deferred — Client ID Metadata Documents and refresh tokens (16.cimd).** Written 2 Sep 2026 from
 the code and the specs cited below; peer-reviewed the same day against the recovered client
 bundle (findings folded in, marked *review*). Part B waits on TLS in front of the dev server
 (`setup/tls.md`, the operator's install) and takes the token endpoint under `/oauth/mcp/*` (§2.2).

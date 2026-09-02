@@ -704,3 +704,164 @@ impl PgStore {
         Ok(row.try_get::<i64, _>("n")?)
     }
 }
+
+fn refresh_row(row: sqlx::postgres::PgRow) -> StoreResult<RefreshTokenRow> {
+    Ok(RefreshTokenRow {
+        token_hash: row.try_get("token_hash")?,
+        jti: row.try_get("jti")?,
+        client_id: row.try_get("client_id")?,
+        account_id: row.try_get("account_id")?,
+        coworker_id: row.try_get("coworker_id")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+        expires_at_ms: row.try_get("expires_at_ms")?,
+        revoked: row.try_get("revoked")?,
+        family: row.try_get("family")?,
+    })
+}
+
+/// A refresh token as the MCP door's authorization server stores it: the hash, never the token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshTokenRow {
+    pub token_hash: String,
+    /// The access key this refresh belongs to — revoked together, rotated together.
+    pub jti: String,
+    pub client_id: String,
+    pub account_id: String,
+    pub coworker_id: String,
+    pub created_at_ms: i64,
+    pub expires_at_ms: i64,
+    pub revoked: bool,
+    /// The chain this token belongs to: the first access key's jti, carried through rotations.
+    pub family: String,
+}
+
+/// What claiming a presented refresh token found. `Claimed` is the one caller that may mint;
+/// `Spent` is a replay (the row exists and was already spent by a rotation); `Unknown` is a
+/// token this server never issued, or one whose chain was removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshClaim {
+    Claimed(RefreshTokenRow),
+    Spent(RefreshTokenRow),
+    Unknown,
+}
+
+impl PgStore {
+    /// SPEND a refresh token in one statement: `revoked = true` only where it was `false`, so
+    /// of any number of concurrent presentations exactly one is `Claimed`. The others read the
+    /// row back and find it `Spent`, which is the replay case the chain kill exists for.
+    pub async fn claim_refresh_token(&self, token_hash: &str) -> StoreResult<RefreshClaim> {
+        let claimed = sqlx::query(
+            "update oauth_refresh_token set revoked = true
+             where token_hash = $1 and revoked = false
+             returning token_hash, jti, client_id, account_id, coworker_id, created_at_ms,
+                       expires_at_ms, revoked, family",
+        )
+        .bind(token_hash)
+        .fetch_optional(self.pool())
+        .await?;
+        if let Some(row) = claimed {
+            return refresh_row(row).map(RefreshClaim::Claimed);
+        }
+        Ok(self
+            .refresh_token(token_hash)
+            .await?
+            .map_or(RefreshClaim::Unknown, RefreshClaim::Spent))
+    }
+
+    pub async fn insert_refresh_token(&self, row: &RefreshTokenRow) -> StoreResult<()> {
+        sqlx::query(
+            "insert into oauth_refresh_token
+               (token_hash, jti, client_id, account_id, coworker_id, created_at_ms, expires_at_ms,
+                revoked, family)
+             values ($1, $2, $3, $4, $5, $6, $7, false, $8)",
+        )
+        .bind(&row.token_hash)
+        .bind(&row.jti)
+        .bind(&row.client_id)
+        .bind(&row.account_id)
+        .bind(&row.coworker_id)
+        .bind(row.created_at_ms)
+        .bind(row.expires_at_ms)
+        .bind(&row.family)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// End a rotation chain: every refresh token of the family is REMOVED and every access key
+    /// they belonged to revoked, in one transaction. Removed rather than marked, so a later
+    /// presentation of any of them reads as unknown — a chain that was ended on purpose (an
+    /// owner's revoke, a replay already handled) is not a fresh replay alarm each time a stale
+    /// client retries. Only a rotation marks a row spent, and only a spent row is a replay.
+    pub async fn revoke_refresh_family(&self, family: &str) -> StoreResult<Vec<String>> {
+        let mut tx = self.pool().begin().await?;
+        let rows = sqlx::query("delete from oauth_refresh_token where family = $1 returning jti")
+            .bind(family)
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut jtis = Vec::with_capacity(rows.len());
+        for row in rows {
+            let jti: String = row.try_get("jti")?;
+            sqlx::query("update bot_key_view set revoked = true where jti = $1")
+                .bind(&jti)
+                .execute(&mut *tx)
+                .await?;
+            jtis.push(jti);
+        }
+        tx.commit().await?;
+        Ok(jtis)
+    }
+
+    /// An owner revoking a bot key: the key and its refresh tokens go together, in one
+    /// transaction, or neither does. `false` when the key is not this account's. Answering
+    /// "revoked" while a refresh token could still mint a successor is the lie this exists to
+    /// prevent.
+    pub async fn revoke_bot_key_with_refresh(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        jti: &str,
+    ) -> StoreResult<bool> {
+        let mut tx = self.pool().begin().await?;
+        let done = sqlx::query(
+            "update bot_key_view set revoked = true where jti = $1 and account_id = $2",
+        )
+        .bind(jti)
+        .bind(account.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() != 1 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("delete from oauth_refresh_token where jti = $1")
+            .bind(jti)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// The row for a presented refresh token, whatever its state — the caller decides what an
+    /// expired or revoked one means (a revoked one presented again is a replay worth logging).
+    pub async fn refresh_token(&self, token_hash: &str) -> StoreResult<Option<RefreshTokenRow>> {
+        let row = sqlx::query(
+            "select token_hash, jti, client_id, account_id, coworker_id, created_at_ms,
+                    expires_at_ms, revoked, family
+             from oauth_refresh_token where token_hash = $1",
+        )
+        .bind(token_hash)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(refresh_row).transpose()
+    }
+
+    /// Revoke a bot key by id regardless of who owns it — for the authorization server rotating
+    /// its own keys, where the owner is the row's account by construction.
+    pub async fn revoke_bot_key_by_jti(&self, jti: &str) -> StoreResult<bool> {
+        let done = sqlx::query("update bot_key_view set revoked = true where jti = $1")
+            .bind(jti)
+            .execute(self.pool())
+            .await?;
+        Ok(done.rows_affected() == 1)
+    }
+}

@@ -197,15 +197,31 @@ pub fn reset_password(token: &str, error: Option<&str>) -> Response {
 /// The MCP door's OAuth sign-in card: a client (Claude Code) is asking to use a coworker, and the
 /// person signs in first. `hidden` is the authorization request carried through as hidden inputs
 /// (already escaped by the caller), so the POST re-validates exactly what the client asked for.
-pub fn oauth_login(client_name: &str, hidden: &str, error: Option<&str>) -> Response {
+/// Where the client comes from, as its own element the name cannot crowd out: the name is the
+/// client's word for itself; the origin is what the server resolved it from. `None` for a
+/// registered client, which has no origin to show.
+fn origin_line(origin: Option<&str>) -> String {
+    origin
+        .map(|host| format!("<p class=msg>From <code>{}</code></p>", escape(host)))
+        .unwrap_or_default()
+}
+
+pub fn oauth_login(
+    client_name: &str,
+    origin: Option<&str>,
+    hidden: &str,
+    error: Option<&str>,
+) -> Response {
     let err = error
         .map(|message| format!("<p class=err>{}</p>", escape(message)))
         .unwrap_or_default();
+    let origin = origin_line(origin);
     let body = format!(
         r##"<form method=post action="/oauth/mcp/authorize">
   {hidden}
   {err}
   <p class=msg><b>{client}</b> wants to use one of your coworkers. Sign in to choose which.</p>
+  {origin}
   <label for=email>Email</label>
   <input id=email name=email type=email autocomplete=username required autofocus>
   <label for=password>Password</label>
@@ -224,10 +240,12 @@ pub fn oauth_login(client_name: &str, hidden: &str, error: Option<&str>) -> Resp
 /// token that says who is choosing; `coworkers` are (id, name) pairs from the person's own roster.
 pub fn oauth_consent(
     client_name: &str,
+    origin: Option<&str>,
     hidden: &str,
     consent: &str,
     coworkers: &[(String, String)],
 ) -> Response {
+    let origin = origin_line(origin);
     let options: String = coworkers
         .iter()
         .map(|(id, name)| format!("<option value=\"{}\">{}</option>", escape(id), escape(name)))
@@ -242,6 +260,7 @@ pub fn oauth_consent(
   <input type=hidden name=consent value="{consent}">
   <p class=msg><b>{client}</b> will run tools as the coworker you choose, on that coworker's own
   computer, under your policy. You can revoke this key any time from the coworker's key list.</p>
+  {origin}
   <label for=coworker>Coworker</label>
   <select id=coworker name=coworker required style="width:100%;padding:.7rem .8rem;font-size:1rem;color:#f5f5f7;background:#0e0e10;border:1px solid #2a2a31;border-radius:10px">{options}</select>
   <button type=submit>Allow <span aria-hidden=true>&rarr;</span></button>

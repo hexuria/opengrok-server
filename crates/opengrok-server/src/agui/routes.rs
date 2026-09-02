@@ -958,7 +958,15 @@ async fn revoke_bot_key(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    match state.auth.store.revoke_bot_key(&account_id, &jti).await {
+    // An OAuth-minted key has refresh tokens that would mint it a successor; they die with it
+    // in ONE transaction, or "revoke" would mean "revoke until the next refresh". A failure is
+    // a 500 the person sees, never a 204 over a key that can still come back.
+    match state
+        .auth
+        .store
+        .revoke_bot_key_with_refresh(&account_id, &jti)
+        .await
+    {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such key").into_response(),
         Err(error) => {

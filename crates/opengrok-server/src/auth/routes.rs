@@ -17,7 +17,8 @@
 //! always send one. Falling back would make the client hold an access token as its refresh token,
 //! and `cursorSessionPresent` would report a session that cannot survive its own first refresh.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -66,6 +67,12 @@ pub struct AuthState {
     /// The hit table behind every door that takes no credential (`budget.rs`): reset mail,
     /// client registration, wrong passwords, domain lookups. Per replica by design.
     pub budgets: Arc<super::budget::Budgets>,
+    /// Client ID Metadata Documents fetched from URL-shaped client ids, with the time fetched.
+    /// Errors and malformed documents are never cached (draft-ietf-oauth-client-id-metadata-document).
+    pub cimd_cache: Arc<Mutex<HashMap<String, (opengrok_store::OAuthClient, i64)>>>,
+    /// Let a client id document be fetched from a loopback address. NEVER in production (SSRF);
+    /// what a test sets so a stand-in document server on 127.0.0.1 can be reached.
+    pub cimd_allow_loopback: bool,
     /// The TXT lookup behind domain-ownership proof. A seam, not a resolver: production binds the
     /// system resolver at boot, tests answer from a map. The default refuses every lookup with a
     /// reason, so a state that was never given one answers 503 rather than "not verified".
@@ -85,7 +92,16 @@ impl AuthState {
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
             dns: Arc::new(crate::domain_proof::NoResolver),
             budgets: Arc::new(super::budget::Budgets::default()),
+            cimd_cache: Arc::new(Mutex::new(HashMap::new())),
+            cimd_allow_loopback: false,
         }
+    }
+
+    /// Tests only: allow a client id metadata document on a loopback address.
+    #[must_use]
+    pub fn with_cimd_loopback(mut self) -> Self {
+        self.cimd_allow_loopback = true;
+        self
     }
 
     /// Bind the TXT lookup domain proof uses — the system resolver in production, a map in tests.
