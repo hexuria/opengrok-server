@@ -257,6 +257,13 @@ the proof, not construction.
   computer is an error not an empty toolbox, reverse-exec excluded from MCP, the ask reply no
   longer promises a nonexistent card, serverInfo names OpenGrok, concurrent calls serialized
   per coworker. (`3980be2`)
+- [x] **16.audit** Every MCP door call leaves a durable row (`mcp_call_audit`: tool, the
+  judge's redaction of the arguments, outcome `ok|failed|refused|awaiting|error`, the request
+  id, when), written after the call — a door call has no run to journal it, so before this a
+  bot key's use was one tracing line. The owner reads it at
+  `GET /coworkers/{id}/mcp-calls` (404 for anybody else's coworker, never an empty list) and
+  in the console's coworker row ("Door calls"). `against_the_mcp_door.rs` reads the rows for a
+  refusal, a reverse-exec refusal and a waiting card.
 - [x] **16.v** Validated on Claude Code itself: `claude mcp list` shows the live door
   connected, and one invocation with both doors configured answered via the gateway, called
   `mcp__opengrok__shell`, and ran it on the coworker's own container — the tool's hostname

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   hireCoworker,
   listCoworkers,
+  listMcpCalls,
   listModels,
   probeModel,
   repinCoworker,
@@ -77,15 +78,64 @@ function TestButton({ model }: { model: string }) {
   );
 }
 
+/**
+ * What this coworker's bot keys have been used for: the door's audit, newest first. Fetched only
+ * when opened — a coworker that has never been called over MCP costs nothing here.
+ */
+function McpCalls({ coworker }: { coworker: Coworker }) {
+  const calls = useQuery({
+    queryKey: ["mcp-calls", coworker.id],
+    queryFn: () => listMcpCalls(coworker.id),
+    retry: false,
+  });
+  if (calls.isLoading) return <p className="muted">Loading…</p>;
+  if (calls.error) return <p className="error">{errorText(calls.error, "could not load calls")}</p>;
+  if (!calls.data || calls.data.length === 0) {
+    return <p className="muted">No calls through the MCP door yet.</p>;
+  }
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Tool</th>
+          <th>Outcome</th>
+          <th>Arguments</th>
+          <th>Request</th>
+        </tr>
+      </thead>
+      <tbody>
+        {calls.data.map((call, index) => (
+          <tr key={`${call.callId}-${index}`}>
+            <td>{new Date(call.atMs).toLocaleString()}</td>
+            <td>
+              <code>{call.tool}</code>
+            </td>
+            <td>{call.outcome}</td>
+            <td>
+              <code>{JSON.stringify(call.arguments)}</code>
+            </td>
+            <td>
+              <code>{call.requestId}</code>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 function CoworkerRow({ coworker, models }: { coworker: Coworker; models: string[] }) {
   const queryClient = useQueryClient();
   const [model, setModel] = useState(coworker.model);
+  const [showCalls, setShowCalls] = useState(false);
   const repin = useMutation({
     mutationFn: () => repinCoworker(coworker.id, model),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["coworkers"] }),
   });
 
   return (
+    <>
     <tr>
       <td>{coworker.name}</td>
       <td>
@@ -111,9 +161,22 @@ function CoworkerRow({ coworker, models }: { coworker: Coworker; models: string[
         ) : null}
       </td>
       <td>
-        <TestButton model={model} />
+        <span className="row">
+          <TestButton model={model} />
+          <button onClick={() => setShowCalls((open) => !open)}>
+            {showCalls ? "Hide door calls" : "Door calls"}
+          </button>
+        </span>
       </td>
     </tr>
+    {showCalls ? (
+      <tr>
+        <td colSpan={4}>
+          <McpCalls coworker={coworker} />
+        </td>
+      </tr>
+    ) : null}
+    </>
   );
 }
 

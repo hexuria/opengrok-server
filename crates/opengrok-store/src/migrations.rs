@@ -473,6 +473,26 @@ create table if not exists webauthn_credential (
 
 create index if not exists webauthn_credential_acct_idx
     on webauthn_credential (account_id) where not revoked;
+
+-- 16.r follow-up: every call through the MCP door, durable. A run journals its own tool calls;
+-- a door call has no run (an Ask makes one — that is the card), so this is the only record that
+-- a key was used to run a tool, with what, and what came of it. Arguments are stored REDACTED
+-- (the judge's redaction), never raw: a shell command can carry a secret. `call_id` repeats
+-- when a remembered yes is spent by a retry (one call, two rows: awaiting, then ok), hence the
+-- serial key.
+create table if not exists mcp_call_audit (
+    id          bigserial primary key,
+    account_id  text   not null,
+    coworker_id text   not null,
+    call_id     text   not null,
+    tool        text   not null,
+    arguments   jsonb  not null,
+    outcome     text   not null,
+    request_id  text   not null,
+    at_ms       bigint not null
+);
+create index if not exists mcp_call_audit_coworker_idx
+    on mcp_call_audit (coworker_id, at_ms desc);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
