@@ -456,6 +456,10 @@ REST ignored a requested model and stored the deployment default. Investigation:
   The coworker's key is minted on a principal the gateway is bound to first
   (`ensure_org_principal` before the mint, as the member-key mint always did): a fresh gateway
   refused every coworker mint "no principal with that email". #46.
+  Each window meter carries `requests` and `counterfactualUsd` (what the tokens would have cost
+  at the model's list API price — a subscription seat's usage against the bill it displaced) and
+  the spend reply a `seat` hint ("subscription" | "api"), from open-ai-gateway #51's per-window
+  fields; absent on an older gateway. The desktop's Usage block reads them. #48.
 - [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
 - [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its

@@ -52,7 +52,8 @@ const ADMIN_TOKEN: &str = "admin-token";
 /// 32 zero bytes, base64: a test vault. The key never leaves this process.
 const KEK: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
-/// One minted key as the stand-in keeps it: its ledger is a list of (when, cost).
+/// One minted key as the stand-in keeps it: its ledger is a list of (when, cost, what the same
+/// tokens would have cost at the model's list API price).
 #[derive(Debug, Clone)]
 struct StandInKey {
     id: String,
@@ -60,7 +61,7 @@ struct StandInKey {
     key: String,
     name: String,
     principal: String,
-    events: Vec<(i64, f64)>,
+    events: Vec<(i64, f64, f64)>,
     revoked: bool,
 }
 
@@ -81,6 +82,12 @@ struct StandIn {
     /// Principals the gateway knows, by email. A mint on one it does not know is refused with
     /// the real gateway's sentence: the org must be bound first (`ensure_org_principal`).
     principals: Vec<String>,
+    /// When true every completion runs on a subscription seat: cost 0, list price 0.001153
+    /// (the figure the operator's Grok seat booked on 2 Sep 2026).
+    seat: bool,
+    /// When true the usage endpoint answers as a gateway older than open-ai-gateway #51 would:
+    /// no per-window request counts, no counterfactuals.
+    older_gateway: bool,
 }
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1_000;
@@ -94,22 +101,35 @@ fn rfc3339(ms: i64) -> String {
 
 /// The three windows over a ledger, the way the gateway computes them: the sum since an
 /// instant, and when the window next frees up (its oldest spend ageing out).
-fn windows(events: &[(i64, f64)], now: i64) -> serde_json::Value {
+fn windows(events: &[(i64, f64, f64)], now: i64, older_gateway: bool) -> serde_json::Value {
     let window = |len: i64| {
-        let inside: Vec<&(i64, f64)> = events.iter().filter(|(at, _)| *at >= now - len).collect();
-        let used: f64 = inside.iter().map(|(_, cost)| cost).sum();
-        let frees = inside.iter().map(|(at, _)| at + len).min().map(rfc3339);
-        (money(used), frees)
+        let inside: Vec<&(i64, f64, f64)> = events
+            .iter()
+            .filter(|(at, _, _)| *at >= now - len)
+            .collect();
+        let used: f64 = inside.iter().map(|(_, cost, _)| cost).sum();
+        let displaced: f64 = inside.iter().map(|(_, _, api)| api).sum();
+        let frees = inside.iter().map(|(at, _, _)| at + len).min().map(rfc3339);
+        (money(used), frees, inside.len(), money(displaced))
     };
-    let (five, five_frees) = window(FIVE_HOURS_MS);
-    let (seven, seven_frees) = window(SEVEN_DAYS_MS);
-    let month: f64 = events.iter().map(|(_, cost)| cost).sum();
-    json!({
+    let (five, five_frees, five_n, five_api) = window(FIVE_HOURS_MS);
+    let (seven, seven_frees, seven_n, seven_api) = window(SEVEN_DAYS_MS);
+    let month: f64 = events.iter().map(|(_, cost, _)| cost).sum();
+    let month_api: f64 = events.iter().map(|(_, _, api)| api).sum();
+    let mut body = json!({
         "five_hour_usd": five, "five_hour_frees_at": five_frees,
         "seven_day_usd": seven, "seven_day_frees_at": seven_frees,
         "month_to_date_usd": money(month), "month_resets_at": "2026-10-01T00:00:00Z",
         "spent_usd": money(month), "requests": events.len(),
-    })
+    });
+    if !older_gateway {
+        body["five_hour_requests"] = json!(five_n);
+        body["seven_day_requests"] = json!(seven_n);
+        body["five_hour_counterfactual_usd"] = json!(five_api);
+        body["seven_day_counterfactual_usd"] = json!(seven_api);
+        body["month_counterfactual_usd"] = json!(money(month_api));
+    }
+    body
 }
 
 type Shared = Arc<Mutex<StandIn>>;
@@ -212,7 +232,8 @@ async fn spawn_stand_in(shared: Shared) -> String {
                     let Some(key) = stand_in.keys.iter().find(|k| k.id == id) else {
                         return (StatusCode::NOT_FOUND, Json(json!({"error": "no key with that id"})));
                     };
-                    let mut body = windows(&key.events, now_ms());
+                    let older_gateway = stand_in.older_gateway;
+                    let mut body = windows(&key.events, now_ms(), older_gateway);
                     body["id"] = json!(key.id);
                     body["name"] = json!(key.name);
                     body["key_prefix"] = json!(key.prefix);
@@ -250,6 +271,7 @@ async fn spawn_stand_in(shared: Shared) -> String {
                     let bearer = bearer_of(&headers);
                     let mut stand_in = shared.lock().unwrap();
                     stand_in.bearers.push(bearer.clone());
+                    let seat = stand_in.seat;
                     if bearer != DEPLOYMENT_KEY {
                         let Some(key) = stand_in.keys.iter_mut().find(|k| k.key == bearer && !k.revoked) else {
                             return axum::response::Response::builder()
@@ -260,8 +282,13 @@ async fn spawn_stand_in(shared: Shared) -> String {
                                 ))
                                 .unwrap();
                         };
-                        // Every completion costs a dollar, on the key's ledger, now.
-                        key.events.push((now_ms(), 1.0));
+                        // Every completion costs a dollar, on the key's ledger, now — or, on a
+                        // seat, nothing, against the list price it displaced.
+                        key.events.push(if seat {
+                            (now_ms(), 0.0, 0.001153)
+                        } else {
+                            (now_ms(), 1.0, 1.0)
+                        });
                     }
                     axum::response::Response::builder()
                         .status(StatusCode::OK)
@@ -679,6 +706,13 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
     );
     let (_, spend) = h.spend(&access, &coworker).await;
     assert_eq!(spend["windows"][0]["usedUsd"], json!("2.000000"), "{spend}");
+    assert_eq!(spend["windows"][0]["requests"], json!(2), "{spend}");
+    assert_eq!(
+        spend["windows"][0]["counterfactualUsd"],
+        json!("2.000000"),
+        "a metered key's list price is its cost: {spend}"
+    );
+    assert_eq!(spend["seat"], json!("api"), "{spend}");
     assert!(
         spend["windows"][0]["freesAt"]
             .as_str()
@@ -921,4 +955,67 @@ async fn a_gateway_that_keeps_refusing_is_asked_once_an_interval_and_the_deploym
         stand_in.mint_attempts, 2,
         "the hire asked, the first turn asked again, the second turn waited out the interval"
     );
+}
+
+#[tokio::test]
+async fn a_seats_usage_shows_its_requests_and_the_bill_it_displaced() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("seat-{tag}.test");
+    let store = store_from(&database_url).await;
+    let (_org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let account_id = store
+        .account_by_email(&admin_email)
+        .await
+        .expect("load")
+        .expect("the admin exists")
+        .id;
+    let h = harness(&database_url, &admin_email).await;
+    let access = h.access_token(&account_id, &admin_email);
+    let coworker = hire(&h, &access, "Ada").await;
+
+    // Nothing run yet: metered, but the month carries neither cost nor a displaced bill, so the
+    // reply does not say how it is paid for.
+    let (_, spend) = h.spend(&access, &coworker).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+    assert!(spend["seat"].is_null(), "{spend}");
+    assert_eq!(spend["windows"][2]["requests"], json!(0), "{spend}");
+
+    // Two turns on a subscription seat: zero cost, a request count, and the list-price bill the
+    // seat displaced — per window and for the month.
+    h.stand_in.lock().unwrap().seat = true;
+    let (status, failure) = h.turn(&coworker, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (status, failure) = h.turn(&coworker, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (_, spend) = h.spend(&access, &coworker).await;
+    assert_eq!(spend["seat"], json!("subscription"), "{spend}");
+    for (i, window) in ["5h", "7d", "month"].iter().enumerate() {
+        assert_eq!(spend["windows"][i]["window"], json!(window), "{spend}");
+        assert_eq!(spend["windows"][i]["usedUsd"], json!("0.000000"), "{spend}");
+        assert_eq!(spend["windows"][i]["requests"], json!(2), "{spend}");
+        assert_eq!(
+            spend["windows"][i]["counterfactualUsd"],
+            json!("0.002306"),
+            "{spend}"
+        );
+    }
+
+    // A gateway older than open-ai-gateway #51 says nothing about requests or the bill: the
+    // fields are absent rather than zero, and so is the seat.
+    h.stand_in.lock().unwrap().older_gateway = true;
+    let (_, spend) = h.spend(&access, &coworker).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+    assert_eq!(spend["windows"][0]["usedUsd"], json!("0.000000"), "{spend}");
+    assert!(spend["windows"][0]["requests"].is_null(), "{spend}");
+    assert!(
+        spend["windows"][0]["counterfactualUsd"].is_null(),
+        "{spend}"
+    );
+    assert_eq!(
+        spend["windows"][2]["requests"],
+        json!(2),
+        "the month's count always was there: {spend}"
+    );
+    assert!(spend["seat"].is_null(), "{spend}");
 }
