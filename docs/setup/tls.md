@@ -89,7 +89,7 @@ If `curl` refuses the certificate, `caddy trust` did not land in the keychain th
 
 ```
 OG_BIND=127.0.0.1:1447
-OG_PUBLIC_GATEWAY_URL=https://192.168.100.24:1447
+OG_PUBLIC_GATEWAY_URL=https://uriahs-MacBook-Pro.local:1447   # the Mac's name; see below
 ```
 
 `OG_BIND` moves to loopback so Caddy can take the LAN address on the same port. The public URL is
@@ -133,7 +133,25 @@ claude mcp login opengrok        # browser: sign in, pick the coworker, Allow �
 The key it receives lives a day and refreshes silently for 90 (16.cimd); revoke it from the
 coworker's key list, where it is labelled "<client> via OAuth".
 
-## When the LAN address changes
+## The address is the Mac's name, not its IP (2 Sep 2026)
+
+An IP-pinned dev gateway dies whenever the Mac changes networks — it happened twice on 2 Sep
+2026 (LAN to hotspot and back), and every pinned piece went dead at once while the plain server
+on loopback stayed healthy. The operator chose to stop pinning: Caddy now serves
+`https://uriahs-MacBook-Pro.local:1447` with the same local CA, bound to every address so it
+follows the Mac across networks, and the same name is `OG_PUBLIC_GATEWAY_URL` on the server and
+`openGrokGatewayUrl` in the app. That URL is also the OAuth issuer and the `resource` a bot key is
+issued for, so a change of it means the door's existing OAuth clients sign in again (`claude mcp
+remove`/`add` with the new URL, then `claude mcp login`): a key minted for the old resource is
+refused by the door as "issued for another server", which is the `aud` check doing its job.
+
+The one caveat: on the Mac itself the name resolves to `::1` first, then `127.0.0.1`. Caddy
+answers on `::1`; the plain server owns `127.0.0.1:1447`. Node and curl take `::1`, so TLS by
+name works locally. A client that insisted on IPv4 loopback would reach the plain server and fail
+the handshake; if that ever bites, the fix is the server binding `[::1]` too, or Caddy taking a
+different loopback port — not going back to an IP.
+
+## When the address changes anyway
 
 Four places, together: the `https://…` site address and the `bind` line in the Caddyfile,
 `OG_PUBLIC_GATEWAY_URL`, and the app's `openGrokGatewayUrl`. The desktop-client doc's note on the stale DHCP address
