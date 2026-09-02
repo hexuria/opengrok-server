@@ -606,6 +606,19 @@ async fn verify_domain(
     if org.domains.contains(&domain) {
         return Json(domain_json(&domain, None)).into_response();
     }
+    // Every verify is a resolver round trip; the org, not the admin, holds the budget.
+    if let Err(spent) = state
+        .budgets
+        .take(&crate::auth::budget::DOMAIN_VERIFY, org_id.as_str())
+    {
+        return crate::auth::budget::too_many(
+            spent,
+            &format!(
+                "too many verification attempts for this org; try again in {} minutes",
+                spent.retry_after_secs.div_ceil(60).max(1)
+            ),
+        );
+    }
     let Some(token) = org.pending_domains.get(&domain).cloned() else {
         return (
             StatusCode::NOT_FOUND,
