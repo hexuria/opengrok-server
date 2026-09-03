@@ -5,7 +5,7 @@
 //! reader and reshaping on every read would re-derive the same bytes forever. The runs journal
 //! remains the account of what actually happened.
 
-use opengrok_core::id::CoworkerId;
+use opengrok_core::id::{AccountId, CoworkerId};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -409,6 +409,9 @@ pub struct CoworkerKeyView {
     pub key_prefix: String,
     pub quota_usd: Option<String>,
     pub created_at_ms: i64,
+    /// Set at retirement. The row stays: its month's points still count toward the owner's
+    /// pool, so retire-and-rehire does not reset a member's month.
+    pub revoked_at_ms: Option<i64>,
 }
 
 /// A freshly minted key to record — attribution only; the secret is not here and never was.
@@ -446,6 +449,7 @@ fn coworker_key_row(row: sqlx::postgres::PgRow) -> StoreResult<CoworkerKeyView> 
         key_prefix: row.try_get("key_prefix")?,
         quota_usd: row.try_get("quota_usd")?,
         created_at_ms: row.try_get("created_at_ms")?,
+        revoked_at_ms: row.try_get("revoked_at_ms")?,
     })
 }
 
@@ -603,7 +607,8 @@ impl PgStore {
         coworker: &CoworkerId,
     ) -> StoreResult<Option<CoworkerKeyView>> {
         let row = sqlx::query(
-            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms
+            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                    revoked_at_ms
              from coworker_gateway_key where coworker_id = $1",
         )
         .bind(coworker.as_str())
@@ -612,20 +617,43 @@ impl PgStore {
         row.map(coworker_key_row).transpose()
     }
 
-    /// Forget the coworker's key row (retirement); the caller revokes on the gateway and drops
-    /// the sealed secret. Returns what was there so the caller knows which key to revoke.
-    pub async fn delete_coworker_key(
+    /// Mark the coworker's key row revoked (retirement); the caller revokes on the gateway and
+    /// drops the sealed secret. The row STAYS: its month's points still count toward the
+    /// owner's pool. Returns what was there so the caller knows which key to revoke; `None`
+    /// when there was no row or it was already marked.
+    pub async fn mark_coworker_key_revoked(
         &self,
         coworker: &CoworkerId,
+        at_ms: i64,
     ) -> StoreResult<Option<CoworkerKeyView>> {
         let row = sqlx::query(
-            "delete from coworker_gateway_key where coworker_id = $1
-             returning coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms",
+            "update coworker_gateway_key set revoked_at_ms = $2
+             where coworker_id = $1 and revoked_at_ms is null
+             returning coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                       revoked_at_ms",
         )
         .bind(coworker.as_str())
+        .bind(at_ms)
         .fetch_optional(self.pool())
         .await?;
         row.map(coworker_key_row).transpose()
+    }
+
+    /// Every key row an account's coworkers ever had, revoked ones included — the pool read
+    /// sums over all of them.
+    pub async fn coworker_keys_for_account(
+        &self,
+        account: &AccountId,
+    ) -> StoreResult<Vec<CoworkerKeyView>> {
+        let rows = sqlx::query(
+            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                    revoked_at_ms
+             from coworker_gateway_key where account_id = $1 order by created_at_ms",
+        )
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(coworker_key_row).collect()
     }
 
     pub async fn insert_gateway_key(&self, key: &NewGatewayKey<'_>) -> StoreResult<()> {

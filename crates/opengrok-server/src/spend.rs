@@ -1,4 +1,5 @@
-//! Per-coworker spend limits (`docs/plan-spend-policy.md`).
+//! Per-coworker keys, meters, and the door that enforces POINTS limits before each model call
+//! (`docs/plan-spend-policy.md`; the limits themselves live in `points.rs`).
 //!
 //! The gateway keeps the ledger; the server evaluates the policy. A coworker hired by an org
 //! member gets a gateway key of its OWN at hire (minted on the org's principal, sealed in the
@@ -151,6 +152,7 @@ pub async fn ensure_key_for(
         key_prefix: minted.key_prefix.clone(),
         quota_usd: None,
         created_at_ms: at_ms,
+        revoked_at_ms: None,
     };
     if let Err(error) = store.insert_coworker_key(&view).await {
         tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be written; revoking the key");
@@ -313,70 +315,6 @@ pub fn micros(text: &str) -> Option<i64> {
     whole.checked_mul(1_000_000)?.checked_add(frac)
 }
 
-/// Micro-dollars as prose: "$4.90".
-fn dollars(micros: i64) -> String {
-    format!(
-        "{}.{:02}",
-        micros / 1_000_000,
-        (micros % 1_000_000) / 10_000
-    )
-}
-
-/// Every amount in a limit parses, or the reason it does not.
-pub fn validate_limit(limit: &SpendLimit) -> Result<(), String> {
-    for (label, value) in [
-        ("fiveHourUsd", &limit.five_hour_usd),
-        ("sevenDayUsd", &limit.seven_day_usd),
-        ("monthUsd", &limit.month_usd),
-    ] {
-        if let Some(value) = value
-            && micros(value).is_none()
-        {
-            return Err(format!(
-                "{label}: '{value}' is not an amount — digits with up to six decimals, like 5.00"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The limits this coworker is under: its own row, then its hirer's, then the org's default,
-/// per window — the most specific admin-written value wins. `Err` is a store failure.
-pub async fn effective_limits(
-    store: &PgStore,
-    coworker: &CoworkerId,
-) -> Result<SpendLimit, String> {
-    let own = store
-        .spend_limit(SpendScope::Coworker, coworker.as_str())
-        .await
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default();
-    let Some(owner) = store
-        .coworker_owner(coworker)
-        .await
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(own);
-    };
-    let member = store
-        .spend_limit(SpendScope::Member, owner.as_str())
-        .await
-        .map_err(|error| error.to_string())?
-        .unwrap_or_default();
-    let org = match store.load_account(&owner).await {
-        Ok((account, _)) => match account.org_id.filter(|org| !org.is_empty()) {
-            Some(org_id) => store
-                .spend_limit(SpendScope::Org, &org_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .unwrap_or_default(),
-            None => SpendLimit::default(),
-        },
-        Err(error) => return Err(error.to_string()),
-    };
-    Ok(own.over(&member).over(&org))
-}
-
 /// One window as the console shows it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -464,12 +402,14 @@ pub async fn spend_for(
     coworker_id: &CoworkerId,
 ) -> Result<CoworkerSpend, String> {
     let store = &state.auth.store;
-    let limits = effective_limits(store, coworker_id).await?;
+    // The USD limits are retired (`points.rs` holds the limits now); the shape keeps its
+    // `limits` field, empty, until the desktop's usage modal has replaced this read.
+    let limits = SpendLimit::default();
     let row = store
         .coworker_key(coworker_id)
         .await
         .map_err(|error| format!("the key row could not be read: {error}"))?
-        .filter(|row| row.account_id == account_id.as_str());
+        .filter(|row| row.account_id == account_id.as_str() && row.revoked_at_ms.is_none());
     let Some(row) = row else {
         let note = match availability(state, account_id).await {
             Ok(_) => "this coworker has no key of its own yet, so it is not metered".to_string(),
@@ -537,7 +477,10 @@ pub struct GuardedDoor {
     /// The resolved limits per coworker, for `fresh_ms`: resolving them is four or five reads,
     /// and a tool loop of twenty calls would otherwise pay a hundred to learn "no limits"
     /// twenty times. A limit written on the admin page shows up within the freshness window.
-    limits_cache: Mutex<HashMap<String, (SpendLimit, i64)>>,
+    limits_cache: Mutex<HashMap<String, (crate::points::Effective, i64)>>,
+    /// The pool reading per OWNER: every coworker of one member shares one batch read per
+    /// freshness window, rather than each paying for its own.
+    pool_cache: Mutex<HashMap<String, (i64, i64)>>,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
     /// a test that counts reads sets it to zero.
     fresh_ms: i64,
@@ -559,11 +502,12 @@ impl GuardedDoor {
             admin,
             cache: Mutex::new(HashMap::new()),
             limits_cache: Mutex::new(HashMap::new()),
+            pool_cache: Mutex::new(HashMap::new()),
             fresh_ms: FRESH_MS,
         }
     }
 
-    async fn limits_for(&self, coworker: &CoworkerId) -> Result<SpendLimit, String> {
+    async fn limits_for(&self, coworker: &CoworkerId) -> Result<crate::points::Effective, String> {
         if self.fresh_ms > 0
             && let Ok(cache) = self.limits_cache.lock()
             && let Some((limits, at_ms)) = cache.get(coworker.as_str())
@@ -571,7 +515,7 @@ impl GuardedDoor {
         {
             return Ok(limits.clone());
         }
-        let limits = effective_limits(&self.store, coworker).await?;
+        let limits = crate::points::effective(&self.store, coworker).await?;
         if let Ok(mut cache) = self.limits_cache.lock() {
             cache.insert(coworker.as_str().to_string(), (limits.clone(), now_ms()));
         }
@@ -637,12 +581,61 @@ impl GuardedDoor {
     }
 }
 
-/// One window's verdict.
-struct Verdict {
-    label: &'static str,
-    used: i64,
-    limit: i64,
-    reset: String,
+impl GuardedDoor {
+    fn cached_pool(&self, owner: &str, within_ms: i64) -> Option<i64> {
+        let cache = self.pool_cache.lock().ok()?;
+        let (points, at_ms) = cache.get(owner)?;
+        (now_ms() - at_ms <= within_ms).then_some(*points)
+    }
+
+    /// The owner's pool total this month — one batch read over every key the owner's coworkers
+    /// ever had, with the turn's patience and the same fresh/stale ladder as the meter.
+    async fn pool_reading(&self, owner: &AccountId, name: &str) -> Result<i64, ModelError> {
+        if self.fresh_ms > 0
+            && let Some(points) = self.cached_pool(owner.as_str(), self.fresh_ms)
+        {
+            return Ok(points);
+        }
+        let Some(admin) = self.admin.as_ref() else {
+            return Err(ModelError::SpendCap(format!(
+                "{name}'s owner has a points pool, but this deployment has no gateway admin \
+                 connection to read it with (OG_GATEWAY_ADMIN_URL). Its turns are held until it does."
+            )));
+        };
+        let keys = crate::points::pool_keys(&self.store, owner)
+            .await
+            .map_err(|error| {
+                ModelError::SpendCap(format!(
+                    "{name}'s owner's keys could not be listed ({error}); the turn is held."
+                ))
+            })?;
+        match admin
+            .points_for_keys_within(&keys, "month", METER_TIMEOUT)
+            .await
+        {
+            Ok(Some(per_key)) => {
+                let points: i64 = per_key.values().sum();
+                if let Ok(mut cache) = self.pool_cache.lock() {
+                    cache.insert(owner.as_str().to_string(), (points, now_ms()));
+                }
+                Ok(points)
+            }
+            Ok(None) => Err(ModelError::SpendCap(format!(
+                "{name}'s owner has a points pool, but the gateway has no reference price set, so \
+                 points cannot be counted; an admin sets it on the admin page. The turn is held."
+            ))),
+            Err(error) => {
+                tracing::error!(%error, owner = %owner.as_str(), "points guard: the pool could not be read");
+                match self.cached_pool(owner.as_str(), STALE_OK_MS) {
+                    Some(points) => Ok(points),
+                    None => Err(ModelError::SpendCap(format!(
+                        "{name}'s owner's pool could not be read ({error}); the turn is held. \
+                         Try again in a moment."
+                    ))),
+                }
+            }
+        }
+    }
 }
 
 fn rfc3339_at(text: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -651,85 +644,63 @@ fn rfc3339_at(text: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
-/// The sentence a person reads when a window is used up, or `None` when every window has
-/// room. Names the first window in the way and when it frees up, says which others still have
-/// room, and names any other window that is also used up.
-fn over_limit(name: &str, usage: &KeyUsage, limits: &SpendLimit) -> Option<String> {
-    let windows = [
-        (
-            "5-hour",
-            usage.five_hour_usd.as_deref(),
-            limits.five_hour_usd.as_deref(),
-            rfc3339_at(usage.five_hour_frees_at.as_deref())
-                .map(|t| format!("it begins to free up at {}", t.format("%H:%M UTC"))),
-        ),
-        (
-            "7-day",
-            usage.seven_day_usd.as_deref(),
-            limits.seven_day_usd.as_deref(),
-            rfc3339_at(usage.seven_day_frees_at.as_deref()).map(|t| {
-                format!(
-                    "it begins to free up at {}",
-                    t.format("%H:%M UTC on %-d %b")
-                )
-            }),
-        ),
-        (
-            "monthly",
-            Some(usage.month_to_date_usd.as_str()),
-            limits.month_usd.as_deref(),
-            rfc3339_at(usage.month_resets_at.as_deref())
-                .map(|t| format!("it resets on {}", t.format("%-d %b"))),
-        ),
-    ];
-    let mut over: Vec<Verdict> = Vec::new();
-    let mut room: Vec<&'static str> = Vec::new();
-    for (label, used, limit, reset) in windows {
-        let Some(limit) = limit.and_then(micros) else {
-            continue;
-        };
-        let used = used.and_then(micros).unwrap_or(0);
-        if used >= limit {
-            over.push(Verdict {
-                label,
-                used,
-                limit,
-                reset: reset.unwrap_or_else(|| "it frees up as older spend ages out".to_string()),
-            });
-        } else {
-            room.push(label);
+/// What the guard knows when it decides: the coworker's month and day, and the owner's pool.
+struct Counted {
+    month: i64,
+    day: i64,
+    day_frees_at: Option<String>,
+    resets_at: Option<String>,
+    pool_used: Option<i64>,
+}
+
+/// The sentence a person reads when a limit is reached, or `None` when there is room at every
+/// one. The cap first, then the pool, then the day's brake: the numbers the person can act
+/// on, and when it frees up.
+fn over_points(name: &str, limits: &crate::points::Effective, counted: &Counted) -> Option<String> {
+    use crate::points::commas;
+    let month_name = chrono::Utc::now().format("%B").to_string();
+    let resets = rfc3339_at(counted.resets_at.as_deref())
+        .map(|t| format!("it resets on {}", t.format("%-d %B")))
+        .unwrap_or_else(|| "it resets on the first of next month".to_string());
+    if let Some(cap) = limits.cap
+        && counted.month >= cap
+    {
+        let mut sentence = format!(
+            "{name} has used its {} points for {month_name} ({} used); {resets}.",
+            commas(cap),
+            commas(counted.month)
+        );
+        if let (Some(pool), Some(used)) = (limits.pool, counted.pool_used) {
+            sentence.push_str(&format!(
+                " {} of your {} remain for other agents.",
+                commas(pool.saturating_sub(used).max(0)),
+                commas(pool)
+            ));
         }
+        return Some(sentence);
     }
-    let first = over.first()?;
-    let mut sentence = format!(
-        "{name} has used its {} allowance ({} of {}); {}.",
-        first.label,
-        dollars(first.used),
-        dollars(first.limit),
-        first.reset
-    );
-    for also in over.iter().skip(1) {
-        sentence.push_str(&format!(
-            " Its {} allowance is also used up ({} of {}); {}.",
-            also.label,
-            dollars(also.used),
-            dollars(also.limit),
-            also.reset
+    if let (Some(pool), Some(used)) = (limits.pool, counted.pool_used)
+        && used >= pool
+    {
+        return Some(format!(
+            "Your pool of {} points for {month_name} is used up ({} used); {resets}.",
+            commas(pool),
+            commas(used)
         ));
     }
-    if !room.is_empty() {
-        sentence.push_str(&format!(
-            " The {} {} still {} room.",
-            room.join(" and "),
-            if room.len() == 1 {
-                "allowance"
-            } else {
-                "allowances"
-            },
-            if room.len() == 1 { "has" } else { "have" }
+    if let Some(day_cap) = limits.day_cap
+        && counted.day >= day_cap
+    {
+        let frees = rfc3339_at(counted.day_frees_at.as_deref())
+            .map(|t| format!("it frees up at {}", t.format("%H:%M UTC")))
+            .unwrap_or_else(|| "it frees up as older spend ages out".to_string());
+        return Some(format!(
+            "{name} has used its {} points for today ({} used); {frees}.",
+            commas(day_cap),
+            commas(counted.day)
         ));
     }
-    Some(sentence)
+    None
 }
 
 #[async_trait::async_trait]
@@ -740,12 +711,12 @@ impl ModelDoor for GuardedDoor {
         };
         let coworker = CoworkerId::from_stored(scope);
         let limits = self.limits_for(&coworker).await.map_err(|error| {
-                tracing::error!(%error, coworker = %coworker.as_str(), "spend guard: limits could not be read");
+                tracing::error!(%error, coworker = %coworker.as_str(), "points guard: limits could not be read");
                 ModelError::SpendCap(format!(
-                    "This coworker's spend limits could not be read ({error}); the turn is held."
+                    "This coworker's points limits could not be read ({error}); the turn is held."
                 ))
             })?;
-        if limits.is_empty() {
+        if !limits.is_limited() {
             return self.inner.stream(request).await;
         }
         let name = self
@@ -754,15 +725,15 @@ impl ModelDoor for GuardedDoor {
             .await
             .map(|(coworker, _)| coworker.name)
             .unwrap_or_else(|_| "This coworker".to_string());
-        // Limits without a key of its own cannot be metered, so they cannot be honoured: held,
-        // and the sentence says what would make it meterable.
+        // A limit — its own, or its owner's pool — cannot be honoured without a key of its own
+        // to count on: held, and the sentence says what would make it countable.
         let key = match self.store.coworker_key(&coworker).await {
             Ok(Some(key)) => key,
             Ok(None) => {
                 return Err(ModelError::SpendCap(format!(
-                    "{name} has spend limits but no gateway key of its own to meter them on, so \
-                     its turns are held. A coworker is metered when its hirer is in an org and the \
-                     deployment has a gateway admin connection and a vault; ask an admin."
+                    "{name} is under a points limit but has no gateway key of its own to count on, \
+                     so its turns are held. A coworker is metered when its hirer is in an org and \
+                     the deployment has a gateway admin connection and a vault; ask an admin."
                 )));
             }
             Err(error) => {
@@ -772,8 +743,25 @@ impl ModelDoor for GuardedDoor {
             }
         };
         let usage = self.reading(&key.key_id, &name).await?;
-        if let Some(sentence) = over_limit(&name, &usage, &limits) {
-            tracing::info!(coworker = %coworker.as_str(), "spend guard: refused — {sentence}");
+        let (Some(month), Some(day)) = (usage.month_points, usage.day_points) else {
+            return Err(ModelError::SpendCap(format!(
+                "{name} is under a points limit, but the gateway has no reference price set, so \
+                 points cannot be counted; an admin sets it on the admin page. The turn is held."
+            )));
+        };
+        let pool_used = match (limits.pool, limits.owner.as_ref()) {
+            (Some(_), Some(owner)) => Some(self.pool_reading(owner, &name).await?),
+            _ => None,
+        };
+        let counted = Counted {
+            month,
+            day,
+            day_frees_at: usage.day_frees_at.clone(),
+            resets_at: usage.month_resets_at.clone(),
+            pool_used,
+        };
+        if let Some(sentence) = over_points(&name, &limits, &counted) {
+            tracing::info!(coworker = %coworker.as_str(), "points guard: refused — {sentence}");
             return Err(ModelError::SpendCap(sentence));
         }
         self.inner.stream(request).await
@@ -785,11 +773,12 @@ impl ModelDoor for GuardedDoor {
 /// still live on the gateway is the failure that matters, so the revoke goes first.
 pub async fn revoke_for(state: &AgUiState, coworker_id: &CoworkerId) {
     let store = &state.auth.store;
-    let row = match store.delete_coworker_key(coworker_id).await {
+    // The row stays, marked: a retired coworker's month still counts toward its owner's pool.
+    let row = match store.mark_coworker_key_revoked(coworker_id, now_ms()).await {
         Ok(Some(row)) => row,
         Ok(None) => return,
         Err(error) => {
-            tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be dropped at retirement");
+            tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be marked revoked at retirement");
             return;
         }
     };
@@ -833,84 +822,73 @@ mod tests {
         for bad in ["", "-1", "1.2345678", "lots", "1e3", ".5", "$5", "1,5"] {
             assert_eq!(micros(bad), None, "{bad}");
         }
-        assert_eq!(dollars(4_900_000), "4.90");
-        assert_eq!(dollars(5_000_000), "5.00");
-        assert_eq!(dollars(123_456), "0.12");
     }
 
-    #[test]
-    fn the_most_specific_window_wins_and_absent_means_nothing() {
-        let org = SpendLimit {
-            five_hour_usd: Some("1.00".into()),
-            seven_day_usd: Some("5.00".into()),
-            month_usd: Some("20.00".into()),
-        };
-        let member = SpendLimit {
-            seven_day_usd: Some("9.00".into()),
-            ..Default::default()
-        };
-        let own = SpendLimit {
-            month_usd: Some("50.00".into()),
-            ..Default::default()
-        };
-        let effective = own.over(&member).over(&org);
-        assert_eq!(effective.five_hour_usd.as_deref(), Some("1.00"));
-        assert_eq!(effective.seven_day_usd.as_deref(), Some("9.00"));
-        assert_eq!(effective.month_usd.as_deref(), Some("50.00"));
-        assert!(SpendLimit::default().is_empty());
-    }
-
-    fn usage(five: &str, seven: &str, month: &str) -> KeyUsage {
-        KeyUsage {
-            quota_usd: None,
-            spent_usd: "0".into(),
-            month_to_date_usd: month.into(),
-            month_resets_at: Some("2026-10-01T00:00:00Z".into()),
-            requests: 3,
-            five_hour_usd: Some(five.into()),
-            five_hour_frees_at: Some("2026-09-02T14:32:10Z".into()),
-            seven_day_usd: Some(seven.into()),
-            seven_day_frees_at: Some("2026-09-09T05:12:44Z".into()),
-            five_hour_requests: None,
-            seven_day_requests: None,
-            month_counterfactual_usd: None,
-            five_hour_counterfactual_usd: None,
-            seven_day_counterfactual_usd: None,
+    fn counted(month: i64, day: i64, pool_used: Option<i64>) -> Counted {
+        Counted {
+            month,
+            day,
+            day_frees_at: Some("2026-09-03T14:32:10Z".into()),
+            resets_at: Some("2026-10-01T00:00:00Z".into()),
+            pool_used,
         }
     }
 
+    /// The plan's sentences: the cap with what the pool leaves others, the pool, the day's
+    /// brake with when it frees up; nothing when there is room everywhere.
     #[test]
-    fn the_sentence_names_the_window_in_the_way_and_when_it_frees_up() {
-        let limits = SpendLimit {
-            five_hour_usd: Some("5.00".into()),
-            seven_day_usd: Some("20.00".into()),
-            month_usd: Some("50.00".into()),
-        };
-        assert_eq!(over_limit("Ada", &usage("4.90", "10", "10"), &limits), None);
-        let s = over_limit("Ada", &usage("5.000000", "10", "10"), &limits).unwrap();
-        assert_eq!(
-            s,
-            "Ada has used its 5-hour allowance (5.00 of 5.00); it begins to free up at 14:32 UTC. \
-             The 7-day and monthly allowances still have room."
-        );
-        let s = over_limit("Ada", &usage("1", "21", "50"), &limits).unwrap();
-        assert!(s.starts_with("Ada has used its 7-day allowance (21.00 of 20.00); it begins to free up at 05:12 UTC on 9 Sep."), "{s}");
-        assert!(
-            s.contains(
-                "Its monthly allowance is also used up (50.00 of 50.00); it resets on 1 Oct."
-            ),
-            "{s}"
-        );
-        assert!(s.ends_with("The 5-hour allowance still has room."), "{s}");
-        // A limit at one window only: the others are not mentioned as having room.
-        let only_month = SpendLimit {
-            month_usd: Some("50.00".into()),
+    fn the_sentence_names_the_limit_in_the_way_with_the_numbers_and_when_it_frees_up() {
+        let month = chrono::Utc::now().format("%B").to_string();
+        let limits = crate::points::Effective {
+            cap: Some(100_000),
+            day_cap: Some(30_000),
+            pool: Some(1_000_000),
             ..Default::default()
         };
-        let s = over_limit("Ada", &usage("9", "9", "50"), &only_month).unwrap();
+        assert_eq!(
+            over_points("New Bot", &limits, &counted(99_999, 100, Some(500_000))),
+            None
+        );
+        let s = over_points("New Bot", &limits, &counted(102_340, 100, Some(588_000))).unwrap();
         assert_eq!(
             s,
-            "Ada has used its monthly allowance (50.00 of 50.00); it resets on 1 Oct."
+            format!(
+                "New Bot has used its 100,000 points for {month} (102,340 used); it resets on \
+                 1 October. 412,000 of your 1,000,000 remain for other agents."
+            )
+        );
+        let s = over_points("New Bot", &limits, &counted(10, 5, Some(1_000_000))).unwrap();
+        assert_eq!(
+            s,
+            format!(
+                "Your pool of 1,000,000 points for {month} is used up (1,000,000 used); it \
+                 resets on 1 October."
+            )
+        );
+        let s = over_points("New Bot", &limits, &counted(10, 30_000, Some(10))).unwrap();
+        assert_eq!(
+            s,
+            "New Bot has used its 30,000 points for today (30,000 used); it frees up at 14:32 UTC."
+        );
+        // A cap alone says nothing about a pool.
+        let cap_only = crate::points::Effective {
+            cap: Some(1_000),
+            ..Default::default()
+        };
+        let s = over_points("Ada", &cap_only, &counted(1_000, 0, None)).unwrap();
+        assert_eq!(
+            s,
+            format!(
+                "Ada has used its 1,000 points for {month} (1,000 used); it resets on 1 October."
+            )
+        );
+        assert_eq!(
+            over_points(
+                "Ada",
+                &crate::points::Effective::default(),
+                &counted(1, 1, None)
+            ),
+            None
         );
     }
 }

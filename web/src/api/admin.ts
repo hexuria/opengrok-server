@@ -198,44 +198,50 @@ export function gatewayUsage(): Promise<GatewayUsage> {
   return getJson<GatewayUsage>("/admin/gateway/usage");
 }
 
-// ---- Spend limits: three windows, three scopes, the admin writes them ----
+// ---- Points: the reference price on the gateway, members' pools, the overview ----
 
-/** The three limits, each optional; null or absent means "this layer says nothing". */
-export interface SpendLimit {
-  fiveHourUsd?: string | null;
-  sevenDayUsd?: string | null;
-  monthUsd?: string | null;
+/** A month's cap and a day's brake, in points; null or absent means "no limit here". */
+export interface PointsLimit {
+  monthPoints?: number | null;
+  dayPoints?: number | null;
 }
 
-export interface SpendLimits {
-  org: SpendLimit | null;
-  members: { id: string; email: string; limits: SpendLimit | null }[];
-  coworkers: { id: string; name: string; ownerEmail: string; limits: SpendLimit | null }[];
+export interface PointsOverview {
+  /** null while the gateway has no reference price (or is older than open-ai-gateway #52). */
+  reference: { usdPerMtok: string } | null;
+  note: string | null;
+  members: { id: string; email: string; pool: number | null; setBy: string | null; usedPoints: number | null }[];
+  coworkers: {
+    id: string;
+    name: string;
+    ownerEmail: string;
+    cap: number | null;
+    dayCap: number | null;
+    usedPoints: number | null;
+  }[];
 }
 
-export function getSpendLimits(): Promise<SpendLimits> {
-  return getJson<SpendLimits>("/admin/spend");
+export function getPointsOverview(): Promise<PointsOverview> {
+  return getJson<PointsOverview>("/admin/points");
 }
 
-async function putLimit(path: string, limit: SpendLimit): Promise<void> {
+async function putJson(path: string, body: unknown): Promise<void> {
   const res = await request(path, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(limit),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new ApiError(res.status, await res.text());
 }
 
-export function setOrgSpendLimit(limit: SpendLimit): Promise<void> {
-  return putLimit("/admin/spend/org", limit);
+/** The reference price, USD per million tokens: one point is one token at it. */
+export function setPointsReference(usdPerMtok: string): Promise<void> {
+  return putJson("/admin/points/reference", { usdPerMtok });
 }
 
-export function setMemberSpendLimit(accountId: string, limit: SpendLimit): Promise<void> {
-  return putLimit(`/admin/spend/members/${encodeURIComponent(accountId)}`, limit);
-}
-
-export function setCoworkerSpendLimit(coworkerId: string, limit: SpendLimit): Promise<void> {
-  return putLimit(`/admin/spend/coworkers/${encodeURIComponent(coworkerId)}`, limit);
+/** A member's monthly pool; null removes it. */
+export function setMemberPool(accountId: string, pool: number | null): Promise<void> {
+  return putJson(`/admin/points/members/${encodeURIComponent(accountId)}`, { pool });
 }
 
 // ---- Coworker templates: types the admin writes, members hire from ----
@@ -246,7 +252,7 @@ export interface TemplateInput {
   model: string | null;
   tools: string[];
   needsApproval: string[];
-  limits: SpendLimit;
+  points: PointsLimit;
 }
 
 export interface CoworkerTemplate extends TemplateInput {

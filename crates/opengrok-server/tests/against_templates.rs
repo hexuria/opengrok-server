@@ -1,5 +1,5 @@
 //! Coworker templates (`docs/plan-spend-policy.md` §4): a type the admin writes — route,
-//! tool ceiling, what needs a human yes, spend limits — that members hire from, applied by
+//! tool ceiling, what needs a human yes, points limits — that members hire from, applied by
 //! COPY at hire. Over the same stand-in gateway as the spend tests, so a coworker hired from a
 //! template with limits is really metered. Needs Postgres; skips loudly without.
 
@@ -534,7 +534,7 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         "model": "oag/cheap",
         "tools": ["shell", "read_file"],
         "needsApproval": ["shell"],
-        "limits": { "monthUsd": "5.00" },
+        "points": { "monthPoints": 5_000_000 },
     });
     let (status, _) = post(&member, "/admin/templates", researcher.clone()).await;
     assert_eq!(status, 403, "a member does not write templates");
@@ -565,7 +565,7 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
     let (status, body) = post(
         &admin,
         "/admin/templates",
-        json!({ "name": "Bad", "limits": { "monthUsd": "lots" } }),
+        json!({ "name": "Bad", "points": { "monthPoints": -5 } }),
     )
     .await;
     assert_eq!(status, 400, "{body}");
@@ -641,11 +641,16 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         "and shell asks first"
     );
     let limits = store
-        .spend_limit(opengrok_store::SpendScope::Coworker, coworker.as_str())
+        .points_limit(opengrok_store::PointsScope::Coworker, coworker.as_str())
         .await
         .expect("limits")
         .expect("copied");
-    assert_eq!(limits.month_usd.as_deref(), Some("5.00"));
+    assert_eq!(limits.limit.month_points, Some(5_000_000));
+    assert_eq!(
+        limits.set_by,
+        member_id.as_str(),
+        "set by the hirer, on the template's word"
+    );
     assert_eq!(
         store.template_of(&coworker).await.expect("use").as_deref(),
         Some(template_id.as_str())
@@ -693,7 +698,7 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         .client
         .put(format!("{}/admin/templates/{template_id}", h.base))
         .header("Authorization", format!("Bearer {admin}"))
-        .json(&json!({ "name": "Researcher v2", "tools": ["read_file"], "limits": { "monthUsd": "1.00" } }))
+        .json(&json!({ "name": "Researcher v2", "tools": ["read_file"], "points": { "monthPoints": 1_000_000 } }))
         .send()
         .await
         .expect("update");
@@ -728,13 +733,13 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
     .await;
     assert_eq!(status, 404, "a deleted template cannot be hired from");
     let limits = store
-        .spend_limit(opengrok_store::SpendScope::Coworker, coworker.as_str())
+        .points_limit(opengrok_store::PointsScope::Coworker, coworker.as_str())
         .await
         .expect("limits")
         .expect("still there");
     assert_eq!(
-        limits.month_usd.as_deref(),
-        Some("5.00"),
+        limits.limit.month_points,
+        Some(5_000_000),
         "the copy outlives the template"
     );
 }
@@ -763,11 +768,11 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
         .connect(&database_url)
         .await
         .expect("connect");
-    let sentinel = "13.130000";
+    let sentinel = 131_313;
     sqlx::query(
-        "create or replace function og_test_refuse_spend_limit() returns trigger as $$
+        "create or replace function og_test_refuse_points_limit() returns trigger as $$
          begin
-           if new.month_usd = '13.130000' then
+           if new.month_points = 131313 then
              raise exception 'the test says no to this limit';
            end if;
            return new;
@@ -776,13 +781,13 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
     .execute(&pool)
     .await
     .expect("trigger fn");
-    sqlx::query("drop trigger if exists og_test_refuse_spend_limit on spend_limit")
+    sqlx::query("drop trigger if exists og_test_refuse_points_limit on points_limit")
         .execute(&pool)
         .await
         .expect("drop old trigger");
     sqlx::query(
-        "create trigger og_test_refuse_spend_limit before insert or update on spend_limit
-         for each row execute function og_test_refuse_spend_limit()",
+        "create trigger og_test_refuse_points_limit before insert or update on points_limit
+         for each row execute function og_test_refuse_points_limit()",
     )
     .execute(&pool)
     .await
@@ -792,7 +797,7 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
         .client
         .post(format!("{}/admin/templates", h.base))
         .header("Authorization", format!("Bearer {admin}"))
-        .json(&json!({ "name": "Capped", "tools": ["read_file"], "limits": { "monthUsd": sentinel } }))
+        .json(&json!({ "name": "Capped", "tools": ["read_file"], "points": { "monthPoints": sentinel } }))
         .send()
         .await
         .expect("template");
@@ -820,13 +825,13 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
     let hired: Value = res.json().await.expect("json");
     let note = hired["templateNote"].as_str().unwrap_or("");
     assert!(
-        note.contains("could not be copied") && note.contains("unlimited"),
+        note.contains("points limit could not be set"),
         "the hirer is told, in the reply: {hired}"
     );
     let coworker = CoworkerId::from_stored(hired["id"].as_str().expect("id").to_string());
     assert!(
         store
-            .spend_limit(opengrok_store::SpendScope::Coworker, coworker.as_str())
+            .points_limit(opengrok_store::PointsScope::Coworker, coworker.as_str())
             .await
             .expect("limits")
             .is_none(),
@@ -851,13 +856,13 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
         .await;
     assert_eq!(status, 200, "{created}");
     let note = created["templateNote"].as_str().unwrap_or("");
-    assert!(note.contains("could not be copied"), "{created}");
+    assert!(note.contains("points limit could not be set"), "{created}");
 
-    sqlx::query("drop trigger if exists og_test_refuse_spend_limit on spend_limit")
+    sqlx::query("drop trigger if exists og_test_refuse_points_limit on points_limit")
         .execute(&pool)
         .await
         .expect("drop trigger");
-    sqlx::query("drop function if exists og_test_refuse_spend_limit()")
+    sqlx::query("drop function if exists og_test_refuse_points_limit()")
         .execute(&pool)
         .await
         .expect("drop fn");

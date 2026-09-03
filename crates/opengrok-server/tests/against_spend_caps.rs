@@ -86,8 +86,13 @@ struct StandIn {
     /// (the figure the operator's Grok seat booked on 2 Sep 2026).
     seat: bool,
     /// When true the usage endpoint answers as a gateway older than open-ai-gateway #51 would:
-    /// no per-window request counts, no counterfactuals.
+    /// no per-window request counts, no counterfactuals, no points, no points routes.
     older_gateway: bool,
+    /// The points reference price (USD per million tokens), as the admin set it; `None` until
+    /// set. Points are each request's list price × 1e6 / this, rounded, summed.
+    reference: Option<f64>,
+    /// Every batch pool read, for the count a test asserts on.
+    pool_reads: usize,
 }
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1_000;
@@ -101,7 +106,30 @@ fn rfc3339(ms: i64) -> String {
 
 /// The three windows over a ledger, the way the gateway computes them: the sum since an
 /// instant, and when the window next frees up (its oldest spend ageing out).
-fn windows(events: &[(i64, f64, f64)], now: i64, older_gateway: bool) -> serde_json::Value {
+const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+
+/// A window's length in ms; `None` for the month (everything the stand-in holds).
+fn window_len(window: &str) -> Option<Option<i64>> {
+    match window {
+        "5h" => Some(Some(FIVE_HOURS_MS)),
+        "24h" => Some(Some(DAY_MS)),
+        "7d" => Some(Some(SEVEN_DAYS_MS)),
+        "month" => Some(None),
+        _ => None,
+    }
+}
+
+/// The gateway's arithmetic: a request's list price over the reference, rounded half up.
+fn points_of(api: f64, reference: f64) -> i64 {
+    (api * 1_000_000.0 / reference).round() as i64
+}
+
+fn windows(
+    events: &[(i64, f64, f64)],
+    now: i64,
+    older_gateway: bool,
+    reference: Option<f64>,
+) -> serde_json::Value {
     let window = |len: i64| {
         let inside: Vec<&(i64, f64, f64)> = events
             .iter()
@@ -110,12 +138,25 @@ fn windows(events: &[(i64, f64, f64)], now: i64, older_gateway: bool) -> serde_j
         let used: f64 = inside.iter().map(|(_, cost, _)| cost).sum();
         let displaced: f64 = inside.iter().map(|(_, _, api)| api).sum();
         let frees = inside.iter().map(|(at, _, _)| at + len).min().map(rfc3339);
-        (money(used), frees, inside.len(), money(displaced))
+        let points = reference.map(|r| {
+            inside
+                .iter()
+                .map(|(_, _, api)| points_of(*api, r))
+                .sum::<i64>()
+        });
+        (money(used), frees, inside.len(), money(displaced), points)
     };
-    let (five, five_frees, five_n, five_api) = window(FIVE_HOURS_MS);
-    let (seven, seven_frees, seven_n, seven_api) = window(SEVEN_DAYS_MS);
+    let (five, five_frees, five_n, five_api, five_points) = window(FIVE_HOURS_MS);
+    let (day, day_frees, day_n, day_api, day_points) = window(DAY_MS);
+    let (seven, seven_frees, seven_n, seven_api, seven_points) = window(SEVEN_DAYS_MS);
     let month: f64 = events.iter().map(|(_, cost, _)| cost).sum();
     let month_api: f64 = events.iter().map(|(_, _, api)| api).sum();
+    let month_points = reference.map(|r| {
+        events
+            .iter()
+            .map(|(_, _, api)| points_of(*api, r))
+            .sum::<i64>()
+    });
     let mut body = json!({
         "five_hour_usd": five, "five_hour_frees_at": five_frees,
         "seven_day_usd": seven, "seven_day_frees_at": seven_frees,
@@ -128,6 +169,14 @@ fn windows(events: &[(i64, f64, f64)], now: i64, older_gateway: bool) -> serde_j
         body["five_hour_counterfactual_usd"] = json!(five_api);
         body["seven_day_counterfactual_usd"] = json!(seven_api);
         body["month_counterfactual_usd"] = json!(money(month_api));
+        body["day_usd"] = json!(day);
+        body["day_frees_at"] = json!(day_frees);
+        body["day_requests"] = json!(day_n);
+        body["day_counterfactual_usd"] = json!(day_api);
+        body["month_points"] = json!(month_points);
+        body["five_hour_points"] = json!(five_points);
+        body["day_points"] = json!(day_points);
+        body["seven_day_points"] = json!(seven_points);
     }
     body
 }
@@ -218,6 +267,127 @@ async fn spawn_stand_in(shared: Shared) -> String {
             ),
         )
         .route(
+            "/admin/api/points/reference",
+            get(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let stand_in = shared.lock().unwrap();
+                    if stand_in.older_gateway {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})));
+                    }
+                    (StatusCode::OK, Json(json!({ "usd_per_mtok": stand_in.reference.map(money) })))
+                },
+            )
+            .put(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let Some(value) = body["usd_per_mtok"].as_str().and_then(|v| v.parse::<f64>().ok()) else {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "that is not a price, e.g. \"0.20\""})));
+                    };
+                    if value <= 0.0 {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "the reference price must be positive: a point is one token at it"})));
+                    }
+                    shared.lock().unwrap().reference = Some(value);
+                    (StatusCode::OK, Json(json!({ "usd_per_mtok": money(value) })))
+                },
+            ),
+        )
+        .route(
+            "/admin/api/points/models",
+            get(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let stand_in = shared.lock().unwrap();
+                    let Some(r) = stand_in.reference.filter(|_| !stand_in.older_gateway) else {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "no reference price set; PUT /admin/api/points/reference first"})));
+                    };
+                    // One catalog model at $0.20 in / $1.20 out / $0.02 cache read per million.
+                    let x = |price: f64| format!("{}", (price / r * 1e6).round() / 1e6);
+                    (StatusCode::OK, Json(json!([{
+                        "id": "oag/cheap", "input_x": x(0.20), "output_x": x(1.20),
+                        "cache_read_x": x(0.02), "cache_write_x": Value::Null, "shown_x": x(0.20),
+                    }])))
+                },
+            ),
+        )
+        .route(
+            "/admin/api/keys/{id}/usage/models",
+            get(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let stand_in = shared.lock().unwrap();
+                    if stand_in.older_gateway {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})));
+                    }
+                    let Some(len) = window_len(q.get("window").map(String::as_str).unwrap_or("month")) else {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "not a window; one of 5h, 24h, 7d, month"})));
+                    };
+                    let Some(key) = stand_in.keys.iter().find(|k| k.id == id) else {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "no key with that id"})));
+                    };
+                    let now = now_ms();
+                    let inside: Vec<&(i64, f64, f64)> = key.events.iter().filter(|(at, _, _)| len.is_none_or(|len| *at >= now - len)).collect();
+                    if inside.is_empty() {
+                        return (StatusCode::OK, Json(json!([])));
+                    }
+                    let cost: f64 = inside.iter().map(|(_, c, _)| c).sum();
+                    let api: f64 = inside.iter().map(|(_, _, a)| a).sum();
+                    let points = stand_in.reference.map(|r| inside.iter().map(|(_, _, a)| points_of(*a, r)).sum::<i64>());
+                    // Every stand-in completion is ten tokens in, five out, on the one model.
+                    (StatusCode::OK, Json(json!([{
+                        "model_id": "oag/cheap", "requests": inside.len(),
+                        "input_tokens": 10 * inside.len(), "output_tokens": 5 * inside.len(),
+                        "cache_read_tokens": 0, "cache_write_tokens": 0,
+                        "cost_usd": money(cost), "list_usd": money(api), "points": points,
+                    }])))
+                },
+            ),
+        )
+        .route(
+            "/admin/api/usage/points",
+            post(
+                |State(shared): State<Shared>, headers: axum::http::HeaderMap, Json(body): Json<Value>| async move {
+                    if bearer_of(&headers) != ADMIN_TOKEN {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                    }
+                    let mut stand_in = shared.lock().unwrap();
+                    stand_in.pool_reads += 1;
+                    if stand_in.meter_down {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "the meter is down"})));
+                    }
+                    if stand_in.older_gateway {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})));
+                    }
+                    let Some(r) = stand_in.reference else {
+                        return (StatusCode::NOT_FOUND, Json(json!({"error": "no reference price set; PUT /admin/api/points/reference first"})));
+                    };
+                    let window = body["window"].as_str().unwrap_or("month");
+                    let Some(len) = window_len(window) else {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "not a window; one of 5h, 24h, 7d, month"})));
+                    };
+                    let now = now_ms();
+                    let mut keys = serde_json::Map::new();
+                    let mut total = 0i64;
+                    for id in body["keys"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                        let points = stand_in.keys.iter().find(|k| k.id == id).map_or(0, |k| {
+                            k.events.iter().filter(|(at, _, _)| len.is_none_or(|len| *at >= now - len)).map(|(_, _, a)| points_of(*a, r)).sum()
+                        });
+                        total += points;
+                        keys.insert(id.to_string(), json!(points));
+                    }
+                    (StatusCode::OK, Json(json!({ "window": window, "keys": keys, "total": total })))
+                },
+            ),
+        )
+        .route(
             "/admin/api/keys/{id}/usage",
             get(
                 |State(shared): State<Shared>, headers: axum::http::HeaderMap, Path(id): Path<String>| async move {
@@ -233,7 +403,8 @@ async fn spawn_stand_in(shared: Shared) -> String {
                         return (StatusCode::NOT_FOUND, Json(json!({"error": "no key with that id"})));
                     };
                     let older_gateway = stand_in.older_gateway;
-                    let mut body = windows(&key.events, now_ms(), older_gateway);
+                    let reference = stand_in.reference;
+                    let mut body = windows(&key.events, now_ms(), older_gateway, reference);
                     body["id"] = json!(key.id);
                     body["name"] = json!(key.name);
                     body["key_prefix"] = json!(key.prefix);
@@ -402,7 +573,10 @@ struct Harness {
 /// connection is the stand-in, and whose vault is a test key — the three things a cap needs.
 async fn harness(database_url: &str, host_email: &str) -> Harness {
     let store = store_from(database_url).await;
-    let stand_in: Shared = Arc::new(Mutex::new(StandIn::default()));
+    let stand_in: Shared = Arc::new(Mutex::new(StandIn {
+        reference: Some(0.20),
+        ..StandIn::default()
+    }));
     let gateway = spawn_stand_in(stand_in.clone()).await;
     let mut auth = AuthState::new(
         store.clone(),
@@ -553,10 +727,43 @@ impl Harness {
     fn usage_reads(&self) -> usize {
         self.stand_in.lock().unwrap().usage_reads
     }
+
+    async fn get_json(&self, access: &str, path: &str) -> (u16, Value) {
+        let res = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .send()
+            .await
+            .expect("get");
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    }
+
+    async fn put_json(&self, access: &str, path: &str, body: Value) -> (u16, Value) {
+        let res = self
+            .client
+            .put(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .json(&body)
+            .send()
+            .await
+            .expect("put");
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap_or_default();
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    }
 }
 
 #[tokio::test]
-async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_plain_words() {
+async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words() {
     let database_url = database_or_skip!();
     let tag = now_ms().to_string();
     let domain = format!("caps-{tag}.test");
@@ -607,10 +814,8 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
     assert_eq!(status, 200, "{spend}");
     assert_eq!(spend["metered"], json!(true), "{spend}");
     assert!(
-        spend["limits"]["fiveHourUsd"].is_null()
-            && spend["limits"]["sevenDayUsd"].is_null()
-            && spend["limits"]["monthUsd"].is_null(),
-        "nothing set anywhere: {spend}"
+        spend["limits"]["fiveHourUsd"].is_null() && spend["limits"]["monthUsd"].is_null(),
+        "the USD limits are retired; the field stays empty until the modal lands: {spend}"
     );
     assert_eq!(spend["windows"][0]["window"], json!("5h"), "{spend}");
     assert_eq!(spend["windows"][0]["usedUsd"], json!("0.000000"), "{spend}");
@@ -641,62 +846,141 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
         assert_eq!(stand_in.bearers, vec![stand_in.keys[0].key.clone()]);
     }
 
-    // The admin writes the org default: two dollars per five hours, fifty a month. A bad amount
-    // is refused in words; a member who is not the admin is refused outright.
-    let (status, text) = h
-        .put_limit(
+    // Every stand-in completion lists at a dollar: 5,000,000 points at the reference of $0.20.
+    // The org admin gives the member (here, the admin's own account) a pool of twelve million;
+    // a bad value is refused in words, and a member who is not the admin is refused outright.
+    let (status, body) = h
+        .put_json(
             &access,
-            "/admin/spend/org",
-            json!({ "fiveHourUsd": "lots" }),
+            &format!("/admin/points/members/{account_id}"),
+            json!({ "pool": -5 }),
         )
         .await;
-    assert_eq!(status, 400, "{text}");
-    assert!(text.contains("is not an amount"), "{text}");
-    let (status, text) = h
-        .put_limit(
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.as_str().unwrap_or("").contains("whole number"),
+        "{body}"
+    );
+    let (status, body) = h
+        .put_json(
             &access,
-            "/admin/spend/org",
-            json!({ "fiveHourUsd": "2.00", "monthUsd": "50.00" }),
+            &format!("/admin/points/members/{account_id}"),
+            json!({ "pool": 12_000_000 }),
         )
         .await;
-    assert_eq!(status, 200, "{text}");
+    assert_eq!(status, 200, "{body}");
     let member_email = format!("member-{tag}@{domain}");
     let member = seed_account(&store, &member_email, "password1", Some(org_id.as_str())).await;
     let member_access = h.access_token(&member, &member_email);
     let (status, _) = h
-        .put_limit(
+        .put_json(
             &member_access,
-            "/admin/spend/org",
-            json!({ "fiveHourUsd": "999" }),
+            &format!("/admin/points/members/{account_id}"),
+            json!({ "pool": 1 }),
         )
         .await;
-    assert_eq!(status, 403, "only the admin writes limits");
-    let (_, spend) = h.spend(&access, &coworker).await;
-    assert_eq!(spend["limits"]["fiveHourUsd"], json!("2.00"), "{spend}");
-    assert_eq!(spend["windows"][0]["limitUsd"], json!("2.00"), "{spend}");
+    assert_eq!(status, 403, "only the admin sets pools");
+    let (status, overview) = h.get_json(&access, "/admin/points").await;
+    assert_eq!(status, 200, "{overview}");
     assert_eq!(
-        spend["windows"][1]["limitUsd"],
-        Value::Null,
-        "no 7-day limit: {spend}"
+        overview["reference"]["usdPerMtok"],
+        json!("0.200000"),
+        "{overview}"
+    );
+    let me = overview["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["id"] == account_id.as_str()))
+        .cloned()
+        .expect("the admin is a member");
+    assert_eq!(me["pool"], json!(12_000_000), "{me}");
+    assert_eq!(
+        me["usedPoints"],
+        json!(5_000_000),
+        "one turn at list price: {me}"
+    );
+    assert!(
+        overview["coworkers"].as_array().is_some_and(|c| c
+            .iter()
+            .any(|c| c["id"] == coworker && c["usedPoints"] == 5_000_000 && c["cap"].is_null())),
+        "{overview}"
     );
 
-    // One more dollar fits ($1 used of $2); the next one does not, and the sentence names the
-    // window, the amounts, when it frees up, and which window still has room.
+    // The owner caps Ada: above the pool is refused with the numbers; seven million is taken,
+    // and the limit read says what she has used and what is effectively hers.
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "cap": 20_000_000 }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["error"],
+        json!("a cap of 20,000,000 points is above your pool of 12,000,000"),
+        "{body}"
+    );
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "cap": "seven" }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, limit) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "cap": 7_000_000, "dayCap": null }),
+        )
+        .await;
+    assert_eq!(status, 200, "{limit}");
+    assert_eq!(limit["metered"], json!(true), "{limit}");
+    assert_eq!(limit["cap"], json!(7_000_000), "{limit}");
+    assert_eq!(limit["effectiveCap"], json!(7_000_000), "{limit}");
+    assert_eq!(limit["usedPoints"], json!(5_000_000), "{limit}");
+    assert!(limit["dayCap"].is_null(), "{limit}");
+    assert_eq!(limit["usedToday"], json!(5_000_000), "{limit}");
+    assert_eq!(limit["pool"]["max"], json!(12_000_000), "{limit}");
+    assert_eq!(limit["pool"]["used"], json!(5_000_000), "{limit}");
+    assert_eq!(
+        limit["pool"]["setBy"],
+        json!(account_id.as_str()),
+        "{limit}"
+    );
+    assert_eq!(
+        limit["pool"]["resetsAt"],
+        json!("2026-10-01T00:00:00Z"),
+        "{limit}"
+    );
+    assert_eq!(
+        limit["reference"]["usdPerMtok"],
+        json!("0.200000"),
+        "{limit}"
+    );
+    let (status, limit) = h
+        .get_json(&member_access, &format!("/coworkers/{coworker}/limit"))
+        .await;
+    assert_eq!(status, 404, "not the owner: {limit}");
+
+    // Five million used of seven: the next turn goes through (and reads the meter); at ten
+    // million the one after is refused, in the plan's sentence — the cap, the month, what is
+    // used, when it resets, and what the pool leaves for other agents.
     let reads_before = h.usage_reads();
     let (state, failure) = h.turn(&coworker, 2).await;
     assert_eq!(state, "finished", "{failure:?}");
     assert!(
         h.usage_reads() > reads_before,
-        "a limited coworker reads the meter"
+        "a capped coworker reads the meter"
     );
     let (state, failure) = h.turn(&coworker, 3).await;
     assert_eq!(state, "failed", "{failure:?}");
     let failure = failure.unwrap_or_default();
     assert!(
-        failure.starts_with(
-            "Ada has used its 5-hour allowance (2.00 of 2.00); it begins to free up at "
-        ) && failure.contains(" UTC.")
-            && failure.ends_with("The monthly allowance still has room."),
+        failure.starts_with("Ada has used its 7,000,000 points for ")
+            && failure.contains(" (10,000,000 used); it resets on 1 ")
+            && failure.ends_with(" 2,000,000 of your 12,000,000 remain for other agents."),
         "a sentence a person can act on: {failure}"
     );
     assert_eq!(
@@ -713,47 +997,114 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
         "a metered key's list price is its cost: {spend}"
     );
     assert_eq!(spend["seat"], json!("api"), "{spend}");
-    assert!(
-        spend["windows"][0]["freesAt"]
-            .as_str()
-            .is_some_and(|t| t.ends_with('Z')),
-        "the meter says when the window frees up: {spend}"
-    );
 
-    // The coworker's own row wins over the org default: ten dollars per five hours, and the
-    // next turn goes through.
-    let (status, text) = h
-        .put_limit(
+    // The usage report, per model: a window that is not one is refused in words.
+    let (status, usage) = h
+        .get_json(
             &access,
-            &format!("/admin/spend/coworkers/{coworker}"),
-            json!({ "fiveHourUsd": "10.00" }),
+            &format!("/coworkers/{coworker}/usage?window=month"),
         )
         .await;
-    assert_eq!(status, 200, "{text}");
-    let (state, failure) = h.turn(&coworker, 4).await;
-    assert_eq!(state, "finished", "{failure:?}");
-    let listing: Value = h
-        .client
-        .get(format!("{}/admin/spend", h.base))
-        .header("Authorization", format!("Bearer {access}"))
-        .send()
-        .await
-        .expect("listing")
-        .json()
-        .await
-        .expect("json");
-    assert_eq!(listing["org"]["fiveHourUsd"], json!("2.00"), "{listing}");
+    assert_eq!(status, 200, "{usage}");
+    assert_eq!(usage["metered"], json!(true), "{usage}");
+    assert_eq!(usage["window"], json!("month"), "{usage}");
+    assert_eq!(usage["seat"], json!("api"), "{usage}");
+    assert_eq!(usage["models"][0]["modelId"], json!("oag/cheap"), "{usage}");
+    assert_eq!(usage["models"][0]["requests"], json!(2), "{usage}");
+    assert_eq!(usage["models"][0]["inputTokens"], json!(20), "{usage}");
+    assert_eq!(usage["models"][0]["points"], json!(10_000_000), "{usage}");
+    assert_eq!(usage["totals"]["points"], json!(10_000_000), "{usage}");
+    assert_eq!(usage["totals"]["listUsd"], json!("2.000000"), "{usage}");
+    let (status, usage) = h
+        .get_json(&access, &format!("/coworkers/{coworker}/usage?window=1d"))
+        .await;
+    assert_eq!(status, 400, "{usage}");
     assert!(
-        listing["coworkers"].as_array().is_some_and(|c| c
-            .iter()
-            .any(|c| c["id"] == coworker && c["limits"]["fiveHourUsd"] == "10.00")),
-        "{listing}"
+        usage["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("5h, 24h, 7d, month"),
+        "{usage}"
     );
 
-    // The meter goes down. A reading under a minute old stands in for this coworker; a coworker
-    // the guard has never read is held, with the reason.
-    h.stand_in.lock().unwrap().meter_down = true;
+    // The cap cleared, the pool binds: one more turn fits (ten of twelve million), the next is
+    // refused by the pool.
+    let (status, limit) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "cap": null }),
+        )
+        .await;
+    assert_eq!(status, 200, "{limit}");
+    assert!(limit["cap"].is_null(), "{limit}");
+    // A ceiling on usedPoints, like the cap: the pool less what the owner's OTHER coworkers used
+    // (none yet), not the room left — that is effectiveCap minus usedPoints.
+    assert_eq!(
+        limit["effectiveCap"],
+        json!(12_000_000),
+        "what the pool leaves her: {limit}"
+    );
+    let (state, failure) = h.turn(&coworker, 4).await;
+    assert_eq!(state, "finished", "{failure:?}");
     let (state, failure) = h.turn(&coworker, 5).await;
+    assert_eq!(state, "failed", "{failure:?}");
+    let failure = failure.unwrap_or_default();
+    assert!(
+        failure.starts_with("Your pool of 12,000,000 points for ")
+            && failure.contains(" is used up (15,000,000 used); it resets on 1 "),
+        "{failure}"
+    );
+
+    // The daily brake: a wide pool again, sixteen million for today — one more fits, the next
+    // is refused with when it frees up.
+    let (status, _) = h
+        .put_json(
+            &access,
+            &format!("/admin/points/members/{account_id}"),
+            json!({ "pool": 100_000_000 }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (status, limit) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "dayCap": 16_000_000 }),
+        )
+        .await;
+    assert_eq!(status, 200, "{limit}");
+    assert_eq!(limit["dayCap"], json!(16_000_000), "{limit}");
+    assert!(
+        limit["dayFreesAt"]
+            .as_str()
+            .is_some_and(|t| t.ends_with('Z')),
+        "{limit}"
+    );
+    let (state, failure) = h.turn(&coworker, 6).await;
+    assert_eq!(state, "finished", "{failure:?}");
+    let (state, failure) = h.turn(&coworker, 7).await;
+    assert_eq!(state, "failed", "{failure:?}");
+    let failure = failure.unwrap_or_default();
+    assert!(
+        failure.starts_with(
+            "Ada has used its 16,000,000 points for today (20,000,000 used); it frees up at "
+        ) && failure.ends_with(" UTC."),
+        "{failure}"
+    );
+    let (status, _) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "dayCap": null }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // The meter goes down. A reading under a minute old stands in for this coworker and for
+    // the owner's pool; a coworker the guard has never read is held, with the reason.
+    h.stand_in.lock().unwrap().meter_down = true;
+    let (state, failure) = h.turn(&coworker, 8).await;
     assert_eq!(state, "finished", "a fresh reading stands in: {failure:?}");
     let res = h
         .client
@@ -784,30 +1135,41 @@ async fn a_limited_coworker_thinks_on_its_own_key_until_a_window_stops_it_in_pla
     let stranger_access = h.access_token(&stranger, &stranger_email);
     let (status, _) = h.spend(&stranger_access, &coworker).await;
     assert_eq!(status, 404);
+    let (status, _) = h
+        .get_json(&stranger_access, &format!("/coworkers/{coworker}/usage"))
+        .await;
+    assert_eq!(status, 404);
 
-    // Retirement revokes the key and forgets the secret.
+    // Retirement revokes the key and forgets the secret, but KEEPS the row, marked: Ada's
+    // month still counts toward her owner's pool.
+    let (_, before) = h.get_json(&access, "/admin/points").await;
+    let owner_used_before = before["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["id"] == account_id.as_str()))
+        .and_then(|m| m["usedPoints"].as_i64())
+        .expect("used");
     let (status, deleted) = h.api("deleteAgents", json!({ "ids": [coworker] })).await;
     assert_eq!(status, 200, "{deleted}");
     assert!(
         h.stand_in.lock().unwrap().keys[0].revoked,
         "revoked on the gateway at retirement"
     );
-    assert!(
-        h.store
-            .coworker_key(&CoworkerId::from_stored(coworker.clone()))
-            .await
-            .expect("row")
-            .is_none(),
-        "the row is gone"
-    );
-    let vault = h.agui.vault.clone().expect("vault");
-    assert!(
-        h.store
-            .open_credential(&vault, &format!("coworker-gateway-key:{coworker}"))
-            .await
-            .expect("secret")
-            .is_none(),
-        "the sealed key is gone"
+    let row = h
+        .store
+        .coworker_key(&CoworkerId::from_stored(coworker.clone()))
+        .await
+        .expect("row")
+        .expect("the row stays");
+    assert!(row.revoked_at_ms.is_some(), "marked revoked, not dropped");
+    let (_, after) = h.get_json(&access, "/admin/points").await;
+    let owner_used_after = after["members"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["id"] == account_id.as_str()))
+        .and_then(|m| m["usedPoints"].as_i64())
+        .expect("used");
+    assert_eq!(
+        owner_used_after, owner_used_before,
+        "a retired coworker's month still counts"
     );
 }
 
@@ -844,9 +1206,13 @@ async fn a_hirer_outside_any_org_hires_on_the_deployment_key_and_the_console_say
         spend["note"].as_str().unwrap_or("").contains("org"),
         "{spend}"
     );
-    // Not in an org: there is no admin surface to write limits on.
+    // Not in an org: there is no admin surface to write pools on.
     let (status, _) = h
-        .put_limit(&access, "/admin/spend/org", json!({ "monthUsd": "1.00" }))
+        .put_json(
+            &access,
+            &format!("/admin/points/members/{account}"),
+            json!({ "pool": 1 }),
+        )
         .await;
     assert_eq!(status, 403);
     // Its turn goes out on the deployment's key, and never reads the meter.

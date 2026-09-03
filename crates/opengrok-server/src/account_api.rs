@@ -50,17 +50,12 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/gateway/keys/{id}/quota", put(set_gateway_key_quota))
         .route("/admin/gateway/budget", put(set_gateway_budget))
         .route("/admin/gateway/usage", get(gateway_usage))
-        // Spend limits (`spend.rs`): the org default, per-member overrides, per-coworker limits.
-        .route("/admin/spend", get(spend_limits))
-        .route("/admin/spend/org", put(set_org_spend_limit))
-        .route(
-            "/admin/spend/members/{account_id}",
-            put(set_member_spend_limit),
-        )
-        .route(
-            "/admin/spend/coworkers/{coworker_id}",
-            put(set_coworker_spend_limit),
-        )
+        // Points (`points.rs`): the reference price on the gateway, every member's monthly
+        // pool, and an overview of every coworker's cap and month. The USD spend limits and
+        // their `/admin/spend/*` routes are retired.
+        .route("/admin/points", get(points_overview))
+        .route("/admin/points/reference", put(set_points_reference))
+        .route("/admin/points/members/{account_id}", put(set_member_pool))
         // Coworker templates (`templates.rs`): types members hire from.
         .route(
             "/admin/templates",
@@ -1170,57 +1165,121 @@ async fn gateway_usage(State(state): State<AuthState>, headers: axum::http::Head
     }
 }
 
-// ---- Spend limits: authored here by the admin, evaluated by `spend::GuardedDoor` ----
+// ---- Points: the reference price, members' pools, and the overview (`points.rs`) ----
 
-/// `GET /admin/spend` — the org default, every member with their override, every coworker in
-/// the org with its own limits. Absent limits are `null`, which means "follows the layer above".
-async fn spend_limits(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
+fn storage_failed(error: &opengrok_store::StoreError) -> Response {
+    tracing::error!(%error, "points: storage failed");
+    (StatusCode::SERVICE_UNAVAILABLE, "storage failed").into_response()
+}
+
+/// `GET /admin/points` — the reference price, every member with their pool and month, every
+/// coworker in the org with its cap, brake and month. Points come from one batch read over
+/// every key in the org; null where the gateway does not say.
+async fn points_overview(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
     let store = &state.store;
-    let org_limit = match store
-        .spend_limit(opengrok_store::SpendScope::Org, org_id.as_str())
-        .await
-    {
-        Ok(limit) => limit,
-        Err(error) => return storage_failed(&error),
-    };
     let accounts = match store.accounts_by_org(org_id.as_str()).await {
         Ok(accounts) => accounts,
         Err(error) => return storage_failed(&error),
     };
-    let member_limits: std::collections::HashMap<String, opengrok_store::SpendLimit> = match store
-        .spend_limits_at(opengrok_store::SpendScope::Member)
+    let pools: std::collections::HashMap<String, opengrok_store::PointsLimitRow> = match store
+        .points_limits_at(opengrok_store::PointsScope::Member)
         .await
     {
         Ok(rows) => rows.into_iter().collect(),
         Err(error) => return storage_failed(&error),
     };
-    let coworker_limits: std::collections::HashMap<String, opengrok_store::SpendLimit> = match store
-        .spend_limits_at(opengrok_store::SpendScope::Coworker)
+    let caps: std::collections::HashMap<String, opengrok_store::PointsLimitRow> = match store
+        .points_limits_at(opengrok_store::PointsScope::Coworker)
         .await
     {
         Ok(rows) => rows.into_iter().collect(),
         Err(error) => return storage_failed(&error),
+    };
+    // Every key in the org, with whose it is, for ONE batch read: (key, owner, coworker).
+    let mut keys_of: Vec<(String, String, String)> = Vec::new();
+    for account in &accounts {
+        match store.coworker_keys_for_account(&account.id).await {
+            Ok(rows) => {
+                for row in rows {
+                    keys_of.push((row.key_id, row.account_id, row.coworker_id));
+                }
+            }
+            Err(error) => return storage_failed(&error),
+        }
+    }
+    let admin = state.gateway_admin.as_ref();
+    let (reference, mut note) = match admin {
+        Some(admin) => match admin.points_reference().await {
+            Ok(reference) => (reference, None),
+            Err(error) => (
+                None,
+                Some(format!("the gateway could not be asked: {error}")),
+            ),
+        },
+        None => (
+            None,
+            Some("no gateway admin connection; points cannot be read".to_string()),
+        ),
+    };
+    let per_key: Option<std::collections::HashMap<String, i64>> = match (admin, reference.as_ref())
+    {
+        (Some(admin), Some(_)) if !keys_of.is_empty() => {
+            let ids: Vec<String> = keys_of.iter().map(|(key, _, _)| key.clone()).collect();
+            match admin
+                .points_for_keys_within(&ids, "month", std::time::Duration::from_secs(15))
+                .await
+            {
+                Ok(per_key) => per_key,
+                Err(error) => {
+                    note = Some(format!("the gateway could not be asked: {error}"));
+                    None
+                }
+            }
+        }
+        (Some(_), Some(_)) => Some(std::collections::HashMap::new()),
+        _ => None,
+    };
+    if reference.is_none() && note.is_none() {
+        note = Some("no reference price set yet; set one to start counting".to_string());
+    }
+    let points_of = |keep: &dyn Fn(&(String, String, String)) -> bool| -> Option<i64> {
+        per_key.as_ref().map(|per_key| {
+            keys_of
+                .iter()
+                .filter(|entry| keep(entry))
+                .map(|(key, _, _)| per_key.get(key).copied().unwrap_or(0))
+                .sum()
+        })
     };
     let mut members = Vec::with_capacity(accounts.len());
     let mut coworkers = Vec::new();
     for account in &accounts {
+        let pool = pools.get(account.id.as_str());
         members.push(json!({
             "id": account.id.as_str(),
             "email": account.email,
-            "limits": member_limits.get(account.id.as_str()),
+            "pool": pool.and_then(|row| row.limit.month_points),
+            "setBy": pool.map(|row| row.set_by.clone()),
+            "usedPoints": points_of(&|(_, owner, _)| owner == account.id.as_str()),
         }));
         match store.coworkers_for(&account.id).await {
             Ok(list) => {
                 for coworker in list {
+                    let cap = caps.get(coworker.id.as_str());
                     coworkers.push(json!({
                         "id": coworker.id.as_str(),
                         "name": coworker.name,
                         "ownerEmail": account.email,
-                        "limits": coworker_limits.get(coworker.id.as_str()),
+                        "cap": cap.and_then(|row| row.limit.month_points),
+                        "dayCap": cap.and_then(|row| row.limit.day_points),
+                        "usedPoints": points_of(&|(_, _, id)| id == coworker.id.as_str()),
                     }));
                 }
             }
@@ -1228,69 +1287,71 @@ async fn spend_limits(State(state): State<AuthState>, headers: axum::http::Heade
         }
     }
     Json(json!({
-        "org": org_limit,
+        "reference": reference.map(|usd_per_mtok| json!({ "usdPerMtok": usd_per_mtok })),
+        "note": note,
         "members": members,
         "coworkers": coworkers,
     }))
     .into_response()
 }
 
-fn storage_failed(error: &opengrok_store::StoreError) -> Response {
-    tracing::error!(%error, "spend limits: storage failed");
-    (StatusCode::SERVICE_UNAVAILABLE, "storage failed").into_response()
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReferenceInput {
+    usd_per_mtok: String,
 }
 
-/// A limit body: any amount may be absent or null (that layer says nothing about that
-/// window); an amount that is present must parse as money.
-async fn write_limit(
-    state: &AuthState,
-    scope: opengrok_store::SpendScope,
-    id: &str,
-    limit: &opengrok_store::SpendLimit,
-) -> Response {
-    if let Err(message) = crate::spend::validate_limit(limit) {
-        return (StatusCode::BAD_REQUEST, message).into_response();
-    }
-    match state
-        .store
-        .put_spend_limit(scope, id, limit, chrono::Utc::now().timestamp_millis())
-        .await
-    {
-        Ok(()) => Json(json!({ "limits": limit })).into_response(),
-        Err(error) => storage_failed(&error),
-    }
-}
-
-/// `PUT /admin/spend/org` — the default every coworker in the org inherits.
-async fn set_org_spend_limit(
+/// `PUT /admin/points/reference` ← `{ usdPerMtok }` — proxied to the gateway, which keeps it
+/// with the prices, refuses a price that is not positive, and audits the change.
+async fn set_points_reference(
     State(state): State<AuthState>,
     headers: axum::http::HeaderMap,
-    Json(limit): Json<opengrok_store::SpendLimit>,
+    Json(input): Json<ReferenceInput>,
 ) -> Response {
-    let (org_id, _org, _) = match admin_org(&state, &headers).await {
-        Ok(found) => found,
-        Err(refusal) => return refusal,
+    if let Err(refusal) = admin_org(&state, &headers).await {
+        return refusal;
+    }
+    let Some(admin) = state.gateway_admin.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no gateway admin connection (OG_GATEWAY_ADMIN_URL); the reference price lives on the gateway",
+        )
+            .into_response();
     };
-    write_limit(
-        &state,
-        opengrok_store::SpendScope::Org,
-        org_id.as_str(),
-        &limit,
-    )
-    .await
+    match admin.set_points_reference(input.usd_per_mtok.trim()).await {
+        Ok(usd_per_mtok) => {
+            Json(json!({ "reference": { "usdPerMtok": usd_per_mtok } })).into_response()
+        }
+        Err(crate::gateway_admin::AdminError::Refused(detail)) => {
+            (StatusCode::BAD_REQUEST, detail).into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
-/// `PUT /admin/spend/members/{account_id}` — one member's coworkers, over the org default.
-async fn set_member_spend_limit(
+#[derive(Debug, serde::Deserialize)]
+struct PoolInput {
+    pool: Option<i64>,
+}
+
+/// `PUT /admin/points/members/{account_id}` ← `{ pool }` — one member's monthly pool; null
+/// removes it.
+async fn set_member_pool(
     State(state): State<AuthState>,
     headers: axum::http::HeaderMap,
     Path(account_id): Path<String>,
-    Json(limit): Json<opengrok_store::SpendLimit>,
+    Json(input): Json<PoolInput>,
 ) -> Response {
     let (org_id, _org, _) = match admin_org(&state, &headers).await {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
+    let Ok((admin_id, _, _)) = caller(&state, &headers).await else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    if let Err(message) = crate::points::validate_points("pool", input.pool) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
     let member = match state
         .store
         .load_account(&AccountId::from_stored(account_id.clone()))
@@ -1300,38 +1361,24 @@ async fn set_member_spend_limit(
         // Somebody else's member reads as "no such member": the reply confirms nothing.
         _ => return (StatusCode::NOT_FOUND, "no such member").into_response(),
     };
-    write_limit(&state, opengrok_store::SpendScope::Member, &member, &limit).await
-}
-
-/// `PUT /admin/spend/coworkers/{coworker_id}` — one coworker, over its hirer's and the org's.
-async fn set_coworker_spend_limit(
-    State(state): State<AuthState>,
-    headers: axum::http::HeaderMap,
-    Path(coworker_id): Path<String>,
-    Json(limit): Json<opengrok_store::SpendLimit>,
-) -> Response {
-    let (org_id, _org, _) = match admin_org(&state, &headers).await {
-        Ok(found) => found,
-        Err(refusal) => return refusal,
+    let limit = opengrok_store::PointsLimit {
+        month_points: input.pool,
+        day_points: None,
     };
-    let coworker = opengrok_core::id::CoworkerId::from_stored(coworker_id);
-    let in_org = match state.store.coworker_owner(&coworker).await {
-        Ok(Some(owner)) => matches!(
-            state.store.load_account(&owner).await,
-            Ok((account, _)) if account.org_id.as_deref() == Some(org_id.as_str())
-        ),
-        _ => false,
-    };
-    if !in_org {
-        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    match state
+        .store
+        .put_points_limit(
+            opengrok_store::PointsScope::Member,
+            &member,
+            limit,
+            admin_id.as_str(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+    {
+        Ok(()) => Json(json!({ "id": member, "pool": input.pool })).into_response(),
+        Err(error) => storage_failed(&error),
     }
-    write_limit(
-        &state,
-        opengrok_store::SpendScope::Coworker,
-        coworker.as_str(),
-        &limit,
-    )
-    .await
 }
 
 // ---- Coworker templates: written by the admin, hired from by members ----
@@ -1398,7 +1445,7 @@ async fn write_template(
             .map(str::to_string),
         tool_ceiling,
         needs_approval,
-        limits: input.limits.clone(),
+        points: input.points,
         created_at_ms,
         updated_at_ms: at_ms,
     };

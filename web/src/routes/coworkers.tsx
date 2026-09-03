@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  getSpend,
+  getLimit,
+  setLimit,
   hireCoworker,
   listCoworkers,
   listTemplates,
@@ -127,54 +128,106 @@ function McpCalls({ coworker }: { coworker: Coworker }) {
   );
 }
 
-/** "14:32 UTC" for a rolling window, "1 Oct" for the month. */
-function whenText(window: string, iso: string | null | undefined): string | null {
+function commas(points: number | null | undefined): string {
+  if (points == null) return "—";
+  return points.toLocaleString("en-US");
+}
+
+function pointsFromInput(raw: string): number | null {
+  const text = raw.replace(/[,\s]/g, "");
+  if (!text) return null;
+  return Number(text);
+}
+
+/** "frees up 14:32" / "resets 1 Oct" for the instants the limit read carries. */
+function whenText(kind: "day" | "month", iso: string | null | undefined): string | null {
   if (!iso) return null;
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return null;
-  if (window === "month") {
+  if (kind === "month") {
     return `resets ${at.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`;
   }
   return `frees up ${at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-const WINDOW_LABEL: Record<string, string> = { "5h": "5 h", "7d": "7 d", month: "month" };
-
 /**
- * The coworker's three meters. Limits are the admin's to write (admin page); a member sees
- * used / limit and when each window next frees up, so the window in the way is visible before
- * it is hit. A coworker with no key of its own says why it is not metered.
+ * The coworker's points: what it used this month and today, the cap and brake its owner set
+ * (editable here — the owner's, at most the pool), and the pool it draws on. A coworker with no
+ * key of its own says why it is not metered.
  */
-function SpendCell({ coworker }: { coworker: Coworker }) {
-  const spend = useQuery({
-    queryKey: ["spend", coworker.id],
-    queryFn: () => getSpend(coworker.id),
+function PointsCell({ coworker }: { coworker: Coworker }) {
+  const queryClient = useQueryClient();
+  const limit = useQuery({
+    queryKey: ["limit", coworker.id],
+    queryFn: () => getLimit(coworker.id),
     retry: false,
   });
-  if (spend.isLoading) return <span className="muted">…</span>;
-  if (spend.error) return <span className="error">{errorText(spend.error, "could not load spend")}</span>;
-  const data = spend.data;
+  const [cap, setCap] = useState<string | null>(null);
+  const [dayCap, setDayCap] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () =>
+      setLimit(coworker.id, {
+        ...(cap == null ? {} : { cap: pointsFromInput(cap) }),
+        ...(dayCap == null ? {} : { dayCap: pointsFromInput(dayCap) }),
+      }),
+    onSuccess: () => {
+      setCap(null);
+      setDayCap(null);
+      queryClient.invalidateQueries({ queryKey: ["limit", coworker.id] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "points"] });
+    },
+  });
+  if (limit.isLoading) return <span className="muted">…</span>;
+  if (limit.error) return <span className="error">{errorText(limit.error, "could not load points")}</span>;
+  const data = limit.data;
   if (!data) return null;
-  const limited = data.windows.some((w) => w.limitUsd);
-  if (!data.metered) {
-    return <span className="muted">Not metered: {data.note ?? "no key of its own"}</span>;
-  }
+  const capShown = cap ?? (data.cap == null ? "" : String(data.cap));
+  const dayShown = dayCap ?? (data.dayCap == null ? "" : String(data.dayCap));
   return (
     <span className="stack">
-      {data.windows.map((w) => (
-        <span key={w.window}>
-          <strong>{WINDOW_LABEL[w.window] ?? w.window}</strong>{" "}
-          ${w.usedUsd ?? "?"}
-          {w.limitUsd ? ` / $${w.limitUsd}` : limited ? " / no limit" : ""}
-          {w.limitUsd && whenText(w.window, w.freesAt) ? (
-            <span className="muted"> ({whenText(w.window, w.freesAt)})</span>
-          ) : null}
-        </span>
-      ))}
-      {!limited ? (
-        <span className="muted">Unlimited — no spend limit at any layer. The org admin sets them.</span>
-      ) : null}
-      {data.note ? <span className="muted">{data.note}</span> : null}
+      {!data.metered ? <span className="muted">Not metered: {data.note ?? "no key of its own"}</span> : null}
+      <span>
+        <strong>month</strong> {commas(data.usedPoints)}
+        {data.effectiveCap != null ? ` / ${commas(data.effectiveCap)}` : ""}
+        {whenText("month", data.pool.resetsAt) ? <span className="muted"> ({whenText("month", data.pool.resetsAt)})</span> : null}
+      </span>
+      <span>
+        <strong>today</strong> {commas(data.usedToday)}
+        {data.dayCap != null ? ` / ${commas(data.dayCap)}` : ""}
+        {data.dayCap != null && whenText("day", data.dayFreesAt) ? (
+          <span className="muted"> ({whenText("day", data.dayFreesAt)})</span>
+        ) : null}
+      </span>
+      <span className="muted">
+        {data.pool.max == null
+          ? "No pool: your admin has not set one."
+          : `Your pool: ${commas(data.pool.used)} of ${commas(data.pool.max)} used this month.`}
+      </span>
+      <span className="row">
+        <input
+          type="text"
+          inputMode="numeric"
+          value={capShown}
+          onChange={(e) => setCap(e.target.value)}
+          placeholder="cap / month"
+          aria-label={`Monthly cap for ${coworker.name}`}
+          style={{ width: "8rem" }}
+        />
+        <input
+          type="text"
+          inputMode="numeric"
+          value={dayShown}
+          onChange={(e) => setDayCap(e.target.value)}
+          placeholder="brake / day"
+          aria-label={`Daily brake for ${coworker.name}`}
+          style={{ width: "8rem" }}
+        />
+        <button onClick={() => save.mutate()} disabled={save.isPending || (cap == null && dayCap == null)}>
+          Save
+        </button>
+        {save.error ? <span className="error">{errorText(save.error, "could not save")}</span> : null}
+      </span>
+      {data.note && data.metered ? <span className="muted">{data.note}</span> : null}
     </span>
   );
 }
@@ -223,7 +276,7 @@ function CoworkerRow({ coworker, models }: { coworker: Coworker; models: string[
         </span>
       </td>
       <td>
-        <SpendCell coworker={coworker} />
+        <PointsCell coworker={coworker} />
       </td>
     </tr>
     {showCalls ? (
@@ -323,7 +376,7 @@ export function CoworkersPage() {
                     <th>Route</th>
                     <th>Change to</th>
                     <th />
-                    <th>Spend</th>
+                    <th>Points</th>
                   </tr>
                 </thead>
                 <tbody>

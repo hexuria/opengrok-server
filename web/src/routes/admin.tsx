@@ -20,11 +20,9 @@ import {
   setAccountMode,
   setBoxKey,
   setGatewayBudget,
-  getSpendLimits,
-  setOrgSpendLimit,
-  setMemberSpendLimit,
-  setCoworkerSpendLimit,
-  type SpendLimit,
+  getPointsOverview,
+  setPointsReference,
+  setMemberPool,
   listTemplates,
   createTemplate,
   updateTemplate,
@@ -697,47 +695,56 @@ function GatewayAccessCard() {
   );
 }
 
-/** Three inputs and a Save: the row's limits, or blank for "follows the layer above". */
-function LimitEditor({
-  label,
-  current,
-  onSave,
+/** `1234567` → `1,234,567`, the way the server writes points in its sentences. */
+function commas(points: number | null | undefined): string {
+  if (points == null) return "—";
+  return points.toLocaleString("en-US");
+}
+
+/** What N points are worth at the reference: N tokens at R dollars per million. */
+function dollarsOf(points: number | null | undefined, usdPerMtok: string | null | undefined): string | null {
+  if (points == null || !usdPerMtok) return null;
+  const r = Number(usdPerMtok);
+  if (!Number.isFinite(r)) return null;
+  return `≈ $${((points * r) / 1_000_000).toFixed(2)}`;
+}
+
+/** A whole number of points from an input, null for blank; NaN is refused by the server. */
+function pointsFromInput(raw: string): number | null {
+  const text = raw.replace(/[,\s]/g, "");
+  if (!text) return null;
+  return Number(text);
+}
+
+/** One member's pool: a number and a Save; blank removes it. */
+function PoolEditor({
+  member,
+  usdPerMtok,
 }: {
-  label: string;
-  current: SpendLimit | null;
-  onSave: (limit: SpendLimit) => Promise<void>;
+  member: { id: string; email: string; pool: number | null };
+  usdPerMtok: string | null;
 }) {
   const queryClient = useQueryClient();
-  const [five, setFive] = useState(current?.fiveHourUsd ?? "");
-  const [seven, setSeven] = useState(current?.sevenDayUsd ?? "");
-  const [month, setMonth] = useState(current?.monthUsd ?? "");
+  const [pool, setPool] = useState(member.pool == null ? "" : String(member.pool));
   const save = useMutation({
-    mutationFn: () =>
-      onSave({
-        fiveHourUsd: five.trim() ? five.trim() : null,
-        sevenDayUsd: seven.trim() ? seven.trim() : null,
-        monthUsd: month.trim() ? month.trim() : null,
-      }),
+    mutationFn: () => setMemberPool(member.id, pointsFromInput(pool)),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "spend"] });
-      queryClient.invalidateQueries({ queryKey: ["spend"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "points"] });
+      queryClient.invalidateQueries({ queryKey: ["limit"] });
     },
   });
-  const field = (value: string, set: (v: string) => void, name: string) => (
-    <input
-      type="text"
-      value={value}
-      onChange={(e) => set(e.target.value)}
-      placeholder="—"
-      aria-label={`${name} limit for ${label}`}
-      style={{ width: "6rem" }}
-    />
-  );
   return (
     <span className="row">
-      {field(five, setFive, "5-hour")}
-      {field(seven, setSeven, "7-day")}
-      {field(month, setMonth, "monthly")}
+      <input
+        type="text"
+        inputMode="numeric"
+        value={pool}
+        onChange={(e) => setPool(e.target.value)}
+        placeholder="no pool"
+        aria-label={`Monthly pool for ${member.email}`}
+        style={{ width: "9rem" }}
+      />
+      <span className="muted">{dollarsOf(pointsFromInput(pool), usdPerMtok) ?? ""}</span>
       <button onClick={() => save.mutate()} disabled={save.isPending}>
         Save
       </button>
@@ -747,39 +754,70 @@ function LimitEditor({
 }
 
 /**
- * Spend limits: a rolling 5-hour window, a rolling 7-day window and the calendar month, in
- * USD, at three scopes. The org default applies to every coworker; a member's row overrides it
- * for that member's coworkers; a coworker's row overrides both. Per window, the most specific
- * value wins and a blank means "follows the layer above". No limits anywhere means nothing is
- * metered and nothing is refused. Enforced before every model call from the gateway's ledger.
+ * Points: one point is one token at the reference price (set here, kept on the gateway with the
+ * prices); every model's multiplier follows from its list price, so a subscription seat and an
+ * API key count the same. The admin sets each member's monthly pool; a member caps their own
+ * coworkers on the coworkers page, at most the pool. A coworker at a limit has its turn refused
+ * with a sentence in the bubble. No pool and no cap anywhere means nothing is metered.
  */
-function SpendLimitsCard() {
-  const limits = useQuery({ queryKey: ["admin", "spend"], queryFn: getSpendLimits, retry: false });
-  if (limits.error instanceof ApiError && limits.error.status === 403) {
+function PointsCard() {
+  const queryClient = useQueryClient();
+  const overview = useQuery({ queryKey: ["admin", "points"], queryFn: getPointsOverview, retry: false });
+  const [reference, setReference] = useState<string | null>(null);
+  const saveReference = useMutation({
+    mutationFn: () => setPointsReference((reference ?? "").trim()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "points"] });
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+      setReference(null);
+    },
+  });
+  if (overview.error instanceof ApiError && overview.error.status === 403) {
     return (
       <section className="card">
-        <h2>Spend limits</h2>
+        <h2>Points</h2>
         <p className="muted">Admins only — you do not manage this organization.</p>
       </section>
     );
   }
+  const usdPerMtok = overview.data?.reference?.usdPerMtok ?? null;
+  const shownReference = reference ?? usdPerMtok ?? "";
   return (
     <section className="card">
-      <h2>Spend limits</h2>
+      <h2>Points</h2>
       <p className="muted">
-        USD per rolling 5 hours, per rolling 7 days, and per calendar month. Blank follows the
-        layer above; nothing set anywhere means no limit. A coworker at a limit has its turn
-        refused with a sentence that names the window and when it frees up.
+        One point is one token at the reference price below (USD per million tokens); a model's
+        multiplier is its list price over it, so a subscription seat counts the same as an API key.
+        Set each member's monthly pool; members cap their own coworkers at most the pool. At a limit
+        a turn is refused with a sentence that names the numbers and when it frees up.
       </p>
-      {limits.isLoading ? (
+      {overview.isLoading ? (
         <p className="muted">Loading…</p>
-      ) : limits.error ? (
-        <p className="error">{errorText(limits.error, "could not load limits")}</p>
-      ) : limits.data ? (
+      ) : overview.error ? (
+        <p className="error">{errorText(overview.error, "could not load points")}</p>
+      ) : overview.data ? (
         <div className="stack">
+          {overview.data.note ? <p className="muted">{overview.data.note}</p> : null}
           <div>
-            <h3>Org default</h3>
-            <LimitEditor label="the org" current={limits.data.org} onSave={setOrgSpendLimit} />
+            <h3>Reference price</h3>
+            <span className="row">
+              <input
+                type="text"
+                inputMode="decimal"
+                value={shownReference}
+                onChange={(e) => setReference(e.target.value)}
+                placeholder="0.20"
+                aria-label="Reference price, USD per million tokens"
+                style={{ width: "7rem" }}
+              />
+              <span className="muted">USD per million tokens · 1,000,000 points {dollarsOf(1_000_000, shownReference) ?? ""}</span>
+              <button onClick={() => saveReference.mutate()} disabled={saveReference.isPending || reference == null}>
+                Save
+              </button>
+              {saveReference.error ? (
+                <span className="error">{errorText(saveReference.error, "could not save")}</span>
+              ) : null}
+            </span>
           </div>
           <div>
             <h3>Members</h3>
@@ -787,15 +825,20 @@ function SpendLimitsCard() {
               <thead>
                 <tr>
                   <th>Member</th>
-                  <th>5 h / 7 d / month</th>
+                  <th>Used this month</th>
+                  <th>Monthly pool</th>
                 </tr>
               </thead>
               <tbody>
-                {limits.data.members.map((m) => (
+                {overview.data.members.map((m) => (
                   <tr key={m.id}>
                     <td>{m.email}</td>
                     <td>
-                      <LimitEditor label={m.email} current={m.limits} onSave={(l) => setMemberSpendLimit(m.id, l)} />
+                      {commas(m.usedPoints)}
+                      <span className="muted"> {dollarsOf(m.usedPoints, usdPerMtok) ?? ""}</span>
+                    </td>
+                    <td>
+                      <PoolEditor member={m} usdPerMtok={usdPerMtok} />
                     </td>
                   </tr>
                 ))}
@@ -804,7 +847,7 @@ function SpendLimitsCard() {
           </div>
           <div>
             <h3>Coworkers</h3>
-            {limits.data.coworkers.length === 0 ? (
+            {overview.data.coworkers.length === 0 ? (
               <p className="muted">No coworkers hired yet.</p>
             ) : (
               <table>
@@ -812,16 +855,24 @@ function SpendLimitsCard() {
                   <tr>
                     <th>Coworker</th>
                     <th>Hired by</th>
-                    <th>5 h / 7 d / month</th>
+                    <th>Used this month</th>
+                    <th>Cap / day</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {limits.data.coworkers.map((c) => (
+                  {overview.data.coworkers.map((c) => (
                     <tr key={c.id}>
                       <td>{c.name}</td>
                       <td>{c.ownerEmail}</td>
+                      <td>{commas(c.usedPoints)}</td>
                       <td>
-                        <LimitEditor label={c.name} current={c.limits} onSave={(l) => setCoworkerSpendLimit(c.id, l)} />
+                        {c.cap == null && c.dayCap == null ? (
+                          <span className="muted">none — draws on the pool</span>
+                        ) : (
+                          <>
+                            {c.cap == null ? "no cap" : commas(c.cap)} / {c.dayCap == null ? "no brake" : commas(c.dayCap)}
+                          </>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -835,7 +886,7 @@ function SpendLimitsCard() {
   );
 }
 
-/** One template's fields; blank limits mean "this template says nothing about that window". */
+/** One template's fields; blank points mean "this template sets no limit". */
 function TemplateEditor({
   tools,
   initial,
@@ -856,10 +907,9 @@ function TemplateEditor({
         name: draft.name.trim(),
         description: draft.description.trim(),
         model: draft.model && draft.model.trim() ? draft.model.trim() : null,
-        limits: {
-          fiveHourUsd: draft.limits.fiveHourUsd?.trim() ? draft.limits.fiveHourUsd.trim() : null,
-          sevenDayUsd: draft.limits.sevenDayUsd?.trim() ? draft.limits.sevenDayUsd.trim() : null,
-          monthUsd: draft.limits.monthUsd?.trim() ? draft.limits.monthUsd.trim() : null,
+        points: {
+          monthPoints: draft.points.monthPoints ?? null,
+          dayPoints: draft.points.dayPoints ?? null,
         },
       }),
     onSuccess: () => {
@@ -927,27 +977,21 @@ function TemplateEditor({
       <span className="row">
         <input
           type="text"
-          value={draft.limits.fiveHourUsd ?? ""}
-          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, fiveHourUsd: e.target.value } })}
-          placeholder="5 h USD"
-          aria-label="Template 5-hour limit"
-          style={{ width: "6rem" }}
+          inputMode="numeric"
+          value={draft.points.monthPoints == null ? "" : String(draft.points.monthPoints)}
+          onChange={(e) => setDraft({ ...draft, points: { ...draft.points, monthPoints: pointsFromInput(e.target.value) } })}
+          placeholder="month points"
+          aria-label="Template monthly cap in points"
+          style={{ width: "8rem" }}
         />
         <input
           type="text"
-          value={draft.limits.sevenDayUsd ?? ""}
-          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, sevenDayUsd: e.target.value } })}
-          placeholder="7 d USD"
-          aria-label="Template 7-day limit"
-          style={{ width: "6rem" }}
-        />
-        <input
-          type="text"
-          value={draft.limits.monthUsd ?? ""}
-          onChange={(e) => setDraft({ ...draft, limits: { ...draft.limits, monthUsd: e.target.value } })}
-          placeholder="month USD"
-          aria-label="Template monthly limit"
-          style={{ width: "6rem" }}
+          inputMode="numeric"
+          value={draft.points.dayPoints == null ? "" : String(draft.points.dayPoints)}
+          onChange={(e) => setDraft({ ...draft, points: { ...draft.points, dayPoints: pointsFromInput(e.target.value) } })}
+          placeholder="day points"
+          aria-label="Template daily brake in points"
+          style={{ width: "8rem" }}
         />
         <button onClick={() => save.mutate()} disabled={save.isPending || !draft.name.trim()}>
           {saveLabel}
@@ -964,7 +1008,7 @@ const EMPTY_TEMPLATE: TemplateInput = {
   model: null,
   tools: ["shell", "read_file", "write_file"],
   needsApproval: [],
-  limits: {},
+  points: {},
 };
 
 function TemplateRow({ template, tools }: { template: CoworkerTemplate; tools: string[] }) {
@@ -978,9 +1022,8 @@ function TemplateRow({ template, tools }: { template: CoworkerTemplate; tools: s
     },
   });
   const limits = [
-    template.limits.fiveHourUsd ? `$${template.limits.fiveHourUsd} / 5 h` : null,
-    template.limits.sevenDayUsd ? `$${template.limits.sevenDayUsd} / 7 d` : null,
-    template.limits.monthUsd ? `$${template.limits.monthUsd} / month` : null,
+    template.points.monthPoints != null ? `${commas(template.points.monthPoints)} points / month` : null,
+    template.points.dayPoints != null ? `${commas(template.points.dayPoints)} points / day` : null,
   ].filter((x) => x != null);
   return (
     <>
@@ -1020,7 +1063,7 @@ function TemplateRow({ template, tools }: { template: CoworkerTemplate; tools: s
                 model: template.model,
                 tools: template.tools,
                 needsApproval: template.needsApproval,
-                limits: template.limits,
+                points: template.points,
               }}
               onSave={(input) => updateTemplate(template.id, input)}
               saveLabel="Save"
@@ -1099,7 +1142,7 @@ export function AdminPage() {
         <div className="stack">
           <UsersCard />
           <GatewayAccessCard />
-          <SpendLimitsCard />
+          <PointsCard />
           <TemplatesCard />
           <ComputersCard />
           <DomainsCard />

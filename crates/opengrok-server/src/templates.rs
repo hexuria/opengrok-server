@@ -1,7 +1,7 @@
 //! Coworker templates (`docs/plan-spend-policy.md` §4): a coworker type the org admin writes
-//! once — model pin, tool ceiling, what needs a human yes, spend limits — that members hire
+//! once — model pin, tool ceiling, what needs a human yes, points limits — that members hire
 //! from. Applied at hire by COPY: the coworker gets the template's grant and its own
-//! `spend_limit` row, and remembers the template id. Nothing links them after that.
+//! `points_limit` row, and remembers the template id. Nothing links them after that.
 //!
 //! A template names only tools this server implements, and only asks approval for tools inside
 //! its own ceiling — the same rule the policy layer enforces at run time, refused here at the
@@ -9,12 +9,12 @@
 
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_policy::ToolSet;
-use opengrok_store::{CoworkerTemplate, SpendLimit, SpendScope};
+use opengrok_store::{CoworkerTemplate, PointsLimit, PointsScope};
 use serde::Deserialize;
 
 use crate::agui::AgUiState;
 
-/// What the admin sends. Tools are plain names; limits are money strings.
+/// What the admin sends. Tools are plain names; points are whole numbers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TemplateInput {
@@ -27,8 +27,9 @@ pub struct TemplateInput {
     pub tools: Vec<String>,
     #[serde(default)]
     pub needs_approval: Vec<String>,
+    /// The month's cap and the day's brake a coworker hired from this starts with.
     #[serde(default)]
-    pub limits: SpendLimit,
+    pub points: PointsLimit,
 }
 
 /// The template's tool ceiling, as `Only(...)`: a template that lists no tools makes a coworker
@@ -55,7 +56,8 @@ pub fn validate(input: &TemplateInput) -> Result<(ToolSet, ToolSet), String> {
             ));
         }
     }
-    crate::spend::validate_limit(&input.limits)?;
+    crate::points::validate_points("points.monthPoints", input.points.month_points)?;
+    crate::points::validate_points("points.dayPoints", input.points.day_points)?;
     Ok((
         ToolSet::only(input.tools.clone()),
         if input.needs_approval.is_empty() {
@@ -114,23 +116,20 @@ pub async fn apply_at_hire(
         .await
         .map_err(|error| format!("could not grant the template's tools: {error}"))?;
     let mut note = None;
-    if !template.limits.is_empty()
+    if !template.points.is_empty()
         && let Err(error) = store
-            .put_spend_limit(
-                SpendScope::Coworker,
+            .put_points_limit(
+                PointsScope::Coworker,
                 coworker_id.as_str(),
-                &template.limits,
+                template.points,
+                account_id.as_str(),
                 at_ms,
             )
             .await
     {
-        // Limits are the part a person can re-apply from the admin page; the grant is not. But
-        // a coworker hired UNLIMITED where the template promised a limit is exactly the kind of
-        // thing that must not happen quietly: the hirer is told, in the reply.
-        tracing::error!(%error, coworker = %coworker_id.as_str(), template = %template.id, "template: limits could not be copied");
+        tracing::error!(%error, coworker = %coworker_id.as_str(), "template: the points limit could not be set at hire");
         note = Some(format!(
-            "The template's spend limits could not be copied ({error}); this coworker is \
-             unlimited until an admin sets its limits on the admin page."
+            "hired, but the template's points limit could not be set ({error}); set it by hand"
         ));
     }
     if !template.description.trim().is_empty() {
@@ -170,7 +169,7 @@ pub fn template_json(template: &CoworkerTemplate) -> serde_json::Value {
         "model": template.model,
         "tools": names(&template.tool_ceiling),
         "needsApproval": names(&template.needs_approval),
-        "limits": template.limits,
+        "points": template.points,
         "updatedAtMs": template.updated_at_ms,
     })
 }
