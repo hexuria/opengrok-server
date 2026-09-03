@@ -220,6 +220,7 @@ mod tests {
             thread_id: "t1".to_string(),
             coworker_id: None,
             model: None,
+            system: None,
             at_ms: 1,
         }];
         for (index, payload) in events.into_iter().enumerate() {

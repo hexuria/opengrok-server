@@ -820,6 +820,9 @@ async fn persist_mcp_ask(
             thread_id: thread_id.clone(),
             coworker_id: Some(coworker.clone()),
             model,
+            // The MCP door composes no system message of its own; a resume of this run has
+            // none to restore, which is the pre-existing behaviour.
+            system: None,
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;

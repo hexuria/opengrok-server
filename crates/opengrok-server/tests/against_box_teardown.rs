@@ -121,6 +121,7 @@ async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (Cowo
         retired: false,
         members: Vec::new(),
         updated_at_ms: 2,
+        role: None,
     };
     state
         .auth
@@ -148,6 +149,7 @@ async fn retire(state: &AgUiState, account: &AccountId, id: &CoworkerId) {
         retired: true,
         members: Vec::new(),
         updated_at_ms: 9,
+        role: None,
     };
     state
         .auth

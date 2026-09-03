@@ -24,6 +24,10 @@ pub enum BoxMode {
     Shared,
 }
 
+/// The most a standing role may be. Long enough for a paragraph of intent, short enough that it
+/// cannot become a second system prompt smuggled through a text field.
+pub const MAX_ROLE_CHARS: usize = 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum CoworkerEvent {
@@ -35,6 +39,13 @@ pub enum CoworkerEvent {
     },
     Renamed {
         name: String,
+        at_ms: i64,
+    },
+    /// What this coworker is FOR, in the hirer's own words, standing across every conversation.
+    /// Its own event rather than a field on `Renamed`, for the reason `Repinned` is its own: a
+    /// caller who meant to describe a coworker must not silently rename it. `None` clears it.
+    RoleSet {
+        role: Option<String>,
         at_ms: i64,
     },
     /// The route this coworker thinks through changed. A pin is an operating fact about the
@@ -82,6 +93,7 @@ impl CoworkerEvent {
             Self::Hired { .. } => "coworker-hired",
             Self::Renamed { .. } => "coworker-renamed",
             Self::Repinned { .. } => "coworker-repinned",
+            Self::RoleSet { .. } => "coworker-role-set",
             Self::ComputerAssigned { .. } => "computer-assigned",
             Self::ComputerReleased { .. } => "computer-released",
             Self::Retired { .. } => "coworker-retired",
@@ -101,6 +113,11 @@ pub struct Coworker {
     pub box_mode: Option<BoxMode>,
     /// Non-empty ⇒ this coworker is a group of these. Order is the order they were named.
     pub members: Vec<CoworkerId>,
+    /// The standing role, read on the run path on EVERY turn (`server/persona.rs`). On the
+    /// aggregate rather than the seam-B profile blob because it is behavioural, not cosmetic:
+    /// the blob is where the client's decoration lives, and a field the model reads every turn
+    /// is not decoration.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -115,6 +132,8 @@ pub enum CoworkerError {
     NoComputer,
     #[error("a shared computer is not one coworker's to release")]
     SharedComputer,
+    #[error("a role may be at most {MAX_ROLE_CHARS} characters")]
+    RoleTooLong,
     /// A blank model reaches the gateway as `"model": ""`, which it answers with a refusal
     /// nobody can act on. Hire accepted one until slice 18 — the 400 arms its callers already
     /// wrote were unreachable, so the invalid value simply got stored.
@@ -137,6 +156,11 @@ pub enum CoworkerCommand {
     },
     Rename {
         name: String,
+        at_ms: i64,
+    },
+    /// Set or clear the standing role. `None` clears it.
+    SetRole {
+        role: Option<String>,
         at_ms: i64,
     },
     /// Point this coworker at a different route. Deliberately its own command: renaming and
@@ -188,6 +212,7 @@ impl Coworker {
             }
             CoworkerEvent::Renamed { name, .. } => self.name = name.clone(),
             CoworkerEvent::Repinned { model, .. } => self.model = model.clone(),
+            CoworkerEvent::RoleSet { role, .. } => self.role.clone_from(role),
             CoworkerEvent::ComputerAssigned { box_id, mode, .. } => {
                 self.box_id = Some(box_id.clone());
                 self.box_mode = Some(*mode);
@@ -283,6 +308,23 @@ impl Coworker {
                 Ok(vec![CoworkerEvent::Renamed { name, at_ms }])
             }
 
+            CoworkerCommand::SetRole { role, at_ms } => {
+                self.alive()?;
+                // Blank and whitespace clear it: the field is nullable and a person who empties
+                // the box means "no role", not "a role made of spaces". The bound is enforced
+                // here as well as at the door, because an aggregate that accepts a role nothing
+                // can render is a broken row nobody refused.
+                let role = role
+                    .map(|role| role.trim().to_string())
+                    .filter(|role| !role.is_empty());
+                if let Some(role) = &role
+                    && role.chars().count() > MAX_ROLE_CHARS
+                {
+                    return Err(CoworkerError::RoleTooLong);
+                }
+                Ok(vec![CoworkerEvent::RoleSet { role, at_ms }])
+            }
+
             CoworkerCommand::AssignComputer {
                 box_id,
                 mode,
@@ -356,6 +398,9 @@ pub struct CoworkerView {
     /// A group's members; empty for an ordinary coworker. The roster's `isGroup`/`memberIds`.
     #[serde(default)]
     pub members: Vec<CoworkerId>,
+    /// The standing role, on the row so the roster carries it without a second read.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[cfg(test)]

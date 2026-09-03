@@ -549,15 +549,16 @@ impl PgStore {
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         sqlx::query(
             "insert into coworker_view
-                (id, account_id, name, model, box_id, retired, updated_at_ms, members)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
+                (id, account_id, name, model, box_id, retired, updated_at_ms, members, role)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              on conflict (id) do update set
                name = excluded.name,
                model = excluded.model,
                box_id = excluded.box_id,
                retired = excluded.retired,
                updated_at_ms = excluded.updated_at_ms,
-               members = excluded.members",
+               members = excluded.members,
+               role = excluded.role",
         )
         .bind(view.id.as_str())
         .bind(account_id.as_str())
@@ -567,6 +568,7 @@ impl PgStore {
         .bind(view.retired)
         .bind(view.updated_at_ms)
         .bind(&members)
+        .bind(&view.role)
         .execute(&mut *tx)
         .await?;
 
@@ -577,7 +579,7 @@ impl PgStore {
     /// The roster, newest first — the order the client sorts by.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
-            "select id, name, model, box_id, retired, updated_at_ms, members
+            "select id, name, model, box_id, retired, updated_at_ms, members, role
              from coworker_view
              where account_id = $1 and retired = false
              order by updated_at_ms desc",
@@ -601,6 +603,7 @@ impl PgStore {
                         row.try_get::<serde_json::Value, _>("members")?,
                     )
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    role: row.try_get("role")?,
                 })
             })
             .collect()

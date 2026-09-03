@@ -83,6 +83,12 @@ pub enum RunEvent {
         /// existed (`#[serde(default)]`); those keep the old behaviour — the current pin.
         #[serde(default)]
         model: Option<String>,
+        /// The system message this turn opened with. A resume must not recompose it from a
+        /// coworker whose role or title moved while a person was answering an approval card —
+        /// the turn would change identity halfway through, at the moment somebody intervened.
+        /// Same reasoning as `model` above, and absent on logs written before this field.
+        #[serde(default)]
+        system: Option<String>,
         at_ms: i64,
     },
     /// One rendered protocol event, stored verbatim so a replay is byte-exact rather than
@@ -141,6 +147,8 @@ pub struct Run {
     pub coworker_id: Option<CoworkerId>,
     /// Captured at start. See `RunEvent::Started::model`.
     pub model: Option<String>,
+    /// Captured at start. See `RunEvent::Started::system`.
+    pub system: Option<String>,
     pub status: RunStatus,
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
@@ -162,6 +170,7 @@ impl Default for Run {
             thread_id: String::new(),
             coworker_id: None,
             model: None,
+            system: None,
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
@@ -199,6 +208,9 @@ pub enum RunCommand {
         thread_id: String,
         coworker_id: Option<CoworkerId>,
         model: Option<String>,
+        /// The composed system message this turn opens with, captured so a resume speaks with
+        /// the same identity and standing role the turn began with.
+        system: Option<String>,
         at_ms: i64,
     },
     Emit {
@@ -244,12 +256,14 @@ impl Run {
                 thread_id,
                 coworker_id,
                 model,
+                system,
                 ..
             } => {
                 self.started = true;
                 self.thread_id = thread_id.clone();
                 self.coworker_id = coworker_id.clone();
                 self.model = model.clone();
+                self.system.clone_from(system);
                 self.status = RunStatus::Running;
             }
             RunEvent::Emitted { payload, .. } => self.emitted.push(payload.clone()),
@@ -290,6 +304,13 @@ impl Run {
         self.emitted.len() as i64
     }
 
+    /// The system message a resume must speak with. A captured one wins; a log written before
+    /// this was stored has none, and the caller composes a fresh one — the old behaviour.
+    #[must_use]
+    pub fn system_for_resume(&self) -> Option<String> {
+        self.system.clone().filter(|text| !text.is_empty())
+    }
+
     /// The pin a resume must think with. A captured start pin wins; a log written before
     /// pins were stored falls back to the coworker's current one (the old behaviour).
     pub fn pin_for_resume(&self, current: &str) -> String {
@@ -306,11 +327,13 @@ impl Run {
                 thread_id,
                 coworker_id,
                 model,
+                system,
                 at_ms,
             } => Ok(vec![RunEvent::Started {
                 thread_id,
                 coworker_id,
                 model,
+                system,
                 at_ms,
             }]),
 
@@ -417,6 +440,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                system: None,
                 at_ms: 1,
             })
             .unwrap()
@@ -424,6 +448,57 @@ mod tests {
             run.apply(&event);
         }
         run
+    }
+
+    /// The turn's identity survives the wait. A role edited while a person answered an
+    /// approval card must not change the coworker halfway through the turn it interrupted.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn a_resume_speaks_with_the_system_message_the_turn_opened_with() {
+        let mut run = Run::default();
+        for event in run
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: Some("openai/gpt-5.6-luna".to_string()),
+                system: Some("You are Ada.".to_string()),
+                at_ms: 1,
+            })
+            .expect("start")
+        {
+            run.apply(&event);
+        }
+        assert_eq!(run.system_for_resume().as_deref(), Some("You are Ada."));
+        // A log written before this was captured has none, and the caller composes afresh.
+        let mut old = Run::default();
+        for event in old
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: None,
+                system: None,
+                at_ms: 1,
+            })
+            .expect("start")
+        {
+            old.apply(&event);
+        }
+        assert_eq!(old.system_for_resume(), None);
+        // An empty capture is treated as none rather than as an empty prompt.
+        let mut blank = Run::default();
+        for event in blank
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: None,
+                system: Some(String::new()),
+                at_ms: 1,
+            })
+            .expect("start")
+        {
+            blank.apply(&event);
+        }
+        assert_eq!(blank.system_for_resume(), None);
     }
 
     #[test]
@@ -452,6 +527,7 @@ mod tests {
             thread_id: "t1".to_string(),
             coworker_id: None,
             model: None,
+            system: None,
             at_ms: 1,
         }];
         for index in 0..5 {
@@ -530,6 +606,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                system: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -681,6 +758,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                system: None,
                 at_ms: 1,
             },
             RunEvent::Suspended {
@@ -729,6 +807,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: Some("openai/gpt-5.5".to_string()),
+                system: None,
                 at_ms: 1,
             })
             .unwrap()

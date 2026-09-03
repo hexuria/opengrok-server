@@ -12,6 +12,10 @@ use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_store::PgStore;
 use sqlx::postgres::PgPoolOptions;
 
+/// The route a deployment hires on when it names none. Provider-qualified so it matches an
+/// advertised catalogue id rather than only resolving upstream.
+const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // `opengrok admin …` runs a CLI command and exits before any listener starts.
@@ -170,9 +174,13 @@ async fn main() -> anyhow::Result<()> {
     let state = AgUiState {
         auth,
         door,
-        model: std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string()),
+        // PROVIDER-QUALIFIED, always. A bare upstream name resolves at the gateway through its
+        // unambiguous-name path, so it works — but it can never match an advertised catalogue id,
+        // which means a template pinned to it is refused and the picker shows no multiplier for
+        // it. A default that half-works is worse than one that does not.
+        model: std::env::var("OG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
         auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL").unwrap_or_else(|_| {
-            std::env::var("OG_MODEL").unwrap_or_else(|_| "gpt-5.6-luna".to_string())
+            std::env::var("OG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
         }),
         computer,
         vault,

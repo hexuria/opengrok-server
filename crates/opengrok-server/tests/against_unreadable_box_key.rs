@@ -123,6 +123,7 @@ async fn unreadable_ascii_key_is_an_error_not_absent() {
                 retired: false,
                 members: Vec::new(),
                 updated_at_ms: at_ms,
+                role: None,
             },
         )
         .await

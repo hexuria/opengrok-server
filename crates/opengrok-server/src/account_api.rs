@@ -1446,6 +1446,7 @@ async fn write_template(
         tool_ceiling,
         needs_approval,
         points: input.points,
+        role: crate::persona::validate_role(input.role.as_deref()).unwrap_or(None),
         created_at_ms,
         updated_at_ms: at_ms,
     };

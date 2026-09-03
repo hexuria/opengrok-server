@@ -51,6 +51,10 @@ create table if not exists coworker_view (
     retired       boolean     not null default false,
     updated_at_ms bigint      not null
 );
+-- The standing role (`server/persona.rs`), read on the run path on every turn. A column rather
+-- than a key in the seam-B profile blob: the blob holds the client's decoration, and a field the
+-- model reads every turn is not decoration.
+alter table coworker_view add column if not exists role text;
 
 -- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
 -- on the account's first agent, torn down when its last agent is deleted. A single row per account.
@@ -634,6 +638,8 @@ alter table coworker_gateway_key add column if not exists revoked_at_ms bigint;
 -- Templates carry points, not USD windows; the USD columns stay unread until the cleanup.
 alter table coworker_template add column if not exists month_points bigint;
 alter table coworker_template add column if not exists day_points bigint;
+-- The standing role a coworker hired from this template starts with (`server/persona.rs`).
+alter table coworker_template add column if not exists role text;
 create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
 -- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.

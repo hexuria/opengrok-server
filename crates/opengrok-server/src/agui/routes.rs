@@ -545,22 +545,33 @@ pub async fn probe_model(
     }
 }
 
+/// `PATCH /coworkers/{id}` — a partial update. A field absent is left alone; `role: null` or a
+/// blank string clears it. Taking the body as a `Value` rather than a struct of `Option`s is what
+/// makes "absent" and "null" different, which a nullable field needs.
 #[derive(Debug, Deserialize)]
 pub struct RepinRequest {
     /// A route through the gateway, never a key.
     pub model: String,
 }
 
-/// `PATCH /coworkers/{id}` — point a coworker at a different route.
+/// `PATCH /coworkers/{id}` — change this coworker's route, its standing role, or both.
 ///
 /// Ownership answers 404, like every other per-coworker route here: an id that is not yours must
-/// not be distinguishable from one that does not exist.
+/// not be distinguishable from one that does not exist. A body naming neither field is a 400
+/// rather than a silent no-op, because a caller who sent one meant something.
 pub async fn repin_coworker(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
     axum::extract::Path(coworker_id): axum::extract::Path<String>,
-    Json(request): Json<RepinRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
+    let refuse = |sentence: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": sentence })),
+        )
+            .into_response()
+    };
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
@@ -575,17 +586,46 @@ pub async fn repin_coworker(
     if !owns {
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     }
+
+    let model = match body.get("model") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(model)) => Some(model.clone()),
+        Some(_) => return refuse("model: expected a route id".to_string()),
+    };
+    // Absent leaves the role alone; null or blank clears it. Both are meaningful, so they cannot
+    // collapse into one `Option`.
+    let role = match body.get("role") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(serde_json::Value::String(role)) => match crate::persona::validate_role(Some(role)) {
+            Ok(role) => Some(role),
+            Err(sentence) => return refuse(sentence),
+        },
+        Some(_) => return refuse("role: expected a string, or null to clear it".to_string()),
+    };
+    if model.is_none() && role.is_none() {
+        return refuse("nothing to change: name a model, a role, or both".to_string());
+    }
+
     let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     };
     let at_ms = now_ms();
-    let events = match loaded.decide(CoworkerCommand::Repin {
-        model: request.model.clone(),
-        at_ms,
-    }) {
-        Ok(events) => events,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
+    let mut events = Vec::new();
+    // One command per decision, as the aggregate defines them: repinning and describing are
+    // different things and a caller that meant one must not do the other.
+    if let Some(model) = model {
+        match loaded.decide(CoworkerCommand::Repin { model, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
+    if let Some(role) = role {
+        match loaded.decide(CoworkerCommand::SetRole { role, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
     let mut after = loaded.clone();
     for event in &events {
         after.apply(event);
@@ -598,6 +638,7 @@ pub async fn repin_coworker(
         retired: after.retired,
         members: after.members.clone(),
         updated_at_ms: at_ms,
+        role: after.role.clone(),
     };
     if state
         .auth
@@ -606,9 +647,14 @@ pub async fn repin_coworker(
         .await
         .is_err()
     {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "could not repin").into_response();
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
     }
-    Json(serde_json::json!({ "id": coworker_id.as_str(), "model": after.model })).into_response()
+    Json(serde_json::json!({
+        "id": coworker_id.as_str(),
+        "model": after.model,
+        "role": after.role,
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -674,6 +720,16 @@ pub async fn hire(
         Ok(events) => events,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
+    // The template's standing role, in the SAME append as the hire: a second write could fail
+    // after the coworker exists, leaving a coworker the template promised a role and did not get.
+    if let Some(role) = template.as_ref().and_then(|t| t.role.clone())
+        && let Ok(more) = coworker.decide(CoworkerCommand::SetRole {
+            role: Some(role),
+            at_ms,
+        })
+    {
+        events.extend(more);
+    }
     for event in &events {
         coworker.apply(event);
     }
@@ -699,6 +755,7 @@ pub async fn hire(
         retired: coworker.retired,
         members: coworker.members.clone(),
         updated_at_ms: at_ms,
+        role: coworker.role.clone(),
     };
 
     if let Err(error) = state
@@ -1345,6 +1402,8 @@ pub async fn run(
         account_id: account_id.clone(),
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
+        // This path composes no system message; a resume of it has none to restore.
+        system: None,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -1387,6 +1446,10 @@ pub struct StoreJournal {
     /// The pin this turn captured. Written on `RunCommand::Start` so a resume does not reload
     /// a coworker that was repinned while we were waiting.
     pub model: Option<String>,
+    /// The composed system message this turn opened with, captured for the same reason as the
+    /// pin: a role edited while a person answered an approval card must not change the coworker
+    /// halfway through the turn.
+    pub system: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -1399,10 +1462,13 @@ impl opengrok_harness::RunJournal for StoreJournal {
         append_events(
             &self.state,
             run_id,
-            &self.thread_id,
-            self.account_id.as_ref(),
-            self.coworker_id.as_ref(),
-            self.model.as_deref(),
+            &RunStart {
+                thread_id: &self.thread_id,
+                account_id: self.account_id.as_ref(),
+                coworker_id: self.coworker_id.as_ref(),
+                model: self.model.as_deref(),
+                system: self.system.as_deref(),
+            },
             events,
         )
         .await
@@ -1411,15 +1477,30 @@ impl opengrok_harness::RunJournal for StoreJournal {
 }
 
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
+/// What a run records about itself at its first batch. A struct rather than five more
+/// parameters: these are one fact — whose turn this is and what it opened with — and they are
+/// only ever passed together.
+struct RunStart<'a> {
+    thread_id: &'a str,
+    account_id: Option<&'a opengrok_core::id::AccountId>,
+    coworker_id: Option<&'a CoworkerId>,
+    model: Option<&'a str>,
+    system: Option<&'a str>,
+}
+
 async fn append_events(
     state: &AgUiState,
     run_id: &str,
-    thread_id: &str,
-    account_id: Option<&opengrok_core::id::AccountId>,
-    coworker_id: Option<&CoworkerId>,
-    model: Option<&str>,
+    start: &RunStart<'_>,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
+    let RunStart {
+        thread_id,
+        account_id,
+        coworker_id,
+        model,
+        system,
+    } = *start;
     if events.is_empty() {
         return Ok(());
     }
@@ -1438,6 +1519,7 @@ async fn append_events(
                     .map(str::trim)
                     .filter(|pin| !pin.is_empty())
                     .map(str::to_string),
+                system: system.map(str::to_string).filter(|text| !text.is_empty()),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -1823,6 +1905,8 @@ async fn continue_run(
         account_id: Some(account_id),
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
+        // This path composes no system message; a resume of it has none to restore.
+        system: None,
     };
 
     let request = ModelRequest {

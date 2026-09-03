@@ -37,6 +37,9 @@ pub struct MockDoor {
     /// it says "{name} here" through the `SendMessage` tool, then stops. Outside a room it
     /// echoes. What a test needs to see two members speak in turn, distinguishably.
     room_speaker: bool,
+    /// Answers with the system prompt it was given, so a test can assert what the model was
+    /// actually told rather than what the code meant to tell it.
+    echo_system: bool,
     /// The one room member (by the name the system prompt gives it) that reaches for the shell
     /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
     /// round continue after the answer. The others behave as `room_speaker`.
@@ -66,12 +69,22 @@ impl MockDoor {
             judge_verdict: None,
             room_speaker: false,
             room_tool_asker: None,
+            echo_system: false,
         }
     }
 
     /// A door that behaves as a group member: on a room turn it delivers "{name} here" with the
     /// room's `SendMessage` tool and then stops; anywhere else it echoes. The name comes from the
     /// system prompt the orchestrator wrote, so two members speak distinguishably from ONE door.
+    /// A door that says back its own system prompt. The composition of identity, standing role
+    /// and machine discipline is only correct if it ARRIVES, and every other door hides it.
+    pub fn echoing_the_system_prompt() -> Self {
+        Self {
+            echo_system: true,
+            ..Self::default()
+        }
+    }
+
     pub fn room_speaker() -> Self {
         Self {
             room_speaker: true,
@@ -144,6 +157,7 @@ impl MockDoor {
             judge_verdict: None,
             room_speaker: false,
             room_tool_asker: None,
+            echo_system: false,
         }
     }
 
@@ -155,6 +169,7 @@ impl MockDoor {
             judge_verdict: None,
             room_speaker: false,
             room_tool_asker: None,
+            echo_system: false,
         }
     }
 
@@ -207,6 +222,12 @@ impl ModelDoor for MockDoor {
             .iter()
             .any(|message| message.content.contains("[tool "));
 
+        if self.echo_system {
+            let said = request.system.clone().unwrap_or_default();
+            return Ok(Box::pin(stream::once(
+                async move { Ok(ModelDelta::Text(said)) },
+            )));
+        }
         let script = if self.room_speaker
             && let Some(name) = Self::room_member_name(&request)
         {
