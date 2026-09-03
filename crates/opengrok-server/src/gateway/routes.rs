@@ -389,13 +389,22 @@ async fn command(
     // survivable only because ids were not discoverable, and the roster is about to make them
     // discoverable on purpose.
     //
-    // The answer is 404, not 403: a person who may not use a coworker must not learn it exists.
-    // An id that names nothing also answers here rather than deeper in, for the same reason.
+    // The refusal is whatever the verb ALREADY says when it has never heard of an agent — never
+    // a 403, and not a uniform 404 either. Both halves matter: 403 says "it exists and is not
+    // yours", and a 404 where the verb's own not-found answer is `null` is the same disclosure
+    // one step removed, because a stranger can then tell a real id from an invented one by which
+    // shape comes back. So refusal and never-heard-of-it are the same reply, per verb.
     if let Some(agent) = names_a_coworker(&method, &args) {
         let coworker = CoworkerId::from_stored(agent);
         match may_use(&state, &caller, &coworker).await {
             Ok(true) => {}
-            Ok(false) => return refusal(404, "no such agent"),
+            Ok(false) => {
+                let (code, body) = never_heard_of_it(&method);
+                return reply(
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::NOT_FOUND),
+                    body,
+                );
+            }
             Err(()) => return refusal(500, "storage failed"),
         }
     }
@@ -857,10 +866,22 @@ async fn roster(
 /// A verb earns a place on this list only by returning a literal. The default is the other way
 /// round — anything naming a coworker is checked — so a verb added later is gated until somebody
 /// deliberately decides it answers nothing.
-const ANSWERS_A_CONSTANT: &[&str] = &[
+///
+/// KEEP WHOLE MATCH ARMS TOGETHER, and `tests/against_constant_verbs.rs` enforces it. Four verbs
+/// share one `Value::Null` arm with `setAgentUnread`; exempting some and gating the rest would
+/// make identical verbs answer differently for the same id. That is not theoretical — the client
+/// passes `args.id` on all four (`source/host/host-gateway-api.ts:361-367`), so a gated sibling
+/// would answer 404 to a colleague on a shared coworker where its arm-mate answers a shape.
+///
+/// This list is a SECOND COPY of something the match statement already knows, and a second copy
+/// with nothing forcing agreement is how catalogues drift. The test is that mechanism.
+pub const ANSWERS_A_CONSTANT: &[&str] = &[
     "addOwnAgentToSharedRoom",
+    "appendConnectorCard",
     "clearAgentMemories",
     "createRoomFromAgent",
+    "createRoomInvite",
+    "createSharedRoom",
     "deleteAgentMemory",
     "getAgentChannels",
     "getAgentMemories",
@@ -868,10 +889,17 @@ const ANSWERS_A_CONSTANT: &[&str] = &[
     "getAgentWorkflows",
     "getAsyncTasks",
     "getConversationOutline",
+    "getSharingState",
     "getSubagents",
+    "joinSharedRoom",
     "kickstartAgent",
+    "leaveSharedRoom",
     "removeOwnAgentFromSharedRoom",
+    "respondToRoomJoinRequest",
+    "setAgentHiddenFromSidebar",
     "setAgentNotificationsEnabled",
+    "setAgentNotifyOnUpdates",
+    "setAgentUnread",
     "submitSecret",
 ];
 
@@ -912,4 +940,28 @@ async fn may_use(state: &GatewayState, caller: &str, coworker: &CoworkerId) -> R
         .map_err(|error| {
             tracing::error!(%error, coworker = %coworker.as_str(), "could not check whether the caller may use this coworker");
         })
+}
+
+/// What a verb answers when it has never heard of an agent, which is also what it answers to
+/// somebody who may not use one. Transcribed from the verbs themselves, not chosen: `updateAgent`
+/// answers `null` for an unknown id (`slice15-lifecycle-smoke.sh` asserts exactly that) and
+/// `getAgentAvatar` answers a two-null object, so a uniform 404 would both break the client and
+/// leak which ids are real.
+///
+/// A THIRD COPY of something the handlers know, like `ANSWERS_A_CONSTANT` — and this one has no
+/// test that can derive it, because "what this returns for an unknown id" is not visible in a
+/// match arm. The smokes are the mechanism: they assert the shapes for ids that do not exist,
+/// and this table has to give the same ones.
+fn never_heard_of_it(method: &str) -> (u16, Value) {
+    match method {
+        "updateAgent"
+        | "setGroupMembers"
+        | "setAgentAvatarBytes"
+        | "runAgentAutomationNow"
+        | "reactToMessage"
+        | "respondToWidget"
+        | "dismissWidget" => (200, Value::Null),
+        "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
+        _ => (404, json!({ "error": "no such agent" })),
+    }
 }
