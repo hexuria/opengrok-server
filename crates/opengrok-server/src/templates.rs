@@ -30,6 +30,9 @@ pub struct TemplateInput {
     /// The month's cap and the day's brake a coworker hired from this starts with.
     #[serde(default)]
     pub points: PointsLimit,
+    /// The standing role a coworker hired from this starts with (`persona.rs`).
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// The template's tool ceiling, as `Only(...)`: a template that lists no tools makes a coworker
@@ -56,6 +59,7 @@ pub fn validate(input: &TemplateInput) -> Result<(ToolSet, ToolSet), String> {
             ));
         }
     }
+    crate::persona::validate_role(input.role.as_deref())?;
     crate::points::validate_points("points.monthPoints", input.points.month_points)?;
     crate::points::validate_points("points.dayPoints", input.points.day_points)?;
     Ok((
@@ -170,6 +174,7 @@ pub fn template_json(template: &CoworkerTemplate) -> serde_json::Value {
         "tools": names(&template.tool_ceiling),
         "needsApproval": names(&template.needs_approval),
         "points": template.points,
+        "role": template.role,
         "updatedAtMs": template.updated_at_ms,
     })
 }

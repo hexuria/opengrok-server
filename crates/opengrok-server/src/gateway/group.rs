@@ -54,6 +54,8 @@ pub struct Member {
     pub name: String,
     pub description: String,
     pub model: String,
+    /// The standing role, appended after the transcribed room prompt.
+    pub role: Option<String>,
 }
 
 /// One line of the room's history, as the client reads it back out of the transcript.
@@ -434,6 +436,7 @@ async fn resolve_members(state: &GatewayState, group: &Coworker) -> Vec<Member> 
             name: coworker.name,
             description,
             model: coworker.model,
+            role: coworker.role,
         });
     }
     members
@@ -554,11 +557,12 @@ async fn run_member_turn(
     let new_messages = messages_since_last_spoke(history, &member.id);
     let request = ModelRequest {
         model: member.model.clone(),
-        system: Some(member_system_prompt(
-            member,
-            room.name,
-            room.description,
-            peers,
+        // The room's prompt is transcribed word for word from the client's own orchestrator
+        // (CLAUDE.md #1), so the standing role is APPENDED after it rather than folded into it:
+        // every transcribed line stays byte-identical and the member still knows what it is for.
+        system: Some(crate::persona::with_standing_role(
+            &member_system_prompt(member, room.name, room.description, peers),
+            &crate::persona::of(&state.agui, &member.id, member.role.clone()).await,
         )),
         messages: vec![ChatMessage {
             role: "user".to_string(),
@@ -904,11 +908,12 @@ pub async fn resume_member_turn(
     // and a member resumed without them would not know it is in a room.
     let request = ModelRequest {
         model: run.pin_for_resume(&member.model),
-        system: Some(member_system_prompt(
-            &member,
-            &group.name,
-            &description,
-            &peers,
+        // The room's prompt is transcribed word for word from the client's own orchestrator
+        // (CLAUDE.md #1), so the standing role is APPENDED after it rather than folded into it:
+        // every transcribed line stays byte-identical and the member still knows what it is for.
+        system: Some(crate::persona::with_standing_role(
+            &member_system_prompt(&member, &group.name, &description, &peers),
+            &crate::persona::of(&state.agui, &member.id, member.role.clone()).await,
         )),
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),

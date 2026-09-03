@@ -655,6 +655,7 @@ async fn reprovision(
         retired: false,
         members: Vec::new(),
         updated_at_ms: at_ms,
+        role: coworker.role.clone(),
     };
     let _ = state
         .agui
@@ -1030,6 +1031,20 @@ pub(crate) async fn run_turn(
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
     // just means the prompt speaks generically.
+    // Who this coworker is, for the one system message below. Read once per run rather than per
+    // round: the persona is a standing fact, and a role edited mid-turn changing the coworker
+    // halfway through would be worse than one that lands on the next turn.
+    let (name, persona) = match state.agui.auth.store.load_coworker(&coworker_id).await {
+        Ok((coworker, _)) => {
+            let persona =
+                crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await;
+            (coworker.name, persona)
+        }
+        Err(error) => {
+            tracing::warn!(%error, coworker = %coworker_id.as_str(), "run: the coworker could not be read for its persona");
+            (String::new(), crate::persona::Persona::default())
+        }
+    };
     let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
         runner
             .tool_schemas()
@@ -1059,10 +1074,18 @@ pub(crate) async fn run_turn(
         // these are different machines, so it would run a command on its box and call the box "your
         // computer" — the exact confusion a person hits when a file lands "on their machine" that is
         // really on the server. This says, plainly, whose machine the tools touch and to say so.
-        system: Some(computer_system_prompt(
-            tools.is_some(),
-            reaches_user_machine,
-            user_machine_label.as_deref(),
+        // ONE system message, composed: who the coworker is, its standing role, then the
+        // machine discipline below. Two messages would be two claims about the same coworker,
+        // and when they disagree the model picks one — which is how a prompt contradicting the
+        // tool list once silently disabled the tool.
+        system: Some(crate::persona::system_message(
+            &name,
+            &persona,
+            Some(&computer_system_prompt(
+                tools.is_some(),
+                reaches_user_machine,
+                user_machine_label.as_deref(),
+            )),
         )),
         messages,
         tools: Vec::new(),
@@ -1903,7 +1926,15 @@ async fn resume_gateway_run(
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id).await,
         spend_scope: Some(coworker_id.as_str().to_string()),
         model: run.pin_for_resume(&coworker.model),
-        system: None,
+        // A resumed run carries the SAME system message as the turn it continues. It used to
+        // carry none at all, so a coworker lost both its identity and the whose-computer
+        // discipline at the moment a person had just intervened — the worst possible moment to
+        // start claiming work on the box happened on their machine.
+        system: Some(crate::persona::system_message(
+            &coworker.name,
+            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
+            None,
+        )),
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),
     };

@@ -174,6 +174,7 @@ async fn hire(
         retired: false,
         members: Vec::new(),
         updated_at_ms: at_ms,
+        role: coworker.role.clone(),
     };
     if let Err(error) = state
         .agui
@@ -329,6 +330,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
             retired: after.retired,
             members: after.members.clone(),
             updated_at_ms: now_ms(),
+            role: after.role.clone(),
         };
         let _ = state
             .agui
@@ -368,6 +370,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
             retired: after.retired,
             members: after.members.clone(),
             updated_at_ms: now_ms(),
+            role: after.role.clone(),
         };
         let _ = state
             .agui
@@ -435,6 +438,7 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value)
                 retired: after.retired,
                 members: after.members.clone(),
                 updated_at_ms: at_ms,
+                role: after.role.clone(),
             };
             if state
                 .agui
@@ -1311,6 +1315,7 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
         box_id: None,
         retired: false,
         updated_at_ms: at_ms,
+        role: group.role.clone(),
         members: group.members.clone(),
     };
     if let Err(error) = state
@@ -1394,6 +1399,7 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
             box_id: None,
             retired: false,
             updated_at_ms: at_ms,
+            role: after.role.clone(),
             members: after.members.clone(),
         };
         if let Err(error) = state

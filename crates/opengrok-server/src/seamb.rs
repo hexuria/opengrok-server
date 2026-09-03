@@ -310,6 +310,7 @@ async fn grok_bot(
                 retired: false,
                 members: Vec::new(),
                 updated_at_ms: at_ms,
+                role: coworker.role.clone(),
             };
             if let Err(error) = store
                 .append_coworker(&id, &account_id, 0, &events, &view)
@@ -400,6 +401,7 @@ async fn grok_bot(
                     retired: after.retired,
                     members: after.members.clone(),
                     updated_at_ms: now_ms(),
+                    role: after.role.clone(),
                 };
                 let _ = store
                     .append_coworker(&coworker_id, &account_id, seq, &events, &view)
@@ -456,6 +458,7 @@ async fn grok_bot(
                         retired: after.retired,
                         members: after.members.clone(),
                         updated_at_ms: at_ms,
+                        role: after.role.clone(),
                     };
                     let _ = store
                         .append_coworker(&coworker_id, &account_id, seq, &events, &view)

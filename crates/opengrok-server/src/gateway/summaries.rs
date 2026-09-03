@@ -21,6 +21,9 @@ pub fn summary(view: &CoworkerView) -> serde_json::Value {
         // spoken yet — and a non-empty description defeats blank-agent suppression (§8.2).
         "description": view.model,
         "title": "",
+        // What this coworker is FOR, standing across every conversation (`server/persona.rs`).
+        // Null rather than absent: the desktop distinguishes "no role" from "field not served".
+        "role": view.role,
         // Slim mode nulls this anyway, and we serve no avatar bytes yet (P7).
         "avatarDataUrl": null,
         "avatarVersion": null,
