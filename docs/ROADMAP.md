@@ -436,7 +436,7 @@ REST ignored a requested model and stored the deployment default. Investigation:
   app's own create/update model field + picker; `auto_review_model` is a second deployment model
   a pin deliberately does not move; per-coworker spend caps (the gateway has no per-day cap, and
   metering a coworker natively means giving each its own gateway key).
-- [x] **18.caps** Per-coworker spend limits (`plan-spend-policy.md`). A coworker hired by an org
+- [x] **18.caps** *(superseded by 18.points: the USD windows' limits are retired, the meters and keys stay)* Per-coworker spend limits. A coworker hired by an org
   member gets a gateway key of its OWN at hire (`spend.rs::ensure_key_for`; minted on the org's
   principal as "coworker: Ada", sealed in the vault, attributed in `coworker_gateway_key` and
   the org's key listing), so the gateway meters its spend apart from everybody else's. Limits
@@ -526,6 +526,18 @@ Listing them as pending would make this tracker lie about how far away done is.
 
 ## Later — unordered, deliberately
 
+- [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one
+  token at the gateway's reference price, so a subscription seat and an API key count the same;
+  the org admin sets each member's monthly pool (`PUT /admin/points/members/{id}`) and the
+  reference price (proxied to the gateway); the owner caps a coworker for the month and brakes
+  it for a rolling day (`GET/PUT /coworkers/{id}/limit`), at most the pool; `GuardedDoor`
+  refuses at cap, pool or brake with a sentence in the bubble, the pool read once per owner
+  per 15 s over every key the owner's coworkers ever had (rows kept at retirement, marked).
+  Usage is a per-model report (`GET /coworkers/{id}/usage?window=`); `/models` entries carry
+  multipliers; templates carry `points`. The USD windows' LIMITS are retired (meters stay);
+  `spend_limit` is dropped in a later cleanup. Gateway legs: open-ai-gateway #52 (reference +
+  multipliers), #53 (per-model usage, the rolling day, points per window, the batch read).
+  `tests/against_spend_caps.rs`, `against_templates.rs`. #49.
 - [ ] Commands: `goal`, `plan`, `review`. Parked: the packaged app's `sendPrompt` has no
   `mode` field and no Plan-mode picker (`docs/verification/plan-mode-wire/`). Honouring
   one here would invent a contract. A client composer control is the prerequisite.

@@ -25,6 +25,7 @@ pub mod autonomy;
 pub mod gateway;
 pub mod identity;
 pub mod migrations;
+pub mod points;
 pub mod postgres;
 pub mod replica;
 pub mod room;
@@ -37,6 +38,7 @@ pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
 };
+pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};

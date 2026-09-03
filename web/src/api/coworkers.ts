@@ -37,7 +37,7 @@ export interface CoworkerTemplate {
   model: string | null;
   tools: string[];
   needsApproval: string[];
-  limits: { fiveHourUsd?: string | null; sevenDayUsd?: string | null; monthUsd?: string | null };
+  points: { monthPoints?: number | null; dayPoints?: number | null };
   updatedAtMs: number;
 }
 
@@ -102,8 +102,62 @@ export function getSpend(id: string): Promise<CoworkerSpend> {
   return getJson<CoworkerSpend>(`/coworkers/${encodeURIComponent(id)}/spend`);
 }
 
+/**
+ * The coworker's points limit: its owner's cap for the month and brake for the day, what it has
+ * used, and the pool its owner's coworkers draw on. Null where the gateway does not say.
+ */
+export interface CoworkerLimit {
+  metered: boolean;
+  note: string | null;
+  cap: number | null;
+  effectiveCap: number | null;
+  usedPoints: number | null;
+  dayCap: number | null;
+  usedToday: number | null;
+  dayFreesAt: string | null;
+  pool: { max: number | null; used: number | null; resetsAt: string | null; setBy: string | null };
+  reference: { usdPerMtok: string } | null;
+}
+
+export function getLimit(id: string): Promise<CoworkerLimit> {
+  return getJson<CoworkerLimit>(`/coworkers/${encodeURIComponent(id)}/limit`);
+}
+
+/** Absent leaves a field as it is; null clears it. */
+export async function setLimit(
+  id: string,
+  body: { cap?: number | null; dayCap?: number | null },
+): Promise<CoworkerLimit> {
+  const res = await request(`/coworkers/${encodeURIComponent(id)}/limit`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { error?: string };
+      if (parsed.error) message = parsed.error;
+    } catch {
+      /* a plain sentence */
+    }
+    throw new ApiError(res.status, message);
+  }
+  return (await res.json()) as CoworkerLimit;
+}
+
+/** A model's points multipliers over the reference price; null while the gateway has none. */
+export interface ModelPoints {
+  inputX: string;
+  outputX: string;
+  cacheReadX: string | null;
+  cacheWriteX: string | null;
+  shownX: string;
+}
+
 export interface Catalogue {
-  models: { id: string }[];
+  models: { id: string; points?: ModelPoints | null }[];
   /** Why the list is empty, when it is. An empty list is never silently "there are no models". */
   note: string | null;
 }

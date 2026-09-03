@@ -97,6 +97,56 @@ pub struct KeyUsage {
     pub five_hour_counterfactual_usd: Option<String>,
     #[serde(rename = "seven_day_counterfactual_usd", default)]
     pub seven_day_counterfactual_usd: Option<String>,
+    /// The rolling day (open-ai-gateway #53): the optional daily brake. Absent on an older
+    /// gateway.
+    #[serde(rename = "day_usd", default)]
+    pub day_usd: Option<String>,
+    #[serde(rename = "day_frees_at", default)]
+    pub day_frees_at: Option<String>,
+    #[serde(rename = "day_requests", default)]
+    pub day_requests: Option<i64>,
+    #[serde(rename = "day_counterfactual_usd", default)]
+    pub day_counterfactual_usd: Option<String>,
+    /// Points per window: each request's list-price cost over the reference price, rounded
+    /// per request and summed. Absent on an older gateway, null while no reference is set.
+    #[serde(rename = "month_points", default)]
+    pub month_points: Option<i64>,
+    #[serde(rename = "five_hour_points", default)]
+    pub five_hour_points: Option<i64>,
+    #[serde(rename = "day_points", default)]
+    pub day_points: Option<i64>,
+    #[serde(rename = "seven_day_points", default)]
+    pub seven_day_points: Option<i64>,
+}
+
+/// A model's points multipliers over the reference price, as the gateway derives them from
+/// its catalog (open-ai-gateway #52). Strings like `10`, `2.5`, `0.125`; `None` for a token
+/// class the catalog has no price for.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ModelPoints {
+    pub id: String,
+    pub input_x: String,
+    pub output_x: String,
+    #[serde(default)]
+    pub cache_read_x: Option<String>,
+    #[serde(default)]
+    pub cache_write_x: Option<String>,
+    pub shown_x: String,
+}
+
+/// One model's share of a key's usage inside a window (open-ai-gateway #53).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ModelUsage {
+    pub model_id: String,
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cost_usd: String,
+    pub list_usd: String,
+    #[serde(default)]
+    pub points: Option<i64>,
 }
 
 /// Why a call to the gateway's admin API did not do what was asked. There is no
@@ -325,6 +375,115 @@ impl GatewayAdmin {
                 .map(Some)
                 .map_err(|error| AdminError::Refused(format!("unexpected usage reply: {error}"))),
             Err(AdminError::Refused(detail)) if detail.contains("no key") => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The points reference price, `None` while the admin has not set one — or on a gateway
+    /// older than open-ai-gateway #52, which has no such door (a 404 either way).
+    pub async fn points_reference(&self) -> Result<Option<String>, AdminError> {
+        match self
+            .send(reqwest::Method::GET, "/admin/api/points/reference", None)
+            .await
+        {
+            Ok(value) => Ok(value
+                .get("usd_per_mtok")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)),
+            Err(AdminError::Refused(detail)) if detail.starts_with("HTTP 404") => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Set the reference price; the gateway's own sentence on refusal.
+    pub async fn set_points_reference(&self, usd_per_mtok: &str) -> Result<String, AdminError> {
+        let value = self
+            .send(
+                reqwest::Method::PUT,
+                "/admin/api/points/reference",
+                Some(serde_json::json!({ "usd_per_mtok": usd_per_mtok })),
+            )
+            .await?;
+        value
+            .get("usd_per_mtok")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| AdminError::Refused("unexpected reference reply".to_string()))
+    }
+
+    /// Every catalog model's multipliers, `None` while no reference is set or on an older
+    /// gateway.
+    pub async fn points_models(&self) -> Result<Option<Vec<ModelPoints>>, AdminError> {
+        match self
+            .send(reqwest::Method::GET, "/admin/api/points/models", None)
+            .await
+        {
+            Ok(value) => serde_json::from_value(value)
+                .map(Some)
+                .map_err(|error| AdminError::Refused(format!("unexpected models reply: {error}"))),
+            Err(AdminError::Refused(detail))
+                if detail.starts_with("HTTP 404") || detail.contains("no reference price") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One key's usage inside a window, per model. `None` when the gateway no longer knows the
+    /// key; an older gateway (no such door) is a refusal the caller reports.
+    pub async fn key_usage_models(
+        &self,
+        key_id: &str,
+        window: &str,
+    ) -> Result<Option<Vec<ModelUsage>>, AdminError> {
+        match self
+            .send(
+                reqwest::Method::GET,
+                &format!("/admin/api/keys/{key_id}/usage/models?window={window}"),
+                None,
+            )
+            .await
+        {
+            Ok(value) => serde_json::from_value(value)
+                .map(Some)
+                .map_err(|error| AdminError::Refused(format!("unexpected usage reply: {error}"))),
+            Err(AdminError::Refused(detail)) if detail.contains("no key") => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Points spent inside a window by each of several keys, in one read — the pool read a
+    /// member's coworkers share. `Ok(None)` while no reference price is set (the gateway's
+    /// 404 with the reason), which the guard treats as "cannot be metered".
+    pub async fn points_for_keys_within(
+        &self,
+        keys: &[String],
+        window: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<std::collections::HashMap<String, i64>>, AdminError> {
+        match self
+            .send_within(
+                reqwest::Method::POST,
+                "/admin/api/usage/points",
+                Some(serde_json::json!({ "keys": keys, "window": window })),
+                timeout,
+            )
+            .await
+        {
+            Ok(value) => {
+                let keys = value
+                    .get("keys")
+                    .and_then(|k| k.as_object())
+                    .map(|map| {
+                        map.iter()
+                            .map(|(key, points)| (key.clone(), points.as_i64().unwrap_or(0)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Some(keys))
+            }
+            Err(AdminError::Refused(detail)) if detail.contains("no reference price") => Ok(None),
             Err(error) => Err(error),
         }
     }

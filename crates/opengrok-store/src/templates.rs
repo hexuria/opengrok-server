@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::StoreResult;
+use crate::points::PointsLimit;
 use crate::postgres::PgStore;
-use crate::spend::SpendLimit;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +25,8 @@ pub struct CoworkerTemplate {
     pub tool_ceiling: ToolSet,
     /// Inside the ceiling: what runs only with a human yes.
     pub needs_approval: ToolSet,
-    pub limits: SpendLimit,
+    /// The month's cap and the day's brake a coworker hired from this starts with.
+    pub points: PointsLimit,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -45,10 +46,9 @@ fn template_row(row: sqlx::postgres::PgRow) -> StoreResult<CoworkerTemplate> {
         needs_approval: serde_json::from_value(approval).map_err(|error| {
             crate::StoreError::Corrupt(format!("template approval set: {error}"))
         })?,
-        limits: SpendLimit {
-            five_hour_usd: row.try_get("five_hour_usd")?,
-            seven_day_usd: row.try_get("seven_day_usd")?,
-            month_usd: row.try_get("month_usd")?,
+        points: PointsLimit {
+            month_points: row.try_get("month_points")?,
+            day_points: row.try_get("day_points")?,
         },
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
@@ -67,14 +67,14 @@ impl PgStore {
         sqlx::query(
             "insert into coworker_template
                 (id, org_id, name, description, model, tool_ceiling, needs_approval,
-                 five_hour_usd, seven_day_usd, month_usd, created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 month_points, day_points, created_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              on conflict (id) do update set
                 name = excluded.name, description = excluded.description,
                 model = excluded.model, tool_ceiling = excluded.tool_ceiling,
                 needs_approval = excluded.needs_approval,
-                five_hour_usd = excluded.five_hour_usd, seven_day_usd = excluded.seven_day_usd,
-                month_usd = excluded.month_usd, updated_at_ms = excluded.updated_at_ms",
+                month_points = excluded.month_points, day_points = excluded.day_points,
+                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(&template.id)
         .bind(&template.org_id)
@@ -83,9 +83,8 @@ impl PgStore {
         .bind(&template.model)
         .bind(&ceiling)
         .bind(&approval)
-        .bind(&template.limits.five_hour_usd)
-        .bind(&template.limits.seven_day_usd)
-        .bind(&template.limits.month_usd)
+        .bind(template.points.month_points)
+        .bind(template.points.day_points)
         .bind(template.created_at_ms)
         .bind(template.updated_at_ms)
         .execute(self.pool())
@@ -97,7 +96,7 @@ impl PgStore {
     pub async fn templates_for_org(&self, org_id: &str) -> StoreResult<Vec<CoworkerTemplate>> {
         let rows = sqlx::query(
             "select id, org_id, name, description, model, tool_ceiling, needs_approval,
-                    five_hour_usd, seven_day_usd, month_usd, created_at_ms, updated_at_ms
+                    month_points, day_points, created_at_ms, updated_at_ms
              from coworker_template where org_id = $1 order by name, id",
         )
         .bind(org_id)
@@ -115,7 +114,7 @@ impl PgStore {
     ) -> StoreResult<Option<CoworkerTemplate>> {
         let row = sqlx::query(
             "select id, org_id, name, description, model, tool_ceiling, needs_approval,
-                    five_hour_usd, seven_day_usd, month_usd, created_at_ms, updated_at_ms
+                    month_points, day_points, created_at_ms, updated_at_ms
              from coworker_template where org_id = $1 and id = $2",
         )
         .bind(org_id)

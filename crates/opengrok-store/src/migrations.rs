@@ -612,6 +612,28 @@ create table if not exists room_pause (
     at_ms     bigint not null
 );
 create index if not exists room_pause_run_idx on room_pause (run_id);
+
+-- Points limits (`docs/plan-spend-policy.md`): a member's monthly pool, set by the org admin;
+-- a coworker's optional monthly cap and optional daily brake (a rolling 24 hours), set by its
+-- owner. A point is one token at the gateway's reference price, so a subscription seat and an
+-- API key count the same. The gateway meters; this table says what may be spent; the guard
+-- refuses before each model call. NULL is "no limit here". The USD `spend_limit` table above
+-- is no longer read and is dropped in a later cleanup, once points have run for a month.
+create table if not exists points_limit (
+    scope_kind    text   not null,
+    scope_id      text   not null,
+    month_points  bigint,
+    day_points    bigint,
+    set_by        text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope_kind, scope_id)
+);
+-- A retired coworker's key row stays, marked: its month's points still count toward its
+-- owner's pool, so retire-and-rehire does not reset a member's month.
+alter table coworker_gateway_key add column if not exists revoked_at_ms bigint;
+-- Templates carry points, not USD windows; the USD columns stay unread until the cleanup.
+alter table coworker_template add column if not exists month_points bigint;
+alter table coworker_template add column if not exists day_points bigint;
 create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
 -- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.

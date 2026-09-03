@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;
+pub mod points;
 pub mod recovery;
 pub mod seamb;
 pub mod seamb_send;

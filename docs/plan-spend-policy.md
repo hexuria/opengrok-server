@@ -1,128 +1,130 @@
-# Spend policy — limits on what a coworker may spend, and who sets them
+# Spend policy — points: what a coworker may spend, and who sets it
 
-Status: **design for review, 2 Sep 2026; the shape is decided, the code is being reworked.** Written
-after the first cut (#32, a lifetime per-key cap) met the operator's answer: limits are a
-**calendar month plus rolling 5-hour and 7-day windows**, "like other LLM subscriptions", and at a
-limit the turn is **refused with a sentence**. This page is the design #32 is reworked to, and
-the vocabulary that keeps three systems from talking past each other again.
+Status: built 3 Sep 2026 (server #49; open-ai-gateway #52 and #53). Supersedes the USD
+three-window design of 2 Sep 2026, which is retired (§6). The desktop's usage modal
+(hexuria/opengrok #55 and after) reads the shapes in §5.
 
----
+## 0. Vocabulary
 
-## 0. Three vocabularies, and one word that meant two things
+- **Reference price R** — USD per million tokens, the org admin's, kept on the gateway with
+  the prices. **One point is one token at R.**
+- **List price** — what a request's tokens would cost at the model's own pay-per-token price
+  (`counterfactual_api_usd`). A subscription seat's cost is truthfully zero; its list price is
+  the bill it displaced. Points are charged from the list price, so a seat and an API key count
+  the same.
+- **Points of a request** — `list price × 1,000,000 / R`, rounded half up per request, summed as
+  integers. Derived at read time, never stored: changing R re-values every past figure alike,
+  so "N points" keeps meaning "N reference tokens".
+- **Multiplier** — a model's list price per token class over R (`×10` input on xai/grok-4.6 at
+  R = 0.20). Shown after the id in pickers; orientation only, the charge is exact.
+- **Pool** — a member's month, set by the org admin. Every coworker the member owns draws on it.
+- **Cap** — a coworker's month, set by its owner, at most the pool.
+- **Brake** — a coworker's rolling 24 hours, set by its owner. Off by default.
+- **Windows** — `5h`, `24h`, `7d`, `month` (the UTC month). Reporting uses all four; limits use
+  the month and the day.
 
-| The gateway says | OpenGrok says | The console says |
+## 1. What the gateway does, and does not
+
+The gateway is the meter. It keeps the prices, R (`points_reference`, one row), the ledger,
+and the arithmetic in one place: the per-key read (`GET /admin/api/keys/{id}/usage`) carries
+`*_points` for the four windows and the rolling day's `day_*` figures; the per-model report
+(`GET /admin/api/keys/{id}/usage/models?window=`) carries requests, tokens by class, cost, list
+price and points per model; the batch read (`POST /admin/api/usage/points {keys, window}`)
+answers the points each of several keys spent and their total in one query. Multipliers come
+from `GET /admin/api/points/models`. The gateway never enforces points: one enforcer per rule,
+or two answers disagree.
+
+## 2. The decision (operator, 3 Sep 2026)
+
+- Limits are in points, **monthly**: the admin sets each member's pool, the owner may cap a
+  coworker below it. No cap means the coworker draws on the pool; no pool means unlimited.
+- An **optional daily brake** per coworker, owner-set, off by default — the only burst brake,
+  chosen over an automatic share-of-pool. It is a rolling 24 hours, the same family as 5h/7d.
+- At a limit the turn is **refused with a sentence** in the bubble; nothing is sent to the
+  model; no warnings before.
+- **Usage is a report** and knows nothing about limits: per model, per window, in a modal.
+- The USD windows' **limits retire**; their **meters stay** for the modal's periods.
+
+## 3. Where the limits are evaluated
+
+`spend::GuardedDoor`, before every model call, from the coworker's `spend_scope`:
+
+1. `points::effective` — the coworker's cap and brake, its owner, the owner's pool (cached
+   per coworker for 15 s). Nothing set anywhere ⇒ the call passes and never touches the meter.
+2. The coworker's key row. No key ⇒ **held** with the reason (a limit cannot be honoured
+   without something to count on). A pool makes every coworker of that member limited, so an
+   unmetered coworker under a pool is held, not run uncounted on the deployment key.
+3. The meter: the per-key read (15 s fresh, a reading under 60 s stands in when the gateway
+   does not answer within 2 s, else held with the reason). Points `null` — no reference price
+   on the gateway — ⇒ held, with the sentence that says who sets it.
+4. The pool, when one is set: the batch read over every key the owner's coworkers ever had
+   (revoked rows included — a retired coworker's month still counts, so retire-and-rehire does
+   not reset the month), cached **per owner** for 15 s so N active coworkers of one member share
+   one read.
+5. The verdict, in order: cap, then pool, then day. The sentences:
+   - "New Bot has used its 100,000 points for September (102,340 used); it resets on
+     1 October. 412,000 of your 1,000,000 remain for other agents."
+   - "Your pool of 1,000,000 points for September is used up (1,000,000 used); it resets on
+     1 October."
+   - "New Bot has used its 30,000 points for today (30,000 used); it frees up at 14:32 UTC."
+
+A burst can overrun a limit by at most one reading's worth (15 s) per coworker.
+
+## 4. Who sets what
+
+| Who | What | Where |
 |---|---|---|
-| principal (one per org) | org | the org budget card |
-| route (a ladder of models) | a model pin like `xai/grok-4.6` | the route column |
-| key (one credential; the gateway meters per key) | a member's key, or a coworker's own key | keys card; nothing for coworkers until #32 |
+| Org admin | R | console → gateway (`PUT /admin/points/reference`, audited on the gateway) |
+| Org admin | each member's pool | `PUT /admin/points/members/{accountId} {pool}` |
+| Org admin | a template's cap and brake | `/admin/templates` (`points.monthPoints`, `points.dayPoints`), copied at hire as the coworker's row, set by the hirer |
+| Coworker's owner | cap and brake | `PUT /coworkers/{id}/limit {cap, dayCap}` — absent leaves, null clears, a cap above the pool is refused with the numbers |
 
-"Key" also named two unrelated things on the same day: the **bot key** Claude Code gets after a
-person signs in through the OAuth door, and the **gateway key** the server mints for a coworker
-at hire, silently, through the gateway's admin API. No person ever does OAuth for a spend limit;
-the coworker's gateway key is plumbing, the only way the gateway can tell one coworker's spend
-from another's. It stays. What changes is what is written on it.
+`effectiveCap` in the limit read is a **ceiling on `usedPoints`**, like the cap: `min(cap,
+pool − what the owner's other coworkers used)` when both exist, either alone otherwise, null
+when neither. A pool lowered after a cap was set binds through it at check time too. Room left
+for this coworker is `effectiveCap − usedPoints`.
 
-## 1. What the gateway enforces, and what it cannot
+## 5. Wire
 
-Every request through the gateway is checked against three budgets at once (`budgets_for`,
-`oag-server/src/gateway/mod.rs`); whichever is exhausted first refuses the request with a 402.
+Server (account API, the signed-in person's token):
 
-| Scope | Period | Grace | Set from |
-|---|---|---|---|
-| principal | calendar month, from the ledger | overshoot multiple | admin API (`PATCH /principals/{email}/budget`) |
-| route | calendar month, from the ledger | none | gateway CLI only |
-| key | **lifetime**, a denormalised counter | none | admin API (`PATCH /keys/{id}/quota`) |
+```
+GET  /coworkers/{id}/usage?window=5h|24h|7d|month
+     → { metered, note, seat, keyPrefix, window,
+         models: [{ modelId, requests, inputTokens, outputTokens, cacheReadTokens,
+                    cacheWriteTokens, costUsd, listUsd, points }], totals: { …same… } }
+GET  /coworkers/{id}/limit
+     → { metered, note, cap, effectiveCap, usedPoints, dayCap, usedToday, dayFreesAt,
+         pool: { max, used, resetsAt, setBy }, reference: { usdPerMtok } | null }
+PUT  /coworkers/{id}/limit           ← { cap, dayCap }        (owner)
+GET  /models                          + points: { inputX, outputX, cacheReadX, cacheWriteX, shownX } | null
+GET  /admin/points                    → reference, note, members[{id,email,pool,setBy,usedPoints}],
+                                        coworkers[{id,name,ownerEmail,cap,dayCap,usedPoints}]
+PUT  /admin/points/reference          ← { usdPerMtok }         (admin; proxied to the gateway)
+PUT  /admin/points/members/{accountId} ← { pool }              (admin)
+GET  /coworkers/{id}/spend            (kept, `limits` empty, until the modal has replaced it)
+```
 
-So the gateway can meter per key, and its **ledger** (`usage_event`: `api_key_id`, `cost_usd`,
-`occurred_at`) is the record of every coworker's spend to the second. What it cannot do today is
-a windowed per-key limit: the key quota is a lifetime wall, and the gateway's own budget check
-deliberately never sums the ledger per request. Hanging rolling windows on the key quota is the
-wrong primitive, which is why #32 as first cut answered a different question.
+Money is a `"%.6f"` string; points are integers; every field is present and `null` where the
+gateway does not say (no reference price, an older gateway, an unmetered coworker). An unknown
+route on an older server is a bare 404, which the desktop reads as "not served yet".
 
-## 2. The decision (operator, 2 Sep 2026)
+## 6. What is retired
 
-Three limits per coworker, all optional, all in USD:
+The USD `spend_limit` rows at org/member/coworker scope, `/admin/spend/*`, the template USD
+columns, and the three-window `over_limit` branch are no longer read or written. The
+`spend_limit` table and the template USD columns stay in the schema until a later cleanup, once
+points have run for a month — a table drop in the single SCHEMA string is the one thing we
+cannot take back. `GET /coworkers/{id}/spend` keeps serving its meters with an empty `limits`
+until the desktop's modal has replaced it.
 
-| Limit | Window | Resets |
-|---|---|---|
-| 5-hour | rolling | when the oldest spend inside the window ages out |
-| 7-day | rolling | same |
-| monthly | calendar month, UTC | on the first |
+## 7. Known gaps
 
-At any limit the turn is **refused**, before the model is called, with a sentence that names the
-window and when it resets: *"Ada has used its 5-hour allowance ($4.90 of $5.00); it resets at
-14:32. The 7-day and monthly allowances still have room."* "You are at your cap" alone is the
-wrong sentence for somebody whose window clears in ten minutes.
-
-## 3. Where the three limits are evaluated, and where the numbers come from
-
-**The gateway keeps the ledger; the server evaluates the policy.** That is CLAUDE.md #6 (the
-server decides, on every action) applied to money.
-
-- **Numbers.** `GET /admin/api/keys/{id}/usage` (open-ai-gateway #50) grows three windowed sums
-  and their reset instants, computed from the ledger with an index on `(api_key_id, occurred_at)`:
-  `five_hour_usd` / `five_hour_resets_at`, `seven_day_usd` / `seven_day_resets_at`,
-  `month_usd` / `month_resets_at`, plus `requests`. One query per window; a coworker's rows in a
-  window are few. The lifetime `spent_usd` stays in the reply for the record but is no longer
-  what a limit is written against.
-- **Limits.** Authored in OpenGrok (`spend_limit` rows, §4), never on the gateway. The gateway's
-  per-key `quota_usd` is left unset — one enforcer per rule, or two answers disagree.
-- **Evaluation.** Before **each model call**, not once per turn: a turn with a tool loop makes
-  many calls, and a subscription-style limit is checked per request. The check lives in a
-  `ModelDoor` wrapper in the server (`spend::GuardedDoor`) around the real `GatewayDoor`: the
-  request carries the coworker it is for (`ModelRequest.spend_scope`), the guard reads the three
-  sums (cached for fifteen seconds per coworker, so a tool loop costs one read), compares them to
-  the coworker's effective limits, and refuses with `ModelError::SpendCap(sentence)` — the same
-  path that already turns a refusal into the run's failure and the transcript's text. A guard
-  that cannot read the numbers **holds** the turn with that reason; it never lets a turn through
-  unmetered.
-- **Granularity.** A model call already in flight finishes; the next one is refused. Two calls
-  racing can both pass by one call's cost — the window is soft by one request, as every
-  subscription's is.
-
-## 4. Who sets what: the policy ladder
-
-Rules are authored by the **admin**, in the admin dashboard; members see their coworkers'
-meters read-only. A member may never raise a limit.
-
-| Layer | Meaning | Where it lives |
-|---|---|---|
-| org budget | the org's monthly total | gateway principal budget (already in the admin dashboard) |
-| model budget | the org's monthly total on one model family | gateway route budget — needs a gateway admin endpoint (later) |
-| org default | the three limits every coworker gets unless something narrower says otherwise | `spend_limit` scope `org` |
-| member override | the three limits a given member's coworkers get | `spend_limit` scope `member` |
-| template | a coworker type with limits baked in, copied at hire | `spend_limit` scope `template` (with templates, later) |
-| coworker | the effective limits on this one coworker | `spend_limit` scope `coworker` |
-
-**Rules.**
-
-1. Every applicable limit applies; a request must fit all of them. Mixing is native.
-2. For a coworker's number, the most specific admin-written value wins: coworker > template >
-   member > org default. An absent value means "no limit at this layer", not zero.
-3. Only admins write limits. Members read.
-4. Template limits are **copied** at hire, not linked; editing a template offers "apply to
-   existing coworkers"; deleting one leaves them as they are. A linked limit would let one edit
-   silently change fifty running coworkers, which a limit must never do.
-5. What a person sees: three meters per coworker (used / limit / resets), in the console and in
-   the refusal sentence.
-6. Not built: a per-coworker, per-model limit. A coworker thinks with one pinned model, so its
-   limits already are its model limits; "nobody burns the expensive model" is the org's model
-   budget.
-
-## 5. Work, in order
-
-1. **Gateway #50, extended**: the three windowed sums and reset instants, the index. Half a day.
-2. **Server (#32 reworked)**: `spend_limit` table + resolver; `GuardedDoor` + `ModelRequest.spend_scope`;
-   the refusal sentences; admin dashboard card (org default, per-member override, per-coworker);
-   coworker page meters read-only; tests over the stand-in gateway with windowed usage, including
-   "the 5-hour window refuses while the month has room" and "the sentence names the reset". A day
-   and a half.
-3. **Templates** (coworker types: model pin, tool ceiling, approval policy, limits): its own slice.
-   *Done 2 Sep 2026: `templates.rs`, `tests/against_templates.rs`; "apply to existing coworkers"
-   is not built yet — a template edit changes nobody until it is.*
-4. **Model budgets**: a route-budget endpoint on the gateway, a card here. Small, later.
-
-## 6. Questions for the operator
-
-1. Org default limits to ship with: proposed none (unlimited until an admin writes one).
-2. Warning threshold in the roster (e.g. 80 %) — wanted, or later?
+- Turns a coworker took on the deployment key before its own key existed are not counted
+  (narrowed by #45 and #46: the key is minted on the next turn, on a bound principal).
+- Without a reference price nothing is counted: limits hold every turn, in words, until the
+  admin sets R.
+- A change of R re-values every existing pool and cap: rare, audited on the gateway, and shown
+  with its dollar equivalent on the admin page while typing.
+- A per-turn request ledger (which request cost what) is a possible follow-up; it needs a
+  per-key request-rows route on the gateway.

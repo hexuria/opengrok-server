@@ -76,11 +76,13 @@ decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinat
    per-key admin scopes so a partner credential is not a full gateway admin.
 3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +
    picker (console already has one). Roster `description = model` habit. `auto_review_model` is
-   a separate deployment pin. Per-coworker spend limits are **three windows** — rolling 5 hours, rolling 7 days, calendar
-   month, "like other LLM subscriptions" — refusing the turn at a limit; decided 2 Sep 2026,
-   design in [`plan-spend-policy.md`](plan-spend-policy.md). Templates (coworker types with the
-   limits baked in) landed with it; org-wide per-model budgets and "apply a template edit to its
-   coworkers" follow.
+   a separate deployment pin. Per-coworker limits are **points** — one token at the gateway's reference price, so seats
+   and API keys count the same — monthly per member (the admin's pool) and per coworker (the
+   owner's cap, at most the pool) with an optional daily brake; decided 3 Sep 2026, design in
+   [`plan-spend-policy.md`](plan-spend-policy.md), built as 18.points with gateway #52/#53.
+   The USD windows' limits are retired. Templates carry points. Left: drop the `spend_limit`
+   table after a month; retire `/coworkers/{id}/spend` once the desktop modal no longer reads
+   it; org-wide per-model budgets and "apply a template edit to its coworkers" follow.
 4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
    (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
    MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are

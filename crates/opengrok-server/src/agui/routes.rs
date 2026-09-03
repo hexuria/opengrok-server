@@ -440,6 +440,13 @@ pub fn router(state: AgUiState) -> Router {
         // Spend limits: the coworker's three meters, read-only here; limits are written by the
         // org admin (`account_api.rs`, `/admin/spend`).
         .route("/coworkers/{coworker_id}/spend", get(get_spend))
+        // Points (`points.rs`): usage per model, a report; and the coworker's own limit, the
+        // owner's to write (its cap for the month, its brake for the day).
+        .route("/coworkers/{coworker_id}/usage", get(get_usage))
+        .route(
+            "/coworkers/{coworker_id}/limit",
+            get(get_limit).put(set_limit),
+        )
         .route(
             "/coworkers/{coworker_id}/keys",
             post(mint_bot_key).get(list_bot_keys),
@@ -474,11 +481,17 @@ pub async fn list_models(
         .into_response();
     };
     let listing = catalogue.list().await;
+    let points = crate::points::models_points(&state).await;
     Json(serde_json::json!({
         "models": listing
             .models
             .iter()
-            .map(|model| serde_json::json!({ "id": model.id }))
+            .map(|model| serde_json::json!({
+                "id": model.id,
+                // Points multipliers (`points.rs`): null on a gateway with no reference price
+                // or older than open-ai-gateway #52; the picker shows ×N after the id.
+                "points": crate::points::points_json(points.as_ref().and_then(|p| p.get(&model.id))),
+            }))
             .collect::<Vec<_>>(),
         "note": listing.note,
     }))
@@ -1006,6 +1019,90 @@ async fn get_spend(
     match crate::spend::spend_for(&state, &account_id, &coworker_id).await {
         Ok(spend) => Json(spend).into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsageQuery {
+    pub window: Option<String>,
+}
+
+/// `GET /coworkers/{id}/usage?window=5h|24h|7d|month` — what the coworker used, per model.
+async fn get_usage(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<UsageQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    let window = query.window.as_deref().unwrap_or("month");
+    match crate::points::usage_for(&state, &account_id, &coworker_id, window).await {
+        Ok(usage) => Json(usage).into_response(),
+        Err((code, error)) => (
+            StatusCode::from_u16(code).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /coworkers/{id}/limit` — the coworker's cap and brake, what it has used, and the pool
+/// it draws on.
+async fn get_limit(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    match crate::points::limit_for(&state, &account_id, &coworker_id).await {
+        Ok(limit) => Json(limit).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response(),
+    }
+}
+
+/// `PUT /coworkers/{id}/limit` ← `{ cap, dayCap }` — the owner's; null clears, absent leaves.
+async fn set_limit(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    match crate::points::set_limit(&state, &account_id, &coworker_id, &body).await {
+        Ok(limit) => Json(limit).into_response(),
+        Err((code, error)) => (
+            StatusCode::from_u16(code).unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+            Json(serde_json::json!({ "error": error })),
+        )
+            .into_response(),
     }
 }
 
