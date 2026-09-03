@@ -203,22 +203,41 @@ impl Harness {
     }
 
     /// The last thing the coworker said — which, with this door, is its system prompt.
-    async fn what_the_model_was_told(&self, agent: &str) -> String {
+    /// Every finished answer in the transcript, oldest first. The count is what the caller
+    /// waits on: reading "the newest finished answer" cannot tell turn two's from turn one's,
+    /// and on a loaded machine it returns turn one's the moment it is asked. That is how this
+    /// test failed inside a gate while passing on its own, and blamed the code for it.
+    async fn answers_so_far(&self, agent: &str) -> Vec<String> {
+        let (_, tail) = self
+            .api(
+                "getAgentTranscriptTail",
+                json!({ "id": agent, "limit": 50 }),
+            )
+            .await;
+        tail["entries"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|e| e["kind"] == "send-message" && e["streaming"] != json!(true))
+                    .filter_map(|e| {
+                        let said = e["message"]["content"].as_str().unwrap_or("");
+                        (!said.is_empty()).then(|| said.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// What the model was told on the answer AFTER `already`, where `already` is the count from
+    /// `answers_so_far` taken before the prompt was sent.
+    async fn what_the_model_was_told_after(&self, agent: &str, already: usize) -> String {
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 50 }),
-                )
-                .await;
-            if let Some(said) = tail["entries"].as_array().and_then(|entries| {
-                entries.iter().rev().find_map(|e| {
-                    (e["kind"] == "send-message" && e["streaming"] != json!(true))
-                        .then(|| e["message"]["content"].as_str().unwrap_or("").to_string())
-                        .filter(|said| !said.is_empty())
-                })
-            }) {
+            let answers = self.answers_so_far(agent).await;
+            if answers.len() > already
+                && let Some(said) = answers.into_iter().nth(already)
+            {
                 return said;
             }
         }
@@ -250,7 +269,7 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
         )
         .await;
     assert_eq!(status, 200, "{sent}");
-    let told = h.what_the_model_was_told(&agent).await;
+    let told = h.what_the_model_was_told_after(&agent, 0).await;
     assert!(told.starts_with("You are Ada."), "{told}");
     assert!(
         told.contains("your OWN computer") || told.contains("do NOT currently have a computer"),
@@ -278,6 +297,9 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
     assert_eq!(h.row(&agent).await["role"], "Keep the changelog honest.");
 
     // And it reaches the model, once, in the composed order, with the computer paragraph after.
+    // Counted BEFORE the prompt: the first turn's answer is already in the transcript, and
+    // "the newest answer" would be it.
+    let already = h.answers_so_far(&agent).await.len();
     let (status, _) = h
         .api(
             "sendPrompt",
@@ -285,7 +307,7 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
         )
         .await;
     assert_eq!(status, 200);
-    let told = h.what_the_model_was_told(&agent).await;
+    let told = h.what_the_model_was_told_after(&agent, already).await;
     assert!(
         told.starts_with("You are Ada.\n\nKeep the changelog honest."),
         "{told}"
@@ -336,6 +358,7 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
     let (status, cleared) = h.patch(&access, &agent, json!({ "role": null })).await;
     assert_eq!(status, 200, "{cleared}");
     assert!(cleared["role"].is_null(), "{cleared}");
+    let already = h.answers_so_far(&agent).await.len();
     let (status, _) = h
         .api(
             "sendPrompt",
@@ -343,7 +366,7 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
         )
         .await;
     assert_eq!(status, 200);
-    let told = h.what_the_model_was_told(&agent).await;
+    let told = h.what_the_model_was_told_after(&agent, already).await;
     assert!(!told.contains("That role stands"), "{told}");
     assert!(told.starts_with("You are Ada."), "{told}");
 
