@@ -699,19 +699,6 @@ impl Harness {
 }
 
 impl Harness {
-    async fn put_limit(&self, access: &str, path: &str, body: Value) -> (u16, String) {
-        let res = self
-            .client
-            .put(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {access}"))
-            .json(&body)
-            .send()
-            .await
-            .expect("put limit");
-        let status = res.status().as_u16();
-        (status, res.text().await.unwrap_or_default())
-    }
-
     async fn turn(&self, coworker: &str, n: usize) -> (String, Option<String>) {
         let (status, sent) = self
             .api(
