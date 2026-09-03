@@ -650,14 +650,22 @@ impl GuardedDoor {
 }
 
 impl GuardedDoor {
-    fn cached_pool(&self, owner: &str, within_ms: i64) -> Option<i64> {
+    /// Keyed on the PAYER alone, deliberately unlike `limits_cache`. A pool is a per-person
+    /// budget: keying it on the pair would fragment one person's month across every coworker
+    /// they talk to and let them overspend by a freshness window per coworker, with no single
+    /// cache line ever noticing.
+    fn cached_pool(&self, payer: &str, within_ms: i64) -> Option<i64> {
         let cache = self.pool_cache.lock().ok()?;
-        let (points, at_ms) = cache.get(owner)?;
+        let (points, at_ms) = cache.get(payer)?;
         (now_ms() - at_ms <= within_ms).then_some(*points)
     }
 
-    /// The owner's pool total this month — one batch read over every key the owner's coworkers
-    /// ever had, with the turn's patience and the same fresh/stale ladder as the meter.
+    /// The PAYER's pool total this month — one batch read over every key ever minted for that
+    /// person on any coworker, with the turn's patience and the same fresh/stale ladder as the
+    /// meter. Not "the owner's", and not "their coworkers' keys": on a shared coworker the
+    /// person talking is not the hirer, and reaching for `coworker_owner` here would restore
+    /// the bug this module was re-keyed to remove — invisibly, because on an unshared coworker
+    /// the two still agree and every test would still pass.
     async fn pool_reading(&self, payer: &AccountId, name: &str) -> Result<i64, ModelError> {
         if self.fresh_ms > 0
             && let Some(points) = self.cached_pool(payer.as_str(), self.fresh_ms)
@@ -785,6 +793,12 @@ impl ModelDoor for GuardedDoor {
         // that reads best — the coworker's owner — is the one that would let a shared coworker's
         // turns quietly draw down somebody else's pool.
         let Some(payer) = request.spend_actor.clone().map(AccountId::from_stored) else {
+            // Loud on this side too: only our own code can build a request like this, and a
+            // sentence to the person turns our bug into their mystery.
+            tracing::error!(
+                coworker = %coworker.as_str(),
+                "points guard: a request named a spend scope but no actor; the turn is held"
+            );
             return Err(ModelError::SpendCap(
                 "This turn does not say whose spend it is, so it cannot be counted against \
                  anybody's limits; it is held. This is a server bug, not a limit you have hit."
