@@ -33,8 +33,27 @@ use crate::gateway_admin::{GatewayAdmin, KeyUsage};
 
 const SECRET_PREFIX: &str = "coworker-gateway-key:";
 
-fn secret_id(coworker: &CoworkerId) -> String {
+/// Where a key minted for this PERSON on this coworker is sealed. The vault binds the id into
+/// the ciphertext as AAD, so this string is part of the credential: changing its shape for an
+/// existing row does not move the secret, it loses it.
+fn secret_id(coworker: &CoworkerId, account: &AccountId) -> String {
+    format!("{SECRET_PREFIX}{}:{}", coworker.as_str(), account.as_str())
+}
+
+/// Where a key minted before a coworker could have more than one is sealed. Read only when the
+/// row says so (`secret_scoped == false`) — never as a fallback for a missing scoped secret,
+/// which would hand one member the owner's credential.
+fn legacy_secret_id(coworker: &CoworkerId) -> String {
     format!("{SECRET_PREFIX}{}", coworker.as_str())
+}
+
+/// The id this row's secret actually lives at.
+fn secret_id_of(row: &opengrok_store::CoworkerKeyView, coworker: &CoworkerId) -> String {
+    if row.secret_scoped {
+        format!("{SECRET_PREFIX}{}:{}", coworker.as_str(), row.account_id)
+    } else {
+        legacy_secret_id(coworker)
+    }
 }
 
 fn now_ms() -> i64 {
@@ -94,7 +113,7 @@ pub async fn ensure_key_for(
     name: &str,
 ) -> KeyOutcome {
     let store = &state.auth.store;
-    match store.coworker_key(coworker_id).await {
+    match store.coworker_key(coworker_id, account_id).await {
         Ok(Some(existing)) => {
             return KeyOutcome::Minted {
                 key_prefix: existing.key_prefix,
@@ -122,7 +141,10 @@ pub async fn ensure_key_for(
             "the gateway would not bind the org's principal: {error}"
         ));
     }
-    let label = format!("coworker: {name}");
+    // Both identities, in a fixed order, because a shared coworker has one key per member and
+    // the gateway's key listing is flat with no grouping — a label naming only the coworker
+    // would show the operator several identical rows.
+    let label = format!("coworker: {name} — member: {}", account_id.as_str());
     let minted = match admin.mint_member_key(&org_id, &label, None).await {
         Ok(minted) => minted,
         Err(error) => {
@@ -131,7 +153,7 @@ pub async fn ensure_key_for(
         }
     };
     let at_ms = now_ms();
-    let id = secret_id(coworker_id);
+    let id = secret_id(coworker_id, account_id);
     let stored = match vault.seal(&id, &minted.key) {
         Ok(sealed) => store.put_secret(&id, &sealed, at_ms).await,
         Err(error) => Err(error),
@@ -153,6 +175,7 @@ pub async fn ensure_key_for(
         quota_usd: None,
         created_at_ms: at_ms,
         revoked_at_ms: None,
+        secret_scoped: true,
     };
     if let Err(error) = store.insert_coworker_key(&view).await {
         tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be written; revoking the key");
@@ -191,13 +214,21 @@ pub async fn ensure_key_for(
 const MINT_RETRY_MS: i64 = 10 * 60 * 1_000;
 static MINT_ATTEMPTS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
+/// Every per-coworker cache in this module keys on the PAIR, because a shared coworker's answer
+/// differs per member: whose pool, whose key, whose limits. Keying on the coworker alone would
+/// hand one member another member's answer for a freshness window.
+fn pair_key(coworker: &CoworkerId, account: &AccountId) -> String {
+    format!("{}:{}", coworker.as_str(), account.as_str())
+}
+
 /// A coworker without a key of its own gets one on its next turn. Minting is a hire-time step,
 /// and a hire while the admin connection was wrong left the coworker unmetered for good —
 /// nothing ever tried again. That was the dev server on 2 Sep 2026: OG_GATEWAY_ADMIN_TOKEN was
 /// an inference key, every mint answered 403, and every coworker hired that day ran on the
 /// deployment's key with no meter, cap or not. `true` when a key now exists.
-async fn mint_late(state: &AgUiState, coworker_id: &CoworkerId) -> bool {
+async fn mint_late(state: &AgUiState, coworker_id: &CoworkerId, account_id: &AccountId) -> bool {
     let now = now_ms();
+    let attempt = pair_key(coworker_id, account_id);
     {
         let Ok(mut attempts) = MINT_ATTEMPTS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -205,23 +236,20 @@ async fn mint_late(state: &AgUiState, coworker_id: &CoworkerId) -> bool {
         else {
             return false;
         };
-        if let Some(last) = attempts.get(coworker_id.as_str())
+        if let Some(last) = attempts.get(&attempt)
             && now - last < MINT_RETRY_MS
         {
             return false;
         }
-        attempts.insert(coworker_id.as_str().to_string(), now);
+        attempts.insert(attempt, now);
     }
-    let Ok(Some(account_id)) = state.auth.store.coworker_owner(coworker_id).await else {
-        return false;
-    };
     let Ok((coworker, _)) = state.auth.store.load_coworker(coworker_id).await else {
         return false;
     };
     if coworker.retired || coworker.is_group() {
         return false;
     }
-    match ensure_key_for(state, &account_id, coworker_id, &coworker.name).await {
+    match ensure_key_for(state, account_id, coworker_id, &coworker.name).await {
         KeyOutcome::Minted { key_prefix } => {
             tracing::info!(coworker = %coworker_id.as_str(), %key_prefix, "spend cap: minted the coworker's own key late, on its turn");
             true
@@ -236,14 +264,18 @@ async fn mint_late(state: &AgUiState, coworker_id: &CoworkerId) -> bool {
 /// The credential this coworker's next request goes out with. `None` ⇒ the deployment's key
 /// (no key of its own). A row whose secret cannot be opened is `Unavailable`, which the door
 /// refuses — fail closed, and say why.
-pub async fn key_for(state: &AgUiState, coworker_id: &CoworkerId) -> Option<GatewayKey> {
-    let row = match state.auth.store.coworker_key(coworker_id).await {
+pub async fn key_for(
+    state: &AgUiState,
+    coworker_id: &CoworkerId,
+    actor: &AccountId,
+) -> Option<GatewayKey> {
+    let row = match state.auth.store.coworker_key(coworker_id, actor).await {
         Ok(Some(row)) => row,
         Ok(None) => {
-            if !mint_late(state, coworker_id).await {
+            if !mint_late(state, coworker_id, actor).await {
                 return None;
             }
-            match state.auth.store.coworker_key(coworker_id).await {
+            match state.auth.store.coworker_key(coworker_id, actor).await {
                 Ok(Some(row)) => row,
                 _ => return None,
             }
@@ -263,7 +295,7 @@ pub async fn key_for(state: &AgUiState, coworker_id: &CoworkerId) -> Option<Gate
     match state
         .auth
         .store
-        .open_credential(vault, &secret_id(coworker_id))
+        .open_credential(vault, &secret_id_of(&row, coworker_id))
         .await
     {
         Ok(Some(key)) => Some(GatewayKey::new(key)),
@@ -284,10 +316,33 @@ pub async fn key_for(state: &AgUiState, coworker_id: &CoworkerId) -> Option<Gate
 pub async fn key_for_opt(
     state: &AgUiState,
     coworker_id: Option<&CoworkerId>,
+    actor: Option<&AccountId>,
 ) -> Option<GatewayKey> {
-    match coworker_id {
-        Some(coworker_id) => key_for(state, coworker_id).await,
-        None => None,
+    match (coworker_id, actor) {
+        (Some(coworker_id), Some(actor)) => key_for(state, coworker_id, actor).await,
+        // No coworker, or nobody named: the deployment's key. An anonymous AG-UI run has no
+        // person to bill, and inventing one would put a stranger's turn on somebody's pool.
+        _ => None,
+    }
+}
+
+/// Whose spend a turn is. The person talking when there is one; the coworker's owner when there
+/// is not — a coworker acting on its own schedule is acting for whoever hired it, and that is an
+/// answer rather than a default. `None` only when the coworker has no owner to fall back to.
+pub async fn actor_for(
+    state: &AgUiState,
+    coworker_id: &CoworkerId,
+    acting: Option<&AccountId>,
+) -> Option<AccountId> {
+    match acting {
+        Some(account) => Some(account.clone()),
+        None => state
+            .auth
+            .store
+            .coworker_owner(coworker_id)
+            .await
+            .ok()
+            .flatten(),
     }
 }
 
@@ -405,11 +460,13 @@ pub async fn spend_for(
     // The USD limits are retired (`points.rs` holds the limits now); the shape keeps its
     // `limits` field, empty, until the desktop's usage modal has replaced this read.
     let limits = SpendLimit::default();
+    // The caller's own key on this coworker: a shared coworker's console row is about the
+    // person reading it, and the pair is what the row is keyed by.
     let row = store
-        .coworker_key(coworker_id)
+        .coworker_key(coworker_id, account_id)
         .await
         .map_err(|error| format!("the key row could not be read: {error}"))?
-        .filter(|row| row.account_id == account_id.as_str() && row.revoked_at_ms.is_none());
+        .filter(|row| row.revoked_at_ms.is_none());
     let Some(row) = row else {
         let note = match availability(state, account_id).await {
             Ok(_) => "this coworker has no key of its own yet, so it is not metered".to_string(),
@@ -507,17 +564,28 @@ impl GuardedDoor {
         }
     }
 
-    async fn limits_for(&self, coworker: &CoworkerId) -> Result<crate::points::Effective, String> {
+    /// Keyed on (coworker, PAYER), not on the coworker: the cap is the coworker's but the pool
+    /// is the payer's, so two members talking to one shared coworker have different answers and
+    /// a coworker-keyed entry would serve one of them the other's for a freshness window.
+    /// Public for the test that pins the cache key: the leak this prevents is invisible from
+    /// outside, because it shows up as one member being told another member's limits for a
+    /// freshness window and then quietly correcting itself.
+    pub async fn limits_for(
+        &self,
+        coworker: &CoworkerId,
+        payer: &AccountId,
+    ) -> Result<crate::points::Effective, String> {
+        let cache_key = pair_key(coworker, payer);
         if self.fresh_ms > 0
             && let Ok(cache) = self.limits_cache.lock()
-            && let Some((limits, at_ms)) = cache.get(coworker.as_str())
+            && let Some((limits, at_ms)) = cache.get(&cache_key)
             && now_ms() - *at_ms <= self.fresh_ms
         {
             return Ok(limits.clone());
         }
-        let limits = crate::points::effective(&self.store, coworker).await?;
+        let limits = crate::points::effective(&self.store, coworker, payer).await?;
         if let Ok(mut cache) = self.limits_cache.lock() {
-            cache.insert(coworker.as_str().to_string(), (limits.clone(), now_ms()));
+            cache.insert(cache_key, (limits.clone(), now_ms()));
         }
         Ok(limits)
     }
@@ -590,23 +658,24 @@ impl GuardedDoor {
 
     /// The owner's pool total this month — one batch read over every key the owner's coworkers
     /// ever had, with the turn's patience and the same fresh/stale ladder as the meter.
-    async fn pool_reading(&self, owner: &AccountId, name: &str) -> Result<i64, ModelError> {
+    async fn pool_reading(&self, payer: &AccountId, name: &str) -> Result<i64, ModelError> {
         if self.fresh_ms > 0
-            && let Some(points) = self.cached_pool(owner.as_str(), self.fresh_ms)
+            && let Some(points) = self.cached_pool(payer.as_str(), self.fresh_ms)
         {
             return Ok(points);
         }
         let Some(admin) = self.admin.as_ref() else {
             return Err(ModelError::SpendCap(format!(
-                "{name}'s owner has a points pool, but this deployment has no gateway admin \
+                "{name}'s turn draws on a points pool, but this deployment has no gateway admin \
                  connection to read it with (OG_GATEWAY_ADMIN_URL). Its turns are held until it does."
             )));
         };
-        let keys = crate::points::pool_keys(&self.store, owner)
+        let keys = crate::points::pool_keys(&self.store, payer)
             .await
             .map_err(|error| {
                 ModelError::SpendCap(format!(
-                    "{name}'s owner's keys could not be listed ({error}); the turn is held."
+                    "The keys {name}'s pool sums over could not be listed ({error}); the turn \
+                     is held."
                 ))
             })?;
         match admin
@@ -616,20 +685,21 @@ impl GuardedDoor {
             Ok(Some(per_key)) => {
                 let points: i64 = per_key.values().sum();
                 if let Ok(mut cache) = self.pool_cache.lock() {
-                    cache.insert(owner.as_str().to_string(), (points, now_ms()));
+                    cache.insert(payer.as_str().to_string(), (points, now_ms()));
                 }
                 Ok(points)
             }
             Ok(None) => Err(ModelError::SpendCap(format!(
-                "{name}'s owner has a points pool, but the gateway has no reference price set, so \
-                 points cannot be counted; an admin sets it on the admin page. The turn is held."
+                "{name}'s turn draws on a points pool, but the gateway has no reference price \
+                 set, so points cannot be counted; an admin sets it on the admin page. The turn \
+                 is held."
             ))),
             Err(error) => {
-                tracing::error!(%error, owner = %owner.as_str(), "points guard: the pool could not be read");
-                match self.cached_pool(owner.as_str(), STALE_OK_MS) {
+                tracing::error!(%error, payer = %payer.as_str(), "points guard: the pool could not be read");
+                match self.cached_pool(payer.as_str(), STALE_OK_MS) {
                     Some(points) => Ok(points),
                     None => Err(ModelError::SpendCap(format!(
-                        "{name}'s owner's pool could not be read ({error}); the turn is held. \
+                        "The pool {name}'s turn draws on could not be read ({error}); it is held. \
                          Try again in a moment."
                     ))),
                 }
@@ -710,7 +780,18 @@ impl ModelDoor for GuardedDoor {
             return self.inner.stream(request).await;
         };
         let coworker = CoworkerId::from_stored(scope);
-        let limits = self.limits_for(&coworker).await.map_err(|error| {
+        // Whose spend this is. A request that names a scope but no actor is one the server built
+        // without resolving a payer; it is held rather than billed to a guess, because the guess
+        // that reads best — the coworker's owner — is the one that would let a shared coworker's
+        // turns quietly draw down somebody else's pool.
+        let Some(payer) = request.spend_actor.clone().map(AccountId::from_stored) else {
+            return Err(ModelError::SpendCap(
+                "This turn does not say whose spend it is, so it cannot be counted against \
+                 anybody's limits; it is held. This is a server bug, not a limit you have hit."
+                    .to_string(),
+            ));
+        };
+        let limits = self.limits_for(&coworker, &payer).await.map_err(|error| {
                 tracing::error!(%error, coworker = %coworker.as_str(), "points guard: limits could not be read");
                 ModelError::SpendCap(format!(
                     "This coworker's points limits could not be read ({error}); the turn is held."
@@ -727,7 +808,7 @@ impl ModelDoor for GuardedDoor {
             .unwrap_or_else(|_| "This coworker".to_string());
         // A limit — its own, or its owner's pool — cannot be honoured without a key of its own
         // to count on: held, and the sentence says what would make it countable.
-        let key = match self.store.coworker_key(&coworker).await {
+        let key = match self.store.coworker_key(&coworker, &payer).await {
             Ok(Some(key)) => key,
             Ok(None) => {
                 return Err(ModelError::SpendCap(format!(
@@ -749,9 +830,9 @@ impl ModelDoor for GuardedDoor {
                  points cannot be counted; an admin sets it on the admin page. The turn is held."
             )));
         };
-        let pool_used = match (limits.pool, limits.owner.as_ref()) {
-            (Some(_), Some(owner)) => Some(self.pool_reading(owner, &name).await?),
-            _ => None,
+        let pool_used = match limits.pool {
+            Some(_) => Some(self.pool_reading(&payer, &name).await?),
+            None => None,
         };
         let counted = Counted {
             month,
@@ -774,14 +855,30 @@ impl ModelDoor for GuardedDoor {
 pub async fn revoke_for(state: &AgUiState, coworker_id: &CoworkerId) {
     let store = &state.auth.store;
     // The row stays, marked: a retired coworker's month still counts toward its owner's pool.
-    let row = match store.mark_coworker_key_revoked(coworker_id, now_ms()).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
+    // EVERY key, not the owner's: a shared coworker has one per member, and revoking only the
+    // hirer's would leave every other member holding a live credential on a retired coworker.
+    let rows = match store
+        .mark_coworker_keys_revoked(coworker_id, now_ms())
+        .await
+    {
+        Ok(rows) if rows.is_empty() => return,
+        Ok(rows) => rows,
         Err(error) => {
-            tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key row could not be marked revoked at retirement");
+            tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the key rows could not be marked revoked at retirement");
             return;
         }
     };
+    for row in rows {
+        revoke_one(state, coworker_id, row).await;
+    }
+}
+
+async fn revoke_one(
+    state: &AgUiState,
+    coworker_id: &CoworkerId,
+    row: opengrok_store::CoworkerKeyView,
+) {
+    let store = &state.auth.store;
     if let Some(admin) = state.auth.gateway_admin.as_ref() {
         if let Err(error) = admin.revoke_key(&row.key_id).await {
             tracing::error!(%error, key = %row.key_id, "spend cap: a retired coworker's key could not be revoked on the gateway");
@@ -789,7 +886,7 @@ pub async fn revoke_for(state: &AgUiState, coworker_id: &CoworkerId) {
     } else {
         tracing::error!(key = %row.key_id, "spend cap: no gateway admin connection; a retired coworker's key is still live on the gateway");
     }
-    if let Err(error) = store.delete_secret(&secret_id(coworker_id)).await {
+    if let Err(error) = store.delete_secret(&secret_id_of(&row, coworker_id)).await {
         tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the sealed key could not be dropped");
     }
     if let Ok((account, _)) = store
@@ -843,7 +940,7 @@ mod tests {
             cap: Some(100_000),
             day_cap: Some(30_000),
             pool: Some(1_000_000),
-            ..Default::default()
+            ..crate::points::Effective::none_set()
         };
         assert_eq!(
             over_points("New Bot", &limits, &counted(99_999, 100, Some(500_000))),
@@ -873,7 +970,7 @@ mod tests {
         // A cap alone says nothing about a pool.
         let cap_only = crate::points::Effective {
             cap: Some(1_000),
-            ..Default::default()
+            ..crate::points::Effective::none_set()
         };
         let s = over_points("Ada", &cap_only, &counted(1_000, 0, None)).unwrap();
         assert_eq!(
@@ -885,7 +982,7 @@ mod tests {
         assert_eq!(
             over_points(
                 "Ada",
-                &crate::points::Effective::default(),
+                &crate::points::Effective::none_set(),
                 &counted(1, 1, None)
             ),
             None

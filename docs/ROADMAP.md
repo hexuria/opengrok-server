@@ -524,6 +524,33 @@ REST ignored a requested model and stored the deployment default. Investigation:
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.
 Listing them as pending would make this tracker lie about how far away done is.
 
+## Slice 19 — a coworker somebody else can meet
+
+A coworker was a private thing with no stated purpose: the model was told a name and nothing
+else, and nobody but the owner could ever see the row. This slice gives a coworker a job it
+remembers and an owner's decision to share it — and, before any sharing is switched on, makes
+every record that sharing would otherwise break carry whose it is.
+
+- [x] **19.1** A standing role, composed into ONE system message on every run
+  (`server/src/persona.rs`), pinned on the run at start so a resume tells the model what the
+  first turn was told. The role lives in its own aggregate column, and the seam-B profile blob
+  is structurally unable to supply one. `PATCH /coworkers/{id}` takes `role`; 1000 characters,
+  refused with the count. `tests/against_role.rs`. PR #51 (`c83d128`, `e25f95e`).
+- [x] **19.2** `Visibility` (private / org), the roster's permission fields, and an account on
+  the remembered "allow once" — a consent record with no owner fails open the moment two people
+  can reach one coworker. `org` is REFUSED with a sentence until 19.4: a 200 would tell somebody
+  their coworker was shared when it was not. `tests/against_visibility.rs`. PR #52.
+- [x] **19.3** A gateway key per (coworker, MEMBER), so a shared coworker's turns bill whoever
+  is talking. The pair is the row's identity, the payer's pool sums the payer's own keys
+  wherever they are, retirement revokes every member's key rather than the hirer's, and all
+  three per-coworker caches re-key on the pair. `ModelRequest` carries `spend_actor` beside
+  `spend_scope`. `tests/against_member_keys.rs`.
+- [ ] **19.4** A transcript per (coworker, member): a nullable `account_id` on the entry rows
+  and a predicate on all six readers. Until this lands the roster is deliberately NOT widened —
+  `coworkers_for` is also the authorization primitive, and widening it first would put two
+  people in one conversation. Deleting the `org` refusal in 19.2 is part of this step, not of a
+  later one.
+
 ## Later — unordered, deliberately
 
 - [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one

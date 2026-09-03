@@ -412,6 +412,12 @@ pub struct CoworkerKeyView {
     /// Set at retirement. The row stays: its month's points still count toward the owner's
     /// pool, so retire-and-rehire does not reset a member's month.
     pub revoked_at_ms: Option<i64>,
+    /// `true` when the sealed secret is at the per-(coworker, member) id; `false` for a row
+    /// written before there was more than one key per coworker, whose secret is at the older
+    /// per-coworker id. The vault binds the id into the ciphertext, so the old rows cannot be
+    /// moved — they are read where they are. Never infer this from the account: a member whose
+    /// secret went missing would then be handed the owner's.
+    pub secret_scoped: bool,
 }
 
 /// A freshly minted key to record — attribution only; the secret is not here and never was.
@@ -450,6 +456,7 @@ fn coworker_key_row(row: sqlx::postgres::PgRow) -> StoreResult<CoworkerKeyView> 
         quota_usd: row.try_get("quota_usd")?,
         created_at_ms: row.try_get("created_at_ms")?,
         revoked_at_ms: row.try_get("revoked_at_ms")?,
+        secret_scoped: row.try_get("secret_scoped")?,
     })
 }
 
@@ -552,12 +559,14 @@ impl PgStore {
     pub async fn insert_coworker_key(&self, view: &CoworkerKeyView) -> StoreResult<()> {
         sqlx::query(
             "insert into coworker_gateway_key
-                (coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms)
-             values ($1, $2, $3, $4, $5, $6)
-             on conflict (coworker_id) do update
-                set account_id = excluded.account_id, key_id = excluded.key_id,
+                (coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                 secret_scoped)
+             values ($1, $2, $3, $4, $5, $6, $7)
+             on conflict (coworker_id, account_id) do update
+                set key_id = excluded.key_id,
                     key_prefix = excluded.key_prefix, quota_usd = excluded.quota_usd,
-                    created_at_ms = excluded.created_at_ms",
+                    created_at_ms = excluded.created_at_ms,
+                    secret_scoped = excluded.secret_scoped",
         )
         .bind(&view.coworker_id)
         .bind(&view.account_id)
@@ -565,6 +574,7 @@ impl PgStore {
         .bind(&view.key_prefix)
         .bind(&view.quota_usd)
         .bind(view.created_at_ms)
+        .bind(view.secret_scoped)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -602,41 +612,61 @@ impl PgStore {
             .collect()
     }
 
+    /// The key this PERSON uses to talk to this coworker. Two arguments, not one: a shared
+    /// coworker has a key per member, and the coworker id alone would hand back whichever row
+    /// the planner reached first — somebody else's credential, billed to somebody else.
     pub async fn coworker_key(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
     ) -> StoreResult<Option<CoworkerKeyView>> {
         let row = sqlx::query(
             "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
-                    revoked_at_ms
-             from coworker_gateway_key where coworker_id = $1",
+                    revoked_at_ms, secret_scoped
+             from coworker_gateway_key where coworker_id = $1 and account_id = $2",
         )
         .bind(coworker.as_str())
+        .bind(account.as_str())
         .fetch_optional(self.pool())
         .await?;
         row.map(coworker_key_row).transpose()
     }
 
-    /// Mark the coworker's key row revoked (retirement); the caller revokes on the gateway and
-    /// drops the sealed secret. The row STAYS: its month's points still count toward the
-    /// owner's pool. Returns what was there so the caller knows which key to revoke; `None`
-    /// when there was no row or it was already marked.
-    pub async fn mark_coworker_key_revoked(
+    /// Every key ever minted for this coworker, one per member who has talked to it. Retirement
+    /// revokes all of them; the console's "is it metered" read asks about one person's.
+    pub async fn coworker_keys(&self, coworker: &CoworkerId) -> StoreResult<Vec<CoworkerKeyView>> {
+        let rows = sqlx::query(
+            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                    revoked_at_ms, secret_scoped
+             from coworker_gateway_key where coworker_id = $1 order by created_at_ms",
+        )
+        .bind(coworker.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(coworker_key_row).collect()
+    }
+
+    /// Mark EVERY key this coworker has revoked (retirement); the caller revokes each on the
+    /// gateway and drops the sealed secrets. The rows STAY: each member's month still counts
+    /// toward their own pool. Returns what was live so the caller knows which keys to revoke —
+    /// empty when there were none or they were already marked. A retirement that revoked only
+    /// the owner's key would leave every other member's credential live on a retired coworker.
+    pub async fn mark_coworker_keys_revoked(
         &self,
         coworker: &CoworkerId,
         at_ms: i64,
-    ) -> StoreResult<Option<CoworkerKeyView>> {
-        let row = sqlx::query(
+    ) -> StoreResult<Vec<CoworkerKeyView>> {
+        let rows = sqlx::query(
             "update coworker_gateway_key set revoked_at_ms = $2
              where coworker_id = $1 and revoked_at_ms is null
              returning coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
-                       revoked_at_ms",
+                       revoked_at_ms, secret_scoped",
         )
         .bind(coworker.as_str())
         .bind(at_ms)
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
         .await?;
-        row.map(coworker_key_row).transpose()
+        rows.into_iter().map(coworker_key_row).collect()
     }
 
     /// Every key row an account's coworkers ever had, revoked ones included — the pool read
@@ -647,7 +677,7 @@ impl PgStore {
     ) -> StoreResult<Vec<CoworkerKeyView>> {
         let rows = sqlx::query(
             "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
-                    revoked_at_ms
+                    revoked_at_ms, secret_scoped
              from coworker_gateway_key where account_id = $1 order by created_at_ms",
         )
         .bind(account.as_str())

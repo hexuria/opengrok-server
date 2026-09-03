@@ -1366,8 +1366,12 @@ pub async fn run(
     }
 
     let request = ModelRequest {
-        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref()).await,
+        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
+            .await,
         spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
+        // An anonymous AG-UI run names nobody, so it is billed to nobody and the guard lets it
+        // through on the deployment's key — the same door an anonymous caller already had.
+        spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
         model,
         system: None,
         messages: to_chat_messages(&input),
@@ -1902,7 +1906,7 @@ async fn continue_run(
     let journal = StoreJournal {
         state: state.clone(),
         thread_id: run.thread_id.clone(),
-        account_id: Some(account_id),
+        account_id: Some(account_id.clone()),
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
         // This path composes no system message; a resume of it has none to restore.
@@ -1910,8 +1914,11 @@ async fn continue_run(
     };
 
     let request = ModelRequest {
-        gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref()).await,
+        gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref(), Some(&account_id))
+            .await,
         spend_scope: run.coworker_id.as_ref().map(|c| c.as_str().to_string()),
+        // The person who answered the card is the person this continuation is for.
+        spend_actor: Some(account_id.as_str().to_string()),
         // The pin the turn started on, not the coworker's current one. A coworker that was
         // repinned while this run waited on a card must not change what the continuation thinks
         // with. Logs written before the pin was stored fall back to the current pin.
@@ -2102,6 +2109,7 @@ mod tests {
             ModelRequest {
                 gateway_key: None,
                 spend_scope: None,
+                spend_actor: None,
                 model: "mock".to_string(),
                 system: None,
                 messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),

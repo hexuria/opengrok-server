@@ -182,6 +182,7 @@ mod tests {
         ModelRequest {
             gateway_key: None,
             spend_scope: None,
+            spend_actor: None,
             model: "oag/cheap".to_string(),
             system: None,
             tools: Vec::new(),

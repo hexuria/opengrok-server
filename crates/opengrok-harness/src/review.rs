@@ -121,7 +121,10 @@ impl ReviewJudge for ModelJudge {
     async fn judge(&self, ask: ReviewAsk<'_>) -> ReviewVerdict {
         let request = ModelRequest {
             gateway_key: None,
+            // The judge is the deployment's own call, not a coworker's turn: no scope, so the
+            // guard passes it straight through, and no actor because there is nobody to bill.
             spend_scope: None,
+            spend_actor: None,
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage {
