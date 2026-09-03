@@ -541,6 +541,9 @@ the records that sharing would otherwise break carry whose they are.
   (`visibility`, `mine`, `canManage`, `owner`), and an account on the remembered "allow once".
   A consent record with no owner fails open the moment two people can reach one coworker: one
   member's yes would authorise another member's command. The column lands BEFORE sharing does.
+  `org` is REFUSED with a sentence until 19.4: nothing reads visibility yet, and a 200 would
+  tell somebody their coworker was shared when it was not. The aggregate records and replays
+  `Org` already, so that refusal is one branch to delete rather than a feature to build.
   `tests/against_visibility.rs`.
 - [ ] **19.3** A gateway key per (member, coworker), so a shared coworker's spend is billed to
   whoever is talking rather than to its owner. All three guard caches re-key with it.

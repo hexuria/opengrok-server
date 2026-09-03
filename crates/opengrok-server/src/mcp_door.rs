@@ -538,6 +538,10 @@ impl McpDoor {
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
         let store = &self.state.agui.auth.store;
+        // PAIRED WITH the remember in `gateway/conversation.rs`, which writes the account of
+        // whoever pressed approve. A yes is spendable only by the account that gave it, so if
+        // these two ever resolve to different people the yes is silently lost and the retry
+        // asks again. See the note at that call site before sharing goes live.
         let once = take_mcp_allow_once_stamped(
             store,
             &principal.coworker,

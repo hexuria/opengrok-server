@@ -1755,6 +1755,14 @@ pub async fn resolve_auto_review_approval(
                 &coworker_id,
                 // The person who pressed the button owns the yes, so only their retry can
                 // spend it. On a shared coworker another member's retry must ask again.
+                //
+                // PAIRED WITH the take in `mcp_door.rs`, which binds `principal.account` off
+                // the MCP session. These two must resolve to the SAME account or a yes is
+                // written that can never be spent — fail-closed, so not a security bug, but it
+                // would present as "approvals do not work on shared coworkers". Today they
+                // cannot differ, because only an owner can reach a coworker at all. When the
+                // roster widens (19.4) a non-owner may answer a card while the session's bot
+                // key belongs to the owner; check this pairing then rather than assume it.
                 Some(account_id.as_str()),
                 &pending.tool,
                 &pending.arguments,

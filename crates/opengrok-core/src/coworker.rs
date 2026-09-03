@@ -784,4 +784,53 @@ mod tests {
             Err(CoworkerError::NotAGroup)
         ));
     }
+    /// The HTTP route refuses `org` today, because nothing reads visibility yet and a 200 would
+    /// tell somebody their coworker was shared when it was not. This test is what makes that
+    /// refusal one branch to delete rather than a feature to build later: the aggregate already
+    /// records the decision and replays it. Do not delete this when the route's arm goes.
+    #[test]
+    fn org_is_a_decision_the_aggregate_already_records_and_replays() {
+        let mut coworker = hired();
+        assert_eq!(
+            coworker.visibility,
+            Visibility::Private,
+            "private until its owner says otherwise"
+        );
+
+        let decided = coworker
+            .decide(CoworkerCommand::SetVisibility {
+                visibility: Visibility::Org,
+                at_ms: 3,
+            })
+            .unwrap();
+        assert!(matches!(
+            decided.as_slice(),
+            [CoworkerEvent::VisibilitySet {
+                visibility: Visibility::Org,
+                ..
+            }]
+        ));
+        for event in &decided {
+            coworker.apply(event);
+        }
+        assert_eq!(coworker.visibility, Visibility::Org, "the event carries it");
+
+        // And back, so unsharing is a decision too rather than the absence of one.
+        for event in coworker
+            .decide(CoworkerCommand::SetVisibility {
+                visibility: Visibility::Private,
+                at_ms: 4,
+            })
+            .unwrap()
+        {
+            coworker.apply(&event);
+        }
+        assert_eq!(coworker.visibility, Visibility::Private);
+
+        // A word we do not recognise reads as nothing rather than as a guess: a value written by
+        // a newer replica must never widen who can see a coworker on an older one.
+        assert_eq!(Visibility::parse("everyone"), None);
+        assert_eq!(Visibility::parse("org"), Some(Visibility::Org));
+        assert_eq!(Visibility::Org.as_str(), "org");
+    }
 }

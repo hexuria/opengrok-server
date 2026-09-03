@@ -229,21 +229,39 @@ async fn visibility_is_private_until_its_owner_shares_it_and_the_roster_says_who
         "a shared row has to be able to say whose it is: {row}"
     );
 
-    // Shared, and back again.
-    let (status, shared) = h
+    // `org` is refused, and the refusal is the point of this PR. Nothing reads visibility yet:
+    // the roster is still owner-scoped and a transcript is still one thread per coworker. A 200
+    // here would report `visibility: "org"` back and share nothing — telling somebody their work
+    // is visible to their org when it is not. A recognised word that cannot take effect is
+    // refused exactly like a word we do not have.
+    let (status, refused) = h
         .patch(&access, &agent, json!({ "visibility": "org" }))
         .await;
-    assert_eq!(status, 200, "{shared}");
-    assert_eq!(shared["visibility"], "org", "{shared}");
-    assert_eq!(h.row(&agent).await["visibility"], "org");
-    let (status, back) = h
+    assert_eq!(status, 400, "{refused}");
+    let sentence = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        sentence.contains("sharing is not switched on yet"),
+        "the refusal has to say why, not just no: {refused}"
+    );
+    assert!(
+        sentence.contains("shared when it is not"),
+        "and it has to say what the refusal is protecting: {refused}"
+    );
+    assert_eq!(
+        h.row(&agent).await["visibility"],
+        "private",
+        "a refused share stores nothing"
+    );
+
+    // Setting it to what it already is still answers, so a client that sends the whole row back
+    // is not refused for saying "private".
+    let (status, same) = h
         .patch(&access, &agent, json!({ "visibility": "private" }))
         .await;
-    assert_eq!(status, 200, "{back}");
-    assert_eq!(back["visibility"], "private", "{back}");
+    assert_eq!(status, 200, "{same}");
+    assert_eq!(same["visibility"], "private", "{same}");
 
-    // A word we do not offer is refused rather than defaulted: quietly storing "private" would
-    // tell somebody they had shared a coworker they had not.
+    // A word we do not offer at all is refused differently, and says so.
     let (status, refused) = h
         .patch(&access, &agent, json!({ "visibility": "public" }))
         .await;
@@ -256,23 +274,27 @@ async fn visibility_is_private_until_its_owner_shares_it_and_the_roster_says_who
     assert_eq!(status, 400);
     assert_eq!(h.row(&agent).await["visibility"], "private", "unchanged");
 
-    // Model, role and visibility travel independently on the same route.
-    let (status, both) = h
+    // Model, role and visibility travel independently on the same route, and a refused
+    // visibility refuses the WHOLE patch rather than half-applying the role beside it.
+    let (status, refused) = h
         .patch(
             &access,
             &agent,
             json!({ "role": "Keeps the changelog.", "visibility": "org" }),
         )
         .await;
-    assert_eq!(status, 200, "{both}");
-    assert_eq!(both["role"], "Keeps the changelog.");
-    assert_eq!(both["visibility"], "org");
-    let (status, only_role) = h.patch(&access, &agent, json!({ "role": null })).await;
-    assert_eq!(status, 200, "{only_role}");
+    assert_eq!(status, 400, "{refused}");
     assert_eq!(
-        only_role["visibility"], "org",
-        "clearing a role does not unshare a coworker"
+        h.row(&agent).await["role"],
+        Value::Null,
+        "the role did not land beside a refused share"
     );
+    let (status, only_role) = h
+        .patch(&access, &agent, json!({ "role": "Keeps the changelog." }))
+        .await;
+    assert_eq!(status, 200, "{only_role}");
+    assert_eq!(only_role["role"], "Keeps the changelog.");
+    assert_eq!(only_role["visibility"], "private");
 
     // Another account still cannot touch it, shared or not — sharing is not a write grant, and
     // the roster does not widen until transcripts are per member.
