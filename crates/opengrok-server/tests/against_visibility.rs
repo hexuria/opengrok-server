@@ -1,9 +1,9 @@
-//! The standing role, from the field to the model's ears.
+//! Visibility, the roster's permission fields, and whose consent a remembered "allow once" is.
 //!
-//! A role that is stored but never reaches the model is decoration, so this drives the real HTTP
-//! surface and then reads what the model was actually told — the mock door answers with its own
-//! system prompt, which is the only way to prove the composition arrived rather than that the
-//! code meant to send it. Needs Postgres; skips loudly without OG_DATABASE_URL.
+//! The roster still returns only the caller's own coworkers — widening it before transcripts are
+//! keyed per member would put two people in one conversation, which is the thing this slice
+//! forbids. So the fields are proven honest now and the widening lands with the entry re-key.
+//! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -96,13 +96,13 @@ async fn harness(database_url: &str, email: &str) -> Harness {
     let account = seed_account(&store, email).await;
     let auth = AuthState::new(
         store.clone(),
-        Arc::new(TokenMinter::new(b"role-test-secret")),
+        Arc::new(TokenMinter::new(b"visibility-test-secret")),
         email.to_string(),
     );
     let agui = AgUiState {
         auth,
         // Says back its system prompt: what the model was TOLD is what it answers.
-        door: Arc::new(MockDoor::echoing_the_system_prompt()),
+        door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
         computer: None,
@@ -202,29 +202,6 @@ impl Harness {
         )
     }
 
-    /// The last thing the coworker said — which, with this door, is its system prompt.
-    async fn what_the_model_was_told(&self, agent: &str) -> String {
-        for _ in 0..100 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 50 }),
-                )
-                .await;
-            if let Some(said) = tail["entries"].as_array().and_then(|entries| {
-                entries.iter().rev().find_map(|e| {
-                    (e["kind"] == "send-message" && e["streaming"] != json!(true))
-                        .then(|| e["message"]["content"].as_str().unwrap_or("").to_string())
-                        .filter(|said| !said.is_empty())
-                })
-            }) {
-                return said;
-            }
-        }
-        panic!("the coworker never answered in 10s");
-    }
-
     async fn row(&self, id: &str) -> Value {
         let (_, rows) = self.api("listAgents", json!({})).await;
         rows.as_array()
@@ -234,135 +211,186 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_it() {
+async fn visibility_is_private_until_its_owner_shares_it_and_the_roster_says_who_may_manage() {
     let database_url = database_or_skip!();
-    let email = format!("role-{}@og.local", uuid::Uuid::now_v7().simple());
+    let email = format!("vis-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness(&database_url, &email).await;
     let access = h.access_token(&h.account.clone(), &email);
     let agent = h.hire("Ada").await;
 
-    // No role yet: the model is still told who it is, and the roster says the role is null
-    // rather than omitting the field.
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "hello", "clientNonce": format!("n0-{}", now_ms()) }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
-    let told = h.what_the_model_was_told(&agent).await;
-    assert!(told.starts_with("You are Ada."), "{told}");
-    assert!(
-        told.contains("your OWN computer") || told.contains("do NOT currently have a computer"),
-        "the machine discipline survives the composition: {told}"
-    );
+    // Private by default. Nobody has to opt out of sharing.
     let row = h.row(&agent).await;
+    assert_eq!(row["visibility"], "private", "{row}");
+    assert_eq!(row["mine"], json!(true), "{row}");
+    assert_eq!(row["canManage"], json!(true), "{row}");
+    assert_eq!(row["owner"]["id"], json!(h.account.as_str()), "{row}");
     assert!(
-        row.get("role").is_some() && row["role"].is_null(),
-        "present and null, not absent: {row}"
+        row["owner"]["name"].as_str().is_some(),
+        "a shared row has to be able to say whose it is: {row}"
     );
 
-    // A role is set through PATCH, comes back on the reply and on the roster.
-    let (status, patched) = h
-        .patch(
-            &access,
-            &agent,
-            json!({ "role": "  Keep the changelog honest.  " }),
-        )
+    // Shared, and back again.
+    let (status, shared) = h
+        .patch(&access, &agent, json!({ "visibility": "org" }))
         .await;
-    assert_eq!(status, 200, "{patched}");
-    assert_eq!(
-        patched["role"], "Keep the changelog honest.",
-        "trimmed: {patched}"
-    );
-    assert_eq!(h.row(&agent).await["role"], "Keep the changelog honest.");
-
-    // And it reaches the model, once, in the composed order, with the computer paragraph after.
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "again", "clientNonce": format!("n1-{}", now_ms()) }),
-        )
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(shared["visibility"], "org", "{shared}");
+    assert_eq!(h.row(&agent).await["visibility"], "org");
+    let (status, back) = h
+        .patch(&access, &agent, json!({ "visibility": "private" }))
         .await;
-    assert_eq!(status, 200);
-    let told = h.what_the_model_was_told(&agent).await;
-    assert!(
-        told.starts_with("You are Ada.\n\nKeep the changelog honest."),
-        "{told}"
-    );
-    assert!(
-        told.contains("That role stands in every conversation"),
-        "the standing sentence is what stops it reading as this turn's instruction: {told}"
-    );
-    let identity_at = told.find("You are Ada.").expect("identity");
-    let role_at = told.find("Keep the changelog honest.").expect("role");
-    let computer_at = told
-        .find("computer")
-        .expect("the machine paragraph is still there");
-    assert!(
-        identity_at < role_at && role_at < computer_at,
-        "order: {told}"
-    );
-    assert_eq!(
-        told.matches("You are Ada.").count(),
-        1,
-        "one identity line: {told}"
-    );
+    assert_eq!(status, 200, "{back}");
+    assert_eq!(back["visibility"], "private", "{back}");
 
-    // Refusals are a 400 with a sentence, and they say the numbers.
+    // A word we do not offer is refused rather than defaulted: quietly storing "private" would
+    // tell somebody they had shared a coworker they had not.
     let (status, refused) = h
-        .patch(&access, &agent, json!({ "role": "x".repeat(1001) }))
+        .patch(&access, &agent, json!({ "visibility": "public" }))
         .await;
     assert_eq!(status, 400, "{refused}");
     assert_eq!(
         refused["error"],
-        "role: 1001 characters is longer than the 1000 allowed"
+        "visibility: 'public' is not one of private, org"
     );
-    let (status, refused) = h.patch(&access, &agent, json!({ "role": 7 })).await;
-    assert_eq!(status, 400, "{refused}");
-    let (status, refused) = h.patch(&access, &agent, json!({})).await;
-    assert_eq!(status, 400, "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("name a model, a role, a visibility, or several"),
-        "{refused}"
-    );
-    // The refused writes changed nothing.
-    assert_eq!(h.row(&agent).await["role"], "Keep the changelog honest.");
+    let (status, _) = h.patch(&access, &agent, json!({ "visibility": 1 })).await;
+    assert_eq!(status, 400);
+    assert_eq!(h.row(&agent).await["visibility"], "private", "unchanged");
 
-    // Null clears it; so does a blank string. The model then hears no role at all.
-    let (status, cleared) = h.patch(&access, &agent, json!({ "role": null })).await;
-    assert_eq!(status, 200, "{cleared}");
-    assert!(cleared["role"].is_null(), "{cleared}");
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "third", "clientNonce": format!("n2-{}", now_ms()) }),
+    // Model, role and visibility travel independently on the same route.
+    let (status, both) = h
+        .patch(
+            &access,
+            &agent,
+            json!({ "role": "Keeps the changelog.", "visibility": "org" }),
         )
         .await;
-    assert_eq!(status, 200);
-    let told = h.what_the_model_was_told(&agent).await;
-    assert!(!told.contains("That role stands"), "{told}");
-    assert!(told.starts_with("You are Ada."), "{told}");
+    assert_eq!(status, 200, "{both}");
+    assert_eq!(both["role"], "Keeps the changelog.");
+    assert_eq!(both["visibility"], "org");
+    let (status, only_role) = h.patch(&access, &agent, json!({ "role": null })).await;
+    assert_eq!(status, 200, "{only_role}");
+    assert_eq!(
+        only_role["visibility"], "org",
+        "clearing a role does not unshare a coworker"
+    );
 
-    // A model repin still works through the same route, and leaves the role alone.
-    let (status, _) = h.patch(&access, &agent, json!({ "role": "Ships." })).await;
-    assert_eq!(status, 200);
-    let (status, repinned) = h
-        .patch(&access, &agent, json!({ "model": "oag/cheap" }))
-        .await;
-    assert_eq!(status, 200, "{repinned}");
-    assert_eq!(repinned["model"], "oag/cheap");
-    assert_eq!(repinned["role"], "Ships.", "a repin is not a role edit");
-
-    // Another account cannot read or write it.
+    // Another account still cannot touch it, shared or not — sharing is not a write grant, and
+    // the roster does not widen until transcripts are per member.
     let stranger = format!("stranger-{}@og.local", uuid::Uuid::now_v7().simple());
     let stranger_id = seed_account(&h.store, &stranger).await;
     let stranger_access = h.access_token(&stranger_id, &stranger);
     let (status, _) = h
-        .patch(&stranger_access, &agent, json!({ "role": "mine" }))
+        .patch(&stranger_access, &agent, json!({ "visibility": "private" }))
         .await;
     assert_eq!(status, 404);
+}
+
+/// A remembered "allow once" belongs to the person who gave it. Without this, sharing a coworker
+/// would let one member's yes authorise another member's command — a consent record that fails
+/// open, which CLAUDE.md #8 forbids.
+#[tokio::test]
+async fn one_members_allow_once_cannot_be_spent_by_another() {
+    let database_url = database_or_skip!();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
+    let store = PgStore::new(pool);
+
+    let coworker = opengrok_core::id::CoworkerId::new();
+    let args = json!({ "command": "echo hi" });
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let ttl = 10 * 60 * 1_000;
+    let ada = "acct_ada";
+    let bo = "acct_bo";
+
+    store
+        .remember_mcp_allow_once(
+            opengrok_store::AllowOnce {
+                coworker: &coworker,
+                account: Some(ada),
+                tool: "shell",
+                arguments: &args,
+                call_id: "call-1",
+                gate: true,
+                at_ms,
+            },
+            ttl,
+        )
+        .await
+        .expect("remember");
+
+    // Bo cannot spend Ada's yes, and neither can an anonymous caller.
+    assert!(
+        store
+            .take_mcp_allow_once(&coworker, Some(bo), "shell", &args, at_ms, ttl)
+            .await
+            .expect("take")
+            .is_none(),
+        "another member's yes is not this member's consent"
+    );
+    assert!(
+        store
+            .take_mcp_allow_once(&coworker, None, "shell", &args, at_ms, ttl)
+            .await
+            .expect("take")
+            .is_none(),
+        "and an unauthenticated caller cannot spend it either"
+    );
+
+    // Ada can, exactly once.
+    let taken = store
+        .take_mcp_allow_once(&coworker, Some(ada), "shell", &args, at_ms, ttl)
+        .await
+        .expect("take")
+        .expect("her own yes");
+    assert_eq!(taken.0, "call-1");
+    assert!(taken.1, "the gate flag survives");
+    assert!(
+        store
+            .take_mcp_allow_once(&coworker, Some(ada), "shell", &args, at_ms, ttl)
+            .await
+            .expect("take")
+            .is_none(),
+        "once means once"
+    );
+
+    // A row written before consent carried an account (NULL) stays takeable only by a caller
+    // with no account — the pre-sharing behaviour — and never by somebody else.
+    store
+        .remember_mcp_allow_once(
+            opengrok_store::AllowOnce {
+                coworker: &coworker,
+                account: None,
+                tool: "shell",
+                arguments: &args,
+                call_id: "call-legacy",
+                gate: false,
+                at_ms,
+            },
+            ttl,
+        )
+        .await
+        .expect("remember");
+    assert!(
+        store
+            .take_mcp_allow_once(&coworker, Some(ada), "shell", &args, at_ms, ttl)
+            .await
+            .expect("take")
+            .is_none(),
+        "an accountless yes is not everybody's"
+    );
+    assert_eq!(
+        store
+            .take_mcp_allow_once(&coworker, None, "shell", &args, at_ms, ttl)
+            .await
+            .expect("take")
+            .expect("the legacy row")
+            .0,
+        "call-legacy"
+    );
 }

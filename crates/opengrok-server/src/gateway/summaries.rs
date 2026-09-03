@@ -74,6 +74,7 @@ mod tests {
             members: Vec::new(),
             updated_at_ms: 1_000,
             role: None,
+            visibility: Default::default(),
         });
         assert_eq!(row["id"], "cw_1");
         assert_eq!(row["name"], "Luna");

@@ -656,6 +656,7 @@ async fn reprovision(
         members: Vec::new(),
         updated_at_ms: at_ms,
         role: coworker.role.clone(),
+        visibility: coworker.visibility,
     };
     let _ = state
         .agui
@@ -1752,6 +1753,9 @@ pub async fn resolve_auto_review_approval(
             && let Err(error) = crate::mcp_door::remember_mcp_allow_once(
                 &state.agui.auth.store,
                 &coworker_id,
+                // The person who pressed the button owns the yes, so only their retry can
+                // spend it. On a shared coworker another member's retry must ask again.
+                Some(account_id.as_str()),
                 &pending.tool,
                 &pending.arguments,
                 &pending.call_id,

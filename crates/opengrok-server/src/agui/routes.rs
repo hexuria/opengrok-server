@@ -603,8 +603,25 @@ pub async fn repin_coworker(
         },
         Some(_) => return refuse("role: expected a string, or null to clear it".to_string()),
     };
-    if model.is_none() && role.is_none() {
-        return refuse("nothing to change: name a model, a role, or both".to_string());
+    // "private" | "org". An unrecognised word is refused rather than defaulted: a caller who
+    // wrote "public" meant something we do not offer, and quietly storing "private" would tell
+    // them they had shared a coworker they had not.
+    let visibility = match body.get("visibility") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => {
+            match opengrok_core::coworker::Visibility::parse(text) {
+                Some(visibility) => Some(visibility),
+                None => {
+                    return refuse(format!("visibility: '{text}' is not one of private, org"));
+                }
+            }
+        }
+        Some(_) => return refuse("visibility: expected \"private\" or \"org\"".to_string()),
+    };
+    if model.is_none() && role.is_none() && visibility.is_none() {
+        return refuse(
+            "nothing to change: name a model, a role, a visibility, or several".to_string(),
+        );
     }
 
     let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
@@ -626,6 +643,12 @@ pub async fn repin_coworker(
             Err(error) => return refuse(error.to_string()),
         }
     }
+    if let Some(visibility) = visibility {
+        match loaded.decide(CoworkerCommand::SetVisibility { visibility, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
     let mut after = loaded.clone();
     for event in &events {
         after.apply(event);
@@ -639,6 +662,7 @@ pub async fn repin_coworker(
         members: after.members.clone(),
         updated_at_ms: at_ms,
         role: after.role.clone(),
+        visibility: after.visibility,
     };
     if state
         .auth
@@ -653,6 +677,7 @@ pub async fn repin_coworker(
         "id": coworker_id.as_str(),
         "model": after.model,
         "role": after.role,
+        "visibility": after.visibility.as_str(),
     }))
     .into_response()
 }
@@ -756,6 +781,7 @@ pub async fn hire(
         members: coworker.members.clone(),
         updated_at_ms: at_ms,
         role: coworker.role.clone(),
+        visibility: coworker.visibility,
     };
 
     if let Err(error) = state

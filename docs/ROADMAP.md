@@ -524,6 +524,31 @@ REST ignored a requested model and stored the deployment default. Investigation:
 other 24 commands sit on no path a user takes, and upstream deleted adjacent features in 0.30.
 Listing them as pending would make this tracker lie about how far away done is.
 
+## Slice 19 — a coworker somebody else can meet
+
+A coworker was a private thing with no stated purpose: the model was told a name and nothing
+else, and nobody but the owner could ever see the row. This slice gives a coworker a job it
+remembers and an owner's decision to share it — and, before any sharing is switched on, makes
+the records that sharing would otherwise break carry whose they are.
+
+- [x] **19.1** A standing role, composed into ONE system message on every run
+  (`server/src/persona.rs`), pinned on the run at start so a resume tells the model what the
+  first turn was told. The role lives in its own aggregate column, and the seam-B profile blob
+  is structurally unable to supply one — two sources for the same sentence is how they diverge.
+  `PATCH /coworkers/{id}` takes `role`; 1000 characters, refused with the count.
+  `tests/against_role.rs`. PR #51 (`c83d128`, `e25f95e`).
+- [x] **19.2** `Visibility` (private by default / org), the roster's permission fields
+  (`visibility`, `mine`, `canManage`, `owner`), and an account on the remembered "allow once".
+  A consent record with no owner fails open the moment two people can reach one coworker: one
+  member's yes would authorise another member's command. The column lands BEFORE sharing does.
+  `tests/against_visibility.rs`.
+- [ ] **19.3** A gateway key per (member, coworker), so a shared coworker's spend is billed to
+  whoever is talking rather than to its owner. All three guard caches re-key with it.
+- [ ] **19.4** A transcript per (member, coworker): a nullable `account_id` on the entry rows
+  and a predicate on all six readers. Until this lands the roster is deliberately NOT widened —
+  `coworkers_for` is also the authorization primitive, and widening it first would put two
+  people in one conversation. `visibility` is recorded and honest; nothing reads it yet.
+
 ## Later — unordered, deliberately
 
 - [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one

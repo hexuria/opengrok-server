@@ -281,6 +281,7 @@ pub const ALLOW_ONCE_TTL_MS: i64 = 10 * 60 * 1_000;
 pub async fn remember_mcp_allow_once(
     store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
+    account: Option<&str>,
     tool: &str,
     arguments: &serde_json::Value,
     call_id: &str,
@@ -288,12 +289,15 @@ pub async fn remember_mcp_allow_once(
 ) -> Result<(), opengrok_store::StoreError> {
     remember_mcp_allow_once_at(
         store,
-        coworker,
-        tool,
-        arguments,
-        call_id,
-        gate,
-        chrono::Utc::now().timestamp_millis(),
+        opengrok_store::AllowOnce {
+            coworker,
+            account,
+            tool,
+            arguments,
+            call_id,
+            gate,
+            at_ms: chrono::Utc::now().timestamp_millis(),
+        },
     )
     .await
 }
@@ -302,26 +306,9 @@ pub async fn remember_mcp_allow_once(
 /// against a down computer does not renew an approval every time it fails to run.
 async fn remember_mcp_allow_once_at(
     store: &opengrok_store::PgStore,
-    coworker: &CoworkerId,
-    tool: &str,
-    arguments: &serde_json::Value,
-    call_id: &str,
-    gate: bool,
-    at_ms: i64,
+    once: opengrok_store::AllowOnce<'_>,
 ) -> Result<(), opengrok_store::StoreError> {
-    store
-        .remember_mcp_allow_once(
-            opengrok_store::AllowOnce {
-                coworker,
-                tool,
-                arguments,
-                call_id,
-                gate,
-                at_ms,
-            },
-            ALLOW_ONCE_TTL_MS,
-        )
-        .await
+    store.remember_mcp_allow_once(once, ALLOW_ONCE_TTL_MS).await
 }
 
 /// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate)`. Matched
@@ -330,10 +317,11 @@ async fn remember_mcp_allow_once_at(
 pub async fn take_mcp_allow_once(
     store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
+    account: Option<&str>,
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Option<(String, bool)> {
-    take_mcp_allow_once_stamped(store, coworker, tool, arguments)
+    take_mcp_allow_once_stamped(store, coworker, account, tool, arguments)
         .await
         .map(|(call_id, gate, _)| (call_id, gate))
 }
@@ -342,12 +330,14 @@ pub async fn take_mcp_allow_once(
 async fn take_mcp_allow_once_stamped(
     store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
+    account: Option<&str>,
     tool: &str,
     arguments: &serde_json::Value,
 ) -> Option<(String, bool, i64)> {
     match store
         .take_mcp_allow_once(
             coworker,
+            account,
             tool,
             arguments,
             chrono::Utc::now().timestamp_millis(),
@@ -548,9 +538,14 @@ impl McpDoor {
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
         let store = &self.state.agui.auth.store;
-        let once =
-            take_mcp_allow_once_stamped(store, &principal.coworker, &call.name, &call.arguments)
-                .await;
+        let once = take_mcp_allow_once_stamped(
+            store,
+            &principal.coworker,
+            Some(principal.account.as_str()),
+            &call.name,
+            &call.arguments,
+        )
+        .await;
         if let Some((id, _, _)) = once.as_ref() {
             call.id = id.clone();
         } else {
@@ -679,12 +674,15 @@ impl McpDoor {
     ) {
         if let Err(error) = remember_mcp_allow_once_at(
             store,
-            &principal.coworker,
-            &call.name,
-            &call.arguments,
-            call_id,
-            gate,
-            at_ms,
+            opengrok_store::AllowOnce {
+                coworker: &principal.coworker,
+                account: Some(principal.account.as_str()),
+                tool: &call.name,
+                arguments: &call.arguments,
+                call_id,
+                gate,
+                at_ms,
+            },
         )
         .await
         {
