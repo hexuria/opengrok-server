@@ -394,6 +394,15 @@ async fn command(
     // yours", and a 404 where the verb's own not-found answer is `null` is the same disclosure
     // one step removed, because a stranger can then tell a real id from an invented one by which
     // shape comes back. So refusal and never-heard-of-it are the same reply, per verb.
+    //
+    // STILL OPEN, and written here rather than only in a pull request: the refusal answers from a
+    // table immediately, while a genuine unknown id answers the same shape after the handler has
+    // been to the store and come back empty. Same bytes, different latency, so the two are still
+    // sortable by somebody who can time replies. The fix is not a matching dummy lookup — that
+    // matches only until either query changes, and nothing makes them change together. It is to
+    // make authorisation part of the LOOKUP (`coworker_for(caller, id) -> Option<_>`, `None` for
+    // both cases), so there is no second path to keep matching and no table to keep in step.
+    // Roadmap 19.5.
     if let Some(agent) = names_a_coworker(&method, &args) {
         let coworker = CoworkerId::from_stored(agent);
         match may_use(&state, &caller, &coworker).await {
@@ -903,6 +912,20 @@ pub const ANSWERS_A_CONSTANT: &[&str] = &[
     "submitSecret",
 ];
 
+/// Ids that are definitely NOT a coworker's. `id` on the wire means different things on
+/// different verbs — the coworker on `openAgent` and the transcript reads, the AUTOMATION on
+/// `setAgentAutomationEnabled` — so the fallback below has to tell them apart. It does it by the
+/// prefix every id in `opengrok-core::id` carries, and it is a DENYLIST on purpose: an id whose
+/// shape is not recognised is treated as a coworker's and checked, which is the narrow side.
+/// Listing the coworker-naming verbs instead would leave a new one unchecked by default.
+///
+/// Learned from `slice15-lifecycle-smoke.sh`, which disabled an automation and got "no such
+/// agent" back: the gate had read a schedule id as a coworker id and refused a verb that never
+/// named a coworker at all.
+const NOT_A_COWORKER_ID: &[&str] = &[
+    "acct_", "box_", "e_", "mon_", "org_", "pr_", "run_", "sched_", "sess_",
+];
+
 /// The coworker a verb acts on, when it names one. Reads `agentId` first (the client's name for
 /// it on nearly every verb) and then `id`, which `openAgent` and the transcript reads use.
 ///
@@ -912,10 +935,17 @@ fn names_a_coworker(method: &str, args: &Value) -> Option<String> {
     if method == "createAgent" || method == "createGroup" || ANSWERS_A_CONSTANT.contains(&method) {
         return None;
     }
-    args.get("agentId")
+    if let Some(agent) = args.get("agentId").and_then(Value::as_str) {
+        return (!agent.is_empty()).then(|| agent.to_string());
+    }
+    args.get("id")
         .and_then(Value::as_str)
-        .or_else(|| args.get("id").and_then(Value::as_str))
-        .filter(|id| !id.is_empty())
+        .filter(|id| {
+            !id.is_empty()
+                && !NOT_A_COWORKER_ID
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
+        })
         .map(str::to_string)
 }
 
