@@ -490,7 +490,9 @@ pub async fn list_models(
                 "id": model.id,
                 // Points multipliers (`points.rs`): null on a gateway with no reference price
                 // or older than open-ai-gateway #52; the picker shows ×N after the id.
-                "points": crate::points::points_json(points.as_ref().and_then(|p| p.get(&model.id))),
+                "points": crate::points::points_json(
+                    points.as_ref().and_then(|p| p.get(crate::points::base_model(&model.id))),
+                ),
             }))
             .collect::<Vec<_>>(),
         "note": listing.note,
