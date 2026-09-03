@@ -539,6 +539,14 @@ pub async fn models_points(state: &AgUiState) -> Option<HashMap<String, ModelPoi
     fetched
 }
 
+/// The catalog id an advertised id prices at: `xai/grok-4.6@sub` and `xai/grok-4.6@api` are
+/// the same model on two credentials, and the gateway's multipliers are listed by catalog id
+/// alone — so an alias inherits its base model's. A ladder id (`oag/cheap`) has no base price
+/// and stays null.
+pub fn base_model(id: &str) -> &str {
+    id.split_once('@').map_or(id, |(base, _)| base)
+}
+
 /// The `points` object a `/models` entry carries, or null.
 pub fn points_json(model: Option<&ModelPoints>) -> Value {
     match model {
@@ -557,6 +565,14 @@ pub fn points_json(model: Option<&ModelPoints>) -> Value {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_alias_prices_at_its_base_model() {
+        assert_eq!(base_model("xai/grok-4.6@sub"), "xai/grok-4.6");
+        assert_eq!(base_model("openai/gpt-5.5@api"), "openai/gpt-5.5");
+        assert_eq!(base_model("xai/grok-4.6"), "xai/grok-4.6");
+        assert_eq!(base_model("oag/cheap"), "oag/cheap");
+    }
 
     #[test]
     fn points_are_written_with_commas() {
