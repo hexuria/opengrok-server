@@ -218,12 +218,12 @@ pub async fn roster_rows_for(
     let Some(account) = state.agui.auth.store.account_by_email(email).await? else {
         return Ok(Vec::new());
     };
-    // Ownership, not visibility. `coworkers_for` is ALSO the authorisation primitive that
-    // `owned_coworker` gates every per-coworker route on, so widening it here would silently make
-    // every org member able to write every other member's limits. The org-visible rows will come
-    // from a separate `roster_for`, added when transcripts are keyed per member — until then a
-    // shared coworker would put two people in one conversation, which is the thing S2 forbids.
-    let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;
+    // Owned rows AND the ones this person's org-mates have shared. A SEPARATE read from
+    // `coworkers_for`, which stays owner-only because it is the authorisation primitive
+    // `owned_coworker` gates management on — repin, retire, limits, computer. Sharing a coworker
+    // lets somebody talk to it; it is not a write grant, and widening one query would have made
+    // it one.
+    let coworkers = state.agui.auth.store.roster_for(&account.id).await?;
 
     // The account's provisioning error (if any) is stamped on its BOXLESS agents, so the roster can
     // say why a bot has no computer. An agent that has a box carries null.
@@ -236,26 +236,27 @@ pub async fn roster_rows_for(
         .ok()
         .flatten();
     let mut rows = Vec::new();
-    for view in coworkers.iter().filter(|view| !view.retired) {
+    for (view, owner) in coworkers.iter().filter(|(view, _)| !view.retired) {
+        let mine = owner.id == account.id;
         let mut row = live_summary(state, view).await;
         // A group has members instead of a computer: the account's provisioning error is not
         // its problem, and a "no computer" note on a group would send a person chasing one.
-        row["computerError"] = if view.box_id.is_none() && view.members.is_empty() {
+        // Somebody else's coworker carries null too — their provisioning trouble is theirs, and
+        // naming it on a shared row would leak the state of an account this reader is not in.
+        row["computerError"] = if mine && view.box_id.is_none() && view.members.is_empty() {
             crate::agui::provision::error_json(&account_error)
         } else {
             Value::Null
         };
-        // The permission fields, decided by the server on every row (S2). `mine` is ownership;
-        // `canManage` is the owner or the org's admin; `owner` names the hirer so a shared row
-        // can say whose it is. Every row here is the caller's own today, so `mine` is true —
-        // the fields exist and are honest now so the desktop needs no change when the roster
-        // widens.
+        // The permission fields, decided by the server on every row. `mine` is ownership;
+        // `canManage` follows it exactly, because management stayed with the owner when the
+        // roster widened; `owner` names the hirer so a shared row can say whose it is.
         row["visibility"] = json!(view.visibility.as_str());
-        row["mine"] = json!(true);
-        row["canManage"] = json!(true);
+        row["mine"] = json!(mine);
+        row["canManage"] = json!(mine);
         row["owner"] = json!({
-            "id": account.id.as_str(),
-            "name": format!("{} {}", account.first_name, account.last_name).trim(),
+            "id": owner.id.as_str(),
+            "name": format!("{} {}", owner.first_name, owner.last_name).trim(),
         });
         rows.push(row);
     }

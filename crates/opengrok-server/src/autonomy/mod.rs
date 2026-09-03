@@ -100,7 +100,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     let journal = StoreJournal {
         state: state.clone(),
         thread_id: thread_id.clone(),
-        account_id: Some(account_id),
+        account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
         system: Some(system.clone()),
@@ -149,7 +149,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     tracing::info!(%origin, run = %run_id, events = events.len(), "fired a run nobody asked for");
 
     if let Some(announce) = announce {
-        announce_finished(&announce, &coworker_id, &events).await;
+        announce_finished(&announce, &coworker_id, &account_id, &events).await;
     }
 }
 
@@ -159,6 +159,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
 async fn announce_finished(
     announce: &Announce,
     coworker_id: &CoworkerId,
+    account_id: &AccountId,
     events: &[opengrok_wire::agui::Event],
 ) {
     let gateway = &announce.gateway;
@@ -195,7 +196,7 @@ async fn announce_finished(
         .agui
         .auth
         .store
-        .append_gateway_entry(coworker_id, &entry, at_ms)
+        .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
         .await
     {
         Ok(_) => {

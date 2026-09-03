@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
 use futures::stream;
+use opengrok_core::id::CoworkerId;
 use serde_json::{Value, json};
 
 use super::{GatewayState, refuse};
@@ -382,6 +383,23 @@ async fn command(
         }
     };
 
+    // AUTHORISATION, once, for every verb that names a coworker. Before this, seam A checked
+    // that the CALLER was somebody and never that the coworker was theirs: any signed-in person
+    // who knew an id could read another person's transcript or send a prompt as them. That was
+    // survivable only because ids were not discoverable, and the roster is about to make them
+    // discoverable on purpose.
+    //
+    // The answer is 404, not 403: a person who may not use a coworker must not learn it exists.
+    // An id that names nothing also answers here rather than deeper in, for the same reason.
+    if let Some(agent) = names_a_coworker(&method, &args) {
+        let coworker = CoworkerId::from_stored(agent);
+        match may_use(&state, &caller, &coworker).await {
+            Ok(true) => {}
+            Ok(false) => return refusal(404, "no such agent"),
+            Err(()) => return refusal(500, "storage failed"),
+        }
+    }
+
     match method.as_str() {
         // ---- the roster ----
         "listAgents" => match roster(&state, &caller).await {
@@ -494,7 +512,7 @@ async fn command(
         // Tails and pages: the same read, dressed four ways. `open*` also marks the agent active.
         "openAgentTail" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, true, false).await;
+                super::conversation::transcript_reply(&state, &args, &caller, true, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -502,7 +520,7 @@ async fn command(
         }
         "getAgentTranscriptTail" | "getAgentTranscriptPage" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, false, false).await;
+                super::conversation::transcript_reply(&state, &args, &caller, false, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -510,7 +528,7 @@ async fn command(
         }
         "openAgentWindowed" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, true, true).await;
+                super::conversation::transcript_reply(&state, &args, &caller, true, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -518,14 +536,15 @@ async fn command(
         }
         "getAgentTranscriptWindow" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, false, true).await;
+                super::conversation::transcript_reply(&state, &args, &caller, false, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
             )
         }
         "getAgentTranscript" => {
-            let (code, body) = super::conversation::full_transcript(&state, &args, false).await;
+            let (code, body) =
+                super::conversation::full_transcript(&state, &args, &caller, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -533,14 +552,15 @@ async fn command(
         }
         "getTranscript" => {
             let (code, body) =
-                super::conversation::full_transcript(&state, &json!({}), false).await;
+                super::conversation::full_transcript(&state, &json!({}), &caller, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
             )
         }
         "openAgent" => {
-            let (code, body) = super::conversation::full_transcript(&state, &args, true).await;
+            let (code, body) =
+                super::conversation::full_transcript(&state, &args, &caller, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -600,7 +620,7 @@ async fn command(
                 .unwrap_or("👍")
                 .to_string();
             wrap(
-                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     let reactions = entry
                         .as_object_mut()
                         .map(|map| map.entry("reactions").or_insert_with(|| json!([])));
@@ -614,7 +634,7 @@ async fn command(
         "respondToWidget" => {
             let value = args.get("value").cloned().unwrap_or(Value::Null);
             wrap(
-                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     if let Some(map) = entry.as_object_mut() {
                         map.insert("respondedValue".to_string(), value);
                     }
@@ -623,14 +643,16 @@ async fn command(
             )
         }
         "dismissWidget" => wrap(
-            super::lifecycle::mutate_entry(&state, &args, |entry| {
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
                 if let Some(map) = entry.as_object_mut() {
                     map.insert("widgetDismissed".to_string(), json!(true));
                 }
             })
             .await,
         ),
-        "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
+        "deleteTranscriptEntries" => {
+            wrap(super::lifecycle::delete_entries(&state, &args, &caller).await)
+        }
         "submitSecret" | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
@@ -824,4 +846,70 @@ async fn roster(
     caller: &str,
 ) -> Result<Vec<Value>, opengrok_store::StoreError> {
     super::live::roster_rows_for(state, caller).await
+}
+
+/// Verbs that carry an `agentId` and answer a CONSTANT — an honest empty in the container the
+/// renderer expects, naming no coworker and reading nothing. They are not gated, because a 404
+/// here would not protect anything and WOULD divert the client: the renderer projects a sharing
+/// reply through `projectSharingState` and rejects anything else as malformed (CLAUDE.md #1,
+/// and the third fact in its header: reply shapes matter as much as replies).
+///
+/// A verb earns a place on this list only by returning a literal. The default is the other way
+/// round — anything naming a coworker is checked — so a verb added later is gated until somebody
+/// deliberately decides it answers nothing.
+const ANSWERS_A_CONSTANT: &[&str] = &[
+    "addOwnAgentToSharedRoom",
+    "clearAgentMemories",
+    "createRoomFromAgent",
+    "deleteAgentMemory",
+    "getAgentChannels",
+    "getAgentMemories",
+    "getAgentThread",
+    "getAgentWorkflows",
+    "getAsyncTasks",
+    "getConversationOutline",
+    "getSubagents",
+    "kickstartAgent",
+    "removeOwnAgentFromSharedRoom",
+    "setAgentNotificationsEnabled",
+    "submitSecret",
+];
+
+/// The coworker a verb acts on, when it names one. Reads `agentId` first (the client's name for
+/// it on nearly every verb) and then `id`, which `openAgent` and the transcript reads use.
+///
+/// Verbs that CREATE a coworker are excluded by having no id to name yet; `deleteAgents` takes a
+/// list and is gated per id inside `lifecycle`, not here.
+fn names_a_coworker(method: &str, args: &Value) -> Option<String> {
+    if method == "createAgent" || method == "createGroup" || ANSWERS_A_CONSTANT.contains(&method) {
+        return None;
+    }
+    args.get("agentId")
+        .and_then(Value::as_str)
+        .or_else(|| args.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Owner, or shared with an org this caller is in. Errors are `Err(())` so the caller answers
+/// 500 rather than treating a broken read as permission — a broken condition on an allow may
+/// only ever narrow (CLAUDE.md #8).
+async fn may_use(state: &GatewayState, caller: &str, coworker: &CoworkerId) -> Result<bool, ()> {
+    let account = match state.agui.auth.store.account_by_email(caller).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            tracing::error!(%error, "could not resolve the caller for a coworker check");
+            return Err(());
+        }
+    };
+    state
+        .agui
+        .auth
+        .store
+        .may_use_coworker(&account.id, coworker)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, coworker = %coworker.as_str(), "could not check whether the caller may use this coworker");
+        })
 }

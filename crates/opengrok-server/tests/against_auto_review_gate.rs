@@ -189,7 +189,7 @@ async fn seed_suspended_run(
         }),
     };
     store
-        .append_gateway_entry(coworker, &card, now_ms())
+        .append_gateway_entry(coworker, account, &card, now_ms())
         .await
         .expect("append card");
     (run_id, entry_id)
@@ -249,9 +249,14 @@ async fn call(base: &str, verb: &str, body: Value) -> (u16, Value) {
     (status, body)
 }
 
-async fn card_status(store: &PgStore, coworker: &CoworkerId, entry_id: &str) -> Option<String> {
+async fn card_status(
+    store: &PgStore,
+    coworker: &CoworkerId,
+    account: &AccountId,
+    entry_id: &str,
+) -> Option<String> {
     store
-        .gateway_transcript(coworker)
+        .gateway_transcript(coworker, account)
         .await
         .expect("transcript")
         .into_iter()
@@ -293,7 +298,9 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     .await;
     assert_eq!(status, 410, "the wrong verb settles nothing");
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("pending")
     );
 
@@ -308,7 +315,9 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true);
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("approved")
     );
     let (run, _) = store.load_run(&run_id).await.expect("run");
@@ -326,7 +335,9 @@ async fn an_auto_review_card_is_answered_exactly_once_and_flips_in_place() {
     assert_eq!(status, 200);
     assert_eq!(body["alreadyAnswered"], true);
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("approved")
     );
 }
@@ -359,7 +370,9 @@ async fn a_denied_auto_review_card_settles_as_denied() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("denied")
     );
     let (run, _) = store.load_run(&run_id).await.expect("run");
@@ -386,7 +399,7 @@ async fn a_press_on_a_dead_request_heals_the_card_to_expired_with_410() {
         now_ms(),
     );
     store
-        .append_gateway_entry(&coworker, &card, now_ms())
+        .append_gateway_entry(&coworker, &account, &card, now_ms())
         .await
         .expect("append card");
     let base = spawn(app_with(store.clone(), &host_email)).await;
@@ -400,12 +413,14 @@ async fn a_press_on_a_dead_request_heals_the_card_to_expired_with_410() {
     .await;
     assert_eq!(status, 410, "{body}");
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("expired")
     );
     // The command the user was shown survives the flip (status-only jsonb_set).
     let entry = store
-        .gateway_transcript(&coworker)
+        .gateway_transcript(&coworker, &account)
         .await
         .expect("transcript")
         .into_iter()
@@ -443,7 +458,9 @@ async fn the_exec_card_verb_ignores_an_auto_review_suspension_and_vice_versa() {
     .await;
     assert_eq!(status, 410);
     assert_eq!(
-        card_status(&store, &coworker, &entry_id).await.as_deref(),
+        card_status(&store, &coworker, &account, &entry_id)
+            .await
+            .as_deref(),
         Some("pending")
     );
     let (run, _) = store.load_run(&run_id).await.expect("run");

@@ -39,7 +39,7 @@ pub use gateway::{
     RefreshTokenRow,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
-pub use postgres::{CredentialUpdate, PgStore, ThreadRun};
+pub use postgres::{CredentialUpdate, PgStore, RosterOwner, ThreadRun};
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;

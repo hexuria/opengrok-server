@@ -148,7 +148,7 @@ pub async fn send(
         .agui
         .auth
         .store
-        .append_gateway_entry(&coworker_id, &user_entry, now_ms())
+        .append_gateway_entry(&coworker_id, account_id, &user_entry, now_ms())
         .await
     {
         tracing::error!(%error, "seam B could not append the user's message");
@@ -172,7 +172,7 @@ pub async fn send(
         .agui
         .auth
         .store
-        .append_gateway_entry(&coworker_id, &placeholder, now_ms())
+        .append_gateway_entry(&coworker_id, account_id, &placeholder, now_ms())
         .await
     {
         Ok(seq) => seq,
@@ -188,7 +188,7 @@ pub async fn send(
     live::emit_transcript(state, agent, "appended", placeholder);
     live::set_running(state, agent, true, json!({})).await;
 
-    let history = conversation::history_for(state, &coworker_id).await;
+    let history = conversation::history_for(state, &coworker_id, account_id).await;
     tokio::spawn(conversation::run_turn(
         state.clone(),
         account_id.clone(),

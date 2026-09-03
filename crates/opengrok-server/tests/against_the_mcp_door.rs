@@ -530,7 +530,7 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert_eq!(run.model.as_deref(), Some("oag/cheap"));
 
     let transcript = store
-        .gateway_transcript(&coworker)
+        .gateway_transcript(&coworker, &account)
         .await
         .expect("transcript");
     let card = transcript
@@ -564,7 +564,7 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert_eq!(body["ok"], true, "{body}");
 
     let flipped = store
-        .gateway_transcript(&coworker)
+        .gateway_transcript(&coworker, &account)
         .await
         .expect("transcript")
         .into_iter()
@@ -664,7 +664,7 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
     );
 
     let transcript = store
-        .gateway_transcript(&coworker)
+        .gateway_transcript(&coworker, &account)
         .await
         .expect("transcript");
     let card = transcript
@@ -711,7 +711,7 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
     );
 
     let flipped = store
-        .gateway_transcript(&coworker)
+        .gateway_transcript(&coworker, &account)
         .await
         .expect("transcript")
         .into_iter()

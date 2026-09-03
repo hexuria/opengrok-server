@@ -883,7 +883,7 @@ async fn persist_mcp_ask(
         .agui
         .auth
         .store
-        .append_gateway_entry(coworker, &card, at_ms)
+        .append_gateway_entry(coworker, account, &card, at_ms)
         .await
     {
         // A suspended run with no card is stuck forever (recovery skips awaiting). Fail it so
@@ -948,7 +948,7 @@ async fn existing_mcp_ask(
         // and append_gateway_entry would otherwise promise a requestId nobody can answer.
         // A transcript READ error must not look like "no card": the card may already be
         // there, and Fail would leave the original press hitting 410.
-        match card_pending_for(state, coworker, &pending.call_id).await {
+        match card_pending_for(state, coworker, account, &pending.call_id).await {
             Ok(true) => return Ok(Some(pending.call_id.clone())),
             Ok(false) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await?,
             Err(error) => return Err(error),
@@ -960,9 +960,15 @@ async fn existing_mcp_ask(
 async fn card_pending_for(
     state: &GatewayState,
     coworker: &CoworkerId,
+    account: &AccountId,
     request_id: &str,
 ) -> Result<bool, opengrok_store::StoreError> {
-    let entries = state.agui.auth.store.gateway_transcript(coworker).await?;
+    let entries = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(coworker, account)
+        .await?;
     Ok(entries.iter().any(|entry| {
         entry["message"]["type"] == "auto-review-approval"
             && entry["message"]["approval"]["requestId"] == request_id

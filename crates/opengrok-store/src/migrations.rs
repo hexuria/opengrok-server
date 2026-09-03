@@ -282,6 +282,23 @@ create table if not exists gateway_entry (
     at_ms       bigint not null,
     primary key (coworker_id, seq)
 );
+-- Whose conversation this entry is part of. A shared coworker is talked to by several people,
+-- and one transcript per coworker would put them all in one thread — everybody reading
+-- everybody's messages, which is the thing sharing must not do.
+--
+-- `seq` stays per COWORKER rather than per pair: the primary key is untouched, so no existing
+-- row moves, and two members' entries simply interleave in one sequence that each of them reads
+-- a subset of. Making seq per-pair would renumber every row that exists.
+alter table gateway_entry add column if not exists account_id text;
+-- Backfill: before this column, a coworker could only be reached by the person who hired it, so
+-- every existing entry is that person's. Idempotent — after the first run nothing is NULL for a
+-- coworker that has a row. Entries whose coworker has no view row keep NULL and are read by
+-- nobody; no route can reach such a coworker, because every route loads it first.
+update gateway_entry e set account_id = c.account_id
+  from coworker_view c
+ where e.coworker_id = c.id and e.account_id is null;
+create index if not exists gateway_entry_reader
+    on gateway_entry (coworker_id, account_id, seq);
 
 -- The prompt-acceptance ledger: (account slot, clientNonce) -> what was accepted. A repeated
 -- nonce with the same digest answers accepted again; a different digest is refused. This is what

@@ -604,6 +604,7 @@ pub async fn get_avatar(state: &GatewayState, args: &Value) -> (u16, Value) {
 pub async fn mutate_entry(
     state: &GatewayState,
     args: &Value,
+    caller: &str,
     edit: impl FnOnce(&mut Value),
 ) -> (u16, Value) {
     let Some(agent) = args.get("agentId").and_then(Value::as_str) else {
@@ -613,11 +614,17 @@ pub async fn mutate_entry(
         return (400, json!({ "error": "entryId is required" }));
     };
     let coworker = CoworkerId::from_stored(agent.to_string());
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
     let Ok(Some((seq, mut entry))) = state
         .agui
         .auth
         .store
-        .find_gateway_entry(&coworker, entry_id)
+        .find_gateway_entry(&coworker, &account.id, entry_id)
         .await
     else {
         return (200, Value::Null);
@@ -627,7 +634,7 @@ pub async fn mutate_entry(
         .agui
         .auth
         .store
-        .update_gateway_entry(&coworker, seq, &entry)
+        .update_gateway_entry(&coworker, &account.id, seq, &entry)
         .await
     {
         tracing::error!(%error, "could not mutate an entry");
@@ -638,7 +645,7 @@ pub async fn mutate_entry(
 }
 
 /// `deleteTranscriptEntries {agentId, ids}` → emits `removed` per entry that went.
-pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(agent) = args.get("agentId").and_then(Value::as_str) else {
         return (400, json!({ "error": "agentId is required" }));
     };
@@ -653,11 +660,17 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
         })
         .unwrap_or_default();
     let coworker = CoworkerId::from_stored(agent.to_string());
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
     match state
         .agui
         .auth
         .store
-        .delete_gateway_entries(&coworker, &ids)
+        .delete_gateway_entries(&coworker, &account.id, &ids)
         .await
     {
         Ok(removed) => {
