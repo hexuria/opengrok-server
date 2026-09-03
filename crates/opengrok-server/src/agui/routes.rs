@@ -1402,6 +1402,8 @@ pub async fn run(
         account_id: account_id.clone(),
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
+        // This path composes no system message; a resume of it has none to restore.
+        system: None,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -1444,6 +1446,10 @@ pub struct StoreJournal {
     /// The pin this turn captured. Written on `RunCommand::Start` so a resume does not reload
     /// a coworker that was repinned while we were waiting.
     pub model: Option<String>,
+    /// The composed system message this turn opened with, captured for the same reason as the
+    /// pin: a role edited while a person answered an approval card must not change the coworker
+    /// halfway through the turn.
+    pub system: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -1456,10 +1462,13 @@ impl opengrok_harness::RunJournal for StoreJournal {
         append_events(
             &self.state,
             run_id,
-            &self.thread_id,
-            self.account_id.as_ref(),
-            self.coworker_id.as_ref(),
-            self.model.as_deref(),
+            &RunStart {
+                thread_id: &self.thread_id,
+                account_id: self.account_id.as_ref(),
+                coworker_id: self.coworker_id.as_ref(),
+                model: self.model.as_deref(),
+                system: self.system.as_deref(),
+            },
             events,
         )
         .await
@@ -1468,15 +1477,30 @@ impl opengrok_harness::RunJournal for StoreJournal {
 }
 
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
+/// What a run records about itself at its first batch. A struct rather than five more
+/// parameters: these are one fact — whose turn this is and what it opened with — and they are
+/// only ever passed together.
+struct RunStart<'a> {
+    thread_id: &'a str,
+    account_id: Option<&'a opengrok_core::id::AccountId>,
+    coworker_id: Option<&'a CoworkerId>,
+    model: Option<&'a str>,
+    system: Option<&'a str>,
+}
+
 async fn append_events(
     state: &AgUiState,
     run_id: &str,
-    thread_id: &str,
-    account_id: Option<&opengrok_core::id::AccountId>,
-    coworker_id: Option<&CoworkerId>,
-    model: Option<&str>,
+    start: &RunStart<'_>,
     events: &[Event],
 ) -> Result<(), opengrok_store::StoreError> {
+    let RunStart {
+        thread_id,
+        account_id,
+        coworker_id,
+        model,
+        system,
+    } = *start;
     if events.is_empty() {
         return Ok(());
     }
@@ -1495,6 +1519,7 @@ async fn append_events(
                     .map(str::trim)
                     .filter(|pin| !pin.is_empty())
                     .map(str::to_string),
+                system: system.map(str::to_string).filter(|text| !text.is_empty()),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -1880,6 +1905,8 @@ async fn continue_run(
         account_id: Some(account_id),
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
+        // This path composes no system message; a resume of it has none to restore.
+        system: None,
     };
 
     let request = ModelRequest {

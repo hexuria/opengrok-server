@@ -140,6 +140,7 @@ async fn seed_coworker(store: &PgStore, account: &AccountId, name: &str) -> Cowo
         retired: false,
         members: Vec::new(),
         updated_at_ms: 2,
+        role: None,
     };
     store
         .append_coworker(&id, account, 0, &events, &view)

@@ -555,15 +555,17 @@ async fn run_member_turn(
     let group_id = room.id;
     let (runner, sent) = member_runner(state, account_id, member, &[], &[]).await;
     let new_messages = messages_since_last_spoke(history, &member.id);
+    // Composed once: what this member is told, and what the run captures for its resume.
+    let system = crate::persona::with_standing_role(
+        &member_system_prompt(member, room.name, room.description, peers),
+        &crate::persona::of(&state.agui, &member.id, member.role.clone()).await,
+    );
     let request = ModelRequest {
         model: member.model.clone(),
         // The room's prompt is transcribed word for word from the client's own orchestrator
         // (CLAUDE.md #1), so the standing role is APPENDED after it rather than folded into it:
         // every transcribed line stays byte-identical and the member still knows what it is for.
-        system: Some(crate::persona::with_standing_role(
-            &member_system_prompt(member, room.name, room.description, peers),
-            &crate::persona::of(&state.agui, &member.id, member.role.clone()).await,
-        )),
+        system: Some(system.clone()),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: turn_prompt(member, room.name, peers, new_messages),
@@ -580,6 +582,7 @@ async fn run_member_turn(
         account_id: Some(account_id.clone()),
         coworker_id: Some(member.id.clone()),
         model: Some(member.model.clone()),
+        system: Some(system.clone()),
     };
     let events = run_conversation(
         state.agui.door.as_ref(),
@@ -897,12 +900,23 @@ pub async fn resume_member_turn(
         _ => (std::slice::from_ref(&pending.call_id), &[]),
     };
     let (runner, sent) = member_runner(&state, &account_id, &member, gate_yes, review_yes).await;
+    // The room prompt this member's turn opened with, restored rather than recomposed.
+    let system = run.system_for_resume().unwrap_or_else(|| {
+        crate::persona::with_standing_role(
+            &member_system_prompt(&member, &group.name, &description, &peers),
+            &crate::persona::Persona {
+                title: None,
+                role: member.role.clone(),
+            },
+        )
+    });
     let journal = StoreJournal {
         state: state.agui.clone(),
         thread_id: run.thread_id.clone(),
         account_id: Some(account_id.clone()),
         coworker_id: Some(member.id.clone()),
         model: run.model.clone(),
+        system: Some(system.clone()),
     };
     // The room's system prompt again: the journal holds the conversation, not the instructions,
     // and a member resumed without them would not know it is in a room.
@@ -911,10 +925,7 @@ pub async fn resume_member_turn(
         // The room's prompt is transcribed word for word from the client's own orchestrator
         // (CLAUDE.md #1), so the standing role is APPENDED after it rather than folded into it:
         // every transcribed line stays byte-identical and the member still knows what it is for.
-        system: Some(crate::persona::with_standing_role(
-            &member_system_prompt(&member, &group.name, &description, &peers),
-            &crate::persona::of(&state.agui, &member.id, member.role.clone()).await,
-        )),
+        system: Some(system.clone()),
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),
         gateway_key: crate::spend::key_for(&state.agui, &member.id).await,
@@ -1028,6 +1039,7 @@ mod tests {
             name: name.to_string(),
             description: String::new(),
             model: "oag/cheap".to_string(),
+            role: None,
         }
     }
 
@@ -1104,6 +1116,7 @@ mod tests {
             name: "Ada".to_string(),
             description: "a careful reviewer".to_string(),
             model: "oag/cheap".to_string(),
+            role: None,
         };
         let bob = member("cw_b", "Bob");
         let system = member_system_prompt(

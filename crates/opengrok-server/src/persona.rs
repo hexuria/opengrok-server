@@ -1,9 +1,12 @@
 //! Who a coworker is, as one system message.
 //!
 //! A coworker carries a `title` (what it is) and a `role` (what it is for, in the person's own
-//! words). Both live in the seam-B profile beside the description, because that is where the
-//! client already puts what it knows about a coworker and a second home would be a second
-//! answer.
+//! words). They live in different places, on purpose. The TITLE is in the seam-B profile blob
+//! beside the description, because that is where the client already puts its decoration and a
+//! second home for it would be a second answer. The ROLE is a column on the aggregate, because
+//! it is behavioural rather than cosmetic: the run path reads it on every single turn, the
+//! thousand-character bound is an invariant worth enforcing where the state lives, and a field
+//! the model is told about is not decoration.
 //!
 //! ONE system message per run, not several. Two prompts arrive at the model as two claims about
 //! the same coworker, and when they disagree the model picks one — `computer_system_prompt`'s
@@ -53,20 +56,23 @@ pub struct Persona {
 }
 
 impl Persona {
-    /// Read from a seam-B profile blob.
+    /// Compose from the two homes: the title out of the seam-B profile blob, the role out of the
+    /// aggregate's column.
+    ///
+    /// A `role` key in the blob is IGNORED, structurally — this function cannot read one. An
+    /// older client or an earlier shape may have written one, and merging it would give a
+    /// coworker two roles with the run path picking between them. The column is the only answer.
     #[must_use]
-    pub fn from_profile(profile: Option<&Value>) -> Self {
-        let field = |key: &str| {
-            profile
-                .and_then(|p| p.get(key))
-                .and_then(Value::as_str)
+    pub fn compose(profile: Option<&Value>, role: Option<&str>) -> Self {
+        let text = |value: Option<&str>| {
+            value
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
                 .map(str::to_string)
         };
         Self {
-            title: field("title"),
-            role: field("role"),
+            title: text(profile.and_then(|p| p.get("title")).and_then(Value::as_str)),
+            role: text(role),
         }
     }
 
@@ -136,12 +142,7 @@ pub async fn of(state: &AgUiState, coworker: &CoworkerId, role: Option<String>) 
         .await
         .ok()
         .flatten();
-    Persona {
-        title: Persona::from_profile(profile.as_ref()).title,
-        role: role
-            .map(|role| role.trim().to_string())
-            .filter(|role| !role.is_empty()),
-    }
+    Persona::compose(profile.as_ref(), role.as_deref())
 }
 
 #[cfg(test)]
@@ -179,18 +180,41 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_reads_absent_blank_and_whitespace_alike() {
-        assert_eq!(Persona::from_profile(None), Persona::default());
+    fn composing_reads_absent_blank_and_whitespace_alike() {
+        assert_eq!(Persona::compose(None, None), Persona::default());
         assert_eq!(
-            Persona::from_profile(Some(&json!({ "title": "", "role": "   " }))),
+            Persona::compose(Some(&json!({ "title": "" })), Some("   ")),
             Persona::default(),
-            "blank is not a title"
+            "blank is not a title, and blank is not a role"
         );
         assert_eq!(
-            Persona::from_profile(Some(
-                &json!({ "title": " release engineer ", "role": "ships" })
-            )),
-            persona(Some("release engineer"), Some("ships"))
+            Persona::compose(
+                Some(&json!({ "title": " release engineer " })),
+                Some(" ships ")
+            ),
+            persona(Some("release engineer"), Some("ships")),
+            "both trimmed"
+        );
+    }
+
+    /// The two homes, and which one answers. A blob that carries a role — written by an older
+    /// client, or left from an earlier shape — must not give the coworker a second role.
+    #[test]
+    fn the_column_is_the_only_role_and_a_role_in_the_blob_is_ignored() {
+        let blob = json!({ "title": "a release engineer", "role": "STALE ROLE FROM THE BLOB" });
+        assert_eq!(
+            Persona::compose(Some(&blob), Some("the column's role")),
+            persona(Some("a release engineer"), Some("the column's role")),
+            "the column wins"
+        );
+        assert_eq!(
+            Persona::compose(Some(&blob), None),
+            persona(Some("a release engineer"), None),
+            "and with no column role the coworker has none — the blob's is not a fallback"
+        );
+        assert!(
+            !system_message("Ada", &Persona::compose(Some(&blob), None), None).contains("STALE"),
+            "nothing from the blob's role reaches the model"
         );
     }
 

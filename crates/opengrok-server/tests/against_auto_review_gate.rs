@@ -111,6 +111,7 @@ async fn seed_coworker(store: &PgStore, account: &AccountId) -> CoworkerId {
         retired: false,
         members: Vec::new(),
         updated_at_ms: 2,
+        role: None,
     };
     store
         .append_coworker(&id, account, 0, &events, &view)
@@ -136,6 +137,7 @@ async fn seed_suspended_run(
             thread_id: thread_id.clone(),
             coworker_id: Some(coworker.clone()),
             model: Some("xai/grok-4.6".to_string()),
+            system: None,
             at_ms: 1,
         })
         .expect("start");

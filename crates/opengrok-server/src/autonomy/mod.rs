@@ -91,12 +91,19 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     )
     .await;
 
+    // Composed once: a routine's turn is still this coworker's turn.
+    let system = crate::persona::system_message(
+        &coworker.name,
+        &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
+        None,
+    );
     let journal = StoreJournal {
         state: state.clone(),
         thread_id: thread_id.clone(),
         account_id: Some(account_id),
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
+        system: Some(system.clone()),
     };
 
     let request = ModelRequest {
@@ -105,11 +112,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
         // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
         model: coworker.model.clone(),
         // A routine's turn is still this coworker's turn: same identity, same standing role.
-        system: Some(crate::persona::system_message(
-            &coworker.name,
-            &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
-            None,
-        )),
+        system: Some(system.clone()),
         tools: Vec::new(),
         messages: vec![ChatMessage {
             role: "user".to_string(),

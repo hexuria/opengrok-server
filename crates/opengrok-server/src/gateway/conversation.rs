@@ -1059,12 +1059,25 @@ pub(crate) async fn run_turn(
     } else {
         None
     };
+    // Composed once and used twice: what the model is told, and what the run captures so a
+    // resume says the same thing. Two compositions could disagree, which is the whole reason
+    // this is one message.
+    let system = crate::persona::system_message(
+        &name,
+        &persona,
+        Some(&computer_system_prompt(
+            tools.is_some(),
+            reaches_user_machine,
+            user_machine_label.as_deref(),
+        )),
+    );
     let journal = StoreJournal {
         state: state.agui.clone(),
         thread_id: thread_id.clone(),
         account_id: Some(account_id),
         coworker_id: Some(coworker_id.clone()),
         model: Some(model.clone()),
+        system: Some(system.clone()),
     };
     let request = ModelRequest {
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id).await,
@@ -1078,15 +1091,7 @@ pub(crate) async fn run_turn(
         // machine discipline below. Two messages would be two claims about the same coworker,
         // and when they disagree the model picks one — which is how a prompt contradicting the
         // tool list once silently disabled the tool.
-        system: Some(crate::persona::system_message(
-            &name,
-            &persona,
-            Some(&computer_system_prompt(
-                tools.is_some(),
-                reaches_user_machine,
-                user_machine_label.as_deref(),
-            )),
-        )),
+        system: Some(system),
         messages,
         tools: Vec::new(),
     };
@@ -1915,12 +1920,24 @@ async fn resume_gateway_run(
     else {
         return;
     };
+    // The system message this turn OPENED with, not a fresh composition: a role or title edited
+    // while the person was answering the card must not change the coworker halfway through the
+    // turn. A run journalled before this was captured has none and composes one, as before.
+    let system = match run.system_for_resume() {
+        Some(captured) => captured,
+        None => crate::persona::system_message(
+            &coworker.name,
+            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
+            None,
+        ),
+    };
     let journal = crate::agui::routes::StoreJournal {
         state: state.agui.clone(),
         thread_id: run.thread_id.clone(),
         account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
         model: run.model.clone(),
+        system: Some(system.clone()),
     };
     let request = ModelRequest {
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id).await,
@@ -1930,11 +1947,7 @@ async fn resume_gateway_run(
         // carry none at all, so a coworker lost both its identity and the whose-computer
         // discipline at the moment a person had just intervened — the worst possible moment to
         // start claiming work on the box happened on their machine.
-        system: Some(crate::persona::system_message(
-            &coworker.name,
-            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
-            None,
-        )),
+        system: Some(system),
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),
     };

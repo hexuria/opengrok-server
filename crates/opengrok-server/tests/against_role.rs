@@ -165,54 +165,6 @@ impl Harness {
         assert_eq!(status, 200, "{created}");
         created["agent"]["id"].as_str().expect("id").to_string()
     }
-
-    async fn is_running(&self, id: &str) -> bool {
-        let (_, rows) = self.api("listAgents", json!({})).await;
-        rows.as_array()
-            .and_then(|rows| rows.iter().find(|row| row["id"] == id))
-            .is_some_and(|row| row["isRunning"] == json!(true))
-    }
-
-    /// `sendPrompt` with the given extra arguments, then wait for the turn to end.
-    async fn turn(&self, agent: &str, prompt: &str, extra: Value) -> String {
-        let nonce = format!("p-{}-{}", prompt.len(), now_ms());
-        let mut args = json!({ "agentId": agent, "prompt": prompt, "clientNonce": nonce });
-        if let (Some(target), Some(overlay)) = (args.as_object_mut(), extra.as_object()) {
-            for (key, value) in overlay {
-                target.insert(key.clone(), value.clone());
-            }
-        }
-        let (status, sent) = self.api("sendPrompt", args).await;
-        assert_eq!(status, 200, "{sent}");
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if !self.is_running(agent).await {
-                return nonce;
-            }
-        }
-        panic!("the turn did not end in 20s");
-    }
-
-    async fn tail(&self, agent: &str) -> Vec<Value> {
-        let (_, tail) = self
-            .api(
-                "getAgentTranscriptTail",
-                json!({ "id": agent, "limit": 200 }),
-            )
-            .await;
-        tail["entries"].as_array().cloned().unwrap_or_default()
-    }
-}
-
-fn answers(entries: &[Value]) -> Vec<&Value> {
-    entries
-        .iter()
-        .filter(|e| {
-            e["kind"] == "send-message"
-                && e["message"]["type"] == "text"
-                && !e["message"]["content"].as_str().unwrap_or("").is_empty()
-        })
-        .collect()
 }
 
 impl Harness {

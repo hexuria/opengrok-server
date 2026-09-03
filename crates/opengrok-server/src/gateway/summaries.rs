@@ -73,6 +73,7 @@ mod tests {
             retired: false,
             members: Vec::new(),
             updated_at_ms: 1_000,
+            role: None,
         });
         assert_eq!(row["id"], "cw_1");
         assert_eq!(row["name"], "Luna");
