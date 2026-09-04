@@ -38,6 +38,10 @@ fn now_ms() -> i64 {
 }
 
 async fn seed_account(store: &PgStore, email: &str) -> AccountId {
+    seed_account_in(store, email, None).await
+}
+
+async fn seed_account_in(store: &PgStore, email: &str, org: Option<&str>) -> AccountId {
     let id = AccountId::new();
     let hash = hash_password("password1").expect("hash");
     let at_ms = now_ms();
@@ -47,7 +51,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
             password_hash: hash.clone(),
             first_name: "Test".to_string(),
             last_name: "User".to_string(),
-            org_id: String::new(),
+            org_id: org.unwrap_or("").to_string(),
             plan: Plan::Ultra,
             verified: true,
             enabled: true,
@@ -63,7 +67,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         password_hash: Some(hash),
         first_name: "Test".to_string(),
         last_name: "User".to_string(),
-        org_id: None,
+        org_id: org.map(str::to_string),
         verified: true,
         enabled: true,
         avatar_url: None,
@@ -74,6 +78,10 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         .expect("append account");
     id
 }
+
+/// One org for the whole file: sharing is org-scoped, so a test with no org can only ever show
+/// the refusal half.
+const ORG: &str = "org_visibility_test";
 
 struct Harness {
     base: String,
@@ -93,7 +101,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         .await
         .expect("migrations");
     let store = PgStore::new(pool);
-    let account = seed_account(&store, email).await;
+    let account = seed_account_in(&store, email, Some(ORG)).await;
     let auth = AuthState::new(
         store.clone(),
         Arc::new(TokenMinter::new(b"visibility-test-secret")),
@@ -138,10 +146,21 @@ async fn harness(database_url: &str, email: &str) -> Harness {
 
 impl Harness {
     async fn api(&self, method: &str, body: Value) -> (u16, Value) {
-        let res = self
+        self.api_as(method, body, None).await
+    }
+
+    /// The same call, made BY somebody: seam A resolves the caller from this header and falls
+    /// back to the deployment's email without it, which is why every test before sharing could
+    /// only ever be one person.
+    async fn api_as(&self, method: &str, body: Value, access: Option<&str>) -> (u16, Value) {
+        let mut req = self
             .client
             .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
+            .header("authorization", "Bearer test-bearer");
+        if let Some(access) = access {
+            req = req.header("x-opengrok-account", access);
+        }
+        let res = req
             .header("content-type", "application/json")
             .body(body.to_string())
             .send()
@@ -202,6 +221,21 @@ impl Harness {
         )
     }
 
+    /// One person's whole transcript, as text, waiting for the turn to land.
+    async fn transcript_of(&self, agent: &str, access: &str) -> String {
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let (_, entries) = self
+                .api_as("getAgentTranscript", json!({ "id": agent }), Some(access))
+                .await;
+            let text = entries.to_string();
+            if text.contains("send-message") {
+                return text;
+            }
+        }
+        panic!("no transcript in 10s");
+    }
+
     async fn row(&self, id: &str) -> Value {
         let (_, rows) = self.api("listAgents", json!({})).await;
         rows.as_array()
@@ -229,39 +263,21 @@ async fn visibility_is_private_until_its_owner_shares_it_and_the_roster_says_who
         "a shared row has to be able to say whose it is: {row}"
     );
 
-    // `org` is refused, and the refusal is the point of this PR. Nothing reads visibility yet:
-    // the roster is still owner-scoped and a transcript is still one thread per coworker. A 200
-    // here would report `visibility: "org"` back and share nothing — telling somebody their work
-    // is visible to their org when it is not. A recognised word that cannot take effect is
-    // refused exactly like a word we do not have.
-    let (status, refused) = h
+    // Shared, and back again. Both directions are decisions the aggregate records.
+    let (status, shared) = h
         .patch(&access, &agent, json!({ "visibility": "org" }))
         .await;
-    assert_eq!(status, 400, "{refused}");
-    let sentence = refused["error"].as_str().unwrap_or_default();
-    assert!(
-        sentence.contains("sharing is not switched on yet"),
-        "the refusal has to say why, not just no: {refused}"
-    );
-    assert!(
-        sentence.contains("shared when it is not"),
-        "and it has to say what the refusal is protecting: {refused}"
-    );
-    assert_eq!(
-        h.row(&agent).await["visibility"],
-        "private",
-        "a refused share stores nothing"
-    );
-
-    // Setting it to what it already is still answers, so a client that sends the whole row back
-    // is not refused for saying "private".
-    let (status, same) = h
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(shared["visibility"], "org", "{shared}");
+    assert_eq!(h.row(&agent).await["visibility"], "org");
+    let (status, back) = h
         .patch(&access, &agent, json!({ "visibility": "private" }))
         .await;
-    assert_eq!(status, 200, "{same}");
-    assert_eq!(same["visibility"], "private", "{same}");
+    assert_eq!(status, 200, "{back}");
+    assert_eq!(back["visibility"], "private", "{back}");
 
-    // A word we do not offer at all is refused differently, and says so.
+    // A word we do not offer is refused rather than defaulted: quietly storing "private" would
+    // tell somebody they had shared a coworker they had not.
     let (status, refused) = h
         .patch(&access, &agent, json!({ "visibility": "public" }))
         .await;
@@ -274,27 +290,23 @@ async fn visibility_is_private_until_its_owner_shares_it_and_the_roster_says_who
     assert_eq!(status, 400);
     assert_eq!(h.row(&agent).await["visibility"], "private", "unchanged");
 
-    // Model, role and visibility travel independently on the same route, and a refused
-    // visibility refuses the WHOLE patch rather than half-applying the role beside it.
-    let (status, refused) = h
+    // Model, role and visibility travel independently on the same route.
+    let (status, both) = h
         .patch(
             &access,
             &agent,
             json!({ "role": "Keeps the changelog.", "visibility": "org" }),
         )
         .await;
-    assert_eq!(status, 400, "{refused}");
-    assert_eq!(
-        h.row(&agent).await["role"],
-        Value::Null,
-        "the role did not land beside a refused share"
-    );
-    let (status, only_role) = h
-        .patch(&access, &agent, json!({ "role": "Keeps the changelog." }))
-        .await;
+    assert_eq!(status, 200, "{both}");
+    assert_eq!(both["role"], "Keeps the changelog.");
+    assert_eq!(both["visibility"], "org");
+    let (status, only_role) = h.patch(&access, &agent, json!({ "role": null })).await;
     assert_eq!(status, 200, "{only_role}");
-    assert_eq!(only_role["role"], "Keeps the changelog.");
-    assert_eq!(only_role["visibility"], "private");
+    assert_eq!(
+        only_role["visibility"], "org",
+        "clearing a role does not unshare a coworker"
+    );
 
     // Another account still cannot touch it, shared or not — sharing is not a write grant, and
     // the roster does not widen until transcripts are per member.
@@ -415,4 +427,263 @@ async fn one_members_allow_once_cannot_be_spent_by_another() {
             .0,
         "call-legacy"
     );
+}
+
+/// Sharing, end to end: a colleague sees the row, can talk to it, gets their OWN conversation,
+/// and cannot manage it. Plus the half that matters more — the two people never see each other's
+/// messages, which is the reason the transcript had to be re-keyed before the roster widened.
+#[tokio::test]
+async fn a_shared_coworker_is_one_coworker_with_a_conversation_each() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let ada_email = format!("ada-{tag}@og.local");
+    let h = harness(&database_url, &ada_email).await;
+    let ada_access = h.access_token(&h.account.clone(), &ada_email);
+    let agent = h.hire("Ada").await;
+
+    let bo_email = format!("bo-{tag}@og.local");
+    let bo = seed_account_in(&h.store, &bo_email, Some(ORG)).await;
+    let bo_access = h.access_token(&bo, &bo_email);
+
+    // An outsider: same server, no org. Sharing with "the org" must not mean everybody.
+    let out_email = format!("out-{tag}@og.local");
+    let outsider = seed_account_in(&h.store, &out_email, None).await;
+    let out_access = h.access_token(&outsider, &out_email);
+
+    let roster_of = |access: String| {
+        let h = &h;
+        let agent = agent.clone();
+        async move {
+            let (_, rows) = h.api_as("listAgents", json!({}), Some(&access)).await;
+            rows.as_array()
+                .and_then(|rows| rows.iter().find(|row| row["id"] == agent).cloned())
+        }
+    };
+
+    // Private: the colleague cannot see it, and cannot reach it by knowing the id either. 404,
+    // not 403 — somebody who may not use a coworker must not learn it exists.
+    assert!(roster_of(bo_access.clone()).await.is_none());
+    let (status, refused) = h
+        .api_as(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "hi", "clientNonce": format!("bo-0-{tag}") }),
+            Some(&bo_access),
+        )
+        .await;
+    assert_eq!(status, 404, "{refused}");
+
+    // Shared with the org.
+    let (status, shared) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "org" }))
+        .await;
+    assert_eq!(status, 200, "{shared}");
+
+    // Bo now sees it, and the row says whose it is and that it is not his to manage.
+    let his_row = roster_of(bo_access.clone())
+        .await
+        .expect("a shared coworker is on a colleague's roster");
+    assert_eq!(his_row["visibility"], "org", "{his_row}");
+    assert_eq!(his_row["mine"], json!(false), "{his_row}");
+    assert_eq!(his_row["canManage"], json!(false), "{his_row}");
+    assert_eq!(
+        his_row["owner"]["id"],
+        json!(h.account.as_str()),
+        "{his_row}"
+    );
+    let hers = roster_of(ada_access.clone()).await.expect("still hers");
+    assert_eq!(hers["mine"], json!(true), "{hers}");
+    assert_eq!(hers["canManage"], json!(true), "{hers}");
+
+    // The outsider still sees nothing and still cannot reach it. An org is a boundary, not a
+    // label — this is the assertion that would fail if `org_id` were compared loosely.
+    assert!(roster_of(out_access.clone()).await.is_none());
+    let (status, _) = h
+        .api_as(
+            "getAgentTranscript",
+            json!({ "id": agent }),
+            Some(&out_access),
+        )
+        .await;
+    assert_eq!(status, 404, "an outsider does not learn it exists");
+
+    // Both talk to it. Same coworker, same model, two conversations.
+    for (who, access, prompt, nonce) in [
+        (
+            &ada_email,
+            &ada_access,
+            "ada speaks",
+            format!("ada-1-{tag}"),
+        ),
+        (&bo_email, &bo_access, "bo speaks", format!("bo-1-{tag}")),
+    ] {
+        let (status, sent) = h
+            .api_as(
+                "sendPrompt",
+                json!({ "agentId": agent, "prompt": prompt, "clientNonce": nonce }),
+                Some(access),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "{who} could not talk to a shared coworker: {sent}"
+        );
+    }
+
+    // The whole point. Each reads their own thread and nobody else's.
+    let hers = h.transcript_of(&agent, &ada_access).await;
+    let his = h.transcript_of(&agent, &bo_access).await;
+    assert!(
+        hers.contains("ada speaks"),
+        "Ada reads what Ada said: {hers}"
+    );
+    assert!(
+        !hers.contains("bo speaks"),
+        "and NOT what Bo said — one coworker, two conversations: {hers}"
+    );
+    assert!(his.contains("bo speaks"), "Bo reads his own: {his}");
+    assert!(
+        !his.contains("ada speaks"),
+        "and not hers, which is the whole reason the entries were re-keyed: {his}"
+    );
+
+    // Sharing is not a write grant. Bo may talk to it; he may not repin, rename or unshare it.
+    let (status, _) = h
+        .patch(&bo_access, &agent, json!({ "visibility": "private" }))
+        .await;
+    assert_eq!(status, 404, "management stayed with the owner");
+    let (status, _) = h
+        .patch(&bo_access, &agent, json!({ "role": "mine now" }))
+        .await;
+    assert_eq!(status, 404);
+    assert_eq!(h.row(&agent).await["visibility"], "org", "unchanged");
+
+    // Unsharing takes it back: Bo loses the row and the id stops working again.
+    let (status, _) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "private" }))
+        .await;
+    assert_eq!(status, 200);
+    assert!(roster_of(bo_access.clone()).await.is_none());
+    let (status, _) = h
+        .api_as(
+            "getAgentTranscript",
+            json!({ "id": agent }),
+            Some(&bo_access),
+        )
+        .await;
+    assert_eq!(
+        status, 404,
+        "unsharing is immediate, not until his next sign-in"
+    );
+
+    // And Ada's own conversation survived all of it.
+    assert!(
+        h.transcript_of(&agent, &ada_access)
+            .await
+            .contains("ada speaks")
+    );
+}
+
+/// `deleteAgents` takes a LIST of ids, not `agentId`, so the coworker check in the dispatch —
+/// which reads `agentId` then `id` — never sees it. And `delete_agents` resolves the DEPLOYMENT
+/// account rather than the caller, so it never compares the two either. A colleague who can see
+/// a shared coworker can therefore retire it, which contradicts what the roster row promises
+/// them (`canManage: false`) and what this file already asserts about repin and unshare.
+///
+/// Sharing is what makes it reachable: before it, a stranger had to guess an unguessable id.
+#[tokio::test]
+async fn a_colleague_cannot_retire_a_coworker_they_do_not_own() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let ada_email = format!("ada-del-{tag}@og.local");
+    let h = harness(&database_url, &ada_email).await;
+    let ada_access = h.access_token(&h.account.clone(), &ada_email);
+    let agent = h.hire("Ada").await;
+    let (status, _) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "org" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let bo_email = format!("bo-del-{tag}@og.local");
+    let bo = seed_account_in(&h.store, &bo_email, Some(ORG)).await;
+    let bo_access = h.access_token(&bo, &bo_email);
+
+    // He can see it — that is what sharing is for.
+    let (_, rows) = h.api_as("listAgents", json!({}), Some(&bo_access)).await;
+    assert!(
+        rows.as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == agent)),
+        "the colleague should see a shared coworker"
+    );
+
+    // He must not be able to end it.
+    let (status, deleted) = h
+        .api_as("deleteAgents", json!({ "ids": [agent] }), Some(&bo_access))
+        .await;
+    assert_eq!(
+        deleted["deleted"],
+        json!(0),
+        "a colleague retired a coworker they do not own: {status} {deleted}"
+    );
+
+    // And it is still Ada's, still live, still on her roster.
+    let (_, hers) = h.api_as("listAgents", json!({}), Some(&ada_access)).await;
+    assert!(
+        hers.as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == agent)),
+        "the owner's coworker survived a colleague's delete: {hers}"
+    );
+
+    // The owner can, of course.
+    let (_, mine) = h
+        .api_as("deleteAgents", json!({ "ids": [agent] }), Some(&ada_access))
+        .await;
+    assert_eq!(
+        mine["deleted"],
+        json!(1),
+        "the owner may retire her own: {mine}"
+    );
+}
+
+/// The gate asks `may_use`, which is true for a colleague on a SHARED coworker. That is right
+/// for talking to it and wrong for changing it: seam A's `updateAgent` renames a coworker, and
+/// nothing downstream compares the caller to the owner either — it resolves the DEPLOYMENT
+/// account. So sharing would hand over the write surface, which is the exact thing the roster's
+/// `canManage: false` tells the colleague it does not.
+#[tokio::test]
+async fn a_colleague_cannot_rename_a_coworker_they_do_not_own() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let ada_email = format!("ada-ren-{tag}@og.local");
+    let h = harness(&database_url, &ada_email).await;
+    let ada_access = h.access_token(&h.account.clone(), &ada_email);
+    let agent = h.hire("Ada").await;
+    let (status, _) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "org" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let bo_email = format!("bo-ren-{tag}@og.local");
+    let bo = seed_account_in(&h.store, &bo_email, Some(ORG)).await;
+    let bo_access = h.access_token(&bo, &bo_email);
+
+    let (_, renamed) = h
+        .api_as(
+            "updateAgent",
+            json!({ "id": agent, "profile": { "name": "Bo's now" } }),
+            Some(&bo_access),
+        )
+        .await;
+    assert_eq!(
+        renamed,
+        Value::Null,
+        "a colleague renamed a coworker they do not own: {renamed}"
+    );
+
+    let (_, rows) = h.api_as("listAgents", json!({}), Some(&ada_access)).await;
+    let name = rows
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == agent))
+        .map(|row| row["name"].clone())
+        .unwrap_or(Value::Null);
+    assert_eq!(name, json!("Ada"), "the owner's coworker kept its name");
 }

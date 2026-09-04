@@ -541,22 +541,31 @@ every record that sharing would otherwise break carry whose it is.
   (`visibility`, `mine`, `canManage`, `owner`), and an account on the remembered "allow once".
   A consent record with no owner fails open the moment two people can reach one coworker: one
   member's yes would authorise another member's command. The column lands BEFORE sharing does.
-  `org` is REFUSED with a sentence until 19.4: nothing reads visibility yet, and a 200 would
-  tell somebody their coworker was shared when it was not. The aggregate records and replays
-  `Org` already, so that refusal is one branch to delete rather than a feature to build.
-  `tests/against_visibility.rs`. PR #52 (`2d9810b`, `ba18c39`).
+  `org` was REFUSED with a sentence while nothing read visibility, because a 200 would have told
+  somebody their coworker was shared when it was not; 19.4 deletes that branch, which is the
+  whole reason it was a branch and not a feature. `tests/against_visibility.rs`.
+  PR #52 (`2d9810b`, `ba18c39`).
 - [x] **19.3** A gateway key per (coworker, MEMBER), so a shared coworker's turns bill whoever
   is talking. The pair is the row's identity, the payer's pool sums the payer's own keys
   wherever they are, retirement revokes every member's key rather than the hirer's, and all
   three per-coworker caches re-key on the pair. `ModelRequest` carries `spend_actor` beside
   `spend_scope`, and the metered judge (19.points, PR #57) carries both — a judge naming a scope
   with no actor is HELD by this slice's own rule, which would switch auto-review off everywhere.
-  `tests/against_member_keys.rs`.
-- [ ] **19.4** A transcript per (coworker, member): a nullable `account_id` on the entry rows
-  and a predicate on all six readers. Until this lands the roster is deliberately NOT widened —
-  `coworkers_for` is also the authorization primitive, and widening it first would put two
-  people in one conversation. Deleting the `org` refusal in 19.2 is part of this step, not of a
-  later one.
+  `tests/against_member_keys.rs`. PR #53.
+- [x] **19.4** A transcript per (coworker, member), and sharing switched on. `gateway_entry`
+  gains an `account_id`, backfilled to each coworker's owner because before it only the hirer
+  could reach one; `seq` stays per coworker so no existing row moves, and two members' entries
+  interleave in one sequence each reads a subset of. All ten queries are scoped. The roster
+  widens through a NEW `roster_for`: `coworkers_for` stays owner-only, because it is the
+  authorization primitive management is gated on and sharing is not a write grant.
+
+  Found on the way and fixed here: **seam A authorized nothing per coworker.** Every verb
+  resolved the CALLER and none checked the coworker was theirs, so any signed-in person who knew
+  an id could read a transcript or prompt somebody else's coworker. Survivable only while ids
+  were undiscoverable — and this slice was about to make them discoverable on purpose. One gate
+  in `gateway/routes.rs` answers 404 (never 403: a person who may not use a coworker must not
+  learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
+  are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
 ## Later — unordered, deliberately
 

@@ -251,7 +251,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         .agui
         .auth
         .store
-        .append_gateway_entry(&coworker_id, &user_entry, now_ms())
+        .append_gateway_entry(&coworker_id, &account.id, &user_entry, now_ms())
         .await
     {
         tracing::error!(%error, "could not append the user's message");
@@ -291,7 +291,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         .agui
         .auth
         .store
-        .append_gateway_entry(&coworker_id, &placeholder, now_ms())
+        .append_gateway_entry(&coworker_id, &account.id, &placeholder, now_ms())
         .await
     {
         Ok(seq) => seq,
@@ -307,7 +307,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     // The turn, off this request's clock. `accepted` means accepted, not answered. Keep the task's
     // abort handle so stopAgentTurn can cancel it; run_turn removes itself when it ends.
     let task_state = state.clone();
-    let history = history_for(state, &coworker_id).await;
+    let history = history_for(state, &coworker_id, &account.id).await;
     let handle = tokio::spawn(run_turn(
         task_state,
         account.id,
@@ -737,12 +737,16 @@ fn answer_entry(id: &str, text: &str, reply_to: Option<&str>) -> Value {
 
 /// The reply link of the turn in progress: the latest user message's `replyTo`. For the path
 /// that answers after an approval card, which has no `sendPrompt` arguments in hand.
-async fn reply_link_of_the_turn(state: &GatewayState, coworker: &CoworkerId) -> Option<String> {
+async fn reply_link_of_the_turn(
+    state: &GatewayState,
+    coworker: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+) -> Option<String> {
     let entries = state
         .agui
         .auth
         .store
-        .gateway_transcript(coworker)
+        .gateway_transcript(coworker, account)
         .await
         .ok()?;
     entries
@@ -757,9 +761,20 @@ async fn reply_link_of_the_turn(state: &GatewayState, coworker: &CoworkerId) -> 
 }
 
 /// The transcript so far, as chat messages — so a coworker remembers its own conversation
-/// rather than greeting every message as its first.
-pub(crate) async fn history_for(state: &GatewayState, coworker: &CoworkerId) -> Vec<ChatMessage> {
-    let Ok(entries) = state.agui.auth.store.gateway_transcript(coworker).await else {
+/// rather than greeting every message as its first. Scoped to `account`: a coworker two people
+/// talk to holds two conversations, and the model may only ever be shown the one it is answering.
+pub(crate) async fn history_for(
+    state: &GatewayState,
+    coworker: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+) -> Vec<ChatMessage> {
+    let Ok(entries) = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(coworker, account)
+        .await
+    else {
         return Vec::new();
     };
     entries
@@ -914,6 +929,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 async fn emit_suspension(
     state: &GatewayState,
     coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
     agent_id: &str,
     suspension: &Suspension,
 ) -> bool {
@@ -929,7 +945,7 @@ async fn emit_suspension(
         .agui
         .auth
         .store
-        .append_gateway_entry(coworker_id, &card, now_ms())
+        .append_gateway_entry(coworker_id, account, &card, now_ms())
         .await
     {
         tracing::error!(%error, "could not append the suspension card entry");
@@ -1135,10 +1151,10 @@ pub(crate) async fn run_turn(
             .agui
             .auth
             .store
-            .update_gateway_entry(&coworker_id, answer_seq, &answer_entry)
+            .update_gateway_entry(&coworker_id, &account_id, answer_seq, &answer_entry)
             .await;
         live::emit_transcript(&state, &agent_id, "updated", answer_entry);
-        if emit_suspension(&state, &coworker_id, &agent_id, &suspension).await {
+        if emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await {
             finished.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
@@ -1160,7 +1176,7 @@ pub(crate) async fn run_turn(
         .agui
         .auth
         .store
-        .update_gateway_entry(&coworker_id, answer_seq, &final_entry)
+        .update_gateway_entry(&coworker_id, &account_id, answer_seq, &final_entry)
         .await
     {
         tracing::error!(%error, "could not finalise the answer entry");
@@ -1210,6 +1226,7 @@ impl Drop for TurnGuard {
 pub async fn transcript_reply(
     state: &GatewayState,
     args: &Value,
+    caller: &str,
     activate: bool,
     with_thread_counts: bool,
 ) -> (u16, Value) {
@@ -1217,6 +1234,13 @@ pub async fn transcript_reply(
         return (400, json!({ "error": "no agent named and none active" }));
     };
     let coworker = CoworkerId::from_stored(agent_id.clone());
+    // The thread read is the READER'S — resolved from the caller, never the coworker's owner.
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
     let before = args.get("beforeSeq").and_then(Value::as_i64);
     let limit = args
         .get("limit")
@@ -1228,7 +1252,7 @@ pub async fn transcript_reply(
         .agui
         .auth
         .store
-        .gateway_tail(&coworker, before, limit)
+        .gateway_tail(&coworker, &account.id, before, limit)
         .await
     {
         Ok(page) => page,
@@ -1260,12 +1284,29 @@ pub async fn transcript_reply(
 }
 
 /// `getAgentTranscript` / `getTranscript` / `openAgent` — the unbounded array forms.
-pub async fn full_transcript(state: &GatewayState, args: &Value, activate: bool) -> (u16, Value) {
+pub async fn full_transcript(
+    state: &GatewayState,
+    args: &Value,
+    caller: &str,
+    activate: bool,
+) -> (u16, Value) {
     let Some(agent_id) = agent_or_active(state, args) else {
         return (400, json!({ "error": "no agent named and none active" }));
     };
     let coworker = CoworkerId::from_stored(agent_id.clone());
-    match state.agui.auth.store.gateway_transcript(&coworker).await {
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
+    match state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(&coworker, &account.id)
+        .await
+    {
         Ok(entries) => {
             if activate {
                 if let Ok(mut active) = state.active_agent.lock() {
@@ -1317,6 +1358,7 @@ pub async fn acceptance_status(state: &GatewayState, args: &Value, caller: &str)
 async fn card_already_settled(
     state: &GatewayState,
     coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
     entry_id: &str,
     path: &str,
 ) -> bool {
@@ -1327,7 +1369,7 @@ async fn card_already_settled(
         .agui
         .auth
         .store
-        .find_gateway_entry(coworker_id, entry_id)
+        .find_gateway_entry(coworker_id, account, entry_id)
         .await
     {
         Ok(Some((_, entry))) => entry["message"][path]["status"]
@@ -1401,7 +1443,7 @@ pub async fn resolve_local_tool_permission(
     let Some((run_id, mut run, seq)) = found else {
         // A second press on a card that already settled — the run has left the awaiting list,
         // which is exactly what an answered run does. Not a dead request; do not heal it.
-        if card_already_settled(state, &coworker_id, &entry_id, "ask").await {
+        if card_already_settled(state, &coworker_id, &account_id, &entry_id, "ask").await {
             return (200, json!({ "alreadyAnswered": true }));
         }
         // The card names a request no run is waiting on — its run died (a crash, a sweep, a
@@ -1415,7 +1457,7 @@ pub async fn resolve_local_tool_permission(
                 .agui
                 .auth
                 .store
-                .set_gateway_ask_status(&coworker_id, &entry_id, "expired")
+                .set_gateway_ask_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
             live::emit_transcript(state, &agent_id, "updated", card);
@@ -1545,7 +1587,7 @@ pub async fn resolve_local_tool_permission(
         .agui
         .auth
         .store
-        .find_gateway_entry(&coworker_id, &entry_id)
+        .find_gateway_entry(&coworker_id, &account_id, &entry_id)
         .await
         && let Some(author) = existing.get("author")
     {
@@ -1555,7 +1597,7 @@ pub async fn resolve_local_tool_permission(
         .agui
         .auth
         .store
-        .update_gateway_entry_by_id(&coworker_id, &entry_id, &card)
+        .update_gateway_entry_by_id(&coworker_id, &account_id, &entry_id, &card)
         .await;
     live::emit_transcript(state, &agent_id, "updated", card);
 
@@ -1661,7 +1703,7 @@ pub async fn resolve_auto_review_approval(
         }
     }
     let Some((run_id, mut run, seq)) = found else {
-        if card_already_settled(state, &coworker_id, &entry_id, "approval").await {
+        if card_already_settled(state, &coworker_id, &account_id, &entry_id, "approval").await {
             return (200, json!({ "alreadyAnswered": true }));
         }
         // Same heal as the exec card: the press flips ONLY approval.status to "expired" and the
@@ -1671,7 +1713,7 @@ pub async fn resolve_auto_review_approval(
                 .agui
                 .auth
                 .store
-                .set_gateway_approval_status(&coworker_id, &entry_id, "expired")
+                .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
             live::emit_transcript(state, &agent_id, "updated", card);
@@ -1738,7 +1780,7 @@ pub async fn resolve_auto_review_approval(
             .agui
             .auth
             .store
-            .set_gateway_approval_status(&coworker_id, &entry_id, status)
+            .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, status)
             .await
     {
         live::emit_transcript(state, &agent_id, "updated", card);
@@ -2000,13 +2042,13 @@ async fn resume_gateway_run(
         text = format!("The turn failed: {why}");
     }
     if !text.is_empty() {
-        let reply_to = reply_link_of_the_turn(&state, &coworker_id).await;
+        let reply_to = reply_link_of_the_turn(&state, &coworker_id, &account_id).await;
         let answer = answer_entry(&entry_id(), &text, reply_to.as_deref());
         if let Ok(_seq) = state
             .agui
             .auth
             .store
-            .append_gateway_entry(&coworker_id, &answer, now_ms())
+            .append_gateway_entry(&coworker_id, &account_id, &answer, now_ms())
             .await
         {
             live::emit_transcript(&state, &agent_id, "appended", answer);
@@ -2015,7 +2057,7 @@ async fn resume_gateway_run(
     // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its
     // card exactly like the first turn did; without this the run paused with nothing to press.
     if let Some(suspension) = find_suspension(&events)
-        && emit_suspension(&state, &coworker_id, &agent_id, &suspension).await
+        && emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await
     {
         return;
     }

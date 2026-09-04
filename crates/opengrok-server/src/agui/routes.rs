@@ -613,29 +613,13 @@ pub async fn repin_coworker(
     };
     // "private" | "org". An unrecognised word is refused rather than defaulted: a caller who
     // wrote "public" meant something we do not offer, and quietly storing "private" would tell
-    // them they had shared a coworker they had not.
-    //
-    // `org` is refused too, and for the SAME reason rather than a different one. Nothing reads
-    // visibility yet: `coworkers_for` is still owner-scoped, and a transcript is still one
-    // thread per coworker. Storing `org` would answer 200, report `visibility: "org"` on the
-    // roster, and share nothing — a security-adjacent setting telling somebody their work is
-    // visible to their org when it is not. A word that cannot take effect is refused with a
-    // sentence, exactly like a word we do not have. Delete this arm when the transcript is
-    // keyed per member and the roster widens; the aggregate already stores `Org` correctly and
-    // is tested for it, so this is one branch to remove and not a feature to build.
+    // them they had shared a coworker they had not. `org` is accepted now that a shared
+    // coworker has a transcript per member; before that it was refused, because storing it
+    // would have reported a sharing that did nothing.
     let visibility = match body.get("visibility") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(text)) => {
             match opengrok_core::coworker::Visibility::parse(text) {
-                Some(opengrok_core::coworker::Visibility::Org) => {
-                    return refuse(
-                        "visibility: sharing is not switched on yet — a coworker's conversation \
-                         is still one thread per coworker, so 'org' would share nothing. It is \
-                         refused rather than stored, so that nothing tells you a coworker is \
-                         shared when it is not."
-                            .to_string(),
-                    );
-                }
                 Some(visibility) => Some(visibility),
                 None => {
                     return refuse(format!("visibility: '{text}' is not one of private, org"));

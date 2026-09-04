@@ -491,7 +491,10 @@ async fn grok_bot(
                 .filter(|limit| *limit > 0)
                 .unwrap_or(200)
                 .clamp(1, 1000);
-            match store.gateway_page(&coworker, before, limit).await {
+            match store
+                .gateway_page(&coworker, &account_id, before, limit)
+                .await
+            {
                 Ok(page) => connect_ok(json!({
                     "entries": page
                         .iter()
@@ -536,7 +539,7 @@ async fn grok_bot(
                     continue;
                 };
                 if store
-                    .append_gateway_entry(&coworker, &parsed, now_ms())
+                    .append_gateway_entry(&coworker, &account_id, &parsed, now_ms())
                     .await
                     .is_ok()
                 {

@@ -20,13 +20,14 @@ impl PgStore {
     pub async fn append_gateway_entry(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         entry: &Value,
         at_ms: i64,
     ) -> StoreResult<i64> {
         for _ in 0..3 {
             let row = sqlx::query(
-                "insert into gateway_entry (coworker_id, seq, entry, at_ms)
-                 select $1, coalesce(max(seq), 0) + 1, $2, $3 from gateway_entry
+                "insert into gateway_entry (coworker_id, seq, entry, at_ms, account_id)
+                 select $1, coalesce(max(seq), 0) + 1, $2, $3, $4 from gateway_entry
                  where coworker_id = $1
                  on conflict do nothing
                  returning seq",
@@ -34,6 +35,7 @@ impl PgStore {
             .bind(coworker.as_str())
             .bind(entry)
             .bind(at_ms)
+            .bind(account.as_str())
             .fetch_optional(self.pool())
             .await?;
             if let Some(row) = row {
@@ -52,16 +54,18 @@ impl PgStore {
     pub async fn update_gateway_entry_by_id(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         entry_id: &str,
         entry: &Value,
     ) -> StoreResult<()> {
         sqlx::query(
             "update gateway_entry set entry = $3
-              where coworker_id = $1 and entry->>'id' = $2",
+              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4",
         )
         .bind(coworker.as_str())
         .bind(entry_id)
         .bind(entry)
+        .bind(account.as_str())
         .execute(self.pool())
         .await?;
         Ok(())
@@ -74,19 +78,21 @@ impl PgStore {
     pub async fn set_gateway_ask_status(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         entry_id: &str,
         status: &str,
     ) -> StoreResult<Option<Value>> {
         let row = sqlx::query(
             "update gateway_entry
                 set entry = jsonb_set(entry::jsonb, '{message,ask,status}', to_jsonb($3::text))::jsonb
-              where coworker_id = $1 and entry->>'id' = $2
+              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4
                 and entry->'message'->'ask' is not null
               returning entry",
         )
         .bind(coworker.as_str())
         .bind(entry_id)
         .bind(status)
+        .bind(account.as_str())
         .fetch_optional(self.pool())
         .await?;
         Ok(match row {
@@ -102,19 +108,21 @@ impl PgStore {
     pub async fn set_gateway_approval_status(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         entry_id: &str,
         status: &str,
     ) -> StoreResult<Option<Value>> {
         let row = sqlx::query(
             "update gateway_entry
                 set entry = jsonb_set(entry::jsonb, '{message,approval,status}', to_jsonb($3::text))::jsonb
-              where coworker_id = $1 and entry->>'id' = $2
+              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4
                 and entry->'message'->'approval' is not null
               returning entry",
         )
         .bind(coworker.as_str())
         .bind(entry_id)
         .bind(status)
+        .bind(account.as_str())
         .fetch_optional(self.pool())
         .await?;
         Ok(match row {
@@ -126,15 +134,20 @@ impl PgStore {
     pub async fn update_gateway_entry(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         seq: i64,
         entry: &Value,
     ) -> StoreResult<()> {
-        sqlx::query("update gateway_entry set entry = $3 where coworker_id = $1 and seq = $2")
-            .bind(coworker.as_str())
-            .bind(seq)
-            .bind(entry)
-            .execute(self.pool())
-            .await?;
+        sqlx::query(
+            "update gateway_entry set entry = $3
+              where coworker_id = $1 and seq = $2 and account_id = $4",
+        )
+        .bind(coworker.as_str())
+        .bind(seq)
+        .bind(entry)
+        .bind(account.as_str())
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 
@@ -144,17 +157,20 @@ impl PgStore {
     pub async fn gateway_tail(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         before_seq: Option<i64>,
         limit: i64,
     ) -> StoreResult<(Vec<Value>, Option<i64>)> {
         let rows = sqlx::query(
             "select seq, entry from gateway_entry
              where coworker_id = $1 and ($2::bigint is null or seq < $2)
+               and account_id = $4
              order by seq desc limit $3",
         )
         .bind(coworker.as_str())
         .bind(before_seq)
         .bind(limit)
+        .bind(account.as_str())
         .fetch_all(self.pool())
         .await?;
 
@@ -180,17 +196,20 @@ impl PgStore {
     pub async fn gateway_page(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         before_seq: Option<i64>,
         limit: i64,
     ) -> StoreResult<Vec<(i64, Value)>> {
         let rows = sqlx::query(
             "select seq, entry from gateway_entry
              where coworker_id = $1 and ($2::bigint is null or seq < $2)
+               and account_id = $4
              order by seq desc limit $3",
         )
         .bind(coworker.as_str())
         .bind(before_seq)
         .bind(limit)
+        .bind(account.as_str())
         .fetch_all(self.pool())
         .await?;
         let mut page: Vec<(i64, Value)> = rows
@@ -231,12 +250,19 @@ impl PgStore {
     }
 
     /// The whole transcript, oldest first. Unbounded on purpose — `getAgentTranscript` is.
-    pub async fn gateway_transcript(&self, coworker: &CoworkerId) -> StoreResult<Vec<Value>> {
-        let rows =
-            sqlx::query("select entry from gateway_entry where coworker_id = $1 order by seq")
-                .bind(coworker.as_str())
-                .fetch_all(self.pool())
-                .await?;
+    pub async fn gateway_transcript(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<Vec<Value>> {
+        let rows = sqlx::query(
+            "select entry from gateway_entry
+             where coworker_id = $1 and account_id = $2 order by seq",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
         rows.into_iter()
             .map(|row| Ok(row.try_get("entry")?))
             .collect()
@@ -247,15 +273,17 @@ impl PgStore {
     pub async fn find_gateway_entry(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         entry_id: &str,
     ) -> StoreResult<Option<(i64, Value)>> {
         let row = sqlx::query(
             "select seq, entry from gateway_entry
-             where coworker_id = $1 and entry->>'id' = $2
+             where coworker_id = $1 and entry->>'id' = $2 and account_id = $3
              order by seq desc limit 1",
         )
         .bind(coworker.as_str())
         .bind(entry_id)
+        .bind(account.as_str())
         .fetch_optional(self.pool())
         .await?;
         row.map(|row| Ok((row.try_get("seq")?, row.try_get("entry")?)))
@@ -266,15 +294,17 @@ impl PgStore {
     pub async fn delete_gateway_entries(
         &self,
         coworker: &CoworkerId,
+        account: &AccountId,
         ids: &[String],
     ) -> StoreResult<Vec<String>> {
         let rows = sqlx::query(
             "delete from gateway_entry
-             where coworker_id = $1 and entry->>'id' = any($2)
+             where coworker_id = $1 and entry->>'id' = any($2) and account_id = $3
              returning entry->>'id' as id",
         )
         .bind(coworker.as_str())
         .bind(ids)
+        .bind(account.as_str())
         .fetch_all(self.pool())
         .await?;
         rows.into_iter().map(|row| Ok(row.try_get("id")?)).collect()

@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
 use futures::stream;
+use opengrok_core::id::CoworkerId;
 use serde_json::{Value, json};
 
 use super::{GatewayState, refuse};
@@ -382,6 +383,51 @@ async fn command(
         }
     };
 
+    // AUTHORISATION, once, for every verb that names a coworker. Before this, seam A checked
+    // that the CALLER was somebody and never that the coworker was theirs: any signed-in person
+    // who knew an id could read another person's transcript or send a prompt as them. That was
+    // survivable only because ids were not discoverable, and the roster is about to make them
+    // discoverable on purpose.
+    //
+    // The refusal is whatever the verb ALREADY says when it has never heard of an agent — never
+    // a 403, and not a uniform 404 either. Both halves matter: 403 says "it exists and is not
+    // yours", and a 404 where the verb's own not-found answer is `null` is the same disclosure
+    // one step removed, because a stranger can then tell a real id from an invented one by which
+    // shape comes back. So refusal and never-heard-of-it are the same reply, per verb.
+    //
+    // STILL OPEN, and written here rather than only in a pull request: the refusal answers from a
+    // table immediately, while a genuine unknown id answers the same shape after the handler has
+    // been to the store and come back empty. Same bytes, different latency, so the two are still
+    // sortable by somebody who can time replies. The fix is not a matching dummy lookup — that
+    // matches only until either query changes, and nothing makes them change together. It is to
+    // make authorisation part of the LOOKUP (`coworker_for(caller, id) -> Option<_>`, `None` for
+    // both cases), so there is no second path to keep matching and no table to keep in step.
+    // Roadmap 19.5.
+    if let Some(agent) = names_a_coworker(&method, &args) {
+        let coworker = CoworkerId::from_stored(agent);
+        // Two levels, and the difference IS what sharing means. Talking to a shared coworker is
+        // what the owner granted; changing it is not. Asking `may_use` for both would make
+        // sharing a write grant and would contradict the `canManage: false` the roster tells the
+        // colleague — a colleague could rename, retire, re-avatar or re-automate a coworker they
+        // were only invited to talk to.
+        let allowed = if NEEDS_OWNERSHIP.contains(&method.as_str()) {
+            owns(&state, &caller, &coworker).await
+        } else {
+            may_use(&state, &caller, &coworker).await
+        };
+        match allowed {
+            Ok(true) => {}
+            Ok(false) => {
+                let (code, body) = never_heard_of_it(&method);
+                return reply(
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::NOT_FOUND),
+                    body,
+                );
+            }
+            Err(()) => return refusal(500, "storage failed"),
+        }
+    }
+
     match method.as_str() {
         // ---- the roster ----
         "listAgents" => match roster(&state, &caller).await {
@@ -494,7 +540,7 @@ async fn command(
         // Tails and pages: the same read, dressed four ways. `open*` also marks the agent active.
         "openAgentTail" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, true, false).await;
+                super::conversation::transcript_reply(&state, &args, &caller, true, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -502,7 +548,7 @@ async fn command(
         }
         "getAgentTranscriptTail" | "getAgentTranscriptPage" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, false, false).await;
+                super::conversation::transcript_reply(&state, &args, &caller, false, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -510,7 +556,7 @@ async fn command(
         }
         "openAgentWindowed" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, true, true).await;
+                super::conversation::transcript_reply(&state, &args, &caller, true, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -518,14 +564,15 @@ async fn command(
         }
         "getAgentTranscriptWindow" => {
             let (code, body) =
-                super::conversation::transcript_reply(&state, &args, false, true).await;
+                super::conversation::transcript_reply(&state, &args, &caller, false, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
             )
         }
         "getAgentTranscript" => {
-            let (code, body) = super::conversation::full_transcript(&state, &args, false).await;
+            let (code, body) =
+                super::conversation::full_transcript(&state, &args, &caller, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -533,14 +580,15 @@ async fn command(
         }
         "getTranscript" => {
             let (code, body) =
-                super::conversation::full_transcript(&state, &json!({}), false).await;
+                super::conversation::full_transcript(&state, &json!({}), &caller, false).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
             )
         }
         "openAgent" => {
-            let (code, body) = super::conversation::full_transcript(&state, &args, true).await;
+            let (code, body) =
+                super::conversation::full_transcript(&state, &args, &caller, true).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -560,7 +608,7 @@ async fn command(
                 .and_then(Value::as_str)
                 .map(|id| vec![id.to_string()])
                 .unwrap_or_default();
-            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+            wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "deleteAgents" => {
             let ids: Vec<String> = args
@@ -573,7 +621,7 @@ async fn command(
                         .collect()
                 })
                 .unwrap_or_default();
-            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+            wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args, &caller).await),
         "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
@@ -600,7 +648,7 @@ async fn command(
                 .unwrap_or("👍")
                 .to_string();
             wrap(
-                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     let reactions = entry
                         .as_object_mut()
                         .map(|map| map.entry("reactions").or_insert_with(|| json!([])));
@@ -614,7 +662,7 @@ async fn command(
         "respondToWidget" => {
             let value = args.get("value").cloned().unwrap_or(Value::Null);
             wrap(
-                super::lifecycle::mutate_entry(&state, &args, move |entry| {
+                super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     if let Some(map) = entry.as_object_mut() {
                         map.insert("respondedValue".to_string(), value);
                     }
@@ -623,14 +671,16 @@ async fn command(
             )
         }
         "dismissWidget" => wrap(
-            super::lifecycle::mutate_entry(&state, &args, |entry| {
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
                 if let Some(map) = entry.as_object_mut() {
                     map.insert("widgetDismissed".to_string(), json!(true));
                 }
             })
             .await,
         ),
-        "deleteTranscriptEntries" => wrap(super::lifecycle::delete_entries(&state, &args).await),
+        "deleteTranscriptEntries" => {
+            wrap(super::lifecycle::delete_entries(&state, &args, &caller).await)
+        }
         "submitSecret" | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
@@ -830,4 +880,177 @@ async fn roster(
     caller: &str,
 ) -> Result<Vec<Value>, opengrok_store::StoreError> {
     super::live::roster_rows_for(state, caller).await
+}
+
+/// Verbs that carry an `agentId` and answer a CONSTANT — an honest empty in the container the
+/// renderer expects, naming no coworker and reading nothing. They are not gated, because a 404
+/// here would not protect anything and WOULD divert the client: the renderer projects a sharing
+/// reply through `projectSharingState` and rejects anything else as malformed (CLAUDE.md #1,
+/// and the third fact in its header: reply shapes matter as much as replies).
+///
+/// A verb earns a place on this list only by returning a literal. The default is the other way
+/// round — anything naming a coworker is checked — so a verb added later is gated until somebody
+/// deliberately decides it answers nothing.
+///
+/// KEEP WHOLE MATCH ARMS TOGETHER, and `tests/against_constant_verbs.rs` enforces it. Four verbs
+/// share one `Value::Null` arm with `setAgentUnread`; exempting some and gating the rest would
+/// make identical verbs answer differently for the same id. That is not theoretical — the client
+/// passes `args.id` on all four (`source/host/host-gateway-api.ts:361-367`), so a gated sibling
+/// would answer 404 to a colleague on a shared coworker where its arm-mate answers a shape.
+///
+/// This list is a SECOND COPY of something the match statement already knows, and a second copy
+/// with nothing forcing agreement is how catalogues drift. The test is that mechanism.
+pub const ANSWERS_A_CONSTANT: &[&str] = &[
+    "addOwnAgentToSharedRoom",
+    "appendConnectorCard",
+    "clearAgentMemories",
+    "createRoomFromAgent",
+    "createRoomInvite",
+    "createSharedRoom",
+    "deleteAgentMemory",
+    "getAgentChannels",
+    "getAgentMemories",
+    "getAgentThread",
+    "getAgentWorkflows",
+    "getAsyncTasks",
+    "getConversationOutline",
+    "getSharingState",
+    "getSubagents",
+    "joinSharedRoom",
+    "kickstartAgent",
+    "leaveSharedRoom",
+    "removeOwnAgentFromSharedRoom",
+    "respondToRoomJoinRequest",
+    "setAgentHiddenFromSidebar",
+    "setAgentNotificationsEnabled",
+    "setAgentNotifyOnUpdates",
+    "setAgentUnread",
+    "submitSecret",
+];
+
+/// Ids that are definitely NOT a coworker's. `id` on the wire means different things on
+/// different verbs — the coworker on `openAgent` and the transcript reads, the AUTOMATION on
+/// `setAgentAutomationEnabled` — so the fallback below has to tell them apart. It does it by the
+/// prefix every id in `opengrok-core::id` carries, and it is a DENYLIST on purpose: an id whose
+/// shape is not recognised is treated as a coworker's and checked, which is the narrow side.
+/// Listing the coworker-naming verbs instead would leave a new one unchecked by default.
+///
+/// Learned from `slice15-lifecycle-smoke.sh`, which disabled an automation and got "no such
+/// agent" back: the gate had read a schedule id as a coworker id and refused a verb that never
+/// named a coworker at all.
+const NOT_A_COWORKER_ID: &[&str] = &[
+    "acct_", "box_", "e_", "mon_", "org_", "pr_", "run_", "sched_", "sess_",
+];
+
+/// The coworker a verb acts on, when it names one. Reads `agentId` first (the client's name for
+/// it on nearly every verb) and then `id`, which `openAgent` and the transcript reads use.
+///
+/// Verbs that CREATE a coworker are excluded by having no id to name yet; `deleteAgents` takes a
+/// list and is gated per id inside `lifecycle`, not here.
+fn names_a_coworker(method: &str, args: &Value) -> Option<String> {
+    if method == "createAgent" || method == "createGroup" || ANSWERS_A_CONSTANT.contains(&method) {
+        return None;
+    }
+    if let Some(agent) = args.get("agentId").and_then(Value::as_str) {
+        return (!agent.is_empty()).then(|| agent.to_string());
+    }
+    args.get("id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            !id.is_empty()
+                && !NOT_A_COWORKER_ID
+                    .iter()
+                    .any(|prefix| id.starts_with(prefix))
+        })
+        .map(str::to_string)
+}
+
+/// Owner, or shared with an org this caller is in. Errors are `Err(())` so the caller answers
+/// 500 rather than treating a broken read as permission — a broken condition on an allow may
+/// only ever narrow (CLAUDE.md #8).
+async fn may_use(state: &GatewayState, caller: &str, coworker: &CoworkerId) -> Result<bool, ()> {
+    let account = match state.agui.auth.store.account_by_email(caller).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            tracing::error!(%error, "could not resolve the caller for a coworker check");
+            return Err(());
+        }
+    };
+    state
+        .agui
+        .auth
+        .store
+        .may_use_coworker(&account.id, coworker)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, coworker = %coworker.as_str(), "could not check whether the caller may use this coworker");
+        })
+}
+
+/// What a verb answers when it has never heard of an agent, which is also what it answers to
+/// somebody who may not use one. Transcribed from the verbs themselves, not chosen: `updateAgent`
+/// answers `null` for an unknown id (`slice15-lifecycle-smoke.sh` asserts exactly that) and
+/// `getAgentAvatar` answers a two-null object, so a uniform 404 would both break the client and
+/// leak which ids are real.
+///
+/// A THIRD COPY of something the handlers know, like `ANSWERS_A_CONSTANT` — and this one has no
+/// test that can derive it, because "what this returns for an unknown id" is not visible in a
+/// match arm. The smokes are the mechanism: they assert the shapes for ids that do not exist,
+/// and this table has to give the same ones.
+fn never_heard_of_it(method: &str) -> (u16, Value) {
+    match method {
+        "updateAgent"
+        | "setGroupMembers"
+        | "setAgentAvatarBytes"
+        | "runAgentAutomationNow"
+        | "reactToMessage"
+        | "respondToWidget"
+        | "dismissWidget" => (200, Value::Null),
+        "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
+        _ => (404, json!({ "error": "no such agent" })),
+    }
+}
+
+/// Verbs that CHANGE a coworker rather than use it. These need ownership, not permission to
+/// talk: sharing lets a colleague have a conversation, and the roster promises them
+/// `canManage: false`. Checked as a denylist would be wrong here — a verb missing from this
+/// list falls back to `may_use`, which is the WIDER answer — so anything that mutates a
+/// coworker's configuration must be added, and `tests/against_visibility.rs` pins the two that
+/// were found the hard way.
+///
+/// `deleteAgents` is NOT here because it takes a list of ids rather than one, so the extractor
+/// below cannot see it; it is filtered to the caller's own inside `lifecycle::delete_agents`.
+pub const NEEDS_OWNERSHIP: &[&str] = &[
+    "createAgentAutomation",
+    "deleteAgent",
+    "deleteAgentAutomation",
+    "duplicateAgent",
+    "getAgentAutomations",
+    "runAgentAutomationNow",
+    "setAgentAutomationEnabled",
+    "setAgentAvatarBytes",
+    "setGroupMembers",
+    "updateAgent",
+    "updateAgentAutomation",
+];
+
+/// Does this caller OWN the coworker. Ownership, never org visibility — the narrow question,
+/// for the verbs that change something.
+async fn owns(state: &GatewayState, caller: &str, coworker: &CoworkerId) -> Result<bool, ()> {
+    let account = match state.agui.auth.store.account_by_email(caller).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            tracing::error!(%error, "could not resolve the caller for an ownership check");
+            return Err(());
+        }
+    };
+    match state.agui.auth.store.coworker_owner(coworker).await {
+        Ok(owner) => Ok(owner.is_some_and(|owner| owner == account.id)),
+        Err(error) => {
+            tracing::error!(%error, coworker = %coworker.as_str(), "could not read a coworker's owner");
+            Err(())
+        }
+    }
 }

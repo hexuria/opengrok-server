@@ -198,7 +198,7 @@ async fn announce_finished(
         .agui
         .auth
         .store
-        .append_gateway_entry(coworker_id, &entry, at_ms)
+        .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
         .await
     {
         Ok(_) => {

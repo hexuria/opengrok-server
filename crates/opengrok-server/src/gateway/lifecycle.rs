@@ -419,14 +419,36 @@ pub async fn update_agent(state: &GatewayState, args: &Value, caller: &str) -> (
 }
 
 /// `deleteAgents {ids}` (and `deleteAgent {id}`) — retirement, in the client's vocabulary.
-pub async fn delete_agents(state: &GatewayState, ids: &[String]) -> (u16, Value) {
+/// Retire coworkers by id. Filtered to the CALLER's own, per id.
+///
+/// This verb takes a LIST rather than an `agentId`, so the coworker check in the dispatch never
+/// sees it; and it used to resolve the DEPLOYMENT account rather than the caller, so it never
+/// compared the two either. Any signed-in person who knew an id could retire somebody else's
+/// coworker — reachable in practice the moment sharing puts ids on a colleague's roster, and
+/// flatly contrary to the `canManage: false` that roster row tells them.
+///
+/// An id the caller does not own is SKIPPED rather than refused, so the count answers how many
+/// went; refusing the whole batch would let one borrowed id cancel a legitimate delete.
+pub async fn delete_agents(state: &GatewayState, ids: &[String], caller: &str) -> (u16, Value) {
     use opengrok_core::coworker::CoworkerCommand;
-    let Some(account) = account(state, &state.email).await else {
+    let Some(account) = account(state, caller).await else {
         return (200, json!({ "deleted": 0 }));
     };
     let mut deleted = 0;
     for id in ids {
         let coworker_id = CoworkerId::from_stored(id.clone());
+        let owned = state
+            .agui
+            .auth
+            .store
+            .coworker_owner(&coworker_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|owner| owner == account.id);
+        if !owned {
+            continue;
+        }
         if let Ok((loaded, seq)) = state.agui.auth.store.load_coworker(&coworker_id).await {
             let at_ms = now_ms();
             let mut after = loaded;
@@ -610,6 +632,7 @@ pub async fn get_avatar(state: &GatewayState, args: &Value) -> (u16, Value) {
 pub async fn mutate_entry(
     state: &GatewayState,
     args: &Value,
+    caller: &str,
     edit: impl FnOnce(&mut Value),
 ) -> (u16, Value) {
     let Some(agent) = args.get("agentId").and_then(Value::as_str) else {
@@ -619,11 +642,17 @@ pub async fn mutate_entry(
         return (400, json!({ "error": "entryId is required" }));
     };
     let coworker = CoworkerId::from_stored(agent.to_string());
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
     let Ok(Some((seq, mut entry))) = state
         .agui
         .auth
         .store
-        .find_gateway_entry(&coworker, entry_id)
+        .find_gateway_entry(&coworker, &account.id, entry_id)
         .await
     else {
         return (200, Value::Null);
@@ -633,7 +662,7 @@ pub async fn mutate_entry(
         .agui
         .auth
         .store
-        .update_gateway_entry(&coworker, seq, &entry)
+        .update_gateway_entry(&coworker, &account.id, seq, &entry)
         .await
     {
         tracing::error!(%error, "could not mutate an entry");
@@ -644,7 +673,7 @@ pub async fn mutate_entry(
 }
 
 /// `deleteTranscriptEntries {agentId, ids}` → emits `removed` per entry that went.
-pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(agent) = args.get("agentId").and_then(Value::as_str) else {
         return (400, json!({ "error": "agentId is required" }));
     };
@@ -659,11 +688,17 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
         })
         .unwrap_or_default();
     let coworker = CoworkerId::from_stored(agent.to_string());
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
     match state
         .agui
         .auth
         .store
-        .delete_gateway_entries(&coworker, &ids)
+        .delete_gateway_entries(&coworker, &account.id, &ids)
         .await
     {
         Ok(removed) => {

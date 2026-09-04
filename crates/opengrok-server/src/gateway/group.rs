@@ -446,6 +446,7 @@ async fn resolve_members(state: &GatewayState, group: &Coworker) -> Vec<Member> 
 async fn post_member_message(
     state: &GatewayState,
     group_id: &CoworkerId,
+    account_id: &AccountId,
     member: &Member,
     content: &str,
 ) {
@@ -460,7 +461,7 @@ async fn post_member_message(
         .agui
         .auth
         .store
-        .append_gateway_entry(group_id, &entry, now_ms())
+        .append_gateway_entry(group_id, account_id, &entry, now_ms())
         .await
     {
         tracing::error!(%error, group = %group_id.as_str(), "group: a member's message could not be appended");
@@ -624,6 +625,7 @@ pub struct RoundCursor {
 async fn pause_room(
     state: &GatewayState,
     room: &Room<'_>,
+    account_id: &AccountId,
     member: &Member,
     run_id: &RunId,
     suspension: &super::conversation::Suspension,
@@ -644,7 +646,7 @@ async fn pause_room(
         .agui
         .auth
         .store
-        .append_gateway_entry(room.id, &card, now_ms())
+        .append_gateway_entry(room.id, account_id, &card, now_ms())
         .await
     {
         tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
@@ -711,7 +713,7 @@ async fn run_rounds(
             match run_member_turn(state, account_id, room, &member, &peers, history).await {
                 MemberOutcome::Spoke(sent) => {
                     for content in sent {
-                        post_member_message(state, room.id, &member, &content).await;
+                        post_member_message(state, room.id, account_id, &member, &content).await;
                         history.push(GroupMessage {
                             speaker: Speaker::Member {
                                 id: member.id.as_str().to_string(),
@@ -733,7 +735,8 @@ async fn run_rounds(
                         this_round,
                         remaining: speakers.iter().map(|m| m.id.as_str().to_string()).collect(),
                     };
-                    if pause_room(state, room, &member, &run_id, &suspension, &at).await {
+                    if pause_room(state, room, account_id, &member, &run_id, &suspension, &at).await
+                    {
                         return;
                     }
                 }
@@ -782,6 +785,7 @@ pub async fn run_group_turn(
     let _guard = RoomGuard {
         state: state.clone(),
         agent_id: agent_id.clone(),
+        account_id: account_id.clone(),
     };
     let description = room_description(&state, &group_id).await;
     let members = resolve_members(&state, &group).await;
@@ -792,7 +796,7 @@ pub async fn run_group_turn(
         .agui
         .auth
         .store
-        .gateway_transcript(&group_id)
+        .gateway_transcript(&group_id, &account_id)
         .await
         .map(|entries| history_of(&entries))
         .unwrap_or_default();
@@ -859,6 +863,7 @@ pub async fn resume_member_turn(
     let _guard = RoomGuard {
         state: state.clone(),
         agent_id: agent_id.clone(),
+        account_id: account_id.clone(),
     };
     let description = room_description(&state, &group_id).await;
     let members = resolve_members(&state, &group).await;
@@ -880,7 +885,7 @@ pub async fn resume_member_turn(
         .agui
         .auth
         .store
-        .gateway_transcript(&group_id)
+        .gateway_transcript(&group_id, &account_id)
         .await
         .map(|entries| history_of(&entries))
         .unwrap_or_default();
@@ -962,7 +967,7 @@ pub async fn resume_member_turn(
             remaining: Vec::new(),
         });
     for content in spoken(&sent) {
-        post_member_message(&state, &group_id, &member, &content).await;
+        post_member_message(&state, &group_id, &account_id, &member, &content).await;
         history.push(GroupMessage {
             speaker: Speaker::Member {
                 id: member.id.as_str().to_string(),
@@ -975,7 +980,16 @@ pub async fn resume_member_turn(
     }
     // A resumed member may raise another card; it gets one exactly like the first.
     if let Some(suspension) = super::conversation::find_suspension(&events)
-        && pause_room(&state, &room, &member, &run_id, &suspension, &cursor).await
+        && pause_room(
+            &state,
+            &room,
+            &account_id,
+            &member,
+            &run_id,
+            &suspension,
+            &cursor,
+        )
+        .await
     {
         return;
     }
@@ -990,6 +1004,9 @@ pub async fn resume_member_turn(
 struct RoomGuard {
     state: GatewayState,
     agent_id: String,
+    /// Whose thread the room's entries were written to — the preview must be read back from the
+    /// same one, and a guard that runs after the turn has no request left to ask.
+    account_id: AccountId,
 }
 
 impl Drop for RoomGuard {
@@ -999,12 +1016,13 @@ impl Drop for RoomGuard {
         }
         let state = self.state.clone();
         let agent_id = self.agent_id.clone();
+        let account_id = self.account_id.clone();
         tokio::spawn(async move {
             let last = state
                 .agui
                 .auth
                 .store
-                .gateway_transcript(&CoworkerId::from_stored(agent_id.clone()))
+                .gateway_transcript(&CoworkerId::from_stored(agent_id.clone()), &account_id)
                 .await
                 .ok()
                 .and_then(|entries| {
