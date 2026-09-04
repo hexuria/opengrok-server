@@ -63,7 +63,7 @@ pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (
             Ok(Ok(stored)) if stored.get("pending").is_none() => {
                 // The earlier create finished; answer with its coworker.
                 if let Some(id) = stored.get("agentId").and_then(Value::as_str) {
-                    return agent_reply(state, id).await;
+                    return agent_reply(state, id, caller).await;
                 }
             }
             Ok(Ok(_)) => {}
@@ -76,7 +76,7 @@ pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (
             Err(_) => return (500, json!({ "error": "ledger unavailable" })),
         }
 
-        let (code, reply) = hire(state, &account.id, name, model_arg(args), args).await;
+        let (code, reply) = hire(state, &account.id, name, model_arg(args), args, caller).await;
         if code == 200
             && let Some(id) = reply.pointer("/agent/id").and_then(Value::as_str)
         {
@@ -87,7 +87,7 @@ pub async fn create_agent(state: &GatewayState, args: &Value, caller: &str) -> (
         return (code, reply);
     }
 
-    hire(state, &account.id, name, model_arg(args), args).await
+    hire(state, &account.id, name, model_arg(args), args, caller).await
 }
 
 /// The nonce record's second write: the row exists (the probe), the fact replaces it.
@@ -116,6 +116,7 @@ async fn hire(
     name: &str,
     model: Option<&str>,
     args: &Value,
+    caller: &str,
 ) -> (u16, Value) {
     use crate::agui::provision;
     use opengrok_core::coworker::{Coworker, CoworkerCommand};
@@ -253,7 +254,7 @@ async fn hire(
     live::emit_roster(state).await;
 
     // Report a failed box the way REST does — without failing the create.
-    let (code, mut reply) = agent_reply(state, id.as_str()).await;
+    let (code, mut reply) = agent_reply(state, id.as_str(), caller).await;
     if code == 200
         && provisioned.error.is_some()
         && let Some(object) = reply.as_object_mut()
@@ -273,8 +274,12 @@ async fn hire(
 }
 
 /// `{agent, transcript}` — what create and duplicate answer.
-async fn agent_reply(state: &GatewayState, id: &str) -> (u16, Value) {
-    let Ok(rows) = live::roster_rows(state).await else {
+///
+/// Reads the CALLER's roster. It used to read `roster_rows`, which is the DEPLOYMENT's, so a
+/// coworker hired by anybody else was written correctly and then reported as
+/// "the hired coworker did not appear" — a 500 on a create that had in fact succeeded.
+async fn agent_reply(state: &GatewayState, id: &str, caller: &str) -> (u16, Value) {
+    let Ok(rows) = live::roster_rows_for(state, caller).await else {
         return (500, json!({ "error": "roster unavailable" }));
     };
     match rows.into_iter().find(|row| row["id"] == id) {
@@ -284,12 +289,12 @@ async fn agent_reply(state: &GatewayState, id: &str) -> (u16, Value) {
 }
 
 /// `updateAgent {id, profile}` → the updated summary, or null for a stranger.
-pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn update_agent(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     use opengrok_core::coworker::CoworkerCommand;
     let Some(id) = args.get("id").and_then(Value::as_str) else {
         return (400, json!({ "error": "id is required" }));
     };
-    let Some(account) = account(state, &state.email).await else {
+    let Some(account) = account(state, caller).await else {
         return (200, Value::Null);
     };
     let coworker_id = CoworkerId::from_stored(id.to_string());
@@ -403,7 +408,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
         .put_seamb_profile(&coworker_id, &profile, now_ms())
         .await;
     live::emit_roster(state).await;
-    let (code, reply) = agent_reply(state, id).await;
+    let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (code, reply);
     }
@@ -469,7 +474,7 @@ fn model_arg(args: &Value) -> Option<&str> {
 }
 
 /// `duplicateAgent {id}` — a fresh hire wearing the original's profile.
-pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn duplicate_agent(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(id) = args.get("id").and_then(Value::as_str) else {
         return (400, json!({ "error": "id is required" }));
     };
@@ -486,7 +491,7 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value)
         .ok()
         .flatten()
         .unwrap_or_else(|| json!({}));
-    let Some(account) = account(state, &state.email).await else {
+    let Some(account) = account(state, caller).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -504,6 +509,7 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value) -> (u16, Value)
         &format!("{} copy", loaded.name),
         Some(loaded.model.as_str()),
         &hire_args,
+        caller,
     )
     .await
 }
@@ -529,7 +535,7 @@ pub async fn search_agents(state: &GatewayState, args: &Value) -> (u16, Value) {
 }
 
 /// `setAgentAvatarBytes {id, pngBase64|null}` and `getAgentAvatar {id}` share the profile row.
-pub async fn set_avatar(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn set_avatar(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(id) = args.get("id").and_then(Value::as_str) else {
         return (400, json!({ "error": "id is required" }));
     };
@@ -566,7 +572,7 @@ pub async fn set_avatar(state: &GatewayState, args: &Value) -> (u16, Value) {
         .put_seamb_profile(&coworker, &profile, now_ms())
         .await;
     live::emit_roster(state).await;
-    let (code, reply) = agent_reply(state, id).await;
+    let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (200, Value::Null);
     }
@@ -693,8 +699,12 @@ pub async fn delete_entries(state: &GatewayState, args: &Value) -> (u16, Value) 
 /// The desktop's Routines pane refreshes from an `agents-automation` frame carrying
 /// `{agentId, automations}` (`gateway-event-families.ts:10` → the controller's `ingest`), so a
 /// mutation, a firing, or a finished run reaches an open pane without a poll.
-pub(crate) async fn emit_automations(state: &GatewayState, agent: &str) {
-    let automations = automations_array(state, Some(agent)).await;
+pub(crate) async fn emit_automations(
+    state: &GatewayState,
+    agent: &str,
+    account_id: &opengrok_core::id::AccountId,
+) {
+    let automations = automations_array(state, Some(agent), account_id).await;
     // UNSTAMPED: the renderer's automations family has no replica and its own emitter sends no
     // stamp; a roster sequence spent here was a roster gap on every routine change.
     live::emit_unstamped(
@@ -833,15 +843,20 @@ async fn automation_json(
     })
 }
 
-async fn automations_array(state: &GatewayState, agent: Option<&str>) -> Vec<Value> {
-    let Some(account) = account(state, &state.email).await else {
-        return Vec::new();
-    };
+/// One person's routines, optionally narrowed to one coworker. Takes a resolved ACCOUNT rather
+/// than an email because the SSE emitter has no caller to resolve — and takes an identity at all
+/// because it used to read `state.email`, which pooled every member's routines into the
+/// deployment's own account: invisible to their owners, and listable by anyone signed in.
+async fn automations_array(
+    state: &GatewayState,
+    agent: Option<&str>,
+    account_id: &opengrok_core::id::AccountId,
+) -> Vec<Value> {
     let schedules = state
         .agui
         .auth
         .store
-        .schedules_for(&account.id)
+        .schedules_for(account_id)
         .await
         .unwrap_or_default();
     let mut out = Vec::with_capacity(schedules.len());
@@ -854,12 +869,18 @@ async fn automations_array(state: &GatewayState, agent: Option<&str>) -> Vec<Val
     out
 }
 
-pub async fn get_automations(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn get_automations(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let agent = args
         .get("id")
         .or_else(|| args.get("agentId"))
         .and_then(Value::as_str);
-    (200, Value::Array(automations_array(state, agent).await))
+    let Some(account) = account(state, caller).await else {
+        return (200, Value::Array(Vec::new()));
+    };
+    (
+        200,
+        Value::Array(automations_array(state, agent, &account.id).await),
+    )
 }
 
 /// What both body shapes boil down to. `None` is a refusal already shaped for the wire.
@@ -939,7 +960,7 @@ fn automation_arg(args: &Value) -> Option<&str> {
 }
 
 /// The mutating automation commands answer the NEW FULL ARRAY, per the contract note.
-pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn create_automation(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(agent) = agent_arg(args) else {
         return (400, json!({ "error": "id (the agent) is required" }));
     };
@@ -947,7 +968,7 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         Ok(spec) => spec,
         Err(refusal) => return refusal,
     };
-    let Some(account) = account(state, &state.email).await else {
+    let Some(account) = account(state, caller).await else {
         return (
             500,
             json!({ "error": "the gateway account does not exist yet" }),
@@ -984,10 +1005,10 @@ pub async fn create_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         tracing::error!(%error, "could not create an automation");
         return (500, json!({ "error": "storage failed" }));
     }
-    emit_automations(state, agent).await;
+    emit_automations(state, agent, &account.id).await;
     (
         200,
-        Value::Array(automations_array(state, Some(agent)).await),
+        Value::Array(automations_array(state, Some(agent), &account.id).await),
     )
 }
 
@@ -1054,11 +1075,12 @@ where
 async fn owned_schedule(
     state: &GatewayState,
     args: &Value,
+    caller: &str,
 ) -> Result<(opengrok_core::account::AccountView, ScheduleId), (u16, Value)> {
     let Some(id) = automation_arg(args) else {
         return Err((400, json!({ "error": "automationId is required" })));
     };
-    let Some(account) = account(state, &state.email).await else {
+    let Some(account) = account(state, caller).await else {
         return Err((200, json!([])));
     };
     let schedule_id = ScheduleId::from_stored(id.to_string());
@@ -1070,12 +1092,12 @@ async fn owned_schedule(
 
 /// `updateAgentAutomation {id, automationId, spec}` — edit in place: name, schedule, prompt and
 /// enabled state on the SAME row, never a second one.
-pub async fn update_automation(state: &GatewayState, args: &Value) -> (u16, Value) {
+pub async fn update_automation(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let spec = match parse_spec(args) {
         Ok(spec) => spec,
         Err(refusal) => return refusal,
     };
-    let (account, schedule_id) = match owned_schedule(state, args).await {
+    let (account, schedule_id) = match owned_schedule(state, args, caller).await {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
@@ -1117,19 +1139,31 @@ pub async fn update_automation(state: &GatewayState, args: &Value) -> (u16, Valu
         .as_ref()
         .map(|c| c.as_str().to_string())
         .unwrap_or_default();
-    emit_automations(state, &agent).await;
+    emit_automations(state, &agent, &account.id).await;
     (
         200,
-        Value::Array(automations_array(state, Some(&agent)).await),
+        Value::Array(automations_array(state, Some(&agent), &account.id).await),
     )
 }
 
 /// setEnabled / delete: pause, resume, delete on the schedule aggregate; the reply is the array.
-pub async fn change_automation(state: &GatewayState, args: &Value, action: &str) -> (u16, Value) {
-    let (account, schedule_id) = match owned_schedule(state, args).await {
+pub async fn change_automation(
+    state: &GatewayState,
+    args: &Value,
+    action: &str,
+    caller: &str,
+) -> (u16, Value) {
+    let (account, schedule_id) = match owned_schedule(state, args, caller).await {
         Ok(found) => found,
-        // Not yours (or nothing named) reads as the unchanged array, as before.
-        Err((404, _)) => return (200, Value::Array(automations_array(state, None).await)),
+        // Not yours (or nothing named) reads as the unchanged array, as before — the CALLER's
+        // array, so "not yours" and "not there" still look the same to them.
+        Err((404, _)) => {
+            let rows = match account(state, caller).await {
+                Some(account) => automations_array(state, None, &account.id).await,
+                None => Vec::new(),
+            };
+            return (200, Value::Array(rows));
+        }
         Err(refusal) => return refusal,
     };
     let at_ms = now_ms();
@@ -1150,18 +1184,18 @@ pub async fn change_automation(state: &GatewayState, args: &Value, action: &str)
         Err(_) => None,
     };
     if let Some(agent) = &agent {
-        emit_automations(state, agent).await;
+        emit_automations(state, agent, &account.id).await;
     }
     (
         200,
-        Value::Array(automations_array(state, agent.as_deref()).await),
+        Value::Array(automations_array(state, agent.as_deref(), &account.id).await),
     )
 }
 
 /// `runAgentAutomationNow` — the sweep's firing path, on demand. The run is a `manual` one in the
 /// pane's history, and it posts into the coworker's chat when it finishes, like a clock firing.
-pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Value) {
-    let (account, schedule_id) = match owned_schedule(state, args).await {
+pub async fn run_automation_now(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    let (account, schedule_id) = match owned_schedule(state, args, caller).await {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
@@ -1188,7 +1222,7 @@ pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Val
         state.agui.clone(),
         crate::autonomy::Firing {
             origin: format!("automation {schedule_id} (run now)"),
-            account_id: account.id,
+            account_id: account.id.clone(),
             coworker_id: coworker_id.clone(),
             prompt: after.prompt.clone(),
             thread_id: schedule_id.as_str().to_string(),
@@ -1199,7 +1233,7 @@ pub async fn run_automation_now(state: &GatewayState, args: &Value) -> (u16, Val
             }),
         },
     ));
-    emit_automations(state, coworker_id.as_str()).await;
+    emit_automations(state, coworker_id.as_str(), &account.id).await;
     (200, Value::Null)
 }
 
@@ -1295,7 +1329,7 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
             view.members.len() == members.len() && members.iter().all(|m| view.members.contains(m))
         })
     {
-        return agent_reply(state, existing.id.as_str()).await;
+        return agent_reply(state, existing.id.as_str(), caller).await;
     }
     let id = CoworkerId::new();
     let at_ms = now_ms();
@@ -1341,7 +1375,7 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
     live::emit_roster(state).await;
-    agent_reply(state, id.as_str()).await
+    agent_reply(state, id.as_str(), caller).await
 }
 
 /// `setGroupMembers {id, memberAgentIds}` → the group's summary, or `null` when `id` is not one
