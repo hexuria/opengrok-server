@@ -107,8 +107,10 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     };
 
     let request = ModelRequest {
-        gateway_key: crate::spend::key_for(&state, &coworker_id).await,
+        gateway_key: crate::spend::key_for(&state, &coworker_id, &account_id).await,
         spend_scope: Some(coworker_id.as_str().to_string()),
+        // Nobody is talking: a coworker acting on its own schedule acts for whoever hired it.
+        spend_actor: Some(account_id.as_str().to_string()),
         // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
         model: coworker.model.clone(),
         // A routine's turn is still this coworker's turn: same identity, same standing role.
@@ -214,5 +216,7 @@ async fn announce_finished(
         serde_json::json!({ "lastMessagePreview": preview }),
     )
     .await;
-    crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str()).await;
+    // The firing's own account: a routine acting on its schedule acts for whoever set it,
+    // and that is whose Routines pane this frame refreshes.
+    crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str(), account_id).await;
 }

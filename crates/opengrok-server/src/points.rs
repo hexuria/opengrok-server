@@ -65,46 +65,67 @@ pub fn commas(points: i64) -> String {
     out
 }
 
-/// The limits a coworker is under, resolved: its own cap and brake (and who set them), its
-/// owner, and the owner's pool (and who set it).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The limits THIS person's turn on a coworker is under: the coworker's own cap and brake (and
+/// who set them), and the payer's pool (and who set it). No `Default`: an `Effective` with no
+/// payer would be a set of limits nobody is answerable for, and the only reason to want one is
+/// to skip saying whose turn it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
     pub cap: Option<i64>,
     pub day_cap: Option<i64>,
     pub cap_set_by: Option<String>,
-    pub owner: Option<AccountId>,
+    /// Whose pool this turn draws on — the person TALKING, not the coworker's hirer. On a
+    /// coworker only its owner can reach they are the same account; on a shared one they are
+    /// not, and billing the hirer for somebody else's conversation is the bug this names away.
+    pub payer: AccountId,
     pub pool: Option<i64>,
     pub pool_set_by: Option<String>,
 }
 
 impl Effective {
+    /// Nothing set, for the arithmetic tests. Deliberately NOT a `Default` impl: outside a test
+    /// an `Effective` has to name whose pool it is, and a derived default would let a caller
+    /// skip saying — which is exactly the bug this type was re-keyed to prevent.
+    #[cfg(test)]
+    pub fn none_set() -> Self {
+        Self {
+            cap: None,
+            day_cap: None,
+            cap_set_by: None,
+            payer: AccountId::from_stored("acct_test".to_string()),
+            pool: None,
+            pool_set_by: None,
+        }
+    }
+
     /// Whether anything at all is enforced: with nothing set the guard never touches the meter.
     pub fn is_limited(&self) -> bool {
         self.cap.is_some() || self.day_cap.is_some() || self.pool.is_some()
     }
 }
 
-pub async fn effective(store: &PgStore, coworker: &CoworkerId) -> Result<Effective, String> {
+/// The limits that bind THIS person's turn on this coworker: the coworker's own cap and daily
+/// brake, and the payer's monthly pool. The payer is an argument rather than a lookup because
+/// the answer differs per member on a shared coworker, and a function that resolved the owner
+/// itself would silently give every member the hirer's pool.
+pub async fn effective(
+    store: &PgStore,
+    coworker: &CoworkerId,
+    payer: &AccountId,
+) -> Result<Effective, String> {
     let own = store
         .points_limit(PointsScope::Coworker, coworker.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    let owner = store
-        .coworker_owner(coworker)
+    let pool = store
+        .points_limit(PointsScope::Member, payer.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    let pool = match &owner {
-        Some(owner) => store
-            .points_limit(PointsScope::Member, owner.as_str())
-            .await
-            .map_err(|error| error.to_string())?,
-        None => None,
-    };
     Ok(Effective {
         cap: own.as_ref().and_then(|row| row.limit.month_points),
         day_cap: own.as_ref().and_then(|row| row.limit.day_points),
         cap_set_by: own.map(|row| row.set_by),
-        owner,
+        payer: payer.clone(),
         pool: pool.as_ref().and_then(|row| row.limit.month_points),
         pool_set_by: pool.map(|row| row.set_by),
     })
@@ -128,13 +149,30 @@ pub fn effective_cap(
     }
 }
 
-/// The key ids the pool sums over: every key the owner's coworkers ever had, revoked ones
-/// included — a retired coworker's month still counts.
-pub async fn pool_keys(store: &PgStore, owner: &AccountId) -> Result<Vec<String>, String> {
-    store
-        .coworker_keys_for_account(owner)
+/// The key ids a person's pool sums over: every key ever minted FOR THEM on any coworker,
+/// revoked ones included — a retired coworker's month still counts, and on a shared coworker
+/// their own key counts toward their own pool rather than the hirer's.
+pub async fn pool_keys(store: &PgStore, payer: &AccountId) -> Result<Vec<String>, String> {
+    pool_keys_by_coworker(store, payer)
         .await
-        .map(|rows| rows.into_iter().map(|row| row.key_id).collect())
+        .map(|rows| rows.into_iter().map(|(key_id, _)| key_id).collect())
+}
+
+/// The same keys, still paired with the coworker each was minted for. The pool reading gets a
+/// figure per key back from the gateway, and without this pairing it can only add them up — so
+/// "your pool is used up" could never say which coworker used it.
+pub async fn pool_keys_by_coworker(
+    store: &PgStore,
+    payer: &AccountId,
+) -> Result<Vec<(String, CoworkerId)>, String> {
+    store
+        .coworker_keys_for_account(payer)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| (row.key_id, CoworkerId::from_stored(row.coworker_id)))
+                .collect()
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -188,10 +226,10 @@ fn next_month_start() -> String {
     format!("{year:04}-{month:02}-01T00:00:00Z")
 }
 
-/// The pool's month total over the owner's keys, or `None` when it cannot be read (no admin
+/// The pool's month total over the payer's keys, or `None` when it cannot be read (no admin
 /// connection, no reference price, the gateway not answering).
-async fn pool_used(state: &AgUiState, admin: &GatewayAdmin, owner: &AccountId) -> Option<i64> {
-    let keys = pool_keys(&state.auth.store, owner).await.ok()?;
+async fn pool_used(state: &AgUiState, admin: &GatewayAdmin, payer: &AccountId) -> Option<i64> {
+    let keys = pool_keys(&state.auth.store, payer).await.ok()?;
     if keys.is_empty() {
         return Some(0);
     }
@@ -202,7 +240,7 @@ async fn pool_used(state: &AgUiState, admin: &GatewayAdmin, owner: &AccountId) -
         Ok(Some(per_key)) => Some(per_key.values().sum()),
         Ok(None) => None,
         Err(error) => {
-            tracing::warn!(%error, owner = %owner.as_str(), "points: the pool could not be read");
+            tracing::warn!(%error, payer = %payer.as_str(), "points: the pool could not be read");
             None
         }
     }
@@ -214,12 +252,14 @@ pub async fn limit_for(
     coworker_id: &CoworkerId,
 ) -> Result<LimitView, String> {
     let store = &state.auth.store;
-    let limits = effective(store, coworker_id).await?;
+    // The caller's own key on this coworker, and their own pool: a shared coworker's console
+    // row answers about the person reading it, not about its hirer.
+    let limits = effective(store, coworker_id, account_id).await?;
     let key = store
-        .coworker_key(coworker_id)
+        .coworker_key(coworker_id, account_id)
         .await
         .map_err(|error| format!("the key row could not be read: {error}"))?
-        .filter(|row| row.account_id == account_id.as_str() && row.revoked_at_ms.is_none());
+        .filter(|row| row.revoked_at_ms.is_none());
     let admin = state.auth.gateway_admin.as_ref();
     let mut note = None;
     let reference = match admin {
@@ -260,8 +300,8 @@ pub async fn limit_for(
             Err(error) => note = Some(format!("the gateway could not be asked: {error}")),
         }
     }
-    let pool_total = match (admin, &limits.owner, reference.as_ref()) {
-        (Some(admin), Some(owner), Some(_)) => pool_used(state, admin, owner).await,
+    let pool_total = match (admin, reference.as_ref()) {
+        (Some(admin), Some(_)) => pool_used(state, admin, &limits.payer).await,
         _ => None,
     };
     Ok(LimitView {
@@ -311,7 +351,9 @@ pub async fn set_limit(
     let cap = field(body, "cap").map_err(|m| (400, m))?;
     let day_cap = field(body, "dayCap").map_err(|m| (400, m))?;
     let store = &state.auth.store;
-    let limits = effective(store, coworker_id).await.map_err(|m| (503, m))?;
+    let limits = effective(store, coworker_id, account_id)
+        .await
+        .map_err(|m| (503, m))?;
     if let (Some(Some(cap)), Some(pool)) = (cap, limits.pool)
         && cap > pool
     {
@@ -323,6 +365,39 @@ pub async fn set_limit(
                 commas(pool)
             ),
         ));
+    }
+    // AND THE CAPS TOGETHER. The check above catches one cap larger than the whole pool; it says
+    // nothing about five caps that each fit and together do not. Accepting those turns the pool
+    // into first-come-first-served: the coworkers that ask last are refused while still under
+    // their own cap, and the sentence they get talks about the pool rather than the
+    // over-allocation that caused it. Refuse it where it is created, not where it bites.
+    //
+    // The coworker being written is EXCLUDED from the sum and its new cap added, so raising an
+    // existing cap is measured against what the others hold, not against its own old value
+    // counted twice. Clearing a cap is never refused: removing a limit cannot over-allocate.
+    if let (Some(Some(cap)), Some(pool)) = (cap, limits.pool) {
+        let others: i64 = store
+            .coworker_caps_for(account_id.as_str())
+            .await
+            .map_err(|error| (503, error.to_string()))?
+            .into_iter()
+            .filter(|(id, _)| id != coworker_id.as_str())
+            .map(|(_, points)| points)
+            .sum();
+        let total = others.saturating_add(cap);
+        if total > pool {
+            return Err((
+                400,
+                format!(
+                    "a cap of {} would put your caps at {}, above your pool of {} — {} more \
+                     than you have to give",
+                    commas(cap),
+                    commas(total),
+                    commas(pool),
+                    commas(total - pool)
+                ),
+            ));
+        }
     }
     let next = PointsLimit {
         month_points: cap.unwrap_or(limits.cap),
@@ -438,10 +513,10 @@ pub async fn usage_for(
     }
     let store = &state.auth.store;
     let key = store
-        .coworker_key(coworker_id)
+        .coworker_key(coworker_id, account_id)
         .await
         .map_err(|error| (503, format!("the key row could not be read: {error}")))?
-        .filter(|row| row.account_id == account_id.as_str() && row.revoked_at_ms.is_none());
+        .filter(|row| row.revoked_at_ms.is_none());
     let unmetered = |note: String| UsageView {
         metered: false,
         note: Some(note),
@@ -588,7 +663,7 @@ mod tests {
         let both = Effective {
             cap: Some(100_000),
             pool: Some(1_000_000),
-            ..Effective::default()
+            ..Effective::none_set()
         };
         // Others used 950,000 of the million: the pool leaves 50,000, under the cap.
         assert_eq!(
@@ -602,18 +677,18 @@ mod tests {
         );
         let cap_only = Effective {
             cap: Some(100_000),
-            ..Effective::default()
+            ..Effective::none_set()
         };
         assert_eq!(effective_cap(&cap_only, None, None), Some(100_000));
         let pool_only = Effective {
             pool: Some(1_000_000),
-            ..Effective::default()
+            ..Effective::none_set()
         };
         assert_eq!(
             effective_cap(&pool_only, Some(5), Some(400_005)),
             Some(600_000)
         );
-        assert_eq!(effective_cap(&Effective::default(), None, None), None);
+        assert_eq!(effective_cap(&Effective::none_set(), None, None), None);
     }
 
     #[test]

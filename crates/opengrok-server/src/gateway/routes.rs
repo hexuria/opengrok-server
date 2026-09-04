@@ -601,7 +601,7 @@ async fn command(
 
         // ---- P5: the agent lifecycle (slice 11) ----
         "createAgent" => wrap(super::lifecycle::create_agent(&state, &args, &caller).await),
-        "updateAgent" => wrap(super::lifecycle::update_agent(&state, &args).await),
+        "updateAgent" => wrap(super::lifecycle::update_agent(&state, &args, &caller).await),
         "deleteAgent" => {
             let ids: Vec<String> = args
                 .get("id")
@@ -623,10 +623,10 @@ async fn command(
                 .unwrap_or_default();
             wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
-        "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args).await),
+        "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args, &caller).await),
         "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
         "searchMedia" => reply(StatusCode::OK, json!([])),
-        "setAgentAvatarBytes" => wrap(super::lifecycle::set_avatar(&state, &args).await),
+        "setAgentAvatarBytes" => wrap(super::lifecycle::set_avatar(&state, &args, &caller).await),
         "getAgentAvatar" => wrap(super::lifecycle::get_avatar(&state, &args).await),
         // The shipped host answers undefined and does nothing; keeping the no-op IS the contract.
         "setAgentNotificationsEnabled" => reply(StatusCode::OK, Value::Null),
@@ -685,12 +685,16 @@ async fn command(
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
         "getAgentAutomations" | "listAllAutomations" => {
-            wrap(super::lifecycle::get_automations(&state, &args).await)
+            wrap(super::lifecycle::get_automations(&state, &args, &caller).await)
         }
-        "createAgentAutomation" => wrap(super::lifecycle::create_automation(&state, &args).await),
+        "createAgentAutomation" => {
+            wrap(super::lifecycle::create_automation(&state, &args, &caller).await)
+        }
         // An edit UPDATES the row. This verb used to be routed to create, so every edit in the
         // desktop's Routines pane made a second schedule.
-        "updateAgentAutomation" => wrap(super::lifecycle::update_automation(&state, &args).await),
+        "updateAgentAutomation" => {
+            wrap(super::lifecycle::update_automation(&state, &args, &caller).await)
+        }
         "setAgentAutomationEnabled" => {
             // `isEnabled` is the desktop's spelling (routines/controller.ts:54); `enabled` the
             // smoke's. Absent means enable, as before.
@@ -704,12 +708,14 @@ async fn command(
             } else {
                 "disable"
             };
-            wrap(super::lifecycle::change_automation(&state, &args, action).await)
+            wrap(super::lifecycle::change_automation(&state, &args, action, &caller).await)
         }
         "deleteAgentAutomation" => {
-            wrap(super::lifecycle::change_automation(&state, &args, "delete").await)
+            wrap(super::lifecycle::change_automation(&state, &args, "delete", &caller).await)
         }
-        "runAgentAutomationNow" => wrap(super::lifecycle::run_automation_now(&state, &args).await),
+        "runAgentAutomationNow" => {
+            wrap(super::lifecycle::run_automation_now(&state, &args, &caller).await)
+        }
         // Workflows, memories, subagents, async tasks: the honest empties in the right containers.
         "getAgentWorkflows" => reply(StatusCode::OK, json!([])),
         "getSubagents" | "getAsyncTasks" => reply(StatusCode::OK, json!([])),

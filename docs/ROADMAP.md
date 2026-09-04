@@ -529,7 +529,7 @@ Listing them as pending would make this tracker lie about how far away done is.
 A coworker was a private thing with no stated purpose: the model was told a name and nothing
 else, and nobody but the owner could ever see the row. This slice gives a coworker a job it
 remembers and an owner's decision to share it — and, before any sharing is switched on, makes
-the records that sharing would otherwise break carry whose they are.
+every record that sharing would otherwise break carry whose it is.
 
 - [x] **19.1** A standing role, composed into ONE system message on every run
   (`server/src/persona.rs`), pinned on the run at start so a resume tells the model what the
@@ -542,10 +542,16 @@ the records that sharing would otherwise break carry whose they are.
   A consent record with no owner fails open the moment two people can reach one coworker: one
   member's yes would authorise another member's command. The column lands BEFORE sharing does.
   `org` was REFUSED with a sentence while nothing read visibility, because a 200 would have told
-  somebody their coworker was shared when it was not; 19.4 deleted that branch, which is the
+  somebody their coworker was shared when it was not; 19.4 deletes that branch, which is the
   whole reason it was a branch and not a feature. `tests/against_visibility.rs`.
-- [ ] **19.3** A gateway key per (member, coworker), so a shared coworker's spend is billed to
-  whoever is talking rather than to its owner. All three guard caches re-key with it.
+  PR #52 (`2d9810b`, `ba18c39`).
+- [x] **19.3** A gateway key per (coworker, MEMBER), so a shared coworker's turns bill whoever
+  is talking. The pair is the row's identity, the payer's pool sums the payer's own keys
+  wherever they are, retirement revokes every member's key rather than the hirer's, and all
+  three per-coworker caches re-key on the pair. `ModelRequest` carries `spend_actor` beside
+  `spend_scope`, and the metered judge (19.points, PR #57) carries both — a judge naming a scope
+  with no actor is HELD by this slice's own rule, which would switch auto-review off everywhere.
+  `tests/against_member_keys.rs`. PR #53.
 - [x] **19.4** A transcript per (coworker, member), and sharing switched on. `gateway_entry`
   gains an `account_id`, backfilled to each coworker's owner because before it only the hirer
   could reach one; `seq` stays per coworker so no existing row moves, and two members' entries

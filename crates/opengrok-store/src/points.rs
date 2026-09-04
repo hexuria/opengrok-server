@@ -117,6 +117,31 @@ impl PgStore {
     }
 
     /// Every row at one scope, keyed by scope id — the admin page's listing.
+    /// The month caps of one member's coworkers, as (coworker id, points). A join rather than a
+    /// lookup per coworker: the caller needs the whole set to answer "do these add up to more
+    /// than the pool", and asking one row at a time turns one question into N.
+    ///
+    /// Retired coworkers are excluded — a cap on a coworker that can no longer spend is not an
+    /// allocation of anything.
+    pub async fn coworker_caps_for(&self, account_id: &str) -> StoreResult<Vec<(String, i64)>> {
+        let rows = sqlx::query(
+            "select l.scope_id, l.month_points
+             from points_limit l
+             join coworker_view c on c.id = l.scope_id
+             where l.scope_kind = 'coworker'
+               and c.account_id = $1
+               and c.retired = false
+               and l.month_points is not null
+             order by l.scope_id",
+        )
+        .bind(account_id)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("scope_id")?, row.try_get("month_points")?)))
+            .collect()
+    }
+
     pub async fn points_limits_at(
         &self,
         scope: PointsScope,

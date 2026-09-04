@@ -785,7 +785,14 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     {
         let stand_in = h.stand_in.lock().unwrap();
         assert_eq!(stand_in.keys.len(), 1, "one key minted at hire");
-        assert_eq!(stand_in.keys[0].name, "coworker: Ada");
+        // Both identities, in a fixed order: a shared coworker has one key per member and the
+        // gateway's key listing is flat, so a label naming only the coworker would show the
+        // operator several rows it could not tell apart.
+        let label = &stand_in.keys[0].name;
+        assert!(
+            label.starts_with("coworker: Ada — member: acct_"),
+            "the label names the coworker and then the member: {label}"
+        );
         assert_eq!(
             stand_in.keys[0].principal,
             GatewayAdmin::org_principal_email(org_id.as_str()),
@@ -814,7 +821,8 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     assert!(
         listed
             .iter()
-            .any(|k| k.key_prefix == prefix && k.label == "coworker: Ada"),
+            .any(|k| k.key_prefix == prefix
+                && k.label.starts_with("coworker: Ada — member: acct_")),
         "the org's key listing attributes it: {listed:?}"
     );
 
@@ -928,6 +936,59 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     assert_eq!(limit["effectiveCap"], json!(7_000_000), "{limit}");
     assert_eq!(limit["usedPoints"], json!(5_000_000), "{limit}");
     assert!(limit["dayCap"].is_null(), "{limit}");
+
+    // AND THE CAPS TOGETHER. Ada holds 7,000,000 of a 12,000,000 pool. A second coworker capped
+    // at 6,000,000 fits under the pool on its own and does not fit beside her — accepted, that
+    // would turn the pool into first-come-first-served and refuse whoever asks last while still
+    // under their own cap. Refused where it is created instead.
+    let second = hire(&h, &access, "Bo").await;
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{second}/limit"),
+            json!({ "cap": 6_000_000 }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(
+        body["error"],
+        json!(
+            "a cap of 6,000,000 would put your caps at 13,000,000, above your pool of \
+             12,000,000 — 1,000,000 more than you have to give"
+        ),
+        "{body}"
+    );
+    // Exactly the room that is left is fine.
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{second}/limit"),
+            json!({ "cap": 5_000_000 }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    // Raising Ada's own cap measures her against the OTHERS, not against her own old value
+    // counted twice: 7,000,000 + 5,000,000 is the whole pool, so she may keep hers.
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{coworker}/limit"),
+            json!({ "cap": 7_000_000 }),
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "her own cap is not counted against her twice: {body}"
+    );
+    // And clearing a cap can never over-allocate.
+    let (status, body) = h
+        .put_json(
+            &access,
+            &format!("/coworkers/{second}/limit"),
+            json!({ "cap": null }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
     assert_eq!(limit["usedToday"], json!(5_000_000), "{limit}");
     assert_eq!(limit["pool"]["max"], json!(12_000_000), "{limit}");
     assert_eq!(limit["pool"]["used"], json!(5_000_000), "{limit}");
@@ -1143,7 +1204,7 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     );
     let row = h
         .store
-        .coworker_key(&CoworkerId::from_stored(coworker.clone()))
+        .coworker_key(&CoworkerId::from_stored(coworker.clone()), &account_id)
         .await
         .expect("row")
         .expect("the row stays");
@@ -1268,7 +1329,14 @@ async fn a_coworker_hired_while_the_gateway_would_not_mint_gets_its_key_on_its_n
     {
         let stand_in = h.stand_in.lock().unwrap();
         assert_eq!(stand_in.keys.len(), 1, "minted late, on the turn");
-        assert_eq!(stand_in.keys[0].name, "coworker: Ada");
+        // Both identities, in a fixed order: a shared coworker has one key per member and the
+        // gateway's key listing is flat, so a label naming only the coworker would show the
+        // operator several rows it could not tell apart.
+        let label = &stand_in.keys[0].name;
+        assert!(
+            label.starts_with("coworker: Ada — member: acct_"),
+            "the label names the coworker and then the member: {label}"
+        );
         assert_eq!(
             stand_in.bearers.last(),
             Some(&stand_in.keys[0].key),
