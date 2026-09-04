@@ -43,6 +43,10 @@ pub struct OAuthCodeRow {
 #[derive(Debug, Clone, Copy)]
 pub struct AllowOnce<'a> {
     pub coworker: &'a CoworkerId,
+    /// WHOSE consent this is. A yes belongs to the person who gave it, not to the coworker: on a
+    /// shared coworker, one member's "allow once" must not authorise another member's command.
+    /// `None` only for a caller with no account, which is the pre-sharing behaviour.
+    pub account: Option<&'a str>,
     pub tool: &'a str,
     pub arguments: &'a Value,
     pub call_id: &'a str,
@@ -195,10 +199,12 @@ impl PgStore {
             .execute(self.pool())
             .await?;
         sqlx::query(
-            "insert into mcp_allow_once (coworker_id, tool, arguments, call_id, gate, at_ms)
-             values ($1, $2, $3, $4, $5, $6)",
+            "insert into mcp_allow_once
+                (coworker_id, account_id, tool, arguments, call_id, gate, at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(yes.coworker.as_str())
+        .bind(yes.account)
         .bind(yes.tool)
         .bind(yes.arguments)
         .bind(yes.call_id)
@@ -219,15 +225,21 @@ impl PgStore {
     pub async fn take_mcp_allow_once(
         &self,
         coworker: &CoworkerId,
+        account: Option<&str>,
         tool: &str,
         arguments: &Value,
         at_ms: i64,
         ttl_ms: i64,
     ) -> StoreResult<Option<(String, bool, i64)>> {
+        // The account is part of the match, not a filter applied after: a yes is spendable only
+        // by whoever gave it. `is not distinct from` so a row written before this column existed
+        // (NULL) is takeable only by a caller with no account — the pre-sharing behaviour, and
+        // never by somebody else.
         let row = sqlx::query(
             "delete from mcp_allow_once where id = (
                  select id from mcp_allow_once
                  where coworker_id = $1 and tool = $2 and arguments = $3 and at_ms > $4
+                   and account_id is not distinct from $5
                  order by id limit 1 for update skip locked)
              returning call_id, gate, at_ms",
         )
@@ -235,6 +247,7 @@ impl PgStore {
         .bind(tool)
         .bind(arguments)
         .bind(at_ms - ttl_ms)
+        .bind(account)
         .fetch_optional(self.pool())
         .await?;
         row.map(|row| {

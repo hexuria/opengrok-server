@@ -24,6 +24,38 @@ pub enum BoxMode {
     Shared,
 }
 
+/// Who may see and talk to a coworker. `Private` is the default and the safe one: a coworker
+/// nobody chose to share stays the hirer's alone. `Org` opens it to the hirer's organisation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    #[default]
+    Private,
+    Org,
+}
+
+impl Visibility {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Org => "org",
+        }
+    }
+
+    /// Parse what a client sent. `None` is a refusal rather than a default: a caller who wrote
+    /// "public" meant something we do not offer, and quietly storing "private" would tell them
+    /// they had shared a coworker they had not.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "private" => Some(Self::Private),
+            "org" => Some(Self::Org),
+            _ => None,
+        }
+    }
+}
+
 /// The most a standing role may be. Long enough for a paragraph of intent, short enough that it
 /// cannot become a second system prompt smuggled through a text field.
 pub const MAX_ROLE_CHARS: usize = 1000;
@@ -46,6 +78,11 @@ pub enum CoworkerEvent {
     /// caller who meant to describe a coworker must not silently rename it. `None` clears it.
     RoleSet {
         role: Option<String>,
+        at_ms: i64,
+    },
+    /// Who may see and talk to this coworker changed.
+    VisibilitySet {
+        visibility: Visibility,
         at_ms: i64,
     },
     /// The route this coworker thinks through changed. A pin is an operating fact about the
@@ -94,6 +131,7 @@ impl CoworkerEvent {
             Self::Renamed { .. } => "coworker-renamed",
             Self::Repinned { .. } => "coworker-repinned",
             Self::RoleSet { .. } => "coworker-role-set",
+            Self::VisibilitySet { .. } => "coworker-visibility-set",
             Self::ComputerAssigned { .. } => "computer-assigned",
             Self::ComputerReleased { .. } => "computer-released",
             Self::Retired { .. } => "coworker-retired",
@@ -113,6 +151,8 @@ pub struct Coworker {
     pub box_mode: Option<BoxMode>,
     /// Non-empty ⇒ this coworker is a group of these. Order is the order they were named.
     pub members: Vec<CoworkerId>,
+    /// Who may see and talk to this coworker. Private unless its owner shared it.
+    pub visibility: Visibility,
     /// The standing role, read on the run path on EVERY turn (`server/persona.rs`). On the
     /// aggregate rather than the seam-B profile blob because it is behavioural, not cosmetic:
     /// the blob is where the client's decoration lives, and a field the model reads every turn
@@ -161,6 +201,11 @@ pub enum CoworkerCommand {
     /// Set or clear the standing role. `None` clears it.
     SetRole {
         role: Option<String>,
+        at_ms: i64,
+    },
+    /// Share this coworker with the hirer's organisation, or take it back.
+    SetVisibility {
+        visibility: Visibility,
         at_ms: i64,
     },
     /// Point this coworker at a different route. Deliberately its own command: renaming and
@@ -213,6 +258,7 @@ impl Coworker {
             CoworkerEvent::Renamed { name, .. } => self.name = name.clone(),
             CoworkerEvent::Repinned { model, .. } => self.model = model.clone(),
             CoworkerEvent::RoleSet { role, .. } => self.role.clone_from(role),
+            CoworkerEvent::VisibilitySet { visibility, .. } => self.visibility = *visibility,
             CoworkerEvent::ComputerAssigned { box_id, mode, .. } => {
                 self.box_id = Some(box_id.clone());
                 self.box_mode = Some(*mode);
@@ -325,6 +371,11 @@ impl Coworker {
                 Ok(vec![CoworkerEvent::RoleSet { role, at_ms }])
             }
 
+            CoworkerCommand::SetVisibility { visibility, at_ms } => {
+                self.alive()?;
+                Ok(vec![CoworkerEvent::VisibilitySet { visibility, at_ms }])
+            }
+
             CoworkerCommand::AssignComputer {
                 box_id,
                 mode,
@@ -401,6 +452,10 @@ pub struct CoworkerView {
     /// The standing role, on the row so the roster carries it without a second read.
     #[serde(default)]
     pub role: Option<String>,
+    /// Who may see and talk to it. On the row for the same reason as the role: the roster
+    /// decides what to show from it, on every listing.
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 #[cfg(test)]
@@ -728,5 +783,54 @@ mod tests {
             }),
             Err(CoworkerError::NotAGroup)
         ));
+    }
+    /// The HTTP route refuses `org` today, because nothing reads visibility yet and a 200 would
+    /// tell somebody their coworker was shared when it was not. This test is what makes that
+    /// refusal one branch to delete rather than a feature to build later: the aggregate already
+    /// records the decision and replays it. Do not delete this when the route's arm goes.
+    #[test]
+    fn org_is_a_decision_the_aggregate_already_records_and_replays() {
+        let mut coworker = hired();
+        assert_eq!(
+            coworker.visibility,
+            Visibility::Private,
+            "private until its owner says otherwise"
+        );
+
+        let decided = coworker
+            .decide(CoworkerCommand::SetVisibility {
+                visibility: Visibility::Org,
+                at_ms: 3,
+            })
+            .unwrap();
+        assert!(matches!(
+            decided.as_slice(),
+            [CoworkerEvent::VisibilitySet {
+                visibility: Visibility::Org,
+                ..
+            }]
+        ));
+        for event in &decided {
+            coworker.apply(event);
+        }
+        assert_eq!(coworker.visibility, Visibility::Org, "the event carries it");
+
+        // And back, so unsharing is a decision too rather than the absence of one.
+        for event in coworker
+            .decide(CoworkerCommand::SetVisibility {
+                visibility: Visibility::Private,
+                at_ms: 4,
+            })
+            .unwrap()
+        {
+            coworker.apply(&event);
+        }
+        assert_eq!(coworker.visibility, Visibility::Private);
+
+        // A word we do not recognise reads as nothing rather than as a guess: a value written by
+        // a newer replica must never widen who can see a coworker on an older one.
+        assert_eq!(Visibility::parse("everyone"), None);
+        assert_eq!(Visibility::parse("org"), Some(Visibility::Org));
+        assert_eq!(Visibility::Org.as_str(), "org");
     }
 }

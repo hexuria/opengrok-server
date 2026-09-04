@@ -141,6 +141,7 @@ async fn seed_coworker(store: &PgStore, account: &AccountId, name: &str) -> Cowo
         members: Vec::new(),
         updated_at_ms: 2,
         role: None,
+        visibility: Default::default(),
     };
     store
         .append_coworker(&id, account, 0, &events, &view)
@@ -471,6 +472,7 @@ async fn a_yes_answered_on_one_replica_is_spent_by_the_retry_on_the_other() {
     opengrok_server::mcp_door::remember_mcp_allow_once(
         &store_a,
         &coworker,
+        Some(account.as_str()),
         "shell",
         &arguments,
         "mcp_yes_1",
@@ -482,6 +484,7 @@ async fn a_yes_answered_on_one_replica_is_spent_by_the_retry_on_the_other() {
         opengrok_server::mcp_door::take_mcp_allow_once(
             &store_b,
             &coworker,
+            Some(account.as_str()),
             "shell",
             &json!({ "cwd": "/tmp", "command": "echo hi" }),
         )
@@ -490,8 +493,14 @@ async fn a_yes_answered_on_one_replica_is_spent_by_the_retry_on_the_other() {
         "taken on the other replica, key order notwithstanding"
     );
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&store_a, &coworker, "shell", &arguments)
-            .await,
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &store_a,
+            &coworker,
+            Some(account.as_str()),
+            "shell",
+            &arguments
+        )
+        .await,
         None,
         "one-shot on every replica"
     );
@@ -501,6 +510,7 @@ async fn a_yes_answered_on_one_replica_is_spent_by_the_retry_on_the_other() {
     opengrok_server::mcp_door::remember_mcp_allow_once(
         &store_a,
         &coworker,
+        Some(account.as_str()),
         "shell",
         &arguments,
         "mcp_yes_2",
@@ -535,8 +545,14 @@ async fn a_yes_answered_on_one_replica_is_spent_by_the_retry_on_the_other() {
     );
     assert_eq!(rows[0]["outcome"], json!("refused"), "{rows}");
     assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(&store_a, &coworker, "shell", &arguments)
-            .await,
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &store_a,
+            &coworker,
+            Some(account.as_str()),
+            "shell",
+            &arguments
+        )
+        .await,
         Some(("mcp_yes_2".to_string(), true)),
         "a call that did not run gives the yes back, visible from A"
     );
