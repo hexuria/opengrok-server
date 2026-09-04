@@ -21,7 +21,12 @@ from [`box/`](box/README.md)) replaced the old single-file ASCII driver; `AsciiB
 the `Computer` adapter. Domain ownership is proven, not assumed: a console admin's claim admits
 nobody until its `_opengrok-verify` TXT record resolves, while the operator's shell still vouches
 directly; password reset rides Resend with a one-shot signed link (12.later). Hexuria's right-sidebar screen paints a live noVNC desktop from
-`getForeverBoxStatus.vncUrl`. A dev instance runs on `:1447` against the real judge.
+`getForeverBoxStatus.vncUrl`. **Slice 19 is done and merged (4 Sep 2026): a coworker can be shared.** A standing role reaches
+the model every turn; an owner marks a coworker `org`; two people hold one coworker without
+sharing a conversation, a gateway key, a pool or a permission card. Building it uncovered that
+**seam A authorised nothing per coworker** — every verb checked that the caller was somebody and
+none checked the coworker was theirs — which is now one gate before the dispatch. A dev instance
+runs on `:1447` against the real judge, rebuilt from `main` after the last merge.
 [`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
 true. Unticked work is the `*.later` boxes and the Later bucket, not a missing slice.
 
@@ -52,26 +57,70 @@ by drift.
 | A coworker's spend is metered on a gateway key of its own, and its limits are three windows — rolling 5 hours, rolling 7 days, calendar month — evaluated by the server before each model call from the gateway's ledger; at a limit the turn is refused with a sentence that names the window and when it resets; a key that cannot be opened holds the turn rather than falling back to the deployment's key | [`plan-spend-policy.md`](plan-spend-policy.md), `opengrok-server/src/spend.rs` |
 | What a second replica must see is a row taken once with `delete … returning`; budgets and caches stay per replica | `opengrok-store/src/replica.rs`, `auth/budget.rs` |
 | A PR is based on `main`, never stacked on a branch about to merge — GitHub closes a PR whose base branch is deleted and it cannot be reopened | this page, 2 Sep 2026 |
+| Sharing lets somebody TALK to a coworker; it is never a write grant. The gate asks two questions — `may_use` (owner or org-shared) and `owns` (owner only) — and the two lists fail in opposite directions on purpose, so only the ownership one has a drift test | `gateway/routes.rs`, `tests/against_constant_verbs.rs` |
+| A refusal is the verb's OWN not-found answer, per verb — never 403, and never a uniform 404. A 404 where the verb answers `null` for an unknown id is the same disclosure one step removed | `gateway/routes.rs::never_heard_of_it` |
+| A live frame carries WHO IT IS FOR. `None` is a payload naming nobody; `Some(account)` reaches that account's streams alone. Stamped frames carry no audience — filtering one spends a sequence other streams expect | `gateway/live.rs`, issue #59 |
+| Points: a member's pool is the PAYER's — the person talking, not the hirer. Three caches key on three different things on purpose (pair, pair, payer-alone) and harmonising them reintroduces the bug | `opengrok-server/src/spend.rs` |
+| Every model call the server makes is metered, including the auto-review judge — which needs a scope AND a key AND an actor; any two of the three is a silent half-fix | `opengrok-harness/src/review.rs` |
 
 ## What's left (do not relitigate "are we done")
 
 In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
 
-**Landed or in review on 2 Sep 2026** (the operator decides and the peer session merges on their
-explicit go, PR by PR — no human presses the button, and no session merges without the go): #26 one
-spelling ("Open Grok"); #27 budgets on every unauthenticated door (`auth/budget.rs`); #30 a
-durable audit of every MCP door call (`mcp_call_audit`, console "Door calls"); #31 the three
-process maps a second replica would break, as rows (`opengrok_store::replica`); #32 per-coworker
-spend caps (a gateway key of the coworker's own; being reworked to the three-window shape the
-operator decided, [`plan-spend-policy.md`](plan-spend-policy.md));
-open-ai-gateway #50 the per-key usage endpoint #32 reads. Each PR body carries its evidence and the
-decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinating-noodle.md`
-(session-local) — the order was hardening → caps → a rooms plan.
+**The queue is empty as of 4 Sep 2026.** Seven pull requests merged in order, each verified the
+same way — local clean-env gate, CI on the branch, CI on `main` after the merge, and a live
+rebuild of `:1447` — then `main` was deployed and its schema checked in the database:
+
+| | What it was | Merge |
+|---|---|---|
+| #57 | the points meter counted everything except the auto-review judge | `f075711` |
+| #54 | two ways the gate blamed the code for something else | `c3f3d88` |
+| #56 | six handlers asked who the deployment was, not who was asking | `a1e28aa` |
+| #52 | visibility, and a consent record that says whose yes it is | `973916a` |
+| #53 | a gateway key per person, not per coworker | `97db9ed` |
+| #55 | a conversation each — and the door that was never locked | `b54ea4e` |
+| #60 | a live frame goes to the stream it is for | `c1555b4` |
+
+The full account — what each was for, what broke, what was found reviewing it, and the wrong
+turns kept in rather than tidied away — is in [`../clearing-up-pr.md`](../clearing-up-pr.md).
+Read that before re-opening any of it.
+
+**Three issues are open and none is guessed at.** Each was investigated to the point where the
+next person can act, and deliberately not started:
+
+- **#61 — chat renders in one burst.** The app's answer arrives all at once. The bubble is
+  already marked `"streaming": true` and the two calls that would grow it already exist and run
+  ONCE (`gateway/conversation.rs`). The journal guarantee is per-ROUND and about the server's own
+  ordering, so streaming does not weaken it — and the comment defending the buffering describes a
+  property the code does not have. **A restart mid-answer leaves an empty bubble marked
+  "typing" forever**; nothing anywhere flips that flag off. That last part is broken today,
+  independent of streaming, and is the smallest useful thing to fix first.
+- **#59 — the roster stream sends the deployment's roster to everybody.** `listAgents` is
+  correctly per-caller; the SSE opener and every update frame are not. It cannot take #60's fix
+  because those frames are stamped: filtering one per person spends a sequence the other streams
+  expect. Needs per-account sequences, which is a replica-contract change.
+- **Three gaps in the points meter**, recorded in the plan file: no ceiling above a member
+  (`PointsScope` has only `Member` and `Coworker`); a limit can be overshot by one turn (the
+  meter is read before the call and never reconciled after); and turns inside the 15s freshness
+  window share one reading. The last two are one problem and want a reservation design agreed
+  with the gateway session before any code.
+
+**Operational things that each cost time this session:**
+
+- **Check which `gh` account is active before diagnosing a merge failure.** A permissions error
+  on merge reads like branch protection and was neither — the active account had changed to one
+  with `pull` only. Reads keep working, so it stays invisible until a write.
+- **`git merge-tree` over every pair of open branches before choosing a merge order.** It said
+  every collision between the six was `docs/ROADMAP.md` and nothing else, and that held exactly.
+- **Identical patch-ids dissolve on their own.** Two branches carried a copy of #54; merging #54
+  first made both vanish with nobody editing anything. Verified with `git cherry` before and
+  after rather than assumed.
 
 1. **Rooms** — [`plan-rooms.md`](plan-rooms.md): the sharing verbs answer in the client's
    shapes (#35) and groups are built (a coworker with members, the client's own orchestrator
-   transcribed, `gateway/group.rs`). Left: shared
-   rooms, parked until groups have been used.
+   transcribed, `gateway/group.rs`). Left: shared rooms, parked until groups have been used.
+   Note that slice 19 shared a COWORKER, which is not a room: one coworker, several people, a
+   conversation each. Rooms are several coworkers in one conversation.
 2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation;
    per-key admin scopes so a partner credential is not a full gateway admin.
 3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +
@@ -80,9 +129,10 @@ decisions it asks for. The plan they came from: `~/.claude/plans/elegant-marinat
    and API keys count the same — monthly per member (the admin's pool) and per coworker (the
    owner's cap, at most the pool) with an optional daily brake; decided 3 Sep 2026, design in
    [`plan-spend-policy.md`](plan-spend-policy.md), built as 18.points with gateway #52/#53.
-   The USD windows' limits are retired. Templates carry points. Left: drop the `spend_limit`
-   table after a month; retire `/coworkers/{id}/spend` once the desktop modal no longer reads
-   it; org-wide per-model budgets and "apply a template edit to its coworkers" follow.
+   The USD windows' limits are retired. Templates carry points. As of slice 19 the pool is the
+   PAYER's, not the hirer's. Left: drop the `spend_limit` table after a month; retire
+   `/coworkers/{id}/spend` once the desktop modal no longer reads it; org-wide per-model budgets
+   and "apply a template edit to its coworkers" follow — and the three meter gaps above.
 4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
    (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
    MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are
