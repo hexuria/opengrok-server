@@ -165,6 +165,19 @@ async fn events(
         .as_deref()
         .filter(|raw| !raw.trim().is_empty())
         .map(|raw| raw.split(',').map(|name| name.trim().to_string()).collect());
+    // WHOSE STREAM THIS IS, resolved once. A frame addressed to one account is dropped for
+    // every other stream; a stream whose account cannot be resolved receives addressed frames
+    // from nobody, which is the narrow side — an unidentified subscriber is not a licence to
+    // deliver somebody's data to it.
+    let audience = state
+        .agui
+        .auth
+        .store
+        .account_by_email(&super::caller_email(&state, &headers).await)
+        .await
+        .ok()
+        .flatten()
+        .map(|account| account.id);
     let subscriber = state.events_tx.subscribe();
     // Connect and disconnect are logged with the request id and the live subscriber count, so
     // "was the stream up at 03:16, and for whom" is one grep. The guard rides in the stream's
@@ -275,8 +288,8 @@ async fn events(
     let live = stream::unfold((subscriber, guard), |(mut subscriber, guard)| async move {
         loop {
             match subscriber.recv().await {
-                Ok((channel, payload)) => {
-                    return Some((Ok::<_, Infallible>((channel, payload)), (subscriber, guard)));
+                Ok(live) => {
+                    return Some((Ok::<_, Infallible>(live), (subscriber, guard)));
                 }
                 // Lagged: frames were dropped for this slow subscriber. Keep going — the client
                 // resyncs from the sequence gap; that is what the ordered stamps are for. Said
@@ -295,8 +308,18 @@ async fn events(
         }
     });
     let filter = wanted.clone();
+    let for_me = audience.clone();
     let live = live.map(move |result| {
-        result.map(|(channel, payload)| frame(&channel, &payload, filter.as_ref()))
+        result.map(|live| {
+            // Addressed to somebody else: not this stream's frame. An empty string is how this
+            // loop already says "not for you" for an unwanted channel, and `sse` drops it.
+            if let Some(to) = live.audience.as_ref()
+                && for_me.as_ref() != Some(to)
+            {
+                return String::new();
+            }
+            frame(&live.channel, &live.payload, filter.as_ref())
+        })
     });
 
     let pings = stream::unfold((), |()| async {
@@ -321,7 +344,7 @@ async fn events(
 struct StreamGuard {
     id: String,
     channels: String,
-    tx: tokio::sync::broadcast::Sender<(String, Value)>,
+    tx: tokio::sync::broadcast::Sender<super::LiveFrame>,
     opened: std::time::Instant,
 }
 

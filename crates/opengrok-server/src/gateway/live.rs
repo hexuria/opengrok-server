@@ -63,7 +63,13 @@ pub fn emit_ordered(
     let seq = seqs.entry(replica_key.to_string()).or_insert(0);
     *seq += 1;
     let payload = build(stamp(state, replica_key, *seq));
-    let _ = state.events_tx.send((channel.to_string(), payload));
+    // NO AUDIENCE, and this is a known gap rather than an oversight. These frames carry an
+    // ordering stamp that every open stream's replica tracks, so filtering them per person would
+    // spend sequence numbers other streams expect — the "they saw N, N+2 and resynced after
+    // every send" failure the opener's comment records. Making the roster per person means
+    // making the SEQUENCES per person, which is a change to the replica contract and its own
+    // piece of work. Filed separately; see the issue linked from #58.
+    send(state, channel, payload, None);
 }
 
 fn active_agent_id(state: &GatewayState) -> Value {
@@ -165,7 +171,37 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
 /// such a frame on a replica key would be a gap for that replica on every send, the class #14
 /// removed; this is the deliberate way to say "not ordered".
 pub fn emit_unstamped(state: &GatewayState, channel: &str, payload: Value) {
-    let _ = state.events_tx.send((channel.to_string(), payload));
+    send(state, channel, payload, None);
+}
+
+/// The same, for a frame built from ONE person's data. Delivered to that account's streams and
+/// no others.
+///
+/// This exists because `emit_unstamped` was carrying a person's routines to every open stream:
+/// the bus is a broadcast and the stream filtered by channel NAME only, so the payload was
+/// correct and the delivery was not. The only thing preventing a disclosure was the client
+/// declining to render an agent it did not recognise — obscurity, not a check, and it stopped
+/// being even that when a coworker could be shared.
+pub fn emit_unstamped_to(
+    state: &GatewayState,
+    channel: &str,
+    payload: Value,
+    audience: &opengrok_core::id::AccountId,
+) {
+    send(state, channel, payload, Some(audience.clone()));
+}
+
+fn send(
+    state: &GatewayState,
+    channel: &str,
+    payload: Value,
+    audience: Option<opengrok_core::id::AccountId>,
+) {
+    let _ = state.events_tx.send(super::LiveFrame {
+        channel: channel.to_string(),
+        payload,
+        audience,
+    });
 }
 
 /// A transcript frame for one agent — `appended` or `updated`, stamped on that agent's replica.
