@@ -183,14 +183,71 @@ async fn concurrent_emits_on_one_agent_arrive_in_sequence_order() {
 
     let mut seen = Vec::new();
     for _ in 0..50 {
-        let (channel, payload) = subscriber.recv().await.expect("frame");
-        assert_eq!(channel, "transcript");
-        assert_eq!(payload["ordered"]["replicaKey"], "transcript:agent-race");
-        seen.push(payload["ordered"]["sequence"].as_i64().expect("sequence"));
+        let live = subscriber.recv().await.expect("frame");
+        assert_eq!(live.channel, "transcript");
+        assert_eq!(
+            live.audience, None,
+            "a stamped frame carries no audience: filtering it per person would spend sequence              numbers other streams expect"
+        );
+        assert_eq!(
+            live.payload["ordered"]["replicaKey"],
+            "transcript:agent-race"
+        );
+        seen.push(
+            live.payload["ordered"]["sequence"]
+                .as_i64()
+                .expect("sequence"),
+        );
     }
     let expected: Vec<i64> = (1..=50).collect();
     assert_eq!(
         seen, expected,
         "frames reached the broadcast out of mint order"
+    );
+}
+
+/// A frame built from ONE person's data reaches that person's stream and nobody else's.
+///
+/// The bus is a broadcast and the stream filtered by channel NAME only, so a routine belonging
+/// to Ada was delivered to Bo's and Cass's streams too. The client declined to render an agent
+/// it did not recognise, which is the only reason it never showed — obscurity, not a check, and
+/// it stopped being even that once a coworker could be shared.
+///
+/// Asserted at the bus rather than over HTTP because that is where the audience lives; the
+/// stream's own drop is the three-line consequence of it.
+#[tokio::test]
+async fn an_addressed_frame_is_not_broadcast_to_everybody() {
+    let database_url = database_or_skip!();
+    let (_, state) = state(&database_url).await;
+    let ada = opengrok_core::id::AccountId::new();
+    let bo = opengrok_core::id::AccountId::new();
+
+    let mut subscriber = state.events_tx.subscribe();
+
+    live::emit_unstamped_to(
+        &state,
+        "agents-automation",
+        serde_json::json!({ "agentId": "cw_ada", "automations": ["ada's weekly report"] }),
+        &ada,
+    );
+    live::emit_unstamped(
+        &state,
+        "agents-automation",
+        serde_json::json!({ "agentId": "cw_any", "automations": [] }),
+    );
+
+    let addressed = subscriber.recv().await.expect("frame");
+    assert_eq!(
+        addressed.audience.as_ref(),
+        Some(&ada),
+        "a frame built from one person's routines names them"
+    );
+    assert_ne!(addressed.audience.as_ref(), Some(&bo), "and it is not Bo's");
+
+    let unaddressed = subscriber.recv().await.expect("frame");
+    assert_eq!(
+        unaddressed.audience, None,
+        "a frame whose payload names nobody still goes to everybody — the audience is a \
+         restriction, not a requirement"
     );
 }

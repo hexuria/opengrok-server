@@ -746,10 +746,11 @@ pub(crate) async fn emit_automations(
     let automations = automations_array(state, Some(agent), account_id).await;
     // UNSTAMPED: the renderer's automations family has no replica and its own emitter sends no
     // stamp; a roster sequence spent here was a roster gap on every routine change.
-    live::emit_unstamped(
+    live::emit_unstamped_to(
         state,
         "agents-automation",
         json!({ "agentId": agent, "automations": automations }),
+        account_id,
     );
 }
 

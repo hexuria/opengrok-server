@@ -65,6 +65,19 @@ fn account_from_header(
     Some(opengrok_core::id::AccountId::from_stored(claims.sub))
 }
 
+/// One frame on the live bus: the channel it belongs to, the payload, and the account it is for.
+///
+/// `audience: None` is a frame that names nobody and may go to every stream. `Some(account)`
+/// carries one person's data and is delivered only to streams that person opened — the check
+/// that used to be missing, and that the desktop client was inadvertently doing for us by
+/// ignoring agents it did not know.
+#[derive(Clone, Debug)]
+pub struct LiveFrame {
+    pub channel: String,
+    pub payload: serde_json::Value,
+    pub audience: Option<opengrok_core::id::AccountId>,
+}
+
 /// What the gateway knows beyond the shared server state.
 #[derive(Clone)]
 pub struct GatewayState {
@@ -83,7 +96,14 @@ pub struct GatewayState {
     /// The live stream: every SSE frame goes through here, and each `/events` subscriber holds
     /// a receiver. Slow subscribers lag and are dropped by `broadcast`'s own rules — a stalled
     /// client must not be able to wedge the host.
-    pub events_tx: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
+    /// Every live frame: the channel, the payload, and WHO IT IS FOR.
+    ///
+    /// The audience is the third element because the bus is a broadcast: without it, a frame
+    /// built from one person's data reached every open stream, and the only thing standing
+    /// between that and a disclosure was the client choosing not to render an agent it did not
+    /// recognise. `None` means "everybody", which is the honest answer for a frame whose payload
+    /// names nobody. `Some(account)` is delivered to that account's streams alone.
+    pub events_tx: tokio::sync::broadcast::Sender<LiveFrame>,
     /// This process's ordering epoch. A client that sees the epoch change treats the replica as
     /// restarted and resyncs — which is exactly what a restart means.
     pub epoch: String,
