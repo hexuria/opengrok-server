@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-use opengrok_server::gateway::routes::ANSWERS_A_CONSTANT;
+use opengrok_server::gateway::routes::{ANSWERS_A_CONSTANT, NEEDS_OWNERSHIP};
 
 const DISPATCH: &str = include_str!("../src/gateway/routes.rs");
 
@@ -95,4 +95,36 @@ fn the_list_is_sorted() {
     let mut sorted = ANSWERS_A_CONSTANT.to_vec();
     sorted.sort_unstable();
     assert_eq!(ANSWERS_A_CONSTANT, sorted.as_slice());
+}
+
+/// The ownership list guards the DANGEROUS direction. A verb missing from `ANSWERS_A_CONSTANT`
+/// is checked, which is safe; a verb missing from `NEEDS_OWNERSHIP` falls back to `may_use`,
+/// which is WIDER — a colleague could change a coworker they were only invited to talk to. So a
+/// stale name here is worth catching, and the two lists must not overlap: a verb cannot both
+/// answer a constant (unchecked) and require ownership.
+#[test]
+fn the_ownership_list_is_current_sorted_and_disjoint() {
+    let known: BTreeSet<String> = arms().into_iter().flatten().collect();
+    let stale: Vec<&&str> = NEEDS_OWNERSHIP
+        .iter()
+        .filter(|verb| !known.contains(**verb))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these require ownership but are not verbs any more: {stale:?}"
+    );
+
+    let mut sorted = NEEDS_OWNERSHIP.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(NEEDS_OWNERSHIP, sorted.as_slice(), "keep the list sorted");
+
+    let exempt: BTreeSet<&str> = ANSWERS_A_CONSTANT.iter().copied().collect();
+    let both: Vec<&&str> = NEEDS_OWNERSHIP
+        .iter()
+        .filter(|verb| exempt.contains(**verb))
+        .collect();
+    assert!(
+        both.is_empty(),
+        "a verb cannot be both unchecked and ownership-only: {both:?}"
+    );
 }

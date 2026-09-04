@@ -582,3 +582,108 @@ async fn a_shared_coworker_is_one_coworker_with_a_conversation_each() {
             .contains("ada speaks")
     );
 }
+
+/// `deleteAgents` takes a LIST of ids, not `agentId`, so the coworker check in the dispatch —
+/// which reads `agentId` then `id` — never sees it. And `delete_agents` resolves the DEPLOYMENT
+/// account rather than the caller, so it never compares the two either. A colleague who can see
+/// a shared coworker can therefore retire it, which contradicts what the roster row promises
+/// them (`canManage: false`) and what this file already asserts about repin and unshare.
+///
+/// Sharing is what makes it reachable: before it, a stranger had to guess an unguessable id.
+#[tokio::test]
+async fn a_colleague_cannot_retire_a_coworker_they_do_not_own() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let ada_email = format!("ada-del-{tag}@og.local");
+    let h = harness(&database_url, &ada_email).await;
+    let ada_access = h.access_token(&h.account.clone(), &ada_email);
+    let agent = h.hire("Ada").await;
+    let (status, _) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "org" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let bo_email = format!("bo-del-{tag}@og.local");
+    let bo = seed_account_in(&h.store, &bo_email, Some(ORG)).await;
+    let bo_access = h.access_token(&bo, &bo_email);
+
+    // He can see it — that is what sharing is for.
+    let (_, rows) = h.api_as("listAgents", json!({}), Some(&bo_access)).await;
+    assert!(
+        rows.as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == agent)),
+        "the colleague should see a shared coworker"
+    );
+
+    // He must not be able to end it.
+    let (status, deleted) = h
+        .api_as("deleteAgents", json!({ "ids": [agent] }), Some(&bo_access))
+        .await;
+    assert_eq!(
+        deleted["deleted"],
+        json!(0),
+        "a colleague retired a coworker they do not own: {status} {deleted}"
+    );
+
+    // And it is still Ada's, still live, still on her roster.
+    let (_, hers) = h.api_as("listAgents", json!({}), Some(&ada_access)).await;
+    assert!(
+        hers.as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["id"] == agent)),
+        "the owner's coworker survived a colleague's delete: {hers}"
+    );
+
+    // The owner can, of course.
+    let (_, mine) = h
+        .api_as("deleteAgents", json!({ "ids": [agent] }), Some(&ada_access))
+        .await;
+    assert_eq!(
+        mine["deleted"],
+        json!(1),
+        "the owner may retire her own: {mine}"
+    );
+}
+
+/// The gate asks `may_use`, which is true for a colleague on a SHARED coworker. That is right
+/// for talking to it and wrong for changing it: seam A's `updateAgent` renames a coworker, and
+/// nothing downstream compares the caller to the owner either — it resolves the DEPLOYMENT
+/// account. So sharing would hand over the write surface, which is the exact thing the roster's
+/// `canManage: false` tells the colleague it does not.
+#[tokio::test]
+async fn a_colleague_cannot_rename_a_coworker_they_do_not_own() {
+    let database_url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let ada_email = format!("ada-ren-{tag}@og.local");
+    let h = harness(&database_url, &ada_email).await;
+    let ada_access = h.access_token(&h.account.clone(), &ada_email);
+    let agent = h.hire("Ada").await;
+    let (status, _) = h
+        .patch(&ada_access, &agent, json!({ "visibility": "org" }))
+        .await;
+    assert_eq!(status, 200);
+
+    let bo_email = format!("bo-ren-{tag}@og.local");
+    let bo = seed_account_in(&h.store, &bo_email, Some(ORG)).await;
+    let bo_access = h.access_token(&bo, &bo_email);
+
+    let (_, renamed) = h
+        .api_as(
+            "updateAgent",
+            json!({ "id": agent, "profile": { "name": "Bo's now" } }),
+            Some(&bo_access),
+        )
+        .await;
+    assert_eq!(
+        renamed,
+        Value::Null,
+        "a colleague renamed a coworker they do not own: {renamed}"
+    );
+
+    let (_, rows) = h.api_as("listAgents", json!({}), Some(&ada_access)).await;
+    let name = rows
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == agent))
+        .map(|row| row["name"].clone())
+        .unwrap_or(Value::Null);
+    assert_eq!(name, json!("Ada"), "the owner's coworker kept its name");
+}

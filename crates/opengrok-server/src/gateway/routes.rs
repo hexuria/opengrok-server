@@ -405,7 +405,17 @@ async fn command(
     // Roadmap 19.5.
     if let Some(agent) = names_a_coworker(&method, &args) {
         let coworker = CoworkerId::from_stored(agent);
-        match may_use(&state, &caller, &coworker).await {
+        // Two levels, and the difference IS what sharing means. Talking to a shared coworker is
+        // what the owner granted; changing it is not. Asking `may_use` for both would make
+        // sharing a write grant and would contradict the `canManage: false` the roster tells the
+        // colleague — a colleague could rename, retire, re-avatar or re-automate a coworker they
+        // were only invited to talk to.
+        let allowed = if NEEDS_OWNERSHIP.contains(&method.as_str()) {
+            owns(&state, &caller, &coworker).await
+        } else {
+            may_use(&state, &caller, &coworker).await
+        };
+        match allowed {
             Ok(true) => {}
             Ok(false) => {
                 let (code, body) = never_heard_of_it(&method);
@@ -598,7 +608,7 @@ async fn command(
                 .and_then(Value::as_str)
                 .map(|id| vec![id.to_string()])
                 .unwrap_or_default();
-            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+            wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "deleteAgents" => {
             let ids: Vec<String> = args
@@ -611,7 +621,7 @@ async fn command(
                         .collect()
                 })
                 .unwrap_or_default();
-            wrap(super::lifecycle::delete_agents(&state, &ids).await)
+            wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args).await),
         "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
@@ -993,5 +1003,48 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "dismissWidget" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
+    }
+}
+
+/// Verbs that CHANGE a coworker rather than use it. These need ownership, not permission to
+/// talk: sharing lets a colleague have a conversation, and the roster promises them
+/// `canManage: false`. Checked as a denylist would be wrong here — a verb missing from this
+/// list falls back to `may_use`, which is the WIDER answer — so anything that mutates a
+/// coworker's configuration must be added, and `tests/against_visibility.rs` pins the two that
+/// were found the hard way.
+///
+/// `deleteAgents` is NOT here because it takes a list of ids rather than one, so the extractor
+/// below cannot see it; it is filtered to the caller's own inside `lifecycle::delete_agents`.
+pub const NEEDS_OWNERSHIP: &[&str] = &[
+    "createAgentAutomation",
+    "deleteAgent",
+    "deleteAgentAutomation",
+    "duplicateAgent",
+    "getAgentAutomations",
+    "runAgentAutomationNow",
+    "setAgentAutomationEnabled",
+    "setAgentAvatarBytes",
+    "setGroupMembers",
+    "updateAgent",
+    "updateAgentAutomation",
+];
+
+/// Does this caller OWN the coworker. Ownership, never org visibility — the narrow question,
+/// for the verbs that change something.
+async fn owns(state: &GatewayState, caller: &str, coworker: &CoworkerId) -> Result<bool, ()> {
+    let account = match state.agui.auth.store.account_by_email(caller).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            tracing::error!(%error, "could not resolve the caller for an ownership check");
+            return Err(());
+        }
+    };
+    match state.agui.auth.store.coworker_owner(coworker).await {
+        Ok(owner) => Ok(owner.is_some_and(|owner| owner == account.id)),
+        Err(error) => {
+            tracing::error!(%error, coworker = %coworker.as_str(), "could not read a coworker's owner");
+            Err(())
+        }
     }
 }
