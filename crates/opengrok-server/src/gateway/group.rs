@@ -571,8 +571,9 @@ async fn run_member_turn(
             content: turn_prompt(member, room.name, peers, new_messages),
         }],
         tools: Vec::new(),
-        gateway_key: crate::spend::key_for(&state.agui, &member.id).await,
+        gateway_key: crate::spend::key_for(&state.agui, &member.id, account_id).await,
         spend_scope: Some(member.id.as_str().to_string()),
+        spend_actor: Some(account_id.as_str().to_string()),
     };
     let thread_id = format!("gateway-{}", group_id.as_str());
     let run_id = RunId::new();
@@ -928,8 +929,9 @@ pub async fn resume_member_turn(
         system: Some(system.clone()),
         messages: crate::agui::routes::conversation_from(&run),
         tools: Vec::new(),
-        gateway_key: crate::spend::key_for(&state.agui, &member.id).await,
+        gateway_key: crate::spend::key_for(&state.agui, &member.id, &account_id).await,
         spend_scope: Some(member.id.as_str().to_string()),
+        spend_actor: Some(account_id.as_str().to_string()),
     };
     let events = resume_conversation(
         state.agui.door.as_ref(),

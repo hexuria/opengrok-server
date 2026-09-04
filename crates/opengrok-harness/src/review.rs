@@ -58,6 +58,12 @@ pub struct ModelJudge {
     /// `None` on both keeps the old pass-through, for callers with no coworker (the harness's
     /// own tests). A judge with no coworker is not billed to a guessed one.
     scope: Option<String>,
+    /// WHOSE POOL. Added here rather than in #57 because the field did not exist on main yet.
+    /// Without it this branch would HOLD every judge call: the guard refuses any request that
+    /// names a spend scope and no actor, which is the rule that stops a shared coworker's spend
+    /// being billed to a guess. A metered judge with no actor is not a smaller fix than an
+    /// unmetered one — it is auto-review switched off everywhere.
+    actor: Option<String>,
     key: Option<GatewayKey>,
 }
 
@@ -68,6 +74,7 @@ impl ModelJudge {
             model: model.into(),
             timeout: DEFAULT_JUDGE_TIMEOUT,
             scope: None,
+            actor: None,
             key: None,
         }
     }
@@ -75,8 +82,14 @@ impl ModelJudge {
     /// Bill this judge to the coworker whose turn raised it, and check it against that
     /// coworker's limits. Set once where the runner is built, which is once per run.
     #[must_use]
-    pub fn for_coworker(mut self, scope: impl Into<String>, key: Option<GatewayKey>) -> Self {
+    pub fn for_coworker(
+        mut self,
+        scope: impl Into<String>,
+        actor: impl Into<String>,
+        key: Option<GatewayKey>,
+    ) -> Self {
         self.scope = Some(scope.into());
+        self.actor = Some(actor.into());
         self.key = key;
         self
     }
@@ -147,6 +160,7 @@ impl ReviewJudge for ModelJudge {
         let request = ModelRequest {
             gateway_key: self.key.clone(),
             spend_scope: self.scope.clone(),
+            spend_actor: self.actor.clone(),
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage {
@@ -307,11 +321,17 @@ mod tests {
         });
         let judge = ModelJudge::new(spy.clone(), "oag/cheap").for_coworker(
             "cw_ada",
+            "acct_ada",
             Some(crate::model::GatewayKey::new("oag_live_adas_own")),
         );
         let _ = judge.judge(ask()).await;
         let seen = spy.seen.lock().unwrap().clone().expect("the judge called");
         assert_eq!(seen.spend_scope, Some("cw_ada".to_string()));
+        assert_eq!(
+            seen.spend_actor,
+            Some("acct_ada".to_string()),
+            "and whose pool it draws on — without this the guard holds every judge call"
+        );
         assert_eq!(
             seen.gateway_key,
             Some(crate::model::GatewayKey::new("oag_live_adas_own")),
@@ -328,6 +348,7 @@ mod tests {
             .await;
         let seen = bare.seen.lock().unwrap().clone().expect("called");
         assert_eq!(seen.spend_scope, None);
+        assert_eq!(seen.spend_actor, None);
         assert_eq!(seen.gateway_key, None);
     }
 }

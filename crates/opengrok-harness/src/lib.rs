@@ -456,6 +456,7 @@ mod tests {
         ModelRequest {
             gateway_key: None,
             spend_scope: None,
+            spend_actor: None,
             model: "mock".to_string(),
             system: None,
             tools: Vec::new(),

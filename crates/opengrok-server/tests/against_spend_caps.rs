@@ -785,7 +785,14 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     {
         let stand_in = h.stand_in.lock().unwrap();
         assert_eq!(stand_in.keys.len(), 1, "one key minted at hire");
-        assert_eq!(stand_in.keys[0].name, "coworker: Ada");
+        // Both identities, in a fixed order: a shared coworker has one key per member and the
+        // gateway's key listing is flat, so a label naming only the coworker would show the
+        // operator several rows it could not tell apart.
+        let label = &stand_in.keys[0].name;
+        assert!(
+            label.starts_with("coworker: Ada — member: acct_"),
+            "the label names the coworker and then the member: {label}"
+        );
         assert_eq!(
             stand_in.keys[0].principal,
             GatewayAdmin::org_principal_email(org_id.as_str()),
@@ -814,7 +821,8 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     assert!(
         listed
             .iter()
-            .any(|k| k.key_prefix == prefix && k.label == "coworker: Ada"),
+            .any(|k| k.key_prefix == prefix
+                && k.label.starts_with("coworker: Ada — member: acct_")),
         "the org's key listing attributes it: {listed:?}"
     );
 
@@ -1196,7 +1204,7 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     );
     let row = h
         .store
-        .coworker_key(&CoworkerId::from_stored(coworker.clone()))
+        .coworker_key(&CoworkerId::from_stored(coworker.clone()), &account_id)
         .await
         .expect("row")
         .expect("the row stays");
@@ -1321,7 +1329,14 @@ async fn a_coworker_hired_while_the_gateway_would_not_mint_gets_its_key_on_its_n
     {
         let stand_in = h.stand_in.lock().unwrap();
         assert_eq!(stand_in.keys.len(), 1, "minted late, on the turn");
-        assert_eq!(stand_in.keys[0].name, "coworker: Ada");
+        // Both identities, in a fixed order: a shared coworker has one key per member and the
+        // gateway's key listing is flat, so a label naming only the coworker would show the
+        // operator several rows it could not tell apart.
+        let label = &stand_in.keys[0].name;
+        assert!(
+            label.starts_with("coworker: Ada — member: acct_"),
+            "the label names the coworker and then the member: {label}"
+        );
         assert_eq!(
             stand_in.bearers.last(),
             Some(&stand_in.keys[0].key),

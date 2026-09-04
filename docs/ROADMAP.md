@@ -529,7 +529,7 @@ Listing them as pending would make this tracker lie about how far away done is.
 A coworker was a private thing with no stated purpose: the model was told a name and nothing
 else, and nobody but the owner could ever see the row. This slice gives a coworker a job it
 remembers and an owner's decision to share it — and, before any sharing is switched on, makes
-the records that sharing would otherwise break carry whose they are.
+every record that sharing would otherwise break carry whose it is.
 
 - [x] **19.1** A standing role, composed into ONE system message on every run
   (`server/src/persona.rs`), pinned on the run at start so a resume tells the model what the
@@ -544,13 +544,19 @@ the records that sharing would otherwise break carry whose they are.
   `org` is REFUSED with a sentence until 19.4: nothing reads visibility yet, and a 200 would
   tell somebody their coworker was shared when it was not. The aggregate records and replays
   `Org` already, so that refusal is one branch to delete rather than a feature to build.
-  `tests/against_visibility.rs`.
-- [ ] **19.3** A gateway key per (member, coworker), so a shared coworker's spend is billed to
-  whoever is talking rather than to its owner. All three guard caches re-key with it.
-- [ ] **19.4** A transcript per (member, coworker): a nullable `account_id` on the entry rows
+  `tests/against_visibility.rs`. PR #52 (`2d9810b`, `ba18c39`).
+- [x] **19.3** A gateway key per (coworker, MEMBER), so a shared coworker's turns bill whoever
+  is talking. The pair is the row's identity, the payer's pool sums the payer's own keys
+  wherever they are, retirement revokes every member's key rather than the hirer's, and all
+  three per-coworker caches re-key on the pair. `ModelRequest` carries `spend_actor` beside
+  `spend_scope`, and the metered judge (19.points, PR #57) carries both — a judge naming a scope
+  with no actor is HELD by this slice's own rule, which would switch auto-review off everywhere.
+  `tests/against_member_keys.rs`.
+- [ ] **19.4** A transcript per (coworker, member): a nullable `account_id` on the entry rows
   and a predicate on all six readers. Until this lands the roster is deliberately NOT widened —
   `coworkers_for` is also the authorization primitive, and widening it first would put two
-  people in one conversation. `visibility` is recorded and honest; nothing reads it yet.
+  people in one conversation. Deleting the `org` refusal in 19.2 is part of this step, not of a
+  later one.
 
 ## Later — unordered, deliberately
 

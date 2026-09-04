@@ -642,6 +642,21 @@ create table if not exists points_limit (
 -- A retired coworker's key row stays, marked: its month's points still count toward its
 -- owner's pool, so retire-and-rehire does not reset a member's month.
 alter table coworker_gateway_key add column if not exists revoked_at_ms bigint;
+-- A key per (coworker, MEMBER), not per coworker. A shared coworker is talked to by people who
+-- do not own it, and one key would bill every one of those turns to the hirer and count them
+-- against the hirer's pool. The base table above still declares `coworker_id` alone as the
+-- primary key because that is what every database created before this line has; these two
+-- statements are what actually holds, on a fresh database too. Both are idempotent — do not
+-- "simplify" them into an `add primary key`, which is not.
+alter table coworker_gateway_key drop constraint if exists coworker_gateway_key_pkey;
+create unique index if not exists coworker_gateway_key_pair
+    on coworker_gateway_key (coworker_id, account_id);
+-- Where this row's secret is sealed. The vault binds the secret id into the ciphertext as AAD
+-- (`store/vault.rs`), so a secret CANNOT be moved to a new id by renaming the row — it would
+-- stop opening. Rows written before the pair existed keep their secret at the per-coworker id
+-- and say so here. This is a marker, not a guess: without it a member whose secret was missing
+-- would fall back to the per-coworker id and quietly send somebody else's credential.
+alter table coworker_gateway_key add column if not exists secret_scoped boolean not null default false;
 -- Templates carry points, not USD windows; the USD columns stay unread until the cleanup.
 alter table coworker_template add column if not exists month_points bigint;
 alter table coworker_template add column if not exists day_points bigint;

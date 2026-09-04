@@ -91,6 +91,13 @@ pub struct ModelRequest {
     /// before each call: the coworker's id. The key alone does not say whose it is, and the
     /// harness does not know what a coworker is — it carries the scope, the server reads it.
     pub spend_scope: Option<String>,
+    /// Whose spend it is: the account whose pool this turn draws on. A SECOND field rather than
+    /// a pair packed into `spend_scope`, because the two genuinely differ — the scope is the
+    /// coworker whose cap and key are counted, the actor is the person being billed — and a
+    /// composite string would have to be split apart again by everything that reads either.
+    /// On a coworker only its owner can reach they name the same person; on a shared one they
+    /// do not, and the difference is the whole point of the field.
+    pub spend_actor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
