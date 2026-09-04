@@ -16,6 +16,19 @@ cd "$(dirname "$0")/.."
 step() { printf '\n=== %s\n' "$*"; }
 fail() { echo "GATE FAILED: $*" >&2; exit 1; }
 
+# THE DATABASE HAS TO EXIST, and this check is here because its absence LIES. A run against a
+# database that is not there does not fail with a word about databases — it fails deep in the
+# integration tests with four red test names, so the tail reads "GATE FAILED: tests" and the next
+# person spends their time reading four tests that are perfectly fine. Cost two full runs to learn.
+# It sits ABOVE `cargo test` for that reason; the side databases further down are created by the
+# smokes themselves, and this one is the caller's. psql is not required to run the gate, so a
+# machine without it skips the check rather than failing on it.
+if [ -n "${OG_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+  if ! psql "$OG_DATABASE_URL" -c 'select 1' >/dev/null 2>&1; then
+    fail "cannot reach the database ${OG_DATABASE_URL##*/} — create it first (createdb ${OG_DATABASE_URL##*/}) or point OG_DATABASE_URL at one that exists. This is the environment, not the code."
+  fi
+fi
+
 step "cargo fmt --all --check"
 cargo fmt --all --check || fail "formatting (run: cargo fmt --all)"
 
