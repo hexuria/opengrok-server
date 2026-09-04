@@ -218,7 +218,13 @@ pub async fn roster_rows_for(
     let Some(account) = state.agui.auth.store.account_by_email(email).await? else {
         return Ok(Vec::new());
     };
+    // Ownership, not visibility. `coworkers_for` is ALSO the authorisation primitive that
+    // `owned_coworker` gates every per-coworker route on, so widening it here would silently make
+    // every org member able to write every other member's limits. The org-visible rows will come
+    // from a separate `roster_for`, added when transcripts are keyed per member — until then a
+    // shared coworker would put two people in one conversation, which is the thing S2 forbids.
     let coworkers = state.agui.auth.store.coworkers_for(&account.id).await?;
+
     // The account's provisioning error (if any) is stamped on its BOXLESS agents, so the roster can
     // say why a bot has no computer. An agent that has a box carries null.
     let account_error = state
@@ -239,6 +245,18 @@ pub async fn roster_rows_for(
         } else {
             Value::Null
         };
+        // The permission fields, decided by the server on every row (S2). `mine` is ownership;
+        // `canManage` is the owner or the org's admin; `owner` names the hirer so a shared row
+        // can say whose it is. Every row here is the caller's own today, so `mine` is true —
+        // the fields exist and are honest now so the desktop needs no change when the roster
+        // widens.
+        row["visibility"] = json!(view.visibility.as_str());
+        row["mine"] = json!(true);
+        row["canManage"] = json!(true);
+        row["owner"] = json!({
+            "id": account.id.as_str(),
+            "name": format!("{} {}", account.first_name, account.last_name).trim(),
+        });
         rows.push(row);
     }
     Ok(rows)

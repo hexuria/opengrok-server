@@ -153,10 +153,26 @@ pub fn effective_cap(
 /// revoked ones included — a retired coworker's month still counts, and on a shared coworker
 /// their own key counts toward their own pool rather than the hirer's.
 pub async fn pool_keys(store: &PgStore, payer: &AccountId) -> Result<Vec<String>, String> {
+    pool_keys_by_coworker(store, payer)
+        .await
+        .map(|rows| rows.into_iter().map(|(key_id, _)| key_id).collect())
+}
+
+/// The same keys, still paired with the coworker each was minted for. The pool reading gets a
+/// figure per key back from the gateway, and without this pairing it can only add them up — so
+/// "your pool is used up" could never say which coworker used it.
+pub async fn pool_keys_by_coworker(
+    store: &PgStore,
+    payer: &AccountId,
+) -> Result<Vec<(String, CoworkerId)>, String> {
     store
         .coworker_keys_for_account(payer)
         .await
-        .map(|rows| rows.into_iter().map(|row| row.key_id).collect())
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| (row.key_id, CoworkerId::from_stored(row.coworker_id)))
+                .collect()
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -349,6 +365,39 @@ pub async fn set_limit(
                 commas(pool)
             ),
         ));
+    }
+    // AND THE CAPS TOGETHER. The check above catches one cap larger than the whole pool; it says
+    // nothing about five caps that each fit and together do not. Accepting those turns the pool
+    // into first-come-first-served: the coworkers that ask last are refused while still under
+    // their own cap, and the sentence they get talks about the pool rather than the
+    // over-allocation that caused it. Refuse it where it is created, not where it bites.
+    //
+    // The coworker being written is EXCLUDED from the sum and its new cap added, so raising an
+    // existing cap is measured against what the others hold, not against its own old value
+    // counted twice. Clearing a cap is never refused: removing a limit cannot over-allocate.
+    if let (Some(Some(cap)), Some(pool)) = (cap, limits.pool) {
+        let others: i64 = store
+            .coworker_caps_for(account_id.as_str())
+            .await
+            .map_err(|error| (503, error.to_string()))?
+            .into_iter()
+            .filter(|(id, _)| id != coworker_id.as_str())
+            .map(|(_, points)| points)
+            .sum();
+        let total = others.saturating_add(cap);
+        if total > pool {
+            return Err((
+                400,
+                format!(
+                    "a cap of {} would put your caps at {}, above your pool of {} — {} more \
+                     than you have to give",
+                    commas(cap),
+                    commas(total),
+                    commas(pool),
+                    commas(total - pool)
+                ),
+            ));
+        }
     }
     let next = PointsLimit {
         month_points: cap.unwrap_or(limits.cap),

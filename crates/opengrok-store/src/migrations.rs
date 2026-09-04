@@ -55,6 +55,8 @@ create table if not exists coworker_view (
 -- than a key in the seam-B profile blob: the blob holds the client's decoration, and a field the
 -- model reads every turn is not decoration.
 alter table coworker_view add column if not exists role text;
+-- Who may see and talk to a coworker: 'private' (the default, and the safe one) or 'org'.
+alter table coworker_view add column if not exists visibility text not null default 'private';
 
 -- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
 -- on the account's first agent, torn down when its last agent is deleted. A single row per account.
@@ -552,6 +554,11 @@ create table if not exists mcp_allow_once (
     gate        boolean not null,
     at_ms       bigint  not null
 );
+-- WHOSE consent this was. Without it, one member's "allow once" on a shared coworker would
+-- authorise a DIFFERENT member's command — a consent record that fails open, which
+-- non-negotiable 8 forbids. Nullable for rows written before sharing existed; a take matches on
+-- it, so an old row can only be spent by a caller with no account, as before.
+alter table mcp_allow_once add column if not exists account_id text;
 create index if not exists mcp_allow_once_lookup_idx on mcp_allow_once (coworker_id, tool);
 
 -- 18.later: a coworker's own gateway key, so its spend lands on its own cap. Attribution only —

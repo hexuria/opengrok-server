@@ -122,6 +122,7 @@ async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (Cowo
         members: Vec::new(),
         updated_at_ms: 2,
         role: None,
+        visibility: Default::default(),
     };
     state
         .auth
@@ -150,6 +151,7 @@ async fn retire(state: &AgUiState, account: &AccountId, id: &CoworkerId) {
         members: Vec::new(),
         updated_at_ms: 9,
         role: None,
+        visibility: Default::default(),
     };
     state
         .auth

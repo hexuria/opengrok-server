@@ -534,17 +534,24 @@ every record that sharing would otherwise break carry whose it is.
 - [x] **19.1** A standing role, composed into ONE system message on every run
   (`server/src/persona.rs`), pinned on the run at start so a resume tells the model what the
   first turn was told. The role lives in its own aggregate column, and the seam-B profile blob
-  is structurally unable to supply one. `PATCH /coworkers/{id}` takes `role`; 1000 characters,
-  refused with the count. `tests/against_role.rs`. PR #51 (`c83d128`, `e25f95e`).
-- [x] **19.2** `Visibility` (private / org), the roster's permission fields, and an account on
-  the remembered "allow once" — a consent record with no owner fails open the moment two people
-  can reach one coworker. `org` is REFUSED with a sentence until 19.4: a 200 would tell somebody
-  their coworker was shared when it was not. `tests/against_visibility.rs`. PR #52.
+  is structurally unable to supply one — two sources for the same sentence is how they diverge.
+  `PATCH /coworkers/{id}` takes `role`; 1000 characters, refused with the count.
+  `tests/against_role.rs`. PR #51 (`c83d128`, `e25f95e`).
+- [x] **19.2** `Visibility` (private by default / org), the roster's permission fields
+  (`visibility`, `mine`, `canManage`, `owner`), and an account on the remembered "allow once".
+  A consent record with no owner fails open the moment two people can reach one coworker: one
+  member's yes would authorise another member's command. The column lands BEFORE sharing does.
+  `org` is REFUSED with a sentence until 19.4: nothing reads visibility yet, and a 200 would
+  tell somebody their coworker was shared when it was not. The aggregate records and replays
+  `Org` already, so that refusal is one branch to delete rather than a feature to build.
+  `tests/against_visibility.rs`. PR #52 (`2d9810b`, `ba18c39`).
 - [x] **19.3** A gateway key per (coworker, MEMBER), so a shared coworker's turns bill whoever
   is talking. The pair is the row's identity, the payer's pool sums the payer's own keys
   wherever they are, retirement revokes every member's key rather than the hirer's, and all
   three per-coworker caches re-key on the pair. `ModelRequest` carries `spend_actor` beside
-  `spend_scope`. `tests/against_member_keys.rs`.
+  `spend_scope`, and the metered judge (19.points, PR #57) carries both — a judge naming a scope
+  with no actor is HELD by this slice's own rule, which would switch auto-review off everywhere.
+  `tests/against_member_keys.rs`.
 - [ ] **19.4** A transcript per (coworker, member): a nullable `account_id` on the entry rows
   and a predicate on all six readers. Until this lands the roster is deliberately NOT widened —
   `coworkers_for` is also the authorization primitive, and widening it first would put two

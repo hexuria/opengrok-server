@@ -549,8 +549,8 @@ impl PgStore {
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         sqlx::query(
             "insert into coworker_view
-                (id, account_id, name, model, box_id, retired, updated_at_ms, members, role)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (id, account_id, name, model, box_id, retired, updated_at_ms, members, role, visibility)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              on conflict (id) do update set
                name = excluded.name,
                model = excluded.model,
@@ -558,7 +558,8 @@ impl PgStore {
                retired = excluded.retired,
                updated_at_ms = excluded.updated_at_ms,
                members = excluded.members,
-               role = excluded.role",
+               role = excluded.role,
+               visibility = excluded.visibility",
         )
         .bind(view.id.as_str())
         .bind(account_id.as_str())
@@ -569,6 +570,7 @@ impl PgStore {
         .bind(view.updated_at_ms)
         .bind(&members)
         .bind(&view.role)
+        .bind(view.visibility.as_str())
         .execute(&mut *tx)
         .await?;
 
@@ -579,7 +581,7 @@ impl PgStore {
     /// The roster, newest first — the order the client sorts by.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
-            "select id, name, model, box_id, retired, updated_at_ms, members, role
+            "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility
              from coworker_view
              where account_id = $1 and retired = false
              order by updated_at_ms desc",
@@ -604,6 +606,12 @@ impl PgStore {
                     )
                     .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                     role: row.try_get("role")?,
+                    // An unrecognised string reads as private: the safe answer, and the only one
+                    // that cannot accidentally share a coworker nobody chose to share.
+                    visibility: row
+                        .try_get::<Option<String>, _>("visibility")?
+                        .and_then(|text| opengrok_core::coworker::Visibility::parse(&text))
+                        .unwrap_or_default(),
                 })
             })
             .collect()

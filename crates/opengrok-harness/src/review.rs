@@ -17,7 +17,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use opengrok_tools::{ReviewAsk, ReviewJudge, ReviewVerdict};
 
-use crate::model::{ChatMessage, ModelDelta, ModelDoor, ModelRequest};
+use crate::model::{ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelRequest};
 
 /// The first line of the judge's system prompt. The mock door keys off it to answer with a canned
 /// verdict, so a test — or a peer driving the real app with no provider — can reach every rung.
@@ -45,6 +45,26 @@ pub struct ModelJudge {
     door: Arc<dyn ModelDoor>,
     model: String,
     timeout: Duration,
+    /// WHOSE SPEND THIS IS. The judge is a real model call made on a coworker's behalf, and it
+    /// used to carry neither a key nor a scope: its tokens went out on the deployment's key and
+    /// were checked against nobody's limits. A coworker sitting at its cap — refused for every
+    /// other call — could still spend through the safety check, once per tool call.
+    ///
+    /// Both halves are needed and neither is enough alone. The SCOPE is what the guard evaluates
+    /// the cap against; the KEY is what the gateway bills, so without it the judge's tokens
+    /// would never appear in the meter the cap is read from, and the cap could never be reached
+    /// by judge spending however carefully it was checked.
+    ///
+    /// `None` on both keeps the old pass-through, for callers with no coworker (the harness's
+    /// own tests). A judge with no coworker is not billed to a guessed one.
+    scope: Option<String>,
+    /// WHOSE POOL. Added here rather than in #57 because the field did not exist on main yet.
+    /// Without it this branch would HOLD every judge call: the guard refuses any request that
+    /// names a spend scope and no actor, which is the rule that stops a shared coworker's spend
+    /// being billed to a guess. A metered judge with no actor is not a smaller fix than an
+    /// unmetered one — it is auto-review switched off everywhere.
+    actor: Option<String>,
+    key: Option<GatewayKey>,
 }
 
 impl ModelJudge {
@@ -53,7 +73,25 @@ impl ModelJudge {
             door,
             model: model.into(),
             timeout: DEFAULT_JUDGE_TIMEOUT,
+            scope: None,
+            actor: None,
+            key: None,
         }
+    }
+
+    /// Bill this judge to the coworker whose turn raised it, and check it against that
+    /// coworker's limits. Set once where the runner is built, which is once per run.
+    #[must_use]
+    pub fn for_coworker(
+        mut self,
+        scope: impl Into<String>,
+        actor: impl Into<String>,
+        key: Option<GatewayKey>,
+    ) -> Self {
+        self.scope = Some(scope.into());
+        self.actor = Some(actor.into());
+        self.key = key;
+        self
     }
 
     #[must_use]
@@ -120,11 +158,9 @@ pub fn parse_verdict(text: &str) -> ReviewVerdict {
 impl ReviewJudge for ModelJudge {
     async fn judge(&self, ask: ReviewAsk<'_>) -> ReviewVerdict {
         let request = ModelRequest {
-            gateway_key: None,
-            // The judge is the deployment's own call, not a coworker's turn: no scope, so the
-            // guard passes it straight through, and no actor because there is nobody to bill.
-            spend_scope: None,
-            spend_actor: None,
+            gateway_key: self.key.clone(),
+            spend_scope: self.scope.clone(),
+            spend_actor: self.actor.clone(),
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage {
@@ -270,5 +306,49 @@ mod tests {
         let judge = ModelJudge::new(Arc::new(HangingDoor), "oag/cheap")
             .with_timeout(Duration::from_millis(50));
         assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable);
+    }
+
+    /// The judge is a real model call made on a coworker's behalf. It used to carry neither a
+    /// key nor a scope, so its tokens went out on the deployment's key and were checked against
+    /// nobody: a coworker at its cap could still spend through the safety check, once per tool
+    /// call. Both halves are asserted, because either alone leaves the hole open — the scope is
+    /// what the guard checks, the key is what the gateway bills, and a cap can only be reached
+    /// by spending the meter it is read from actually sees.
+    #[tokio::test]
+    async fn the_judge_is_billed_and_checked_as_the_coworker_that_raised_it() {
+        let spy = Arc::new(SpyDoor {
+            seen: Mutex::new(None),
+        });
+        let judge = ModelJudge::new(spy.clone(), "oag/cheap").for_coworker(
+            "cw_ada",
+            "acct_ada",
+            Some(crate::model::GatewayKey::new("oag_live_adas_own")),
+        );
+        let _ = judge.judge(ask()).await;
+        let seen = spy.seen.lock().unwrap().clone().expect("the judge called");
+        assert_eq!(seen.spend_scope, Some("cw_ada".to_string()));
+        assert_eq!(
+            seen.spend_actor,
+            Some("acct_ada".to_string()),
+            "and whose pool it draws on — without this the guard holds every judge call"
+        );
+        assert_eq!(
+            seen.gateway_key,
+            Some(crate::model::GatewayKey::new("oag_live_adas_own")),
+            "billed to the coworker, not the deployment"
+        );
+
+        // A judge with no coworker is billed to nobody rather than to a guessed owner, and
+        // passes the guard as it always did.
+        let bare = Arc::new(SpyDoor {
+            seen: Mutex::new(None),
+        });
+        let _ = ModelJudge::new(bare.clone(), "oag/cheap")
+            .judge(ask())
+            .await;
+        let seen = bare.seen.lock().unwrap().clone().expect("called");
+        assert_eq!(seen.spend_scope, None);
+        assert_eq!(seen.spend_actor, None);
+        assert_eq!(seen.gateway_key, None);
     }
 }
