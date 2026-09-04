@@ -188,13 +188,20 @@ pub(crate) async fn tools_for_coworker(
     )
     .await;
     if let Some(policy) = effective.review_policy() {
-        executor = executor.with_auto_review(
-            policy,
-            Arc::new(opengrok_harness::ModelJudge::new(
-                state.door.clone(),
-                state.auto_review_model.clone(),
-            )),
-        );
+        // The judge is billed to the coworker whose turn raised it, and checked against that
+        // coworker's limits. Resolved HERE because this function already holds the coworker and
+        // runs once per run, which is exactly where the run path resolves its own key.
+        //
+        // A coworker over its cap now has its judge refused, and a refused judge is
+        // `Unavailable`, which the executor turns into an Ask — so the tool call raises a card
+        // for a person rather than proceeding unreviewed or spending past a limit.
+        let judge =
+            opengrok_harness::ModelJudge::new(state.door.clone(), state.auto_review_model.clone())
+                .for_coworker(
+                    coworker_id.as_str(),
+                    crate::spend::key_for(state, &coworker_id).await,
+                );
+        executor = executor.with_auto_review(policy, Arc::new(judge));
     }
 
     Some(ToolRunner::new(executor, context))

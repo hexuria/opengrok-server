@@ -479,8 +479,11 @@ pub struct GuardedDoor {
     /// twenty times. A limit written on the admin page shows up within the freshness window.
     limits_cache: Mutex<HashMap<String, (crate::points::Effective, i64)>>,
     /// The pool reading per OWNER: every coworker of one member shares one batch read per
-    /// freshness window, rather than each paying for its own.
-    pool_cache: Mutex<HashMap<String, (i64, i64)>>,
+    /// freshness window, rather than each paying for its own. Holds the heaviest spender beside
+    /// the total, so a CACHED reading gives the same sentence as a fresh one — a refusal whose
+    /// wording depends on how recently the meter was read is worse than one that never names
+    /// anybody.
+    pool_cache: Mutex<HashMap<String, (PoolReading, i64)>>,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
     /// a test that counts reads sets it to zero.
     fresh_ms: i64,
@@ -582,19 +585,19 @@ impl GuardedDoor {
 }
 
 impl GuardedDoor {
-    fn cached_pool(&self, owner: &str, within_ms: i64) -> Option<i64> {
+    fn cached_pool(&self, owner: &str, within_ms: i64) -> Option<PoolReading> {
         let cache = self.pool_cache.lock().ok()?;
-        let (points, at_ms) = cache.get(owner)?;
-        (now_ms() - at_ms <= within_ms).then_some(*points)
+        let (reading, at_ms) = cache.get(owner)?;
+        (now_ms() - at_ms <= within_ms).then(|| reading.clone())
     }
 
     /// The owner's pool total this month — one batch read over every key the owner's coworkers
     /// ever had, with the turn's patience and the same fresh/stale ladder as the meter.
-    async fn pool_reading(&self, owner: &AccountId, name: &str) -> Result<i64, ModelError> {
+    async fn pool_reading(&self, owner: &AccountId, name: &str) -> Result<PoolReading, ModelError> {
         if self.fresh_ms > 0
-            && let Some(points) = self.cached_pool(owner.as_str(), self.fresh_ms)
+            && let Some(reading) = self.cached_pool(owner.as_str(), self.fresh_ms)
         {
-            return Ok(points);
+            return Ok(reading);
         }
         let Some(admin) = self.admin.as_ref() else {
             return Err(ModelError::SpendCap(format!(
@@ -602,23 +605,44 @@ impl GuardedDoor {
                  connection to read it with (OG_GATEWAY_ADMIN_URL). Its turns are held until it does."
             )));
         };
-        let keys = crate::points::pool_keys(&self.store, owner)
+        let pairs = crate::points::pool_keys_by_coworker(&self.store, owner)
             .await
             .map_err(|error| {
                 ModelError::SpendCap(format!(
                     "{name}'s owner's keys could not be listed ({error}); the turn is held."
                 ))
             })?;
+        let keys: Vec<String> = pairs.iter().map(|(key_id, _)| key_id.clone()).collect();
         match admin
             .points_for_keys_within(&keys, "month", METER_TIMEOUT)
             .await
         {
             Ok(Some(per_key)) => {
                 let points: i64 = per_key.values().sum();
+                let top = pairs
+                    .iter()
+                    .filter_map(|(key_id, coworker)| {
+                        per_key.get(key_id).map(|used| (coworker.clone(), *used))
+                    })
+                    .filter(|(_, used)| *used > 0)
+                    .max_by_key(|(_, used)| *used);
+                let heaviest = match top {
+                    Some((id, used)) => {
+                        let name = self
+                            .store
+                            .load_coworker(&id)
+                            .await
+                            .map(|(loaded, _)| loaded.name)
+                            .unwrap_or_else(|_| "another agent".to_string());
+                        Some((id, name, used))
+                    }
+                    None => None,
+                };
+                let reading = PoolReading { points, heaviest };
                 if let Ok(mut cache) = self.pool_cache.lock() {
-                    cache.insert(owner.as_str().to_string(), (points, now_ms()));
+                    cache.insert(owner.as_str().to_string(), (reading.clone(), now_ms()));
                 }
-                Ok(points)
+                Ok(reading)
             }
             Ok(None) => Err(ModelError::SpendCap(format!(
                 "{name}'s owner has a points pool, but the gateway has no reference price set, so \
@@ -627,7 +651,7 @@ impl GuardedDoor {
             Err(error) => {
                 tracing::error!(%error, owner = %owner.as_str(), "points guard: the pool could not be read");
                 match self.cached_pool(owner.as_str(), STALE_OK_MS) {
-                    Some(points) => Ok(points),
+                    Some(reading) => Ok(reading),
                     None => Err(ModelError::SpendCap(format!(
                         "{name}'s owner's pool could not be read ({error}); the turn is held. \
                          Try again in a moment."
@@ -644,6 +668,20 @@ fn rfc3339_at(text: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
+/// One pool reading: the month's total, and the coworker that accounts for most of it.
+///
+/// The heaviest spender is carried, not looked up later, because it is free here — the gateway
+/// already answers per key and the key-to-coworker pairing is already in hand. Looked up later
+/// it would be a second round trip on the path that is refusing somebody.
+#[derive(Clone)]
+struct PoolReading {
+    points: i64,
+    /// Resolved to a NAME here, once per pool read rather than once per turn: the reading is
+    /// cached for the freshness window, so the one extra lookup rides along with it instead of
+    /// landing on the hot path.
+    heaviest: Option<(CoworkerId, String, i64)>,
+}
+
 /// What the guard knows when it decides: the coworker's month and day, and the owner's pool.
 struct Counted {
     month: i64,
@@ -651,6 +689,11 @@ struct Counted {
     day_frees_at: Option<String>,
     resets_at: Option<String>,
     pool_used: Option<i64>,
+    /// Who accounts for most of the pool, when it is somebody other than the coworker being
+    /// refused. Named so the person reading knows where to look, instead of being told the money
+    /// is gone and left to guess which of their coworkers spent it. Already filtered by the
+    /// caller, which is where both ids are in hand.
+    pool_heaviest: Option<(String, i64)>,
 }
 
 /// The sentence a person reads when a limit is reached, or `None` when there is room at every
@@ -682,11 +725,18 @@ fn over_points(name: &str, limits: &crate::points::Effective, counted: &Counted)
     if let (Some(pool), Some(used)) = (limits.pool, counted.pool_used)
         && used >= pool
     {
-        return Some(format!(
+        let mut sentence = format!(
             "Your pool of {} points for {month_name} is used up ({} used); {resets}.",
             commas(pool),
             commas(used)
-        ));
+        );
+        if let Some((heaviest, spent)) = counted.pool_heaviest.as_ref() {
+            sentence.push_str(&format!(
+                " {heaviest} accounts for {} of it.",
+                commas(*spent)
+            ));
+        }
+        return Some(sentence);
     }
     if let Some(day_cap) = limits.day_cap
         && counted.day >= day_cap
@@ -749,16 +799,26 @@ impl ModelDoor for GuardedDoor {
                  points cannot be counted; an admin sets it on the admin page. The turn is held."
             )));
         };
-        let pool_used = match (limits.pool, limits.owner.as_ref()) {
+        let pool = match (limits.pool, limits.owner.as_ref()) {
             (Some(_), Some(owner)) => Some(self.pool_reading(owner, &name).await?),
             _ => None,
         };
+        // Naming the coworker being refused would tell somebody they are the reason they were
+        // refused, which they can already see. Dropped here, where both ids are in hand.
+        let pool_heaviest = pool.as_ref().and_then(|reading| {
+            reading
+                .heaviest
+                .as_ref()
+                .filter(|(id, _, _)| id != &coworker)
+                .map(|(_, name, used)| (name.clone(), *used))
+        });
         let counted = Counted {
             month,
             day,
             day_frees_at: usage.day_frees_at.clone(),
             resets_at: usage.month_resets_at.clone(),
-            pool_used,
+            pool_used: pool.map(|reading| reading.points),
+            pool_heaviest,
         };
         if let Some(sentence) = over_points(&name, &limits, &counted) {
             tracing::info!(coworker = %coworker.as_str(), "points guard: refused — {sentence}");
@@ -831,6 +891,14 @@ mod tests {
             day_frees_at: Some("2026-09-03T14:32:10Z".into()),
             resets_at: Some("2026-10-01T00:00:00Z".into()),
             pool_used,
+            pool_heaviest: None,
+        }
+    }
+
+    fn counted_blaming(month: i64, pool_used: i64, who: &str, spent: i64) -> Counted {
+        Counted {
+            pool_heaviest: Some((who.to_string(), spent)),
+            ..counted(month, 0, Some(pool_used))
         }
     }
 
@@ -889,6 +957,37 @@ mod tests {
                 &counted(1, 1, None)
             ),
             None
+        );
+    }
+
+    /// A pool refusal that names nobody leaves the reader to guess which of their coworkers ate
+    /// the month. The caller drops the name when the heaviest spender IS the one being refused,
+    /// so this only ever points somewhere the reader has not already looked.
+    #[test]
+    fn the_pool_refusal_says_who_spent_it() {
+        let month = chrono::Utc::now().format("%B").to_string();
+        let limits = crate::points::Effective {
+            pool: Some(1_000_000),
+            ..Default::default()
+        };
+        let s = over_points(
+            "Bo",
+            &limits,
+            &counted_blaming(4_000, 1_000_000, "Ada", 812_500),
+        )
+        .unwrap();
+        assert_eq!(
+            s,
+            format!(
+                "Your pool of 1,000,000 points for {month} is used up (1,000,000 used); it \
+                 resets on 1 October. Ada accounts for 812,500 of it."
+            )
+        );
+        // Nothing named: the caller already decided this reader is the spender.
+        let s = over_points("Ada", &limits, &counted(4_000, 0, Some(1_000_000))).unwrap();
+        assert!(
+            s.ends_with("it resets on 1 October."),
+            "no blame when there is nobody else to name: {s}"
         );
     }
 }
