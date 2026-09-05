@@ -67,6 +67,16 @@ const IMAGE_BYTES: &[u8] = include_bytes!("fixtures/mock-image.png");
 const VIDEO_BYTES: &[u8] = include_bytes!("fixtures/mock-video.mp4");
 const AUDIO_BYTES: &[u8] = include_bytes!("fixtures/mock-audio.mp3");
 
+/// The four readers that have no other way to be exercised: the PDF viewer, the spreadsheet
+/// viewer, the JSON reader and the mammoth `.docx` reader all reach their bytes through
+/// `readAttachmentChunk` and draw nothing without a real file. Every one of these is a genuine
+/// document — `file(1)` reports "PDF document, version 1.4, 1 pages" and "Microsoft Word 2007+" —
+/// because a reader given a plausible-looking stub fails in a way that teaches nobody anything.
+const PDF_BYTES: &[u8] = include_bytes!("fixtures/mock-report.pdf");
+const CSV_BYTES: &[u8] = include_bytes!("fixtures/mock-table.csv");
+const JSON_BYTES: &[u8] = include_bytes!("fixtures/mock-data.json");
+const DOCX_BYTES: &[u8] = include_bytes!("fixtures/mock-doc.docx");
+
 /// Is the fixture surface open? Gated on the door being a mock, because the tool writes entries no
 /// real turn could produce. Read from the environment rather than threaded through: the door is
 /// chosen there too (`main.rs`), and `provision::local_docker_allowed` sets the precedent.
@@ -249,6 +259,10 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("js", "files", "user-attachment, .js"),
     ("upload", "files", "user-attachment, .png (the media branch)"),
     ("audio", "files", "user-attachment, .mp3 — audio has no card path"),
+    ("pdf", "files", "user-attachment, .pdf — a real one-page document"),
+    ("csv", "files", "user-attachment, .csv — the spreadsheet reader"),
+    ("json", "files", "user-attachment, .json — the JSON reader"),
+    ("docx", "files", "user-attachment, .docx — heading + table, the mammoth path"),
     ("notice", "kinds", "a muted system line"),
     ("event", "kinds", "a timeline event (name-changed)"),
     ("thinking", "kinds", "a collapsible reasoning block"),
@@ -592,6 +606,10 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // attachment card takes the `file` branch and renders as a bare link. The host resolves
         // audio fine — it is the card side that cannot ask for it — so this is an attachment kind.
         "audio" => vec![user_attachment("audio", "mock-audio.mp3", AUDIO_BYTES)],
+        "pdf" => vec![user_attachment("pdf", "mock-report.pdf", PDF_BYTES)],
+        "csv" => vec![user_attachment("csv", "mock-table.csv", CSV_BYTES)],
+        "json" => vec![user_attachment("json", "mock-data.json", JSON_BYTES)],
+        "docx" => vec![user_attachment("docx", "mock-doc.docx", DOCX_BYTES)],
 
         "notice" => vec![json!({
             "kind": "notice",

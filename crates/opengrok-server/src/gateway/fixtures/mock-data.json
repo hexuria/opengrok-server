@@ -1,0 +1,5 @@
+{
+  "fixture": "mock-data",
+  "nested": { "list": [1, 2, 3], "ok": true },
+  "note": "Written by the mock fixture catalogue."
+}
