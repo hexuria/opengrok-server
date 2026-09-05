@@ -100,6 +100,32 @@ fn refusal(code: u16, message: &str) -> Response {
     )
 }
 
+/// The one refusal that carries a machine-readable `code`.
+///
+/// `code` is additive and appears ONLY here. Every other refusal keeps the `{"error": …}` shape
+/// the client already parses, because widening a reply shape the client reads is how a client we
+/// do not compile starts diverting (CLAUDE.md #1, and its third header fact).
+///
+/// 401 rather than 403 on both: 403 asserts we know who the caller is and are refusing them,
+/// which is a lie about the absent case — the whole point is that we do not know.
+///
+/// The two codes mean different things to the client and must stay distinct. On this seam the
+/// account header is attached per CONNECTION, so `account_identity_required` says "rebuild the
+/// connection, which re-reads the token secret" — retrying the call carries the same absence.
+/// `account_identity_invalid` says the opposite: a rebuild will not help, surface it.
+fn identity_refusal(code: &str) -> Response {
+    let message = match code {
+        "account_identity_invalid" => {
+            "the account identity header did not verify; sign in again"
+        }
+        _ => "this call carried no account identity; reconnect so the account header is attached",
+    };
+    reply(
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": message, "code": code }),
+    )
+}
+
 /// `GET /health` — the supervisor probes this on a 1500 ms deadline and only accepts
 /// `ok === true`. The busy flag is real: it reports whether any run is live right now.
 ///
@@ -393,7 +419,23 @@ async fn command(
     // The per-account pivot: whose account this call is FOR. The caller's own account when it sends
     // a valid account token in `ACCOUNT_HEADER`, else the `OG_GATEWAY_EMAIL` fallback — so a client
     // that has not yet learned to send the header keeps working. Resolved once, per request.
-    let caller = super::caller_email(&state, &headers).await;
+    // WHO this request is for, or a refusal. Resolved once and handed to the whole dispatch, so
+    // getting it wrong here is wrong for every verb — which is precisely how a headerless
+    // connection came to read and write as the admin. See `gateway::Caller`.
+    let resolved = super::caller_of(&state, &headers).await;
+    // INFO, not DEBUG: this is the line that answers "who was this request for", and it was the
+    // missing one. A debug-level answer is one nobody has when they need it.
+    tracing::info!(method = %method, account = %resolved.logged(), "seam-A call");
+    if let Some(code) = resolved.refusal_code() {
+        return identity_refusal(code);
+    }
+    let caller = match resolved.email() {
+        Some(email) => email.to_string(),
+        // Unreachable: `refusal_code` is Some for exactly the variants with no email, and we have
+        // just returned on those. Refuse rather than unwrap — the workspace denies `expect`, and a
+        // wrong guess here is an identity bug, which is the one kind we are not repeating.
+        None => return identity_refusal("account_identity_required"),
+    };
 
     // An empty body is `{}` (`parseCommandArgs`); a malformed one is a command error, not a
     // gateway outage, so it answers < 500.

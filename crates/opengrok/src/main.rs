@@ -100,6 +100,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
             Arc::new(with_mock_verdict(MockDoor::echoing()))
         }
+        // Every renderable transcript shape on demand, so client rendering can be worked on
+        // without a provider. `gateway::mock_fixtures` owns the catalogue; the door only forwards.
+        Ok("mock-cards") => {
+            tracing::warn!(
+                "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
+            );
+            Arc::new(with_mock_verdict(MockDoor::serving_fixtures()))
+        }
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
         Ok("mock-tools") => {

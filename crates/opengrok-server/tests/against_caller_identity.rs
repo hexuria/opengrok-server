@@ -83,7 +83,19 @@ struct Harness {
     account: AccountId,
 }
 
+/// The existing tests here are about which ACCOUNT owns a routine, not about how a caller is
+/// identified, so they speak as the deployment account and opt into the fallback. The identity
+/// tests at the bottom of this file use `strict_harness` and must never be switched to this one.
 async fn harness(database_url: &str, email: &str) -> Harness {
+    build_harness(database_url, email, true).await
+}
+
+/// A gateway with the fallback OFF — the shipped default since 5 Sep 2026.
+async fn strict_harness(database_url: &str, email: &str) -> Harness {
+    build_harness(database_url, email, false).await
+}
+
+async fn build_harness(database_url: &str, email: &str, identity_fallback: bool) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -119,6 +131,11 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         email.to_string(),
         Some("http://opengrok.lan:1447".to_string()),
     );
+    let gateway = if identity_fallback {
+        gateway.allowing_identity_fallback()
+    } else {
+        gateway
+    };
     let app = opengrok_server::router(agui.clone(), gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -362,4 +379,77 @@ async fn a_duplicate_belongs_to_the_caller_not_the_deployment() {
             .is_some_and(|rows| rows.iter().any(|r| r["id"] == copy_id.as_str())),
         "somebody else's copy appeared on the deployment account's roster: {theirs}"
     );
+}
+
+/// A seam-A call with NO account identity is refused, not served as the deployment account.
+///
+/// This is the 5 Sep 2026 incident as a test. The desktop attaches the account header once per
+/// CONNECTION; one empty read of its token secret at connect time dropped the header for the whole
+/// life of that connection, and every call over it — `listAgents` through `sendPrompt` — was served
+/// as `OG_GATEWAY_EMAIL`, which on that deployment was the org admin. The person saw another
+/// account's coworkers and could have written to that account's transcripts. Nothing degraded,
+/// nothing retried, nothing logged.
+///
+/// The code matters as much as the status: the header is attached per connect, so the client must
+/// REBUILD its connection (re-reading the secret) rather than retry the call, which would carry
+/// the same absence. `account_identity_required` is what tells it which.
+#[tokio::test]
+async fn a_call_with_no_account_identity_is_refused_not_served_as_the_deployment() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let (status, body) = harness.api("listAgents", json!({})).await;
+
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["code"], json!("account_identity_required"), "{body}");
+    assert!(
+        !body["error"].as_str().unwrap_or_default().is_empty(),
+        "a refusal must say why in words too: {body}"
+    );
+}
+
+/// A header that does not verify is refused DIFFERENTLY, and never falls back.
+///
+/// Two codes, because they need different client behaviour. An absent header is a connection that
+/// failed to read its secret — rebuilding fixes it. A present-but-invalid one is an expired or
+/// wrong token, where rebuilding re-attaches the same dead credential and would spin forever. So
+/// `account_identity_invalid` must surface rather than trigger a reconnect.
+///
+/// It is also refused even where the fallback is opted in: an invalid header is an active claim we
+/// rejected, and answering it as somebody else would be the original bug wearing a signature.
+#[tokio::test]
+async fn an_unverifiable_account_header_is_refused_as_invalid() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let (status, body) = harness
+        .api_as("listAgents", json!({}), "not-a-real-token")
+        .await;
+
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["code"], json!("account_identity_invalid"), "{body}");
+}
+
+/// 401, never 403. 403 asserts we know who the caller is and are refusing them, which is a lie
+/// about the absent case — not knowing is the entire condition being reported.
+#[tokio::test]
+async fn identity_refusals_are_401_and_never_403() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    for (label, status) in [
+        ("absent", harness.api("listAgents", json!({})).await.0),
+        (
+            "invalid",
+            harness.api_as("listAgents", json!({}), "nope").await.0,
+        ),
+    ] {
+        assert_eq!(status, 401, "the {label} case must be 401, not 403");
+    }
 }

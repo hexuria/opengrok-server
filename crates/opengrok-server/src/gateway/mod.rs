@@ -20,6 +20,7 @@ pub mod conversation;
 pub mod group;
 pub mod lifecycle;
 pub mod live;
+pub mod mock_fixtures;
 pub mod routes;
 pub mod summaries;
 
@@ -38,17 +39,110 @@ use crate::agui::routes::AgUiState;
 /// cannot forge another account; verified exactly like seam B (`minter.verify_access`).
 pub const ACCOUNT_HEADER: &str = "x-opengrok-account";
 
-/// The email of the account this request is FOR: the caller's own account when it presents a valid
-/// account token in `ACCOUNT_HEADER`, else `state.email` (the `OG_GATEWAY_EMAIL` fallback). The
-/// fallback is what keeps a client that has not yet learned to send the header working unchanged —
-/// the pivot is additive, not a flag day.
-pub async fn caller_email(state: &GatewayState, headers: &axum::http::HeaderMap) -> String {
-    if let Some(account_id) = account_from_header(state, headers)
-        && let Ok((account, _)) = state.agui.auth.store.load_account(&account_id).await
-    {
-        return account.email;
+/// Who a seam-A request is for, or why we will not guess.
+///
+/// THIS USED TO FAIL OPEN, AND IT AUTHENTICATED PEOPLE AS SOMEBODY ELSE. The old shape returned
+/// `state.email` whenever the header was missing or unreadable. That fallback was written to keep
+/// a client that had not yet learned to send the header working — additive, not a flag day — and
+/// it is a reasonable migration choice right up until you notice what it means: a request with no
+/// identity was served AS the account named by `OG_GATEWAY_EMAIL`, which on a dev box is the
+/// admin. On 5 Sep 2026 that is exactly what happened. The desktop attaches the header once per
+/// CONNECTION; one empty read of its token secret at connect time dropped the header for the whole
+/// life of that connection, and every call over it — reads and writes, `sendPrompt` included —
+/// ran as the admin. Nothing degraded, nothing retried, nothing logged. The person saw another
+/// account's coworkers in their sidebar and could have written to that account's transcripts.
+///
+/// Both ends failed open, each citing the other's fallback as its justification: the client's
+/// comment said a failure here was fine because "the server falls back to its configured account",
+/// and ours said the fallback kept older clients working. Each is defensible alone. Together they
+/// authenticate as the admin, and neither side's review catches it, because the bug is in the seam.
+///
+/// So: a missing identity is now a refusal the caller can act on (CLAUDE.md #8), and `Fallback` is
+/// reachable only when a deployment opts in with `OG_GATEWAY_IDENTITY_FALLBACK=1`.
+pub enum Caller {
+    /// The account named by a verified `ACCOUNT_HEADER` token.
+    Account(String),
+    /// No usable header, and the deployment opted back in to the old behaviour.
+    Fallback(String),
+    /// No header at all. `account_identity_required` — the client should REBUILD its connection
+    /// (which re-reads the token secret) rather than retry the call, because on this seam the
+    /// header is attached per connect and a retry carries the same absence.
+    Missing,
+    /// A header that did not verify — expired, wrong signature, or an account since deleted.
+    /// `account_identity_invalid` — a rebuild will not fix it, so the client must surface it.
+    Invalid,
+}
+
+impl Caller {
+    /// The email to act as, for a caller we accepted.
+    pub fn email(&self) -> Option<&str> {
+        match self {
+            Self::Account(email) | Self::Fallback(email) => Some(email),
+            Self::Missing | Self::Invalid => None,
+        }
     }
-    state.email.clone()
+
+    /// The stable code the client branches on. Prose is for people and may be reworded; this is
+    /// the contract, compared with `===` on the other side.
+    pub fn refusal_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Missing => Some("account_identity_required"),
+            Self::Invalid => Some("account_identity_invalid"),
+            Self::Account(_) | Self::Fallback(_) => None,
+        }
+    }
+
+    /// What to log this request as. Never the token, only the resolved identity — the request line
+    /// recorded `auth_len` and nothing else, and because that bearer is SHARED and identical for
+    /// every caller, three separate readings of a cross-account bug were drawn from a log that
+    /// could not have distinguished them. This is that gap closed.
+    pub fn logged(&self) -> &str {
+        match self {
+            Self::Account(email) | Self::Fallback(email) => email,
+            Self::Missing => "<no-identity>",
+            Self::Invalid => "<bad-identity>",
+        }
+    }
+}
+
+/// Resolve who a seam-A request is for. See `Caller`.
+pub async fn caller_of(state: &GatewayState, headers: &axum::http::HeaderMap) -> Caller {
+    let present = headers.get(ACCOUNT_HEADER).is_some();
+    if let Some(account_id) = account_from_header(state, headers) {
+        if let Ok((account, _)) = state.agui.auth.store.load_account(&account_id).await {
+            return Caller::Account(account.email);
+        }
+        // A token that verifies for an account we cannot load is not a caller we can serve, and
+        // falling back here would be the original bug wearing a signature.
+        return Caller::Invalid;
+    }
+    if present {
+        // A header that did not verify is never a fallback candidate, opted in or not: it is an
+        // active claim we rejected, and answering it as somebody else would be worse than the
+        // absent case, not better.
+        return Caller::Invalid;
+    }
+    if state.identity_fallback {
+        tracing::warn!(
+            account = %state.email,
+            "seam-A request carried no identity; serving it as OG_GATEWAY_EMAIL because \
+             OG_GATEWAY_IDENTITY_FALLBACK=1. This is the pre-5-Sep-2026 behaviour and it serves \
+             one account's data to whoever asks without one."
+        );
+        return Caller::Fallback(state.email.clone());
+    }
+    Caller::Missing
+}
+
+/// The email of the account this request is FOR, or `state.email` under the opted-in fallback.
+///
+/// Kept for the surfaces that resolve an identity outside the seam-A dispatch and have no way to
+/// refuse. Prefer `caller_of` wherever a refusal can actually be returned.
+pub async fn caller_email(state: &GatewayState, headers: &axum::http::HeaderMap) -> String {
+    match caller_of(state, headers).await {
+        Caller::Account(email) | Caller::Fallback(email) => email,
+        Caller::Missing | Caller::Invalid => state.email.clone(),
+    }
 }
 
 /// The account id from a valid `ACCOUNT_HEADER` token, or `None`. Accepts the raw JWT or a
@@ -61,8 +155,21 @@ fn account_from_header(
         .get(ACCOUNT_HEADER)
         .and_then(|value| value.to_str().ok())?;
     let token = raw.strip_prefix("Bearer ").unwrap_or(raw).trim();
-    let claims = state.agui.auth.minter.verify_access(token).ok()?;
-    Some(opengrok_core::id::AccountId::from_stored(claims.sub))
+    // NAME THE FAILURE. This used to be `.ok()?`, and the silence was half the bug: a token that
+    // did not verify became "no identity", which became the deployment account, with nothing said.
+    // `jsonwebtoken` distinguishes InvalidSignature from ExpiredSignature from InvalidToken, and
+    // which one it is decides whose bug it is — so log it rather than make the next person guess.
+    match state.agui.auth.minter.verify_access(token) {
+        Ok(claims) => Some(opengrok_core::id::AccountId::from_stored(claims.sub)),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                token_len = token.len(),
+                "an account identity header did not verify"
+            );
+            None
+        }
+    }
 }
 
 /// One frame on the live bus: the channel it belongs to, the payload, and the account it is for.
@@ -87,6 +194,12 @@ pub struct GatewayState {
     /// Whose coworkers this gateway serves as its roster. The desktop is a one-person surface;
     /// this names the person.
     pub email: String,
+    /// Serve a request that carries NO account identity as `email`, the pre-5-Sep-2026 behaviour.
+    /// Read once at startup from `OG_GATEWAY_IDENTITY_FALLBACK`, never per request. Off by
+    /// default because on it is how a headerless connection read and wrote as the admin; see
+    /// `Caller`. Tests that mean to exercise the deployment identity opt in explicitly with
+    /// `allowing_identity_fallback`, which also makes them greppable.
+    pub identity_fallback: bool,
     /// Host settings, echoed back the way the resync chain expects. In memory on purpose: the
     /// client rewrites every field of interest on every `transport-connected`, so persisting
     /// them would only preserve values the next connect immediately overwrites.
@@ -135,6 +248,7 @@ impl GatewayState {
             bearer,
             email,
             public_gateway_url,
+            identity_fallback: std::env::var("OG_GATEWAY_IDENTITY_FALLBACK").as_deref() == Ok("1"),
             settings: Arc::new(Mutex::new(default_settings())),
             started_at_ms: chrono::Utc::now().timestamp_millis(),
             events_tx: tokio::sync::broadcast::channel(256).0,
@@ -144,6 +258,15 @@ impl GatewayState {
             running: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    /// Serve headerless requests as `email`. For tests whose subject is not identity and which
+    /// therefore speak as the deployment account, and for a deployment that has knowingly opted
+    /// back in. Never reach for this to make a failing identity test pass.
+    #[must_use]
+    pub fn allowing_identity_fallback(mut self) -> Self {
+        self.identity_fallback = true;
+        self
     }
 }
 

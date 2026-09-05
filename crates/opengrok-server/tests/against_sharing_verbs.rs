@@ -63,7 +63,10 @@ async fn spawn(database_url: &str) -> String {
         Some("test-bearer".to_string()),
         email,
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
+    // must be asked for rather than assumed.
+    .allowing_identity_fallback();
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -131,6 +131,14 @@ async fn trace_request(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.len())
         .unwrap_or(0);
+    // WHETHER AN IDENTITY WAS OFFERED AT ALL. `auth_len` is the SHARED host bearer and is
+    // identical for every caller, so the request line could not distinguish one person from
+    // another — which is why a cross-account bug was read three different wrong ways from a log
+    // that looked clean. This flag is the cheapest thing that would have settled it here; the
+    // account it resolved to is logged by the seam-A dispatch, which has the store to resolve it.
+    let account_hdr = req
+        .headers()
+        .contains_key(crate::gateway::ACCOUNT_HEADER);
     let started = std::time::Instant::now();
     let span = tracing::info_span!("http", id = %id);
     let response = next.run(req).instrument(span).await;
@@ -141,6 +149,7 @@ async fn trace_request(
         status = response.status().as_u16(),
         origin = has_origin,
         auth_len,
+        account_hdr,
         ms = started.elapsed().as_millis() as u64,
         "request"
     );
