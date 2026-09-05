@@ -40,6 +40,13 @@ pub struct MockDoor {
     /// Answers with the system prompt it was given, so a test can assert what the model was
     /// actually told rather than what the code meant to tell it.
     echo_system: bool,
+    /// Forwards whatever the person typed to the `mock_fixture` tool, then speaks the tool's
+    /// result back as an ordinary bubble. What makes `help` and every fixture reachable from the
+    /// composer with no provider and no spend.
+    ///
+    /// The door stays dumb on purpose: it does not know which fixtures exist. The catalogue lives
+    /// on the server side of the tool, so there is one list rather than two that can drift.
+    catalogue: bool,
     /// The one room member (by the name the system prompt gives it) that reaches for the shell
     /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
     /// round continue after the answer. The others behave as `room_speaker`.
@@ -70,6 +77,7 @@ impl MockDoor {
             room_speaker: false,
             room_tool_asker: None,
             echo_system: false,
+            catalogue: false,
         }
     }
 
@@ -158,7 +166,39 @@ impl MockDoor {
             room_speaker: false,
             room_tool_asker: None,
             echo_system: false,
+            catalogue: false,
         }
+    }
+
+    /// A door whose every turn hands the person's own words to the `mock_fixture` tool and then
+    /// says back what it answered. `OG_MODEL_DOOR=mock-cards` selects it.
+    pub fn serving_fixtures() -> Self {
+        Self {
+            catalogue: true,
+            ..Self::default()
+        }
+    }
+
+    /// The person's last words, which the catalogue door forwards verbatim as a fixture name.
+    fn last_user_message(request: &ModelRequest) -> String {
+        request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// What the tool answered, read back out of the conversation the harness appended it to.
+    fn result_of(request: &ModelRequest, call_id: &str) -> Option<String> {
+        let marker = format!("[tool {call_id} result]");
+        request.messages.iter().rev().find_map(|message| {
+            message
+                .content
+                .split_once(&marker)
+                .map(|(_, tail)| tail.trim().to_string())
+        })
     }
 
     pub fn failing_with(message: impl Into<String>) -> Self {
@@ -170,6 +210,7 @@ impl MockDoor {
             room_speaker: false,
             room_tool_asker: None,
             echo_system: false,
+            catalogue: false,
         }
     }
 
@@ -227,6 +268,35 @@ impl ModelDoor for MockDoor {
             return Ok(Box::pin(stream::once(
                 async move { Ok(ModelDelta::Text(said)) },
             )));
+        }
+
+        // The catalogue door: ask the fixture tool for whatever the person typed, then speak its
+        // answer. Two rounds, keyed off the conversation exactly as `once_then_answer` is — a
+        // counter here would be per-process on a shared `Arc` and would work only the first time.
+        if self.catalogue {
+            const CALL: &str = "mock-fixture-1";
+            let script = match Self::result_of(&request, CALL) {
+                // The tool has answered; say it back as an ordinary bubble so `help` reads as
+                // chat rather than as a tool card.
+                Some(answer) => vec![ModelDelta::Text(answer)],
+                None => {
+                    let asked = Self::last_user_message(&request);
+                    vec![
+                        ModelDelta::ToolCallStart {
+                            id: CALL.to_string(),
+                            name: "mock_fixture".to_string(),
+                        },
+                        ModelDelta::ToolCallArgs {
+                            id: CALL.to_string(),
+                            delta: serde_json::json!({ "fixture": asked }).to_string(),
+                        },
+                        ModelDelta::ToolCallEnd {
+                            id: CALL.to_string(),
+                        },
+                    ]
+                }
+            };
+            return Ok(Box::pin(stream::iter(script.into_iter().map(Ok))));
         }
         let script = if self.room_speaker
             && let Some(name) = Self::room_member_name(&request)

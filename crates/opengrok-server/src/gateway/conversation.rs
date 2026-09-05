@@ -1044,6 +1044,22 @@ pub(crate) async fn run_turn(
         crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await;
+    // The fixture tool, offered only under a mock door. It records into `fixtures`; the turn
+    // appends whatever it finds there once the rounds are done, so the entries arrive through the
+    // ordinary append path rather than through a private one the door would otherwise need.
+    let fixtures = super::mock_fixtures::enabled().then(super::mock_fixtures::tool);
+    let tools = match (&fixtures, tools) {
+        (Some((handler, _)), Some(runner)) => {
+            Some(runner.with_local(super::mock_fixtures::schema(), handler.clone()))
+        }
+        // A coworker with no computer still gets the fixtures: they touch nothing but the
+        // transcript, and a boxless coworker is exactly where a rendering pass tends to start.
+        (Some((handler, _)), None) => Some(
+            opengrok_harness::ToolRunner::local_only()
+                .with_local(super::mock_fixtures::schema(), handler.clone()),
+        ),
+        (None, runner) => runner,
+    };
     // Whether this turn can actually reach the user's machine — read from the offered schemas so
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
@@ -1126,6 +1142,17 @@ pub(crate) async fn run_turn(
         now_ms(),
     )
     .await;
+
+    if let Some((_, sink)) = &fixtures {
+        super::mock_fixtures::drain_into(
+            &state.agui.auth.store,
+            &coworker_id,
+            &account_id,
+            sink,
+            now_ms(),
+        )
+        .await;
+    }
 
     // The answer is whatever the run's message deltas add up to; a run that produced nothing
     // still ends its bubble, with the failure said out loud rather than a spinner forever.
