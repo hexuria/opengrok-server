@@ -102,6 +102,12 @@ fn refusal(code: u16, message: &str) -> Response {
     )
 }
 
+/// The counter an unaddressable stream is seeded from. It has no frames and never will, so the
+/// number only has to be stable and never collide with a real account's — no account id is empty.
+fn unaddressable() -> opengrok_core::id::AccountId {
+    opengrok_core::id::AccountId::from_stored(String::new())
+}
+
 /// The one refusal that carries a machine-readable `code`.
 ///
 /// `code` is additive and appears ONLY here. Every other refusal keeps the `{"error": …}` shape
@@ -266,13 +272,21 @@ async fn events(
     // The baseline sequence for THIS account — the number their own stream has already reached,
     // not a global one. Since #58 each account has its own counter under the same `replicaKey`,
     // so seeding from anyone else's would hand the replica a gap on its very first frame.
-    // An identity that verified but names no account is not a stream we can address, and since
-    // #58 an unaddressed stream receives nothing anyway — so refuse rather than open one that
-    // would sit silent forever. Same reasoning as `Caller::Invalid` on the dispatch.
-    let Some(audience) = audience else {
-        return identity_refusal("account_identity_invalid");
+    // AN UNRESOLVED ACCOUNT IS NOT AN AUTH FAILURE. The identity already verified above; if the
+    // account cannot be read it is because the STORE could not answer, and a store outage must not
+    // present as "sign in again" — `against_events_when_the_store_is_down` exists precisely
+    // because the stream has to open through an outage and seed itself when the store returns.
+    //
+    // I refused here at first, reasoning that a stream nothing can address may as well be told so.
+    // That was wrong in the one case it actually fires: the caller IS identified, the failure is
+    // transient, and refusing converts a database blip into a credential error the person is
+    // asked to fix by signing in. Opening with no audience is the narrow side — the stream
+    // receives no addressed frames, which is exactly the pre-#58 posture for a stream whose
+    // account is unknown, and it recovers on the client's next connect.
+    let seed_stamp = match &audience {
+        Some(account) => super::live::current_for(&state, "roster", account),
+        None => super::live::current_for(&state, "roster", &unaddressable()),
     };
-    let seed_stamp = super::live::current_for(&state, "roster", &audience);
 
     // THE OPENER'S ROSTER, not the deployment's. This read used to be `roster_rows(&state)`,
     // which is `roster_rows_for(state, &state.email)` — so every stream, however well identified,
@@ -376,7 +390,7 @@ async fn events(
             // Addressed to somebody else: not this stream's frame. An empty string is how this
             // loop already says "not for you" for an unwanted channel, and `sse` drops it.
             if let Some(to) = live.audience.as_ref()
-                && &for_me != to
+                && for_me.as_ref() != Some(to)
             {
                 return String::new();
             }
