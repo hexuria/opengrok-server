@@ -14,6 +14,12 @@
 //! turn appends what it finds there. The fixtures reach the transcript through the same append
 //! path as every real entry.
 //!
+//! CRAWLING THE RESULT. `timeline-event` and `permission-request` rows carry no `data-index` —
+//! they sit outside the message-row virtualization — so a crawler keyed on `[data-index]` reports
+//! them missing when they drew perfectly well. Walk the scroller's direct children instead. The
+//! transcript is virtualized either way, so read it scrolled to the bottom. Measured 5 Sep 2026,
+//! after an index-based pass produced a false "blank" for exactly those two kinds.
+//!
 //! PROVENANCE. Every shape below is transcribed, never invented — `docs/research/client-grok-bot.md`
 //! §3.1-3.2 for the wire, and a read of the shipped V2 render sites for what actually draws. The
 //! two disagree in places that matter, and where they do the render site wins and the divergence
@@ -548,7 +554,10 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         "event" => vec![json!({
             "kind": "event",
             "id": entry_id("event"),
-            "event": { "type": "name-changed", "to": "Renamed by a mock fixture" },
+            // `to` is the NEW NAME and the row renders as "Renamed to {to}", so it has to read
+            // like a name. "Renamed by a mock fixture" produced "Renamed to Renamed by a mock
+            // fixture", which is well-formed and still tells you the field was misunderstood.
+            "event": { "type": "name-changed", "to": "Mock Fixture Bot" },
             "timestampMs": now_ms(),
         })],
 
