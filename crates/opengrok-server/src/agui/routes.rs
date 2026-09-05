@@ -980,8 +980,17 @@ pub(crate) fn account_from_bearer(
         .or_else(|| {
             crate::auth::cookies::read_cookie(headers, crate::auth::cookies::ACCESS_COOKIE)
         })?;
-    let claims = state.auth.minter.verify_access(&token).ok()?;
-    Some(opengrok_core::id::AccountId::from_stored(claims.sub))
+    // Name the failure, as the seam-A path does. `.ok()?` here meant a mint refused with
+    // "a signed access token is required" and no record of WHY — ExpiredSignature and
+    // InvalidSignature are different bugs belonging to different people, and the caller cannot
+    // tell you which because it only sees the 401.
+    match state.auth.minter.verify_access(&token) {
+        Ok(claims) => Some(opengrok_core::id::AccountId::from_stored(claims.sub)),
+        Err(error) => {
+            tracing::warn!(%error, token_len = token.len(), "a bearer access token did not verify");
+            None
+        }
+    }
 }
 
 pub(crate) fn now_ms() -> i64 {

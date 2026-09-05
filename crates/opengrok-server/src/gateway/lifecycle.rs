@@ -541,13 +541,26 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value, caller: &str) -
 }
 
 /// `searchAgents {query}` — the roster, filtered by name. Honest and small.
-pub async fn search_agents(state: &GatewayState, args: &Value) -> (u16, Value) {
+/// `searchAgents {query}` — the command palette's search, over the CALLER's roster.
+///
+/// It used to search `roster_rows(state)`, the deployment-wide read (`OG_GATEWAY_EMAIL`), and took
+/// no caller at all — so whoever typed in the palette matched against the configured account's
+/// coworkers and got back their ids, names, descriptions and titles. The same disclosure as the
+/// stream's opening snapshot, over RPC instead of a frame, and reachable by typing a word.
+///
+/// Rows carry `lastMessagePreview: null` (`summaries.rs:42`) and the ownership gate still refuses
+/// the transcripts, so this was coworker METADATA and never message content — but a name and a
+/// description are somebody's, and a verb that names no caller cannot be scoped by the gate above
+/// it, because there is no id in the arguments for `names_a_coworker` to check.
+pub async fn search_agents(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_lowercase();
-    let rows = live::roster_rows(state).await.unwrap_or_default();
+    let rows = live::roster_rows_for(state, caller)
+        .await
+        .unwrap_or_default();
     let hits: Vec<Value> = rows
         .into_iter()
         .filter(|row| {

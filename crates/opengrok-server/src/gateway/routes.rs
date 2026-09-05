@@ -191,15 +191,28 @@ async fn events(
         .as_deref()
         .filter(|raw| !raw.trim().is_empty())
         .map(|raw| raw.split(',').map(|name| name.trim().to_string()).collect());
-    // WHOSE STREAM THIS IS, resolved once. A frame addressed to one account is dropped for
-    // every other stream; a stream whose account cannot be resolved receives addressed frames
-    // from nobody, which is the narrow side — an unidentified subscriber is not a licence to
-    // deliver somebody's data to it.
+
+    // WHOSE STREAM THIS IS, resolved once and FAIL-CLOSED, exactly as the seam-A dispatch does.
+    //
+    // This used to go through `caller_email`, which falls back to `OG_GATEWAY_EMAIL` — so a
+    // stream that offered no identity was given the deployment account as its audience and
+    // received that account's ADDRESSED frames, the very delivery the audience check exists to
+    // prevent. The 5 Sep 2026 fail-closed change landed on `/api/*` and left its twin here open;
+    // the stream open is not a seam-A call, so it never even appeared in the `seam-A call` lines
+    // that were being read to prove the fix. Same seam, same fallback, one surface later.
+    let resolved = super::caller_of(&state, &headers).await;
+    tracing::info!(account = %resolved.logged(), "events: stream open");
+    if let Some(code) = resolved.refusal_code() {
+        return identity_refusal(code);
+    }
+    let Some(caller) = resolved.email().map(str::to_string) else {
+        return identity_refusal("account_identity_required");
+    };
     let audience = state
         .agui
         .auth
         .store
-        .account_by_email(&super::caller_email(&state, &headers).await)
+        .account_by_email(&caller)
         .await
         .ok()
         .flatten()
@@ -248,7 +261,13 @@ async fn events(
     // read succeeds, stamped `current` like the opener's own. The task ends with the stream: it
     // checks the channel before every read and the receiver is dropped with the body.
     let (late_tx, late_rx) = tokio::sync::mpsc::channel::<String>(1);
-    let snapshot = match super::live::roster_rows(&state).await {
+    // THE OPENER'S ROSTER, not the deployment's. This read used to be `roster_rows(&state)`,
+    // which is `roster_rows_for(state, &state.email)` — so every stream, however well identified,
+    // was handed the `OG_GATEWAY_EMAIL` account's coworkers as its first frame. A correct
+    // `listAgents` answered the caller's own roster over RPC and this frame replaced it 420 ms
+    // later; the client that adopted it showed one account another account's bots. The caller was
+    // resolved twenty lines above and simply was not used here.
+    let snapshot = match super::live::roster_rows_for(&state, &caller).await {
         Ok(rows) => {
             let payload = json!({
                 "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
@@ -266,6 +285,9 @@ async fn events(
             );
             let retry_state = state.clone();
             let retry_wanted = wanted.clone();
+            // The retry is the same frame, so it takes the same caller — a late snapshot that
+            // fell back to the deployment account would reintroduce the bug on the slow path.
+            let retry_caller = caller.clone();
             let id = guard.id.clone();
             tokio::spawn(async move {
                 let mut wait_secs = 1u64;
@@ -274,7 +296,7 @@ async fn events(
                     if late_tx.is_closed() {
                         return;
                     }
-                    match super::live::roster_rows(&retry_state).await {
+                    match super::live::roster_rows_for(&retry_state, &retry_caller).await {
                         Ok(rows) => {
                             let payload = json!({
                                 "activeAgentId": retry_state.active_agent.lock().ok().and_then(|a| a.clone()),
@@ -689,7 +711,7 @@ async fn command(
             wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args, &caller).await),
-        "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
+        "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args, &caller).await),
         "searchMedia" => reply(StatusCode::OK, json!([])),
         "setAgentAvatarBytes" => wrap(super::lifecycle::set_avatar(&state, &args, &caller).await),
         "getAgentAvatar" => wrap(super::lifecycle::get_avatar(&state, &args).await),

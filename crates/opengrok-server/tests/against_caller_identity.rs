@@ -453,3 +453,92 @@ async fn identity_refusals_are_401_and_never_403() {
         assert_eq!(status, 401, "the {label} case must be 401, not 403");
     }
 }
+
+/// The event stream refuses an unidentified opener instead of adopting the deployment account.
+///
+/// The 5 Sep 2026 fail-closed change landed on the seam-A dispatch and left the stream open: it
+/// resolved its audience through `caller_email`, which falls back to `OG_GATEWAY_EMAIL`. A stream
+/// that offered no identity was therefore given the deployment account as its audience and
+/// received that account's ADDRESSED frames — the delivery the audience check exists to prevent.
+/// It never showed up in the `seam-A call` log lines either, because a stream open is not one.
+#[tokio::test]
+async fn the_event_stream_refuses_an_unidentified_opener() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let res = harness
+        .client
+        .get(format!("{}/events", harness.base))
+        .header("authorization", "Bearer test-bearer")
+        .send()
+        .await
+        .expect("stream open");
+
+    assert_eq!(res.status().as_u16(), 401);
+    let body: Value = serde_json::from_str(&res.text().await.expect("body")).expect("json");
+    assert_eq!(body["code"], json!("account_identity_required"), "{body}");
+}
+
+/// A stream carrying a header that does not verify is refused as invalid, not as absent — the
+/// client must renew rather than merely rebuild, and only the code distinguishes those.
+#[tokio::test]
+async fn the_event_stream_refuses_an_unverifiable_opener_as_invalid() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let res = harness
+        .client
+        .get(format!("{}/events", harness.base))
+        .header("authorization", "Bearer test-bearer")
+        .header("x-opengrok-account", "not-a-real-token")
+        .send()
+        .await
+        .expect("stream open");
+
+    assert_eq!(res.status().as_u16(), 401);
+    let body: Value = serde_json::from_str(&res.text().await.expect("body")).expect("json");
+    assert_eq!(body["code"], json!("account_identity_invalid"), "{body}");
+}
+
+/// `searchAgents` searches the CALLER's roster, not the deployment's.
+///
+/// It took no caller at all and filtered the deployment-wide read, so the command palette matched
+/// against `OG_GATEWAY_EMAIL`'s coworkers for whoever typed in it. Metadata rather than message
+/// content — rows carry `lastMessagePreview: null` and the ownership gate still refused the
+/// transcripts — but somebody else's coworker names and descriptions all the same. It is also the
+/// shape the authorisation gate above the dispatch cannot catch: no id in the arguments means
+/// `names_a_coworker` has nothing to check, so the verb has to scope itself.
+#[tokio::test]
+async fn search_agents_matches_only_the_callers_own_coworkers() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let deployment = format!("deployment-{tag}@og.local");
+    let h = harness(&url, &deployment).await;
+
+    // The deployment account hires one; a DIFFERENT signed-in person hires another.
+    h.hire("Findme").await;
+    let other_email = format!("other-{tag}@og.local");
+    let other = seed_account(&h.store, &other_email).await;
+    let other_token = h.access_token(&other, &other_email);
+    let (status, created) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "Findmetoo", "clientNonce": format!("s-{tag}") }),
+            &other_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{created}");
+
+    // "findme" matches both by name — but each caller may only see their own.
+    let (status, hits) = h.api_as("searchAgents", json!({ "query": "findme" }), &other_token).await;
+    assert_eq!(status, 200, "{hits}");
+    let names: Vec<&str> = hits
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert_eq!(names, vec!["Findmetoo"], "the other account's search leaked: {hits}");
+}
