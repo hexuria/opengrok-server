@@ -450,7 +450,9 @@ async fn a_routine_change_refreshes_the_pane_without_spending_a_roster_sequence(
         "the pane frame is unstamped: {refresh}"
     );
 
-    live::emit_roster(&gateway).await;
+    // Since #58 the roster emit is per-account: it takes the caller whose roster changed, and
+    // delivers only to that account's streams.
+    live::emit_roster_for_caller(&gateway, &email).await;
     let roster = next_frame(&mut stream, &mut buffer).await;
     assert_eq!(roster["channel"], "agents");
     assert_eq!(

@@ -467,7 +467,7 @@ async fn post_member_message(
         tracing::error!(%error, group = %group_id.as_str(), "group: a member's message could not be appended");
         return;
     }
-    live::emit_transcript(state, group_id.as_str(), "appended", entry);
+    live::emit_transcript(state, group_id.as_str(), "appended", entry).await;
 }
 
 /// The group as the prompts describe it.
@@ -651,7 +651,7 @@ async fn pause_room(
     {
         tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
     }
-    live::emit_transcript(state, room.id.as_str(), "appended", card);
+    live::emit_transcript(state, room.id.as_str(), "appended", card).await;
     if let Err(error) = state
         .agui
         .auth

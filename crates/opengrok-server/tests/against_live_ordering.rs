@@ -67,7 +67,10 @@ async fn state(database_url: &str) -> (axum::Router, GatewayState) {
         Some("test-bearer".to_string()),
         "host@og.local".to_string(),
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // These tests are about ORDERING, not identity: their streams speak as the deployment
+    // account, which since 5 Sep 2026 must be asked for rather than assumed.
+    .allowing_identity_fallback();
     (opengrok_server::router(agui, gateway.clone()), gateway)
 }
 
@@ -133,7 +136,7 @@ async fn opening_a_second_stream_leaves_no_gap_on_the_first() {
 
     // Something has been emitted before anyone connects, so the opener has a real number to
     // report rather than zero.
-    live::emit_roster(&gateway).await;
+    live::emit_roster_for_caller(&gateway, "host@og.local").await;
 
     let mut a = open_events(&client, &base).await;
     let mut a_buf = String::new();
@@ -152,7 +155,7 @@ async fn opening_a_second_stream_leaves_no_gap_on_the_first() {
     );
 
     // One real roster emit: A sees exactly the next number, B too.
-    live::emit_roster(&gateway).await;
+    live::emit_roster_for_caller(&gateway, "host@og.local").await;
     let a_next = next_frame(&mut a, &mut a_buf).await;
     assert_eq!(roster_sequence(&a_next), a_seq + 1, "A saw a gap: {a_next}");
     let b_next = next_frame(&mut b, &mut b_buf).await;
@@ -174,7 +177,8 @@ async fn concurrent_emits_on_one_agent_arrive_in_sequence_order() {
                 "agent-race",
                 "appended",
                 serde_json::json!({ "id": format!("e{i}") }),
-            );
+            )
+            .await;
         }));
     }
     for task in tasks {

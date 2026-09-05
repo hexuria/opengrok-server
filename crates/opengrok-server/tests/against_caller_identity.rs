@@ -542,3 +542,109 @@ async fn search_agents_matches_only_the_callers_own_coworkers() {
         .collect();
     assert_eq!(names, vec!["Findmetoo"], "the other account's search leaked: {hits}");
 }
+
+/// Read `data:` frames from an open SSE response until one arrives or the wait runs out.
+async fn next_frame(res: &mut reqwest::Response, buffer: &mut String, secs: u64) -> Option<Value> {
+    loop {
+        if let Some(start) = buffer.find("data: ")
+            && let Some(end) = buffer[start..].find("\n\n")
+        {
+            let line = buffer[start + 6..start + end].to_string();
+            buffer.replace_range(..start + end + 2, "");
+            return serde_json::from_str(&line).ok();
+        }
+        let chunk = match tokio::time::timeout(
+            std::time::Duration::from_secs(secs),
+            res.chunk(),
+        )
+        .await
+        {
+            Ok(Ok(Some(bytes))) => bytes,
+            // Timed out, or the stream ended: no frame, which for this test is the point.
+            _ => return None,
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// A stream opens on its OWN roster, and never receives another account's frames.
+///
+/// #58, and it was two bugs sharing a mechanism. The stream's opening snapshot was built from the
+/// deployment account, so every subscriber's first frame was somebody else's roster; and every
+/// stamped emit went out with `audience: None`, so roster deltas AND transcript frames — message
+/// content included — reached every open stream. The only thing standing in front of it was the
+/// client declining to render an agent it did not recognise, which is obscurity rather than a
+/// check, and it stopped being even that when a coworker could be shared.
+///
+/// The old comment said scoping meant per-person SEQUENCES and therefore a change to the replica
+/// contract. It meant per-person COUNTERS: the wire `replicaKey` is still `"roster"`, the split
+/// lives in the server's map, and no account can see a gap because no account receives the frames
+/// that would have skipped its numbers.
+#[tokio::test]
+async fn a_stream_sees_only_its_own_account() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let h = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let a_email = format!("a-{tag}@og.local");
+    let b_email = format!("b-{tag}@og.local");
+    let a = seed_account(&h.store, &a_email).await;
+    let b = seed_account(&h.store, &b_email).await;
+    let a_token = h.access_token(&a, &a_email);
+    let b_token = h.access_token(&b, &b_email);
+
+    // A hires; B hires nothing.
+    let (status, made) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "AlphasBot", "clientNonce": format!("a-{tag}") }),
+            &a_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{made}");
+
+    // B opens a stream. Its OPENING SNAPSHOT must be B's roster — empty — not A's or the
+    // deployment's. Before the fix this frame carried whatever OG_GATEWAY_EMAIL could see.
+    let mut b_stream = h
+        .client
+        .get(format!("{}/events?channels=agents", h.base))
+        .header("authorization", "Bearer test-bearer")
+        .header("x-opengrok-account", &b_token)
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .expect("b stream");
+    assert_eq!(b_stream.status().as_u16(), 200);
+
+    let mut buffer = String::new();
+    let opening = next_frame(&mut b_stream, &mut buffer, 5)
+        .await
+        .expect("an opening snapshot");
+    assert_eq!(opening["channel"], "agents");
+    let names: Vec<&str> = opening["payload"]["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "B's stream opened on somebody else's roster: {names:?}"
+    );
+
+    // Now A changes its roster. B must hear NOTHING — not the delta, not a snapshot.
+    let (status, second) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "AlphasSecond", "clientNonce": format!("a2-{tag}") }),
+            &a_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{second}");
+
+    let leaked = next_frame(&mut b_stream, &mut buffer, 3).await;
+    assert!(
+        leaked.is_none(),
+        "A's roster change reached B's stream: {leaked:?}"
+    );
+}

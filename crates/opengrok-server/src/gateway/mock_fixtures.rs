@@ -171,6 +171,58 @@ pub async fn drain_into(
     }
 }
 
+/// Read a fixture file for the desktop's attachment readers, or say why not.
+///
+/// THIS IS A FILE-READ API AND IT IS SCOPED TO ONE DIRECTORY ON PURPOSE.
+///
+/// The desktop's PDF, spreadsheet, markdown and text viewers all reach bytes through seam-A
+/// `readAttachmentChunk` / `readAttachmentText`; only image, video and audio bypass it by
+/// streaming through `sand-media://`. Both verbs were refused unconditionally, so those readers
+/// could never load anything on an OpenGrok server — including the fixtures this module writes.
+///
+/// The general feature is the artifacts slice and is deliberately parked (`ROADMAP.md` Later).
+/// What is open here is the fixture directory ONLY, and only while a mock door is selected, so
+/// that the catalogue can be verified end to end without opening a real read surface. Reading is
+/// what the whole thing is for; the containment is the part worth reviewing:
+///
+/// 1. the door must be a mock door (`enabled()`) — on a real deployment this answers nothing;
+/// 2. the path is CANONICALISED first, so `..` and symlinks are resolved before any check;
+/// 3. the canonical path must sit under the canonical fixture directory.
+///
+/// Prefix-matching the raw string would be the classic hole: `/tmp/opengrok-mock-fixtures/../../
+/// Volumes/goldcoders/OSS/opengrok-server/.env` passes a naive `starts_with` and hands back
+/// `OG_TOKEN_SECRET` and `OG_CREDENTIAL_KEK`. Canonicalising first is what closes it, and it is
+/// why the check is on the RESOLVED path and never on the argument.
+pub fn read_fixture(path: &str) -> Result<Vec<u8>, String> {
+    if !enabled() {
+        return Err("attachment reads are open only under a mock door".to_string());
+    }
+    read_contained(path)
+}
+
+/// The containment itself, without the door check — so it can be tested directly. Setting
+/// `OG_MODEL_DOOR` from a test is not available to us: `set_var` is unsafe in edition 2024 and
+/// `unsafe_code` is forbidden workspace-wide, and a security check that cannot be exercised
+/// because of a test-harness detail is one that silently stops being exercised.
+fn read_contained(path: &str) -> Result<Vec<u8>, String> {
+    let root = std::fs::canonicalize(FIXTURE_DIR)
+        .map_err(|_| "the fixture directory does not exist yet".to_string())?;
+    // ONE refusal string for both "not there" and "not yours to read", byte for byte. The first
+    // version of this appended the OS error to the absent case — so `/etc/passwd` (exists, outside
+    // the root) and `/tmp/opengrok-mock-fixtures/nope` (inside, absent) answered differently, and
+    // the difference reports whether an arbitrary path on the host exists. A test that only
+    // checked both messages CONTAINED the same phrase passed anyway; the live check caught it.
+    let resolved = std::fs::canonicalize(path).map_err(|_| NO_SUCH.to_string())?;
+    if !resolved.starts_with(&root) {
+        return Err(NO_SUCH.to_string());
+    }
+    std::fs::read(&resolved).map_err(|_| NO_SUCH.to_string())
+}
+
+/// The single refusal. Absent, outside the root, or unreadable all answer with this and nothing
+/// more — the shape of the failure must not describe the host's filesystem.
+const NO_SUCH: &str = "no such attachment";
+
 /// Every fixture, grouped as the help text presents them. The single source of truth for what
 /// exists: `help_text` renders this, and `entries_for` dispatches on it.
 const CATALOGUE: &[(&str, &str, &str)] = &[
@@ -829,6 +881,50 @@ mod tests {
             leaf[0]
         );
         assert!(leaf[0]["message"]["title"].is_null(), "a top-level title is dropped");
+    }
+
+    /// The containment, which is the only part of the read surface worth reviewing.
+    ///
+    /// A naive `starts_with` on the ARGUMENT lets `/tmp/opengrok-mock-fixtures/../../etc/passwd`
+    /// through — and on this machine the interesting target is not `/etc/passwd` but the repo's
+    /// own `.env`, which holds `OG_TOKEN_SECRET` and `OG_CREDENTIAL_KEK`. Canonicalising first
+    /// and checking the RESOLVED path is what closes it.
+    #[test]
+    fn a_traversal_out_of_the_fixture_directory_is_refused() {
+        // Make sure the directory and one real file exist, so a refusal below is the CHECK
+        // refusing rather than the file merely being absent.
+        let _ = entries_for("markdown");
+        assert!(
+            read_contained(&format!("{FIXTURE_DIR}/mock-notes.md")).is_ok(),
+            "a real fixture must be readable or this test proves nothing"
+        );
+
+        for escape in [
+            "/etc/passwd",
+            "/etc/hosts",
+            &format!("{FIXTURE_DIR}/../../etc/passwd"),
+            &format!("{FIXTURE_DIR}/../"),
+            &format!("{FIXTURE_DIR}/./../../etc/hosts"),
+        ] {
+            assert!(
+                read_contained(escape).is_err(),
+                "`{escape}` escaped the fixture directory"
+            );
+        }
+    }
+
+    /// A path outside the root and a path that does not exist answer the SAME way. Whether a file
+    /// elsewhere on the host exists is itself something this surface must not report.
+    #[test]
+    fn outside_and_absent_are_indistinguishable() {
+        let _ = entries_for("markdown");
+        let outside = read_contained("/etc/hosts").expect_err("must refuse");
+        let absent = read_contained(&format!("{FIXTURE_DIR}/not-a-real-file.md")).expect_err("must refuse");
+        assert_eq!(
+            outside, absent,
+            "the refusals must be identical, not merely similar — a suffix that differs \
+             reports whether a path outside the root exists"
+        );
     }
 
     #[test]

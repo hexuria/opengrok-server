@@ -252,7 +252,7 @@ async fn hire(
         .store
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
 
     // Report a failed box the way REST does — without failing the create.
     let (code, mut reply) = agent_reply(state, id.as_str(), caller).await;
@@ -410,7 +410,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value, caller: &str) -> (
         .store
         .put_seamb_profile(&coworker_id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (code, reply);
@@ -489,7 +489,7 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String], caller: &str) -
             crate::spend::revoke_for(&state.agui, &coworker_id).await;
         }
     }
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     (200, json!({ "deleted": deleted }))
 }
 
@@ -610,7 +610,7 @@ pub async fn set_avatar(state: &GatewayState, args: &Value, caller: &str) -> (u1
         .store
         .put_seamb_profile(&coworker, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (200, Value::Null);
@@ -681,7 +681,7 @@ pub async fn mutate_entry(
         tracing::error!(%error, "could not mutate an entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, agent, "updated", entry.clone());
+    live::emit_transcript(state, agent, "updated", entry.clone()).await;
     (200, entry)
 }
 
@@ -716,7 +716,7 @@ pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) ->
     {
         Ok(removed) => {
             for id in &removed {
-                live::emit_transcript_removed(state, agent, id);
+                live::emit_transcript_removed(state, agent, id).await;
             }
             (200, json!({ "deleted": removed.len() }))
         }
@@ -1428,7 +1428,7 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
         .store
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     agent_reply(state, id.as_str(), caller).await
 }
 
@@ -1501,7 +1501,7 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
             tracing::error!(%error, "setGroupMembers could not save");
             return (500, json!({ "error": "save failed" }));
         }
-        live::emit_roster(state).await;
+        live::emit_roster_for_caller(state, caller).await;
     }
     let Ok(rows) = live::roster_rows(state).await else {
         return (500, json!({ "error": "roster unavailable" }));

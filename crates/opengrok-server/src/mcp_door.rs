@@ -914,7 +914,7 @@ async fn persist_mcp_ask(
     }
     // Persist-only would be enough for a reload; emitting means an open desktop sees the
     // card without reconnecting. No subscriber is an ordinary morning (live::emit).
-    crate::gateway::live::emit_transcript(state, coworker.as_str(), "appended", card);
+    crate::gateway::live::emit_transcript(state, coworker.as_str(), "appended", card).await;
     Ok(call.id.clone())
 }
 

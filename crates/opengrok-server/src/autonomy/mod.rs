@@ -202,7 +202,7 @@ async fn announce_finished(
         .await
     {
         Ok(_) => {
-            crate::gateway::live::emit_transcript(gateway, coworker_id.as_str(), "appended", entry);
+            crate::gateway::live::emit_transcript(gateway, coworker_id.as_str(), "appended", entry).await;
         }
         Err(error) => {
             tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");

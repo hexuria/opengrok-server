@@ -8,6 +8,8 @@
 
 use std::convert::Infallible;
 
+use base64::Engine as _;
+
 use axum::Router;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -261,6 +263,17 @@ async fn events(
     // read succeeds, stamped `current` like the opener's own. The task ends with the stream: it
     // checks the channel before every read and the receiver is dropped with the body.
     let (late_tx, late_rx) = tokio::sync::mpsc::channel::<String>(1);
+    // The baseline sequence for THIS account — the number their own stream has already reached,
+    // not a global one. Since #58 each account has its own counter under the same `replicaKey`,
+    // so seeding from anyone else's would hand the replica a gap on its very first frame.
+    // An identity that verified but names no account is not a stream we can address, and since
+    // #58 an unaddressed stream receives nothing anyway — so refuse rather than open one that
+    // would sit silent forever. Same reasoning as `Caller::Invalid` on the dispatch.
+    let Some(audience) = audience else {
+        return identity_refusal("account_identity_invalid");
+    };
+    let seed_stamp = super::live::current_for(&state, "roster", &audience);
+
     // THE OPENER'S ROSTER, not the deployment's. This read used to be `roster_rows(&state)`,
     // which is `roster_rows_for(state, &state.email)` — so every stream, however well identified,
     // was handed the `OG_GATEWAY_EMAIL` account's coworkers as its first frame. A correct
@@ -272,7 +285,7 @@ async fn events(
             let payload = json!({
                 "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
                 "agents": rows,
-                "ordered": super::live::current(&state, "roster"),
+                "ordered": seed_stamp.clone(),
                 "coverage": { "kind": "complete-roster" },
             });
             frame("agents", &payload, wanted.as_ref())
@@ -288,6 +301,7 @@ async fn events(
             // The retry is the same frame, so it takes the same caller — a late snapshot that
             // fell back to the deployment account would reintroduce the bug on the slow path.
             let retry_caller = caller.clone();
+            let retry_seed = seed_stamp.clone();
             let id = guard.id.clone();
             tokio::spawn(async move {
                 let mut wait_secs = 1u64;
@@ -301,7 +315,7 @@ async fn events(
                             let payload = json!({
                                 "activeAgentId": retry_state.active_agent.lock().ok().and_then(|a| a.clone()),
                                 "agents": rows,
-                                "ordered": super::live::current(&retry_state, "roster"),
+                                "ordered": retry_seed.clone(),
                                 "coverage": { "kind": "complete-roster" },
                             });
                             tracing::info!(
@@ -362,7 +376,7 @@ async fn events(
             // Addressed to somebody else: not this stream's frame. An empty string is how this
             // loop already says "not for you" for an unwanted channel, and `sse` drops it.
             if let Some(to) = live.audience.as_ref()
-                && for_me.as_ref() != Some(to)
+                && &for_me != to
             {
                 return String::new();
             }
@@ -834,10 +848,57 @@ async fn command(
         "listBoxMcpServers" => reply(StatusCode::OK, json!({ "servers": [] })),
 
         // ---- P7: attachments wait on the artifacts store, and say so ----
-        "uploadAttachment"
-        | "readAttachmentImage"
-        | "readAttachmentText"
-        | "readAttachmentChunk" => refusal(
+        //
+        // Except the two READ verbs under a mock door. Every desktop viewer that is not
+        // image/video/audio reaches its bytes through these — the PDF, spreadsheet, markdown,
+        // json and text readers all go `attachments.readBytes` → `readAttachmentChunk` in 4 MB
+        // chunks — so refusing them unconditionally meant the fixture catalogue could show a file
+        // chip that no reader could ever open. `mock_fixtures::read_fixture` serves the fixture
+        // directory and nothing else, and only while a mock door is selected; the general feature
+        // is the artifacts slice and stays parked (`ROADMAP.md` Later).
+        "readAttachmentChunk" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            match super::mock_fixtures::read_fixture(path) {
+                Ok(bytes) => {
+                    let total = bytes.len();
+                    // The desktop probes with `length: 0` first, purely to learn `totalSize`.
+                    // That probe must answer the size and NO bytes, or it pays for the whole
+                    // file before deciding whether it wants any of it.
+                    let offset = args
+                        .get("offset")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .min(total as u64) as usize;
+                    let length = args
+                        .get("length")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .min((total - offset) as u64) as usize;
+                    let slice = &bytes[offset..offset + length];
+                    reply(
+                        StatusCode::OK,
+                        json!({
+                            "totalSize": total,
+                            "bytesBase64": base64::engine::general_purpose::STANDARD.encode(slice),
+                        }),
+                    )
+                }
+                Err(why) => refusal(400, &why),
+            }
+        }
+        "readAttachmentText" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            match super::mock_fixtures::read_fixture(path) {
+                // Lossy on purpose: a reader asking for TEXT wants to see the file, and half a
+                // markdown fixture is more use than a decode error. The desktop truncates.
+                Ok(bytes) => reply(
+                    StatusCode::OK,
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                ),
+                Err(why) => refusal(400, &why),
+            }
+        }
+        "uploadAttachment" | "readAttachmentImage" => refusal(
             400,
             "attachments are not stored by this server yet (artifacts is a planned slice)",
         ),
