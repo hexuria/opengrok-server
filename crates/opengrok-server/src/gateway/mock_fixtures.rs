@@ -171,7 +171,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     // (name, group, one-line description)
     ("text", "cards", "the ordinary assistant bubble"),
     ("widget", "cards", "a choice card with four options"),
-    ("cursor-agent", "cards", "the cloud-agent card"),
+    ("cursor-agent", "cards", "cloud-agent card — blank unless the bcId resolves upstream"),
     ("email-draft", "cards", "an editable email draft"),
     ("slack-draft", "cards", "an editable Slack draft"),
     ("auto-review-approval", "cards", "the approval card (interactive)"),
@@ -179,7 +179,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("secret-request", "cards", "a secret prompt"),
     ("connector", "cards", "the plugin-connect card"),
     ("connectors", "cards", "the multi-connect card"),
-    ("permission", "cards", "local-tool-permission — the real permission block"),
+    ("permission", "cards", "local-tool-permission — projects, but never drawn from history"),
     ("permission-request", "cards", "the retired read-only leaf (title only, NOT interactive)"),
     ("image", "media", "attachment card, remote .jpg"),
     ("video", "media", "attachment card, remote .webm"),
@@ -194,7 +194,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("notice", "kinds", "a muted system line"),
     ("event", "kinds", "a timeline event (name-changed)"),
     ("thinking", "kinds", "a collapsible reasoning block"),
-    ("computer-handoff", "kinds", "send-message + boxRequestId; blank without a box"),
+    ("computer-handoff", "kinds", "the box card mid-handoff — attachment + boxRequestId"),
     ("tool-running", "tools", "tool line — running"),
     ("tool-success", "tools", "tool line — success"),
     ("tool-error", "tools", "tool line — error"),
@@ -396,10 +396,18 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
             "connectors",
             json!({ "type": "connectors", "connectors": ["github", "slack", "linear"] }),
         )],
-        // THE INTERACTIVE PERMISSION BLOCK. Emitted as a `send-message` CARD and never as its own
-        // entry kind: `transcript.tsx:974` returns null for `kind === "local-tool-permission"`, so
-        // the entry-kind spelling renders nothing at all. `message.ask` must be a record
-        // (`production/model.ts:414`) or the whole entry is rejected.
+        // THE INTERACTIVE PERMISSION BLOCK — AND IT CANNOT DRAW FROM A TRANSCRIPT ENTRY.
+        //
+        // The entry projects correctly (kind `local-tool-permission`, status, requestId) and then
+        // `transcript.tsx:974` returns null for it. The block a person actually sees is drawn from
+        // `localToolPermissionStore`, fed by the coordinator's `bridge.localToolPermission` ask
+        // channel — a live request, not history. So this fixture exercises the projection and
+        // stops there, by the client's design, and no change to the body will make it appear.
+        //
+        // Kept because the projection is still worth exercising and because the shape is the one
+        // a real ask carries: emitted as a `send-message` CARD, never as its own entry kind, with
+        // `message.ask` a record (`production/model.ts:414`) or the entry is rejected.
+        // To see the block itself, drive a real approval — not this.
         "permission" | "local-tool-permission" => vec![card(
             "permission",
             json!({
@@ -417,7 +425,13 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // Kept so the difference from `permission` above is visible side by side.
         "permission-request" => vec![card(
             "permission-request",
-            json!({ "type": "permission-request", "title": "A retired permission-request leaf" }),
+            json!({
+                "type": "permission-request",
+                // NESTED. projectPermissionRequestEntry (model.ts:240) reads
+                // `message.permission.title`, not `message.title`. A top-level title projects to
+                // null and the entry is dropped — measured against the shipped client, not read.
+                "permission": { "title": "A retired permission-request leaf" }
+            }),
         )],
 
         // ---- attachment cards: classified on the URL alone ----
@@ -482,19 +496,34 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
             "durationMs": 4200,
             "timestampMs": now_ms(),
         })],
-        // There is no `kind: "computer-handoff"` on the wire. It is a `send-message` whose
-        // TOP-LEVEL `boxRequestId` is present and whose `message.type` is not "attachment".
+        // A HANDOFF IS AN ATTACHMENT, not a text message — and there is no `computer-handoff`
+        // string in the shipped contract at all.
         //
-        // ORDERING TRAP: that check runs BEFORE the card projector, so a stray `boxRequestId` on
-        // any other fixture would silently turn it into a handoff instead of the card its
-        // `message.type` names. `no_other_fixture_carries_a_box_request_id` holds that line.
+        // Transcribed from the recovered 0.18 renderer: the box card is drawn ONLY from the
+        // attachment branch, keyed on the message URL (`view-BKPMMMAd.js`, component `as(T)`:
+        // `const b = L(e.message.url); if (b === "box") …`), and it reads the box fields off the
+        // ENTRY rather than the message — `e.boxInstruction`, `e.boxRequestId`, `e.boxResolution`,
+        // `e.boxSnapshot`. A separate index (`Obn`) files every `send-message` carrying
+        // `boxRequestId` into the box-card store, type-agnostically, but the attachment branch is
+        // its only consumer.
         //
-        // Least deterministic fixture here: it renders through live computer state, so it can
-        // legitimately draw nothing when the account has no box.
+        // So the first version of this fixture was wrong twice over: it used `type: "text"`, and
+        // it was written against V2's own generic `computer-handoff` kind, which exists nowhere in
+        // the recovered bundle. For a text message that branch is unreachable — the text projector
+        // returns first — so it is a dead branch in a newer client, not a defect in the contract.
+        // First measured 5 Sep 2026: it drew a plain bubble, which is exactly right for what it was.
+        //
+        // `boxResolution: null` with no live request renders "handed_back"; a string resolution
+        // renders that instead. `no_other_fixture_carries_a_box_request_id` still holds the
+        // ordering line, and `box` deliberately stays without one so the two are distinguishable.
         "computer-handoff" => vec![{
             let mut entry = card(
                 "computer-handoff",
-                json!({ "type": "text", "content": "Handing this to your computer." }),
+                json!({
+                    "type": "attachment",
+                    "url": "sand://box",
+                    "alt": "Handed to the computer"
+                }),
             );
             entry["boxRequestId"] = json!(format!("req_{}", uuid::Uuid::now_v7().simple()));
             entry["boxInstruction"] = json!("Open the settings page");
@@ -512,10 +541,14 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
             "text": "A muted system line from the mock fixture catalogue.",
             "timestampMs": now_ms(),
         })],
+        // `to`, not `name`: projectTimelineEvent (timeline-event-registry.ts:57) requires a string
+        // `to` for name-changed and returns null without it, which drops the whole entry silently.
+        // Verified by running this catalogue against the shipped V2 client on 5 Sep 2026 — the
+        // first spelling drew nothing and reported nothing.
         "event" => vec![json!({
             "kind": "event",
             "id": entry_id("event"),
-            "event": { "type": "name-changed", "name": "Renamed by a mock fixture" },
+            "event": { "type": "name-changed", "to": "Renamed by a mock fixture" },
             "timestampMs": now_ms(),
         })],
 
@@ -678,15 +711,26 @@ mod tests {
         assert!(entry["content"].as_str().is_some_and(|text| !text.is_empty()));
     }
 
-    /// A handoff is a `send-message` with a top-level `boxRequestId`, and its `message.type` must
-    /// not be `attachment` or it takes the attachment card's box branch instead.
+    /// A handoff IS the attachment box branch, carrying the box fields at the entry's top level.
+    ///
+    /// This test asserted the opposite until 5 Sep 2026 — that `message.type` must NOT be
+    /// `attachment` — which is what a plausible reading of a newer client's generic
+    /// `computer-handoff` branch gives you. The recovered renderer draws the box card only from
+    /// the attachment branch, keyed on the URL, so the fixture and this assertion were both wrong
+    /// in the same direction and agreed with each other. A test written from the same guess as the
+    /// code confirms the guess, not the contract.
     #[test]
-    fn the_handoff_is_a_send_message_with_a_box_request_id() {
+    fn the_handoff_is_the_attachment_box_branch() {
         let entries = entries_for("computer-handoff").expect("fixture");
         let entry = &entries[0];
         assert_eq!(entry["kind"], "send-message");
+        assert_eq!(entry["message"]["type"], "attachment");
+        assert_eq!(entry["message"]["url"], "sand://box");
         assert!(entry["boxRequestId"].as_str().is_some_and(|id| !id.is_empty()));
-        assert_ne!(entry["message"]["type"], "attachment");
+        assert!(entry["boxInstruction"].as_str().is_some());
+        // `box` is the same card WITHOUT a request, so the two states stay distinguishable.
+        let plain = entries_for("box").expect("fixture");
+        assert!(plain[0].get("boxRequestId").is_none());
     }
 
     /// THE ORDERING TRAP. The handoff check runs before the card projector, so a stray
@@ -748,6 +792,34 @@ mod tests {
         let all = entries_for("all").expect("fixture");
         let others = CATALOGUE.iter().filter(|(_, group, _)| *group != "bulk").count();
         assert!(all.len() >= others, "expected at least {others} entries, got {}", all.len());
+    }
+
+    /// Both of these were WRONG and drew nothing, silently, until the catalogue was run against
+    /// the shipped client on 5 Sep 2026. A rejected entry reports only a `rejectedCount` the page
+    /// does not expose, so neither failure was visible from either side — which is exactly why the
+    /// field path, not just the field's presence, is worth pinning in a test.
+    #[test]
+    fn the_two_field_paths_that_silently_dropped_their_entries() {
+        // name-changed reads `to`; `name` projects to null and the entry is dropped.
+        let event = entries_for("event").expect("fixture");
+        assert_eq!(event[0]["event"]["type"], "name-changed");
+        assert!(
+            event[0]["event"]["to"].as_str().is_some_and(|to| !to.is_empty()),
+            "name-changed needs a string `to`: {}",
+            event[0]
+        );
+        assert!(event[0]["event"]["name"].is_null(), "`name` is the spelling that was dropped");
+
+        // permission-request reads `message.permission.title`, not `message.title`.
+        let leaf = entries_for("permission-request").expect("fixture");
+        assert!(
+            leaf[0]["message"]["permission"]["title"]
+                .as_str()
+                .is_some_and(|title| !title.is_empty()),
+            "the title is nested under `permission`: {}",
+            leaf[0]
+        );
+        assert!(leaf[0]["message"]["title"].is_null(), "a top-level title is dropped");
     }
 
     #[test]
