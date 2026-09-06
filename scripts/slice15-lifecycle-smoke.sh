@@ -11,7 +11,17 @@ BASE="${OG_BASE:-http://127.0.0.1:$PORT}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
 command -v jq >/dev/null || fail "jq is required"
-api() { curl -sS --max-time 10 -X POST "$BASE/api/$1" -H 'content-type: application/json' -d "${2:-}"; }
+
+# WHO THESE CALLS ARE FOR. Seam A fails closed since the identity change: a call or a stream
+# with no `x-opengrok-account` is refused `account_identity_required`, because a headerless
+# connection used to be served as OG_GATEWAY_EMAIL — the admin on a dev box. The real client
+# attaches this header per connection, so the smoke does too, and now covers the identified path
+# rather than the fallback that no longer exists.
+ACCOUNT_TOKEN=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=host@opengrok.local" | jq -r '.accessToken')
+[ -n "$ACCOUNT_TOKEN" ] && [ "$ACCOUNT_TOKEN" != "null" ] || fail "could not mint an account token"
+IDENT=(-H "x-opengrok-account: $ACCOUNT_TOKEN")
+
+api() { curl -sS --max-time 10 -X POST "$BASE/api/$1" "${IDENT[@]}" -H 'content-type: application/json' -d "${2:-}"; }
 
 echo "1. createAgent hires, and the clientNonce dedupes"
 NONCE="ca-$(date +%s)-$$"
@@ -54,10 +64,10 @@ did=$(echo "$dup" | jq -r '.agent.id')
 ok "a copy exists ($did)"
 
 echo "6. reactions and deletion mutate entries and tell the stream"
-SSE=$(mktemp); curl -sN --max-time 15 "$BASE/events?channels=transcript" > "$SSE" & SSE_PID=$!
+SSE=$(mktemp); curl -sN --max-time 15 "$BASE/events?channels=transcript" "${IDENT[@]}" > "$SSE" & SSE_PID=$!
 sleep 1
 PN="pn-$(date +%s)"
-curl -sS --max-time 5 -X POST "$BASE/api/sendPrompt" -H 'content-type: application/json' \
+curl -sS --max-time 5 -X POST "$BASE/api/sendPrompt" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"agentId\":\"$aid\",\"prompt\":\"react to me\",\"clientNonce\":\"$PN\"}" >/dev/null
 sleep 2
 eid=$(api getAgentTranscriptTail "{\"agentId\":\"$aid\",\"limit\":10}" | jq -r '[.entries[] | select(.kind=="message")][0].id')
@@ -84,7 +94,7 @@ echo "$listed" | jq -e --arg id "$auto_id" 'any(.[]; .id == $id)' >/dev/null || 
 disabled=$(api setAgentAutomationEnabled "{\"id\":\"$auto_id\",\"enabled\":false}")
 echo "$disabled" | jq -e --arg id "$auto_id" '[.[] | select(.id == $id)][0].enabled == false' >/dev/null \
   || fail "disable did not stick: $disabled"
-schedules_see_it=$(curl -sS "$BASE/schedules" -H "authorization: Bearer $(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=host@opengrok.local" | jq -r '.accessToken')")
+schedules_see_it=$(curl -sS "$BASE/schedules" -H "authorization: Bearer $ACCOUNT_TOKEN")
 echo "$schedules_see_it" | jq -e --arg id "$auto_id" 'any(.[]; .id == $id and .active == false)' >/dev/null \
   || fail "the /schedules view disagrees — two vocabularies, two truths: $schedules_see_it"
 api deleteAgentAutomation "{\"id\":\"$auto_id\"}" >/dev/null
@@ -97,7 +107,7 @@ api getSharingState '{}' | jq -e 'type == "object" and (.rooms | type == "array"
 api getAgentChannels "{\"id\":\"$aid\"}" | jq -e '.channels | type == "array"' >/dev/null || fail "channels"
 api listBoxMcpServers '{}' | jq -e '.servers | type == "array"' >/dev/null || fail "mcp servers"
 api getSubagents "{\"id\":\"$aid\"}" | jq -e 'type == "array"' >/dev/null || fail "subagents"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/createGroup" -H 'content-type: application/json' -d '{"name":"g"}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/createGroup" "${IDENT[@]}" -H 'content-type: application/json' -d '{"name":"g"}')
 [ "$code" = "400" ] || fail "groups answered $code, expected a readable 400"
 ok "records and arrays where validated, a readable refusal for groups"
 
@@ -118,14 +128,14 @@ size=$(curl -s "$BASE/avatars/$avid" | wc -c | tr -d ' ')
 [ "$size" -gt 30 ] || fail "avatar bytes too small: $size"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/avatars/cw_nobody")
 [ "$code" = "404" ] || fail "a missing avatar answered $code"
-slim=$(curl -sS --max-time 5 -X POST "$BASE/api/listAgents" -H 'x-sand-slim-avatars: 1')
+slim=$(curl -sS --max-time 5 -X POST "$BASE/api/listAgents" "${IDENT[@]}" -H 'x-sand-slim-avatars: 1')
 echo "$slim" | jq -e --arg id "$avid" '[.[] | select(.id == $id)][0] | .avatarDataUrl == null and .avatarVersion != null' >/dev/null \
   || fail "slim mode must null the dataUrl and keep the version"
 api deleteAgents "{\"ids\":[\"$avid\"]}" >/dev/null
 
 echo "11. the skills catalogue is the plugin catalogue; attachments refuse readably"
 api skillsCatalog '{}' | jq -e 'type == "array"' >/dev/null || fail "skillsCatalog container"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/uploadAttachment" -H 'content-type: application/json' -d '{}')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/uploadAttachment" "${IDENT[@]}" -H 'content-type: application/json' -d '{}')
 [ "$code" = "400" ] || fail "uploadAttachment answered $code, expected a readable 400"
 box=$(api getBoxStoreStatus '{}')
 [ "$box" = "null" ] || fail "box store status should be null with no store: $box"
