@@ -108,6 +108,20 @@ fn unaddressable() -> opengrok_core::id::AccountId {
     opengrok_core::id::AccountId::from_stored(String::new())
 }
 
+/// Stamp `accepted: true` onto a successful entry reply. The widget verbs' client-side
+/// `actionReply` requires a record with a boolean `accepted` or it rolls back; the entry from
+/// `mutate_entry` is a record, so the flag rides on it. A non-object reply (the `Null` for an
+/// unknown entry) passes through untouched — `Null` already means "nothing to settle".
+fn accepted(reply: (u16, Value)) -> (u16, Value) {
+    let (code, mut body) = reply;
+    if code == 200
+        && let Some(map) = body.as_object_mut()
+    {
+        map.insert("accepted".to_string(), json!(true));
+    }
+    (code, body)
+}
+
 /// The one refusal that carries a machine-readable `code`.
 ///
 /// `code` is additive and appears ONLY here. Every other refusal keeps the `{"error": …}` shape
@@ -774,25 +788,50 @@ async fn command(
                 .await,
             )
         }
+        // `accepted: true` on both widget replies: the client's `actionReply`
+        // (`widget-interactions.ts:35-39`) requires a record with a boolean `accepted` and rolls
+        // the optimistic state back otherwise. Returning the bare entry made the card flicker
+        // back and settle only when the `updated` frame landed. Additive — the entry still comes
+        // back — and it is set on the ENTRY the client receives, not written to the store, because
+        // `accepted` is a reply fact and not a transcript one.
         "respondToWidget" => {
             let value = args.get("value").cloned().unwrap_or(Value::Null);
-            wrap(
+            wrap(accepted(
                 super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     if let Some(map) = entry.as_object_mut() {
                         map.insert("respondedValue".to_string(), value);
                     }
                 })
                 .await,
-            )
+            ))
         }
-        "dismissWidget" => wrap(
+        "dismissWidget" => wrap(accepted(
             super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
                 if let Some(map) = entry.as_object_mut() {
                     map.insert("widgetDismissed".to_string(), json!(true));
                 }
             })
             .await,
+        )),
+        // `discardDraft {entryId, agentId}` — official 0.29/0.30 verb, transcribed at
+        // `client-versions-0.18-0.30.md:944`. The client collapses the card to "Discarded"
+        // optimistically and rolls back on error; until this arm existed it was answered
+        // `unknown gateway method` and Discard visibly did nothing. Same tier as `dismissWidget`:
+        // discarding a draft on a shared coworker is talking, not managing, so `may_use` not
+        // `owns`. No `accepted` check on the client side; any 2xx settles it.
+        "discardDraft" => wrap(
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("draftSendState".to_string(), json!("discarded"));
+                }
+            })
+            .await,
         ),
+        // `sendDraft {entryId, draft, agentId}` — its sibling at `:943`. The projector already
+        // draws `"sent"`, but no client button sends the verb yet, so mutating on it would be
+        // inventing behaviour ahead of the client. A placeholder keeps the shape stable; it
+        // becomes a real arm when the button does.
+        "sendDraft" => reply(StatusCode::OK, Value::Null),
         "deleteTranscriptEntries" => {
             wrap(super::lifecycle::delete_entries(&state, &args, &caller).await)
         }
@@ -1168,7 +1207,9 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "runAgentAutomationNow"
         | "reactToMessage"
         | "respondToWidget"
-        | "dismissWidget" => (200, Value::Null),
+        | "dismissWidget"
+        | "discardDraft"
+        | "sendDraft" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
     }
