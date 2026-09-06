@@ -361,7 +361,12 @@ async fn grok_bot(
             {
                 object.insert(
                     "computerError".to_string(),
-                    crate::agui::provision::error_json(&provisioned.error),
+                    crate::agui::provision::error_json_at(
+                        &provisioned
+                            .error
+                            .clone()
+                            .map(|(c, m)| (c, m, crate::agui::routes::now_ms())),
+                    ),
                 );
             }
             connect_ok(reply)
@@ -658,6 +663,7 @@ async fn grok_bot(
                 account_error = Some((
                     "invalid_key".into(),
                     "The saved box.ascii.dev key cannot be opened. An admin can paste it again on the dashboard.".into(),
+                    crate::agui::routes::now_ms(),
                 ));
             }
             // `mode` (resolved above) is the caller's EFFECTIVE sharing mode, so the client knows
@@ -666,7 +672,7 @@ async fn grok_bot(
             // turns the options list into an honest "this is yours, these are also available".
             connect_ok(json!({
                 "computers": computers,
-                "computerError": crate::agui::provision::error_json(&account_error),
+                "computerError": crate::agui::provision::error_json_at(&account_error),
                 // `mode` is the historical name; `sharingMode` is the same value under the name the
                 // client reads, so the desktop can place a reset control by mode (and refuse to offer
                 // per-org reset, which would destroy a box the whole org shares).

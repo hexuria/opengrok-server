@@ -409,7 +409,7 @@ pub async fn roster_rows_for(
         // Somebody else's coworker carries null too — their provisioning trouble is theirs, and
         // naming it on a shared row would leak the state of an account this reader is not in.
         row["computerError"] = if mine && view.box_id.is_none() && view.members.is_empty() {
-            crate::agui::provision::error_json(&account_error)
+            crate::agui::provision::error_json_at(&account_error)
         } else {
             Value::Null
         };

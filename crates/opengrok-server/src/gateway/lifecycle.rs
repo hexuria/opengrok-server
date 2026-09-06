@@ -262,7 +262,7 @@ async fn hire(
     {
         object.insert(
             "computerError".to_string(),
-            provision::error_json(&provisioned.error),
+            provision::error_json_at(&provisioned.error.clone().map(|(c, m)| (c, m, now_ms()))),
         );
     }
     if code == 200
@@ -1503,7 +1503,11 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
         }
         live::emit_roster_for_caller(state, caller).await;
     }
-    let Ok(rows) = live::roster_rows(state).await else {
+    // The CALLER's roster, not the deployment's. `setGroupMembers` looks up the row it has just
+    // been authorised to modify, so reading `OG_GATEWAY_EMAIL`'s roster was never a disclosure —
+    // but it is the same wrong read as the three that were, and on a caller whose group is not in
+    // the deployment account's roster it answers `null` for a group that plainly exists.
+    let Ok(rows) = live::roster_rows_for(state, caller).await else {
         return (500, json!({ "error": "roster unavailable" }));
     };
     match rows.into_iter().find(|row| row["id"] == id) {

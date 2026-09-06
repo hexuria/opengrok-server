@@ -776,7 +776,13 @@ pub async fn hire(
         provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
             .await;
     events.extend(provisioned.events);
-    let computer_error = provisioned.error;
+    // Stamped with NOW, because this one is fresh by construction — it is the error from the
+    // provisioning attempt this very request just made. Every `computerError` on the wire carries
+    // `updatedAtMs` or the client cannot tell which of them it may trust; a field that is
+    // sometimes present is worse than one that never is.
+    let computer_error = provisioned
+        .error
+        .map(|(code, message)| (code, message, at_ms));
     // A key of its own, so a cap can be written on it. Never fails the hire; the console says
     // why when it could not be minted.
     let _key =
@@ -869,7 +875,7 @@ pub async fn hire(
             "name": view.name,
             "model": view.model,
             "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": provision::error_json(&computer_error),
+            "computerError": provision::error_json_at(&computer_error),
             // A sentence when something the template promised did not land; null otherwise.
             "templateNote": template_note,
         })),

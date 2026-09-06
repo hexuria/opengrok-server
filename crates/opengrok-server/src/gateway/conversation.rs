@@ -416,7 +416,10 @@ pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u1
                 "agentId": agent_id,
                 "state": if stopped { "stopped" } else { "unknown" },
                 "vncUrl": Value::Null,
-                "computerError": { "code": code, "message": message },
+                // Stamped like every other computerError: these are fresh by construction
+                // (this request just asked the provider), and a field the client sees only
+                // sometimes is worse than one it never sees.
+                "computerError": { "code": code, "message": message, "updatedAtMs": now_ms() },
             }),
         );
     };
@@ -477,7 +480,7 @@ pub async fn box_control(
             "agentId": agent_id,
             "state": "absent",
             "vncUrl": Value::Null,
-            "computerError": { "code": code, "message": message },
+            "computerError": { "code": code, "message": message, "updatedAtMs": now_ms() },
         })
     };
     let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
@@ -537,6 +540,7 @@ pub async fn box_control(
                                         "computerError": {
                                             "code": error.code(),
                                             "message": error.to_string(),
+                                            "updatedAtMs": now_ms(),
                                         },
                                     }),
                                 );
