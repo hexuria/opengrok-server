@@ -105,6 +105,21 @@ const GZ_BYTES: &[u8] = include_bytes!("fixtures/mock-notes.md.gz");
 // header: the client never parses past the magic, so a real 7z would prove nothing more. This is
 // the opposite call from the pdf and docx, where the reader DOES parse and a stub fails inside it.
 const SEVENZIP_BYTES: &[u8] = include_bytes!("fixtures/mock-bundle.7z");
+// The office formats. Every one is a structurally complete package that opens in a real
+// application — `textutil` reads the rtf and the odt, `file(1)` names each correctly — because a
+// reader is only worth testing against a file that really holds the constructs it claims to
+// render. A stub that opens and shows nothing teaches its author that the code works. Built by
+// `scripts/make-document-fixtures.py`, which explains each choice at the part level.
+const PPTX_BYTES: &[u8] = include_bytes!("fixtures/mock-deck.pptx");
+const ODT_BYTES: &[u8] = include_bytes!("fixtures/mock-notes.odt");
+const ODP_BYTES: &[u8] = include_bytes!("fixtures/mock-deck.odp");
+const RTF_BYTES: &[u8] = include_bytes!("fixtures/mock-rich.rtf");
+// The other two Download-path fixtures, alongside `sevenzip`. `.doc` is refused on the OLE magic
+// and `.pages` on its package shape, and neither is parsed further — so the doc is a 512-byte
+// header and zeroes, and the pages is a real zip whose `Index/` and `Metadata/` folders ARE the
+// signal. Do not "improve" either into something a reader can open: the refusal is the coverage.
+const DOC_BYTES: &[u8] = include_bytes!("fixtures/mock-legacy.doc");
+const PAGES_BYTES: &[u8] = include_bytes!("fixtures/mock-page.pages");
 
 /// The markdown showcase, as one bubble — the SAME bytes as `mock-notes.md`, by `include_str!`,
 /// so the text card and the file reader show one document and cannot drift apart. It is
@@ -514,6 +529,32 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
         "sevenzip",
         "files",
         "user-attachment, .7z — UNSUPPORTED on purpose: the Download prompt, not a listing",
+    ),
+    (
+        "pptx",
+        "files",
+        "user-attachment, .pptx — three slides: title, nested bullets, an image with notes",
+    ),
+    (
+        "odt",
+        "files",
+        "user-attachment, .odt — headings, runs, both list kinds, a 2x3 table, a link",
+    ),
+    ("odp", "files", "user-attachment, .odp — two ODF slides"),
+    (
+        "rtf",
+        "files",
+        "user-attachment, .rtf — bold/italic runs, a tab, a unicode escape, two paragraphs",
+    ),
+    (
+        "doc",
+        "files",
+        "user-attachment, .doc — UNSUPPORTED: refused on the OLE magic, Download prompt",
+    ),
+    (
+        "pages",
+        "files",
+        "user-attachment, .pages — UNSUPPORTED: refused on the package shape, Download prompt",
     ),
     ("rust", "files", "user-attachment, .rs"),
     ("js", "files", "user-attachment, .js"),
@@ -993,6 +1034,12 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
             "mock-bundle.7z",
             SEVENZIP_BYTES,
         )],
+        "pptx" => vec![user_attachment("pptx", "mock-deck.pptx", PPTX_BYTES)],
+        "odt" => vec![user_attachment("odt", "mock-notes.odt", ODT_BYTES)],
+        "odp" => vec![user_attachment("odp", "mock-deck.odp", ODP_BYTES)],
+        "rtf" => vec![user_attachment("rtf", "mock-rich.rtf", RTF_BYTES)],
+        "doc" => vec![user_attachment("doc", "mock-legacy.doc", DOC_BYTES)],
+        "pages" => vec![user_attachment("pages", "mock-page.pages", PAGES_BYTES)],
         "rust" => vec![user_attachment("rust", "mock_sample.rs", RS_BYTES)],
         "js" => vec![user_attachment("js", "mock-sample.js", JS_BYTES)],
         "upload" => vec![user_attachment("upload", "mock-pixel.png", &png_bytes())],
@@ -1340,7 +1387,8 @@ mod tests {
     #[test]
     fn user_attachments_keep_their_snake_case_fields() {
         for fixture in [
-            "markdown", "zip", "targz", "gz", "sevenzip", "rust", "js", "upload",
+            "markdown", "zip", "targz", "gz", "sevenzip", "rust", "js", "upload", "pptx", "odt",
+            "odp", "rtf", "doc", "pages",
         ] {
             let entries = entries_for(fixture).expect("fixture");
             let entry = &entries[0];
@@ -1614,6 +1662,80 @@ mod tests {
             SEVENZIP_BYTES.starts_with(&[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]),
             "7z: wrong signature, so the client would not reach the unsupported branch"
         );
+    }
+
+    /// The office documents are real packages, and the ones meant to be REFUSED are still
+    /// refusable. Each is pinned where its format puts the signal: OOXML and ODF are zips, so
+    /// they start `PK`; ODF additionally requires `mimetype` as the FIRST entry and STORED, which
+    /// is how a reader sniffs the package without inflating anything — deflate it and the sniff
+    /// reads nothing. The pptx is checked for the parts a slide-by-slide outline needs, including
+    /// the notes slide and the embedded PNG, because those are the two a text-only reader drops
+    /// silently rather than loudly.
+    #[test]
+    fn the_office_documents_are_real_packages() {
+        for (label, bytes) in [
+            ("pptx", PPTX_BYTES),
+            ("odt", ODT_BYTES),
+            ("odp", ODP_BYTES),
+            ("pages", PAGES_BYTES),
+        ] {
+            assert!(bytes.starts_with(b"PK\x03\x04"), "{label}: not a zip");
+        }
+        // `mimetype` first and uncompressed: the local header's name field sits at offset 30, and
+        // byte 8 is the compression method, which must be 0 (stored).
+        for (label, bytes) in [("odt", ODT_BYTES), ("odp", ODP_BYTES)] {
+            assert_eq!(
+                &bytes[30..38],
+                b"mimetype",
+                "{label}: mimetype is not the first entry"
+            );
+            assert_eq!(
+                bytes[8], 0,
+                "{label}: mimetype is deflated, so a sniff reads nothing"
+            );
+        }
+        for part in [
+            &b"ppt/slides/slide1.xml"[..],
+            b"ppt/slides/slide2.xml",
+            b"ppt/slides/slide3.xml",
+            // The two a text-only outline drops without saying so.
+            b"ppt/notesSlides/notesSlide1.xml",
+            b"ppt/media/image1.png",
+            // Without a master and a layout the package is not openable at all.
+            b"ppt/slideMasters/slideMaster1.xml",
+            b"ppt/slideLayouts/slideLayout1.xml",
+        ] {
+            assert!(
+                PPTX_BYTES.windows(part.len()).any(|w| w == part),
+                "pptx lacks {}",
+                String::from_utf8_lossy(part)
+            );
+        }
+        // RTF is plain text, and the escape is the interesting byte: `\u233?` carries an ASCII
+        // fallback after the code point, which a careless control-word stripper leaves behind as
+        // a stray `?`.
+        assert!(RTF_BYTES.starts_with(br"{\rtf1"), "rtf: no header");
+        for token in [&br"\u233?"[..], br"\tab", br"\b ", br"\i ", br"\par"] {
+            assert!(
+                RTF_BYTES.windows(token.len()).any(|w| w == token),
+                "rtf lacks {}",
+                String::from_utf8_lossy(token)
+            );
+        }
+        // The two refusals. Both must stay unopenable — a later "fix" that makes either readable
+        // removes the only coverage the Download path has, which is why this is asserted and not
+        // merely commented.
+        assert!(
+            DOC_BYTES.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
+            "doc: wrong OLE magic, so the client would not reach the unsupported branch"
+        );
+        for folder in [&b"Index/"[..], b"Metadata/"] {
+            assert!(
+                PAGES_BYTES.windows(folder.len()).any(|w| w == folder),
+                "pages lacks {}, which is what the format is recognised by",
+                String::from_utf8_lossy(folder)
+            );
+        }
     }
 
     /// The markdown showcase is complete on headings: all six ATX levels, plus both setext forms.
