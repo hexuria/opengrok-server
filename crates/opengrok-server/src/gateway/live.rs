@@ -215,7 +215,6 @@ pub async fn emit_roster_to(state: &GatewayState, audience: &[opengrok_core::id:
         let Ok(rows) = roster_rows_for(state, &account_row.email).await else {
             continue;
         };
-        let rows = rows.clone();
         let active = active.clone();
         emit_ordered_to(state, "agents", "roster", account, move |ordered| {
             json!({
@@ -347,7 +346,7 @@ fn send(
 /// So the account is passed in rather than derived. Every caller has it already — it is the same
 /// account it just appended or updated with — and taking it as an argument makes the frame and
 /// the row that backs it impossible to disagree.
-pub async fn emit_transcript(
+pub fn emit_transcript(
     state: &GatewayState,
     agent_id: &str,
     account: &opengrok_core::id::AccountId,
@@ -372,7 +371,7 @@ pub async fn emit_transcript(
 
 /// A transcript `removed` frame for one entry id, stamped on that agent's replica.
 /// The same, for a deletion. Same reasoning: the row was deleted from ONE person's transcript.
-pub async fn emit_transcript_removed(
+pub fn emit_transcript_removed(
     state: &GatewayState,
     agent_id: &str,
     account: &opengrok_core::id::AccountId,

@@ -68,7 +68,7 @@ pub enum Caller {
     /// (which re-reads the token secret) rather than retry the call, because on this seam the
     /// header is attached per connect and a retry carries the same absence.
     Missing,
-    /// A header that did not verify — expired, wrong signature, or an account since deleted.
+    /// A header that did not verify — expired, wrong signature, or malformed.
     /// `account_identity_invalid` — a rebuild will not fix it, so the client must surface it.
     Invalid,
 }
@@ -108,13 +108,16 @@ impl Caller {
 /// Resolve who a seam-A request is for. See `Caller`.
 pub async fn caller_of(state: &GatewayState, headers: &axum::http::HeaderMap) -> Caller {
     let present = headers.get(ACCOUNT_HEADER).is_some();
-    if let Some(account_id) = account_from_header(state, headers) {
-        if let Ok((account, _)) = state.agui.auth.store.load_account(&account_id).await {
-            return Caller::Account(account.email);
-        }
-        // A token that verifies for an account we cannot load is not a caller we can serve, and
-        // falling back here would be the original bug wearing a signature.
-        return Caller::Invalid;
+    // THE EMAIL COMES FROM THE TOKEN, not from the store. An earlier shape loaded the account by
+    // `sub` and answered `Invalid` when the load failed — but `load_account` replays a log and
+    // cannot fail for a missing account (it replays to a blank one); the only way it fails is the
+    // database not answering. So that branch turned a store outage into "sign in again" for every
+    // request that carried a valid identity, on the one seam that must open through an outage
+    // (`against_events_when_the_store_is_down`). The mint signed `email` beside `sub`
+    // (`AccessClaims`) and there is no event that changes an account's email, so the token's copy
+    // is as authoritative as the row's for as long as the token lives.
+    if let Some((_, email)) = account_from_header(state, headers) {
+        return Caller::Account(email);
     }
     if present {
         // A header that did not verify is never a fallback candidate, opted in or not: it is an
@@ -134,12 +137,12 @@ pub async fn caller_of(state: &GatewayState, headers: &axum::http::HeaderMap) ->
     Caller::Missing
 }
 
-/// The account id from a valid `ACCOUNT_HEADER` token, or `None`. Accepts the raw JWT or a
-/// `Bearer <jwt>` value, so the client may reuse its Authorization-shaped token verbatim.
+/// The account id and email from a valid `ACCOUNT_HEADER` token, or `None`. Accepts the raw JWT
+/// or a `Bearer <jwt>` value, so the client may reuse its Authorization-shaped token verbatim.
 fn account_from_header(
     state: &GatewayState,
     headers: &axum::http::HeaderMap,
-) -> Option<opengrok_core::id::AccountId> {
+) -> Option<(opengrok_core::id::AccountId, String)> {
     let raw = headers
         .get(ACCOUNT_HEADER)
         .and_then(|value| value.to_str().ok())?;
@@ -149,7 +152,10 @@ fn account_from_header(
     // `jsonwebtoken` distinguishes InvalidSignature from ExpiredSignature from InvalidToken, and
     // which one it is decides whose bug it is — so log it rather than make the next person guess.
     match state.agui.auth.minter.verify_access(token) {
-        Ok(claims) => Some(opengrok_core::id::AccountId::from_stored(claims.sub)),
+        Ok(claims) => Some((
+            opengrok_core::id::AccountId::from_stored(claims.sub),
+            claims.email,
+        )),
         Err(error) => {
             tracing::warn!(
                 %error,

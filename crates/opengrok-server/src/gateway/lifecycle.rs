@@ -680,7 +680,7 @@ pub async fn mutate_entry(
         tracing::error!(%error, "could not mutate an entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, agent, &account.id, "updated", entry.clone()).await;
+    live::emit_transcript(state, agent, &account.id, "updated", entry.clone());
     (200, entry)
 }
 
@@ -715,7 +715,7 @@ pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) ->
     {
         Ok(removed) => {
             for id in &removed {
-                live::emit_transcript_removed(state, agent, &account.id, id).await;
+                live::emit_transcript_removed(state, agent, &account.id, id);
             }
             (200, json!({ "deleted": removed.len() }))
         }

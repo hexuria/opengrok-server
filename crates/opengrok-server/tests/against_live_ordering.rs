@@ -288,8 +288,7 @@ async fn concurrent_emits_on_one_agent_arrive_in_sequence_order() {
                 &account,
                 "appended",
                 serde_json::json!({ "id": format!("e{i}") }),
-            )
-            .await;
+            );
         }));
     }
     for task in tasks {

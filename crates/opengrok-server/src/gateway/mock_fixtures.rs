@@ -340,7 +340,7 @@ pub async fn drain_into(
             tracing::warn!(%error, "mock fixture could not be appended");
             continue;
         }
-        super::live::emit_transcript(state, coworker.as_str(), account, "appended", entry).await;
+        super::live::emit_transcript(state, coworker.as_str(), account, "appended", entry);
     }
 }
 

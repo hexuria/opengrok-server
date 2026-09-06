@@ -1,9 +1,12 @@
-//! A routine belongs to the person who set it, and a duplicate to the person who made it.
+//! Seam A serves the caller it can identify, and nobody when it cannot.
 //!
-//! Both used to belong to the DEPLOYMENT account: five seam-A handlers resolved
-//! `account(state, &state.email)` and never looked at the caller. That pooled every member's
-//! routines into one identity — invisible to their owners, and listable, editable and deletable
-//! by anyone signed in. Needs Postgres; skips loudly without OG_DATABASE_URL.
+//! Routines and duplicates used to belong to the DEPLOYMENT account: five seam-A handlers
+//! resolved `account(state, &state.email)` and never looked at the caller. That pooled every
+//! member's routines into one identity — invisible to their owners, and listable, editable and
+//! deletable by anyone signed in. Then the fallback itself went: a request or a stream with no
+//! usable identity is refused with a code the client branches on, `searchAgents` answers the
+//! caller's roster, and a stream sees only its own account's frames.
+//! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 

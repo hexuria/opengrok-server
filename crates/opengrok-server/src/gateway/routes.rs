@@ -288,13 +288,9 @@ async fn events(
     // account cannot be read it is because the STORE could not answer, and a store outage must not
     // present as "sign in again" — `against_events_when_the_store_is_down` exists precisely
     // because the stream has to open through an outage and seed itself when the store returns.
-    //
-    // I refused here at first, reasoning that a stream nothing can address may as well be told so.
-    // That was wrong in the one case it actually fires: the caller IS identified, the failure is
-    // transient, and refusing converts a database blip into a credential error the person is
-    // asked to fix by signing in. Opening with no audience is the narrow side — the stream
-    // receives no addressed frames, which is exactly the pre-#58 posture for a stream whose
-    // account is unknown, and it recovers on the client's next connect.
+    // Refusing here would turn a database blip into a credential error the person is asked to
+    // fix by signing in. Opening with no audience is the narrow side — the stream receives no
+    // addressed frames — and it recovers on the client's next connect.
     let seed_stamp = match &audience {
         Some(account) => super::live::current_for(&state, "roster", account),
         None => super::live::current_for(&state, "roster", &unaddressable()),

@@ -208,8 +208,7 @@ async fn announce_finished(
                 account_id,
                 "appended",
                 entry,
-            )
-            .await;
+            );
         }
         Err(error) => {
             tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");

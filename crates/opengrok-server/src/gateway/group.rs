@@ -467,7 +467,7 @@ async fn post_member_message(
         tracing::error!(%error, group = %group_id.as_str(), "group: a member's message could not be appended");
         return;
     }
-    live::emit_transcript(state, group_id.as_str(), account_id, "appended", entry).await;
+    live::emit_transcript(state, group_id.as_str(), account_id, "appended", entry);
 }
 
 /// The group as the prompts describe it.
@@ -496,7 +496,7 @@ async fn member_runner(
     member: &Member,
     gate_yes: &[String],
     review_yes: &[String],
-) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
+) -> MemberTools {
     let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = sent.clone();
     let deliver: opengrok_harness::LocalTool = Arc::new(move |call: &ToolCall| {
@@ -532,12 +532,41 @@ async fn member_runner(
     // The catalogue door fires for room members too — `MockDoor::stream` checks it before
     // `room_speaker` — so without the fixture tool here a group turn asks for `mock_fixture`
     // against a runner that does not have it, and the room fills with tool-not-found chatter
-    // instead of members speaking. Offered under a mock door only, like everywhere else.
-    let runner = match super::mock_fixtures::enabled().then(super::mock_fixtures::tool) {
-        Some((handler, _)) => runner.with_local(super::mock_fixtures::schema(), handler),
-        None => runner,
+    // instead of members speaking. Offered under a mock door only, like everywhere else. The
+    // sink comes back with the runner because the member's turn has to DRAIN it: a first cut
+    // dropped it here, so the tool reported "appended N entries" into a room where nothing ever
+    // landed — the chatter fixed, the lie kept.
+    let (runner, fixtures) = match super::mock_fixtures::enabled().then(super::mock_fixtures::tool)
+    {
+        Some((handler, sink)) => (
+            runner.with_local(super::mock_fixtures::schema(), handler),
+            Some(sink),
+        ),
+        None => (runner, None),
     };
-    (runner, sent)
+    MemberTools {
+        runner,
+        sent,
+        fixtures,
+    }
+}
+
+/// A member's runner and the two sinks its local tools record into.
+struct MemberTools {
+    runner: ToolRunner,
+    /// What `SendMessage` delivered, in order.
+    sent: Arc<Mutex<Vec<String>>>,
+    /// What `mock_fixture` recorded — present only under a mock door. Drained into the ROOM's
+    /// transcript once the turn is done, the way `conversation.rs` drains a coworker's own.
+    fixtures: Option<Arc<Mutex<Vec<Value>>>>,
+}
+
+impl MemberTools {
+    async fn drain_fixtures(&self, state: &GatewayState, room: &CoworkerId, account: &AccountId) {
+        if let Some(sink) = &self.fixtures {
+            super::mock_fixtures::drain_into(state, room, account, sink, now_ms()).await;
+        }
+    }
 }
 
 /// What the room hears of a member's turn: its messages minus passes, capped.
@@ -562,7 +591,7 @@ async fn run_member_turn(
     history: &[GroupMessage],
 ) -> MemberOutcome {
     let group_id = room.id;
-    let (runner, sent) = member_runner(state, account_id, member, &[], &[]).await;
+    let tools = member_runner(state, account_id, member, &[], &[]).await;
     let new_messages = messages_since_last_spoke(history, &member.id);
     // Composed once: what this member is told, and what the run captures for its resume.
     let system = crate::persona::with_standing_role(
@@ -596,7 +625,7 @@ async fn run_member_turn(
     };
     let events = run_conversation(
         state.agui.door.as_ref(),
-        Some(&runner),
+        Some(&tools.runner),
         &journal,
         request,
         &thread_id,
@@ -610,10 +639,11 @@ async fn run_member_turn(
     {
         tracing::warn!(member = %member.id.as_str(), group = %group_id.as_str(), "group: a member's turn failed; it said nothing");
     }
+    tools.drain_fixtures(state, group_id, account_id).await;
     if let Some(suspension) = super::conversation::find_suspension(&events) {
         return MemberOutcome::Suspended { run_id, suspension };
     }
-    MemberOutcome::Spoke(spoken(&sent))
+    MemberOutcome::Spoke(spoken(&tools.sent))
 }
 
 /// Where a round stood when a member's run suspended: persisted with the pause so the answer
@@ -659,7 +689,7 @@ async fn pause_room(
     {
         tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
     }
-    live::emit_transcript(state, room.id.as_str(), account_id, "appended", card).await;
+    live::emit_transcript(state, room.id.as_str(), account_id, "appended", card);
     if let Err(error) = state
         .agui
         .auth
@@ -913,7 +943,7 @@ pub async fn resume_member_turn(
         }
         _ => (std::slice::from_ref(&pending.call_id), &[]),
     };
-    let (runner, sent) = member_runner(&state, &account_id, &member, gate_yes, review_yes).await;
+    let tools = member_runner(&state, &account_id, &member, gate_yes, review_yes).await;
     // The room prompt this member's turn opened with, restored rather than recomposed.
     let system = run.system_for_resume().unwrap_or_else(|| {
         crate::persona::with_standing_role(
@@ -948,7 +978,7 @@ pub async fn resume_member_turn(
     };
     let events = resume_conversation(
         state.agui.door.as_ref(),
-        &runner,
+        &tools.runner,
         &journal,
         request,
         RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
@@ -974,7 +1004,8 @@ pub async fn resume_member_turn(
             this_round: 0,
             remaining: Vec::new(),
         });
-    for content in spoken(&sent) {
+    tools.drain_fixtures(&state, &group_id, &account_id).await;
+    for content in spoken(&tools.sent) {
         post_member_message(&state, &group_id, &account_id, &member, &content).await;
         history.push(GroupMessage {
             speaker: Speaker::Member {
