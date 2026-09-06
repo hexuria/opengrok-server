@@ -274,6 +274,16 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
             }
         }
         let active = active.clone();
+        // WHO THIS ROW WENT TO, AND WHAT IT SAID. The working dot is drawn from `isRunning` on
+        // this frame, so "the dot never appeared" has three possible causes — the row was wrong,
+        // the audience was wrong, or the client did not apply it — and from a log that named none
+        // of them all three look identical. This line separates the first two from the third.
+        tracing::debug!(
+            coworker = %coworker_id,
+            account = %account.as_str(),
+            is_running = %row["isRunning"],
+            "roster: agent-upserted"
+        );
         emit_ordered_to(
             state,
             "agent-upserted",
