@@ -134,17 +134,6 @@ pub async fn caller_of(state: &GatewayState, headers: &axum::http::HeaderMap) ->
     Caller::Missing
 }
 
-/// The email of the account this request is FOR, or `state.email` under the opted-in fallback.
-///
-/// Kept for the surfaces that resolve an identity outside the seam-A dispatch and have no way to
-/// refuse. Prefer `caller_of` wherever a refusal can actually be returned.
-pub async fn caller_email(state: &GatewayState, headers: &axum::http::HeaderMap) -> String {
-    match caller_of(state, headers).await {
-        Caller::Account(email) | Caller::Fallback(email) => email,
-        Caller::Missing | Caller::Invalid => state.email.clone(),
-    }
-}
-
 /// The account id from a valid `ACCOUNT_HEADER` token, or `None`. Accepts the raw JWT or a
 /// `Bearer <jwt>` value, so the client may reuse its Authorization-shaped token verbatim.
 fn account_from_header(

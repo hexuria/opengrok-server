@@ -219,9 +219,8 @@ async fn record_error(
     }
 }
 
-/// Render a provisioning error as the client contract `{code, message}`, or null when there is
-/// none. The same shape on every surface: create responses, listOpenGrokComputers, and agent rows.
-/// A provisioning error as the client contract `{code, message, updatedAtMs}`, or null.
+/// A provisioning error as the client contract `{code, message, updatedAtMs}`, or null. The same
+/// shape on every surface: create responses, listOpenGrokComputers, and agent rows.
 ///
 /// THE STAMP IS PART OF THE ANSWER. On 5 Sep 2026 a `quota_exceeded` recorded at 13:44 was shown
 /// as the live state of a box at 20:11, and nothing in the payload could tell the two apart —

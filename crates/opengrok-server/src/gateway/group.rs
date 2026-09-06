@@ -467,7 +467,7 @@ async fn post_member_message(
         tracing::error!(%error, group = %group_id.as_str(), "group: a member's message could not be appended");
         return;
     }
-    live::emit_transcript(state, group_id.as_str(), "appended", entry).await;
+    live::emit_transcript(state, group_id.as_str(), account_id, "appended", entry).await;
 }
 
 /// The group as the prompts describe it.
@@ -529,6 +529,14 @@ async fn member_runner(
     .await
     .unwrap_or_else(ToolRunner::local_only)
     .with_local(send_message_schema(), deliver);
+    // The catalogue door fires for room members too — `MockDoor::stream` checks it before
+    // `room_speaker` — so without the fixture tool here a group turn asks for `mock_fixture`
+    // against a runner that does not have it, and the room fills with tool-not-found chatter
+    // instead of members speaking. Offered under a mock door only, like everywhere else.
+    let runner = match super::mock_fixtures::enabled().then(super::mock_fixtures::tool) {
+        Some((handler, _)) => runner.with_local(super::mock_fixtures::schema(), handler),
+        None => runner,
+    };
     (runner, sent)
 }
 
@@ -651,7 +659,7 @@ async fn pause_room(
     {
         tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
     }
-    live::emit_transcript(state, room.id.as_str(), "appended", card).await;
+    live::emit_transcript(state, room.id.as_str(), account_id, "appended", card).await;
     if let Err(error) = state
         .agui
         .auth

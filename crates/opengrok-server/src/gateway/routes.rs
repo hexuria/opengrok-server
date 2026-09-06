@@ -327,7 +327,9 @@ async fn events(
             // The retry is the same frame, so it takes the same caller — a late snapshot that
             // fell back to the deployment account would reintroduce the bug on the slow path.
             let retry_caller = caller.clone();
-            let retry_seed = seed_stamp.clone();
+            // The account this stream is for, or the unaddressable placeholder — the same choice
+            // the opener made, so the retry stamps from the same counter the live frames use.
+            let retry_audience = audience.clone().unwrap_or_else(unaddressable);
             let id = guard.id.clone();
             tokio::spawn(async move {
                 let mut wait_secs = 1u64;
@@ -341,7 +343,17 @@ async fn events(
                             let payload = json!({
                                 "activeAgentId": retry_state.active_agent.lock().ok().and_then(|a| a.clone()),
                                 "agents": rows,
-                                "ordered": retry_seed.clone(),
+                                // STAMPED AT SEND, not at open. Freezing the opener's stamp here
+                                // meant that if a roster emit for this account landed while the
+                                // retry was still backing off, the late snapshot arrived stamped
+                                // BEHIND the live frame — and the replica discards a snapshot
+                                // older than what it holds, which is exactly the seeding this
+                                // path exists to guarantee.
+                                "ordered": super::live::current_for(
+                                    &retry_state,
+                                    "roster",
+                                    &retry_audience,
+                                ),
                                 "coverage": { "kind": "complete-roster" },
                             });
                             tracing::info!(
@@ -939,11 +951,14 @@ async fn command(
                         .and_then(Value::as_u64)
                         .unwrap_or(0)
                         .min(total as u64) as usize;
-                    let length = args
-                        .get("length")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0)
-                        .min((total - offset) as u64) as usize;
+                    // ABSENT AND ZERO ARE DIFFERENT. `length: 0` is the desktop's probe for
+                    // `totalSize` and must return no bytes; an OMITTED length means "the rest",
+                    // and defaulting it to zero answered a correct size with an empty body — an
+                    // empty success, which this file's own header calls the dangerous reply.
+                    let length = match args.get("length").and_then(Value::as_u64) {
+                        Some(asked) => asked.min((total - offset) as u64) as usize,
+                        None => total - offset,
+                    };
                     let slice = &bytes[offset..offset + length];
                     reply(
                         StatusCode::OK,

@@ -540,7 +540,6 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value, caller: &str) -
     .await
 }
 
-/// `searchAgents {query}` — the roster, filtered by name. Honest and small.
 /// `searchAgents {query}` — the command palette's search, over the CALLER's roster.
 ///
 /// It used to search `roster_rows(state)`, the deployment-wide read (`OG_GATEWAY_EMAIL`), and took
@@ -681,7 +680,7 @@ pub async fn mutate_entry(
         tracing::error!(%error, "could not mutate an entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, agent, "updated", entry.clone()).await;
+    live::emit_transcript(state, agent, &account.id, "updated", entry.clone()).await;
     (200, entry)
 }
 
@@ -716,7 +715,7 @@ pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) ->
     {
         Ok(removed) => {
             for id in &removed {
-                live::emit_transcript_removed(state, agent, id).await;
+                live::emit_transcript_removed(state, agent, &account.id, id).await;
             }
             (200, json!({ "deleted": removed.len() }))
         }

@@ -340,7 +340,7 @@ pub async fn drain_into(
             tracing::warn!(%error, "mock fixture could not be appended");
             continue;
         }
-        super::live::emit_transcript(state, coworker.as_str(), "appended", entry).await;
+        super::live::emit_transcript(state, coworker.as_str(), account, "appended", entry).await;
     }
 }
 
@@ -378,8 +378,7 @@ pub fn read_fixture(path: &str) -> Result<Vec<u8>, String> {
 /// `unsafe_code` is forbidden workspace-wide, and a security check that cannot be exercised
 /// because of a test-harness detail is one that silently stops being exercised.
 fn read_contained(path: &str) -> Result<Vec<u8>, String> {
-    let root = std::fs::canonicalize(FIXTURE_DIR)
-        .map_err(|_| "the fixture directory does not exist yet".to_string())?;
+    let root = fixture_root()?;
     // ONE refusal string for both "not there" and "not yours to read", byte for byte. The first
     // version of this appended the OS error to the absent case — so `/etc/passwd` (exists, outside
     // the root) and `/tmp/opengrok-mock-fixtures/nope` (inside, absent) answered differently, and
@@ -460,8 +459,16 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
         "cards",
         "the retired read-only leaf (title only, NOT interactive)",
     ),
-    ("image", "media", "attachment card, remote .jpg"),
-    ("video", "media", "attachment card, remote .webm"),
+    (
+        "image",
+        "media",
+        "attachment card, local .png — media must be a path, not a URL",
+    ),
+    (
+        "video",
+        "media",
+        "attachment card, local .mp4 — media must be a path, not a URL",
+    ),
     (
         "box",
         "media",
@@ -489,7 +496,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     (
         "pdf",
         "files",
-        "user-attachment, .pdf — two real pages, proves the 1 / 2 indicator",
+        "user-attachment, .pdf — three real pages, proves the page indicator",
     ),
     (
         "csv",
@@ -561,9 +568,11 @@ pub fn help_text() -> String {
     }
     out.push_str(
         "\nTwo traps worth knowing: a `.zip`/`.md`/`.rs`/`.js` URL on an attachment CARD renders \
-         as a bare link, so those fixtures use user-attachment entries instead; and `data:` URLs \
-         never render as media, so the image and video fixtures point at remote URLs your host \
-         must be able to fetch.\n",
+         as a bare link, so those fixtures use user-attachment entries instead; and media on an \
+         attachment card must be a LOCAL PATH — a `data:` URL never classifies as media, and a \
+         remote one resolves to null before anything is fetched, so `image` and `video` point at \
+         files on disk. The one exception is a text card's `images[]`, which is rendered as a \
+         plain <img> and does take remote https.\n",
     );
     out
 }
@@ -588,10 +597,58 @@ fn card(name: &str, message: Value) -> Value {
 
 /// Write a fixture file and hand back its path. `user-attachment` projections feed `file_path`
 /// into the host's read/download bridge, so the file has to be there.
+/// The fixture root, canonicalised, and REFUSED IF IT IS A SYMLINK.
+///
+/// `FIXTURE_DIR` is a fixed path in world-writable `/tmp`, so any local user can pre-create it as
+/// a link to `/` before the server first touches it. Canonicalising the root then makes every
+/// path "contained" and turns `readAttachmentChunk` into an arbitrary-file read over seam A —
+/// including the `.env` this module's own comment names as the interesting target. Checking the
+/// path the caller sent is not enough when the ROOT is attacker-controlled.
+///
+/// `symlink_metadata` does not follow the final component, so this sees the link itself. The
+/// directory is created with `0o700` so a later swap needs the server user rather than any user.
+fn fixture_root() -> Result<std::path::PathBuf, String> {
+    let raw = std::path::Path::new(FIXTURE_DIR);
+    if let Ok(meta) = std::fs::symlink_metadata(raw)
+        && meta.file_type().is_symlink()
+    {
+        tracing::error!(
+            dir = FIXTURE_DIR,
+            "the fixture directory is a symlink; refusing to serve"
+        );
+        return Err(NO_SUCH.to_string());
+    }
+    std::fs::canonicalize(raw).map_err(|_| "the fixture directory does not exist yet".to_string())
+}
+
+/// Create the fixture directory owned by this user and readable by nobody else, then write.
+///
+/// `create_dir_all` alone inherits the umask and would happily adopt a directory somebody else
+/// planted; `fs::write` follows a symlink at `path`, so a pre-planted link would have this
+/// overwrite an arbitrary file as the server user. Mode `0o700` at creation and a symlink check
+/// on the root close both. Best effort by design: a fixture that cannot be written is a fixture
+/// that draws nothing, not a server that fails to start.
 fn fixture_file(name: &str, body: &[u8]) -> String {
     let path = format!("{FIXTURE_DIR}/{name}");
-    if let Err(error) = std::fs::create_dir_all(FIXTURE_DIR) {
+    #[cfg(unix)]
+    let made = {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(FIXTURE_DIR)
+    };
+    #[cfg(not(unix))]
+    let made = std::fs::create_dir_all(FIXTURE_DIR);
+    if let Err(error) = made {
         tracing::warn!(%error, "could not create the mock fixture directory");
+    }
+    if fixture_root().is_err() {
+        tracing::error!(
+            dir = FIXTURE_DIR,
+            "refusing to write into a symlinked fixture directory"
+        );
+        return path;
     }
     if let Err(error) = std::fs::write(&path, body) {
         tracing::warn!(%error, path, "could not write a mock fixture file");

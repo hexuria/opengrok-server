@@ -280,10 +280,12 @@ async fn concurrent_emits_on_one_agent_arrive_in_sequence_order() {
     for i in 0..50 {
         let gateway = gateway.clone();
         let racer_id = racer_id.clone();
+        let account = account.clone();
         tasks.push(tokio::spawn(async move {
             live::emit_transcript(
                 &gateway,
                 &racer_id,
+                &account,
                 "appended",
                 serde_json::json!({ "id": format!("e{i}") }),
             )

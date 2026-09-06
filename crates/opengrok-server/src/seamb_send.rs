@@ -158,7 +158,7 @@ pub async fn send(
             "transcript unavailable",
         );
     }
-    live::emit_transcript(state, agent, "appended", user_entry).await;
+    live::emit_transcript(state, agent, account_id, "appended", user_entry).await;
 
     let answer_id = entry_id();
     let placeholder = json!({
@@ -185,7 +185,7 @@ pub async fn send(
             );
         }
     };
-    live::emit_transcript(state, agent, "appended", placeholder).await;
+    live::emit_transcript(state, agent, account_id, "appended", placeholder).await;
     live::set_running(state, agent, true, json!({})).await;
 
     let history = conversation::history_for(state, &coworker_id, account_id).await;

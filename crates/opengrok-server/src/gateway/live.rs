@@ -100,6 +100,11 @@ pub fn emit_ordered_to(
 /// Every account that can currently SEE this coworker: its owner, plus the owner's org-mates when
 /// it is shared org-wide.
 ///
+/// FOR ROSTER FRAMES ONLY. A roster row is a fact about the coworker, so everyone who can see it
+/// wants the update. A TRANSCRIPT is not — it is stored per `(coworker, account)`, so a shared
+/// coworker has one per person and this audience would deliver somebody else's conversation. That
+/// is why `emit_transcript` takes an account instead of calling this.
+///
 /// The roster widened to include org-mates' shared coworkers (`roster_for`), so a change to a
 /// shared coworker has to reach more than its owner or a colleague's sidebar goes quietly stale.
 /// Ownership alone would be a safe under-delivery and a wrong one.
@@ -326,51 +331,67 @@ fn send(
 }
 
 /// A transcript frame for one agent — `appended` or `updated`, stamped on that agent's replica.
-/// ADDRESSED, and this one carried CONTENT. Before #58 every transcript frame — the entry itself,
-/// message text included — went to every open `/events` stream, filtered only by channel name.
-/// The roster leak next door disclosed names; this one disclosed what people said. Nothing stopped
-/// it but the client declining to render an agent it did not recognise, which is obscurity rather
-/// than a check, and stopped being even that once a coworker could be shared.
-pub async fn emit_transcript(state: &GatewayState, agent_id: &str, kind: &str, entry: Value) {
-    let coworker = opengrok_core::id::CoworkerId::from_stored(agent_id.to_string());
-    for account in audience_for(state, &coworker).await {
-        let entry = entry.clone();
-        emit_ordered_to(
-            state,
-            "transcript",
-            &format!("transcript:{agent_id}"),
-            &account,
-            move |ordered| {
-                json!({
-                    "type": kind,
-                    "entry": entry,
-                    "agentId": agent_id,
-                    "ordered": ordered,
-                })
-            },
-        );
-    }
+/// ADDRESSED TO THE ENTRY'S OWN ACCOUNT, and this one carries CONTENT.
+///
+/// Before #58 every transcript frame — the entry itself, message text included — went to every
+/// open `/events` stream, filtered only by channel name. The roster leak next door disclosed
+/// names; this one disclosed what people said.
+///
+/// The first fix addressed `audience_for`, which is everyone who can SEE the coworker: the owner
+/// plus org-mates when it is shared. That was still wrong, because a transcript is not stored per
+/// coworker — `append_gateway_entry` keys on `(coworker, account)`, so a shared coworker has one
+/// transcript PER PERSON talking to it. Addressing the viewers of the coworker pushed Bob's
+/// message and its answer into Alice's and Carol's open transcript for the same coworker: content
+/// they cannot read back, and frames for entries that vanish on their next reload.
+///
+/// So the account is passed in rather than derived. Every caller has it already — it is the same
+/// account it just appended or updated with — and taking it as an argument makes the frame and
+/// the row that backs it impossible to disagree.
+pub async fn emit_transcript(
+    state: &GatewayState,
+    agent_id: &str,
+    account: &opengrok_core::id::AccountId,
+    kind: &str,
+    entry: Value,
+) {
+    emit_ordered_to(
+        state,
+        "transcript",
+        &format!("transcript:{agent_id}"),
+        account,
+        move |ordered| {
+            json!({
+                "type": kind,
+                "entry": entry,
+                "agentId": agent_id,
+                "ordered": ordered,
+            })
+        },
+    );
 }
 
 /// A transcript `removed` frame for one entry id, stamped on that agent's replica.
-pub async fn emit_transcript_removed(state: &GatewayState, agent_id: &str, entry_id: &str) {
-    let coworker = opengrok_core::id::CoworkerId::from_stored(agent_id.to_string());
-    for account in audience_for(state, &coworker).await {
-        emit_ordered_to(
-            state,
-            "transcript",
-            &format!("transcript:{agent_id}"),
-            &account,
-            move |ordered| {
-                json!({
-                    "type": "removed",
-                    "id": entry_id,
-                    "agentId": agent_id,
-                    "ordered": ordered,
-                })
-            },
-        );
-    }
+/// The same, for a deletion. Same reasoning: the row was deleted from ONE person's transcript.
+pub async fn emit_transcript_removed(
+    state: &GatewayState,
+    agent_id: &str,
+    account: &opengrok_core::id::AccountId,
+    entry_id: &str,
+) {
+    emit_ordered_to(
+        state,
+        "transcript",
+        &format!("transcript:{agent_id}"),
+        account,
+        move |ordered| {
+            json!({
+                "type": "removed",
+                "id": entry_id,
+                "agentId": agent_id,
+                "ordered": ordered,
+            })
+        },
+    );
 }
 
 /// The live roster rows for the gateway's default account (`state.email`). Used by the SSE emitters,

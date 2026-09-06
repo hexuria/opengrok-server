@@ -257,7 +257,14 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         tracing::error!(%error, "could not append the user's message");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, "appended", user_entry.clone()).await;
+    live::emit_transcript(
+        state,
+        &agent_id,
+        &account.id,
+        "appended",
+        user_entry.clone(),
+    )
+    .await;
 
     // A group answers as a ROOM: its members take turns (`group.rs`), each posting under its
     // own name, so there is no single answer bubble to grow into.
@@ -300,7 +307,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
             return (500, json!({ "error": "transcript unavailable" }));
         }
     };
-    live::emit_transcript(state, &agent_id, "appended", placeholder).await;
+    live::emit_transcript(state, &agent_id, &account.id, "appended", placeholder).await;
 
     live::set_running(state, &agent_id, true, json!({})).await;
 
@@ -954,7 +961,7 @@ async fn emit_suspension(
     {
         tracing::error!(%error, "could not append the suspension card entry");
     }
-    live::emit_transcript(state, agent_id, "appended", card).await;
+    live::emit_transcript(state, agent_id, account, "appended", card).await;
     // The turn is paused, not running. It resumes when the card is answered.
     live::set_running(state, agent_id, false, json!({})).await;
     true
@@ -1052,6 +1059,12 @@ pub(crate) async fn run_turn(
     // appends whatever it finds there once the rounds are done, so the entries arrive through the
     // ordinary append path rather than through a private one the door would otherwise need.
     let fixtures = super::mock_fixtures::enabled().then(super::mock_fixtures::tool);
+    // WHETHER THIS COWORKER REALLY HAS A COMPUTER, decided before the fixture tool is folded in.
+    // `tools.is_some()` used to answer it, and the fixture arm below hands a boxless coworker a
+    // `local_only()` runner — so under a mock door the prompt began claiming a machine that does
+    // not exist. That is the exact failure the prompt's own comment warns about: a system prompt
+    // contradicting the tool list silently disables the tool.
+    let has_computer = tools.is_some();
     let tools = match (&fixtures, tools) {
         (Some((handler, _)), Some(runner)) => {
             Some(runner.with_local(super::mock_fixtures::schema(), handler.clone()))
@@ -1103,7 +1116,7 @@ pub(crate) async fn run_turn(
         &name,
         &persona,
         Some(&computer_system_prompt(
-            tools.is_some(),
+            has_computer,
             reaches_user_machine,
             user_machine_label.as_deref(),
         )),
@@ -1177,7 +1190,7 @@ pub(crate) async fn run_turn(
             .store
             .update_gateway_entry(&coworker_id, &account_id, answer_seq, &answer_entry)
             .await;
-        live::emit_transcript(&state, &agent_id, "updated", answer_entry).await;
+        live::emit_transcript(&state, &agent_id, &account_id, "updated", answer_entry).await;
         if emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await {
             finished.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
@@ -1205,7 +1218,7 @@ pub(crate) async fn run_turn(
     {
         tracing::error!(%error, "could not finalise the answer entry");
     }
-    live::emit_transcript(&state, &agent_id, "updated", final_entry).await;
+    live::emit_transcript(&state, &agent_id, &account_id, "updated", final_entry).await;
 
     let preview: String = text.chars().take(120).collect();
     live::set_running(
@@ -1484,7 +1497,7 @@ pub async fn resolve_local_tool_permission(
                 .set_gateway_ask_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
-            live::emit_transcript(state, &agent_id, "updated", card).await;
+            live::emit_transcript(state, &agent_id, &account_id, "updated", card).await;
         }
         return (
             410,
@@ -1623,7 +1636,7 @@ pub async fn resolve_local_tool_permission(
         .store
         .update_gateway_entry_by_id(&coworker_id, &account_id, &entry_id, &card)
         .await;
-    live::emit_transcript(state, &agent_id, "updated", card).await;
+    live::emit_transcript(state, &agent_id, &account_id, "updated", card).await;
 
     // Carry the turn on in the background EITHER WAY: on approval the resumed run dispatches the
     // command and the model's own summary lands in the transcript; on refusal the model is told
@@ -1740,7 +1753,7 @@ pub async fn resolve_auto_review_approval(
                 .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
-            live::emit_transcript(state, &agent_id, "updated", card).await;
+            live::emit_transcript(state, &agent_id, &account_id, "updated", card).await;
         }
         return (
             410,
@@ -1807,7 +1820,7 @@ pub async fn resolve_auto_review_approval(
             .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, status)
             .await
     {
-        live::emit_transcript(state, &agent_id, "updated", card).await;
+        live::emit_transcript(state, &agent_id, &account_id, "updated", card).await;
     }
 
     // An MCP-synthesized run is not a conversation. Resuming it would execute the tool on this
@@ -2075,7 +2088,7 @@ async fn resume_gateway_run(
             .append_gateway_entry(&coworker_id, &account_id, &answer, now_ms())
             .await
         {
-            live::emit_transcript(&state, &agent_id, "appended", answer).await;
+            live::emit_transcript(&state, &agent_id, &account_id, "appended", answer).await;
         }
     }
     // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its
