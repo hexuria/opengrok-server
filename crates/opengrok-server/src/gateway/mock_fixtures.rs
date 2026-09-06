@@ -433,7 +433,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("pdf", "files", "user-attachment, .pdf — two real pages, proves the 1 / 2 indicator"),
     ("csv", "files", "user-attachment, .csv — the spreadsheet reader"),
     ("json", "files", "user-attachment, .json — the JSON reader"),
-    ("docx", "files", "user-attachment, .docx — H1/H2, bold-italic, bullets, 3-col table, hyperlink"),
+    ("docx", "files", "user-attachment, .docx — every run style mammoth maps; colour and alignment cannot survive"),
     ("html", "files", "user-attachment, .html — MUST render as text, never execute"),
     ("txt", "files", "user-attachment, .txt with tabs"),
     ("yaml", "files", "user-attachment, .yaml"),
@@ -842,6 +842,23 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         "pdf" => vec![user_attachment("pdf", "mock-report.pdf", PDF_BYTES)],
         "csv" => vec![user_attachment("csv", "mock-table.csv", CSV_BYTES)],
         "json" => vec![user_attachment("json", "mock-data.json", JSON_BYTES)],
+        // WHAT THIS FIXTURE CANNOT PROVE, so nobody chases it. Walked run-by-run against mammoth
+        // 1.12.2 on 6 Sep 2026: headings h1-h6, bold, italic, strike, superscript, subscript,
+        // underline, highlight (as <mark>), monospace, nested bullets and numbers, the table, the
+        // hyperlink's real href, the hard break and the Quote blockquote all survive.
+        //
+        // RUN COLOUR AND PARAGRAPH ALIGNMENT DO NOT, AND CANNOT. mammoth strips presentational
+        // formatting by design and offers no style-map target for either, so the red run and the
+        // centred/right paragraphs are in the file and will never reach the reader — on our build
+        // or on the official one, which uses the same library. The page break likewise has no HTML
+        // counterpart and correctly reads as a paragraph boundary. They stay in the fixture because
+        // a document that omitted them would quietly imply the reader had been asked; it has, and
+        // the answer is no.
+        //
+        // Three of the survivors needed a client-side style map (`u => u`, `highlight => mark`,
+        // `p[style-name='Quote'] => blockquote:fresh`) — mammoth's default map drops underline and
+        // highlight and does not know Quote. That the fixture forced those three to be added is
+        // the whole argument for a complete document over a representative one.
         "docx" => vec![user_attachment("docx", "mock-doc.docx", DOCX_BYTES)],
 
         "notice" => vec![json!({
