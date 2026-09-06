@@ -264,6 +264,15 @@ def write_pptx(path, png):
             ("rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"),
             ("rId2", "image", "../media/image1.png"),
         ]),
+        # THE NOTES LINK IS ONE-DIRECTIONAL, AND DELIBERATELY SO. The notes slide points back at
+        # slide3, but slide3.xml.rels does NOT point forward at the notes slide. PowerPoint writes
+        # both directions, so this is not what a real deck looks like — and that is the point: a
+        # reader that only walks slide -> notes finds nothing here and silently drops the speaker
+        # notes, which is exactly the bug worth catching. Confirmed by the client session on
+        # 6 Sep 2026, which found the notes only after falling back to scanning notesSlides rels,
+        # then asked for the fixture to stay as it is now that its reader handles both directions.
+        # Do not "fix" this into a bidirectional link; it would remove the only case that tests
+        # the fallback.
         "ppt/notesSlides/notesSlide1.xml": notes,
         "ppt/notesSlides/_rels/notesSlide1.xml.rels": rels([
             ("rId1", "notesMaster", "../notesMasters/notesMaster1.xml"),
