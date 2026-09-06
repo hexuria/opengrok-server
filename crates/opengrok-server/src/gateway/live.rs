@@ -274,6 +274,16 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
             }
         }
         let active = active.clone();
+        // WHO THIS ROW WENT TO, AND WHAT IT SAID. The working dot is drawn from `isRunning` on
+        // this frame, so "the dot never appeared" has three possible causes — the row was wrong,
+        // the audience was wrong, or the client did not apply it — and from a log that named none
+        // of them all three look identical. This line separates the first two from the third.
+        tracing::debug!(
+            coworker = %coworker_id,
+            account = %account.as_str(),
+            is_running = %row["isRunning"],
+            "roster: agent-upserted"
+        );
         emit_ordered_to(
             state,
             "agent-upserted",
@@ -449,6 +459,34 @@ pub async fn roster_rows_for(
             "id": owner.id.as_str(),
             "name": format!("{} {}", owner.first_name, owner.last_name).trim(),
         });
+        // UNREAD, PER READER. These four were hard-coded `false`/`0`/`updatedAt` since the roster
+        // existed, which the renderer reads as "seen everything, always" — so its "New" separator,
+        // anchored at `lastViewedAt` whenever `lastActivityAt` is greater, could never appear and
+        // no row could ever carry a badge.
+        //
+        // Read per pair, inside the per-viewer loop, because that is what unread IS: two people
+        // sharing one coworker are in different places in it, and a single answer would be wrong
+        // for at least one of them.
+        //
+        // A read failure leaves the row's defaults rather than failing the roster: a badge that is
+        // missing is a smaller wrong than a sidebar that will not paint.
+        if let Ok(unread) = state
+            .agui
+            .auth
+            .store
+            .unread_state(&view.id, &account.id)
+            .await
+        {
+            // NEVER VIEWED STAYS NEVER. The renderer treats a non-positive `lastViewedAt` as
+            // never, so `0` says exactly that; inventing `now` here would silence a first unread
+            // and inventing the row's `updatedAt` is what the old hard-coded value did.
+            row["lastViewedAt"] = json!(unread.last_viewed_ms.unwrap_or(0));
+            if let Some(activity) = unread.last_activity_ms {
+                row["lastActivityAt"] = json!(activity);
+            }
+            row["unreadCount"] = json!(unread.unread);
+            row["hasUnread"] = json!(unread.unread > 0);
+        }
         rows.push(row);
     }
     Ok(rows)

@@ -11,6 +11,7 @@
 //! through the projection. A bug this hides is therefore a bug in the door, not in anything
 //! downstream of it.
 
+use futures::StreamExt as _;
 use futures::stream;
 
 use crate::model::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
@@ -51,9 +52,47 @@ pub struct MockDoor {
     /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
     /// round continue after the answer. The others behave as `room_speaker`.
     room_tool_asker: Option<String>,
+    /// Wait this long before EACH delta, so a mock turn takes observable time.
+    ///
+    /// WITHOUT THIS THE MOCK DOOR CANNOT SHOW A RUNNING STATE AT ALL. Every path here ends in
+    /// `stream::iter`, which is synchronous: the whole answer is already in memory, so a turn
+    /// begins and ends inside the same millisecond and `isRunning` flips true then false with no
+    /// roster frame in between. The client's green "working" dot is therefore never drawn, and
+    /// neither is anything else that needs a turn to still be in flight when a frame is read —
+    /// which includes watching an answer arrive progressively.
+    ///
+    /// `None` by default, and every test relies on that: pacing the suite would add real seconds
+    /// to hundreds of turns for no assertion's benefit. It is opt-in for a dev server, where the
+    /// point is to LOOK like a model is typing. Per delta rather than per turn because
+    /// `echo_script` already emits one delta per word, so the same knob buys word-by-word
+    /// arrival for free.
+    per_delta_delay: Option<std::time::Duration>,
 }
 
 impl MockDoor {
+    /// Pace every delta by `ms`, so a mock turn is observably in flight. See `per_delta_delay`.
+    ///
+    /// `0` disables it rather than sleeping zero, so a deployment can turn the pacing off by
+    /// setting the variable to `0` instead of having to unset it — an unset and an explicit
+    /// "off" should not behave differently.
+    #[must_use]
+    pub fn paced_by_ms(mut self, ms: u64) -> Self {
+        self.per_delta_delay = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        self
+    }
+
+    /// The script as a stream, paced if this door is paced. Every path in `stream` ends here, so
+    /// a new answer shape cannot forget to be paced.
+    fn emit(&self, script: Vec<ModelDelta>) -> DeltaStream {
+        let Some(delay) = self.per_delta_delay else {
+            return Box::pin(stream::iter(script.into_iter().map(Ok)));
+        };
+        Box::pin(stream::iter(script).then(move |delta| async move {
+            tokio::time::sleep(delay).await;
+            Ok(delta)
+        }))
+    }
+
     /// Answer judge requests with this word ("allow" | "block" | "ask"); anything else parses to
     /// `Unavailable`, which is also a rung worth reaching.
     #[must_use]
@@ -71,13 +110,7 @@ impl MockDoor {
     pub fn with_script(script: Vec<ModelDelta>) -> Self {
         Self {
             script,
-            fail_with: None,
-            once_then_answer: false,
-            judge_verdict: None,
-            room_speaker: false,
-            room_tool_asker: None,
-            echo_system: false,
-            catalogue: false,
+            ..Self::default()
         }
     }
 
@@ -159,14 +192,9 @@ impl MockDoor {
     pub fn asking_for_a_tool() -> Self {
         Self {
             script: Self::shell_script(),
-            fail_with: None,
             // Asks once, then answers — like a turn that actually ends.
             once_then_answer: true,
-            judge_verdict: None,
-            room_speaker: false,
-            room_tool_asker: None,
-            echo_system: false,
-            catalogue: false,
+            ..Self::default()
         }
     }
 
@@ -203,14 +231,8 @@ impl MockDoor {
 
     pub fn failing_with(message: impl Into<String>) -> Self {
         Self {
-            script: Vec::new(),
             fail_with: Some(message.into()),
-            once_then_answer: false,
-            judge_verdict: None,
-            room_speaker: false,
-            room_tool_asker: None,
-            echo_system: false,
-            catalogue: false,
+            ..Self::default()
         }
     }
 
@@ -252,9 +274,7 @@ impl ModelDoor for MockDoor {
                 .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER))
         {
             let word = word.clone();
-            return Ok(Box::pin(stream::once(
-                async move { Ok(ModelDelta::Text(word)) },
-            )));
+            return Ok(self.emit(vec![ModelDelta::Text(word)]));
         }
         // Has this conversation already seen its tool result? The harness appends one as a user
         // message, so the conversation itself is the state.
@@ -265,9 +285,7 @@ impl ModelDoor for MockDoor {
 
         if self.echo_system {
             let said = request.system.clone().unwrap_or_default();
-            return Ok(Box::pin(stream::once(
-                async move { Ok(ModelDelta::Text(said)) },
-            )));
+            return Ok(self.emit(vec![ModelDelta::Text(said)]));
         }
 
         // The catalogue door: ask the fixture tool for whatever the person typed, then speak its
@@ -278,7 +296,17 @@ impl ModelDoor for MockDoor {
             let script = match Self::result_of(&request, CALL) {
                 // The tool has answered; say it back as an ordinary bubble so `help` reads as
                 // chat rather than as a tool card.
-                Some(answer) => vec![ModelDelta::Text(answer)],
+                //
+                // WORD BY WORD, like `echo_script`. One delta carrying the whole fixture makes the
+                // pacing knob almost useless here: a single pause before the text is shorter than
+                // a roster round-trip plus a paint, so the running state never becomes visible and
+                // neither does the answer arriving. Splitting changes nothing a reader can see —
+                // the deltas are concatenated on the way to the transcript — and it buys the same
+                // observable window the echoing door has.
+                Some(answer) => answer
+                    .split_inclusive(' ')
+                    .map(|word| ModelDelta::Text(word.to_string()))
+                    .collect(),
                 None => {
                     let asked = Self::last_user_message(&request);
                     vec![
@@ -296,7 +324,7 @@ impl ModelDoor for MockDoor {
                     ]
                 }
             };
-            return Ok(Box::pin(stream::iter(script.into_iter().map(Ok))));
+            return Ok(self.emit(script));
         }
         let script = if self.room_speaker
             && let Some(name) = Self::room_member_name(&request)
@@ -336,12 +364,12 @@ impl ModelDoor for MockDoor {
         } else {
             self.script.clone()
         };
-        Ok(Box::pin(stream::iter(script.into_iter().map(Ok))))
+        Ok(self.emit(script))
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use futures::StreamExt;
@@ -359,6 +387,53 @@ mod tests {
                 content: text.to_string(),
             }],
         }
+    }
+
+    /// Pacing is real, and off unless asked for.
+    ///
+    /// Asserts a FLOOR on elapsed time, never a ceiling: a sleep may overrun on a loaded machine
+    /// but cannot fire early, so this cannot flake the way a "finishes within N ms" assertion
+    /// would. The unpaced half is the half that matters for the suite — every other test in the
+    /// workspace depends on the default door being instant.
+    #[tokio::test]
+    async fn a_paced_door_takes_time_and_an_unpaced_one_does_not() {
+        let script = vec![
+            ModelDelta::Text("one ".to_string()),
+            ModelDelta::Text("two ".to_string()),
+            ModelDelta::Text("three".to_string()),
+        ];
+
+        let started = std::time::Instant::now();
+        let paced: Vec<_> = MockDoor::with_script(script.clone())
+            .paced_by_ms(20)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(paced.len(), 3, "pacing must not change what is emitted");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(60),
+            "three deltas at 20ms each cannot arrive in {elapsed:?}"
+        );
+
+        // Zero is an explicit off, not a zero-length sleep: an operator turning the pacing off by
+        // setting the variable to 0 must get exactly the unset behaviour.
+        let started = std::time::Instant::now();
+        let instant: Vec<_> = MockDoor::with_script(script)
+            .paced_by_ms(0)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert_eq!(instant.len(), 3);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "an unpaced door must stay instant — the whole suite depends on it"
+        );
     }
 
     #[tokio::test]

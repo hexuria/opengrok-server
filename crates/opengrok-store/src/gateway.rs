@@ -12,6 +12,21 @@ use sqlx::Row;
 use crate::StoreResult;
 use crate::postgres::PgStore;
 
+/// What the roster needs to draw an unread badge for one reader.
+///
+/// `last_viewed_ms` is `None` when this person has never opened this coworker. The renderer reads
+/// a non-finite or non-positive `lastViewedAt` as never, so absence is carried through rather than
+/// invented as "now" (which would silence a genuine first unread) or as zero (which would mark
+/// every historic entry unread the first time anybody looked).
+#[derive(Debug, Clone, Default)]
+pub struct UnreadState {
+    pub last_viewed_ms: Option<i64>,
+    /// The newest entry of any kind, or `None` for a coworker that has never spoken.
+    pub last_activity_ms: Option<i64>,
+    /// How many things the COWORKER said that this person has not seen.
+    pub unread: i64,
+}
+
 impl PgStore {
     /// Append one client-shaped entry, returning the sequence it landed at.
     ///
@@ -288,6 +303,162 @@ impl PgStore {
         .await?;
         row.map(|row| Ok((row.try_get("seq")?, row.try_get("entry")?)))
             .transpose()
+    }
+
+    /// What the roster needs to draw an unread badge for one reader.
+    ///
+    /// COUNTS WHAT THE COWORKER SAID, not what the person did. `send-message` is the coworker's
+    /// own utterance; a `message` row is usually the person's own prompt, and counting those would
+    /// have somebody's roster light up because they themselves typed. `lastActivityAt` is the
+    /// newest entry of EITHER kind, because the client compares it against `lastViewedAt` to place
+    /// its "New" separator and a separator anchored past your own last message reads wrongly.
+    ///
+    /// One statement, three aggregates: two round trips could disagree with each other if an
+    /// entry lands between them, and the disagreement would show as a badge with no message under
+    /// it.
+    pub async fn unread_state(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<UnreadState> {
+        let row = sqlx::query(
+            "select
+               (select viewed_at_ms from coworker_last_viewed
+                 where coworker_id = $1 and account_id = $2)              as viewed,
+               (select max(at_ms) from gateway_entry
+                 where coworker_id = $1 and account_id = $2)              as activity,
+               (select count(*) from gateway_entry
+                 where coworker_id = $1 and account_id = $2
+                   and entry->>'kind' = 'send-message'
+                   and at_ms > coalesce(
+                     (select viewed_at_ms from coworker_last_viewed
+                       where coworker_id = $1 and account_id = $2), 0))   as unread",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_one(self.pool())
+        .await?;
+        Ok(UnreadState {
+            last_viewed_ms: row.try_get("viewed")?,
+            last_activity_ms: row.try_get("activity")?,
+            unread: row.try_get::<Option<i64>, _>("unread")?.unwrap_or(0),
+        })
+    }
+
+    /// Mark this coworker read up to `at_ms` for this person. Clears a manual unread: an explicit
+    /// Mark as Read is the person overriding their own earlier Mark as Unread.
+    pub async fn set_last_viewed(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        self.record_view(coworker, account, at_ms, false).await
+    }
+
+    /// A view the APP recorded rather than the person asking — opening or focusing the coworker.
+    ///
+    /// Refuses to clear a deliberate Mark as Unread. Without that refusal the badge a person just
+    /// asked for is wiped by the app's own view-on-open before they can look away, which is why
+    /// official carries the same flag (`agent-db.ts`, `markViewed(..., {preserveManualUnread})`).
+    pub async fn record_incidental_view(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        self.record_view(coworker, account, at_ms, true).await
+    }
+
+    async fn record_view(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+        at_ms: i64,
+        preserve_manual_unread: bool,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into coworker_last_viewed (coworker_id, account_id, viewed_at_ms, manually_unread)
+             values ($1, $2, $3, false)
+             on conflict (coworker_id, account_id) do update set
+               viewed_at_ms = case
+                 when $4 and coworker_last_viewed.manually_unread then coworker_last_viewed.viewed_at_ms
+                 else excluded.viewed_at_ms
+               end,
+               manually_unread = case
+                 when $4 then coworker_last_viewed.manually_unread
+                 else false
+               end",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .bind(at_ms)
+        .bind(preserve_manual_unread)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Mark it UNREAD: rewind last-viewed to just before the newest thing the coworker said, so
+    /// exactly that one entry becomes unread.
+    ///
+    /// Returns false when there is nothing to be unread about — an empty transcript cannot be
+    /// marked unread, and saying so lets the caller answer honestly instead of writing a stamp
+    /// that means nothing.
+    pub async fn mark_unread(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<bool> {
+        let row = sqlx::query(
+            "select max(at_ms) as newest from gateway_entry
+              where coworker_id = $1 and account_id = $2 and entry->>'kind' = 'send-message'",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_one(self.pool())
+        .await?;
+        let Some(newest) = row.try_get::<Option<i64>, _>("newest")? else {
+            return Ok(false);
+        };
+        self.set_last_viewed(coworker, account, newest - 1).await?;
+        sqlx::query(
+            "update coworker_last_viewed set manually_unread = true
+              where coworker_id = $1 and account_id = $2",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .execute(self.pool())
+        .await?;
+        Ok(true)
+    }
+
+    /// Entries still flagged `streaming` for one reader, oldest first.
+    ///
+    /// FOR RECOVERY, which has to close what a dead process left open. The flag is written when a
+    /// turn starts and cleared when it finishes; a process that died in between leaves it set with
+    /// nothing coming to clear it, and the client draws an empty bubble with typing dots for as
+    /// long as the row says so — it has no timeout of its own (verified against the packaged app:
+    /// `hasText = content.trim().length > 0 || streaming`). Scoped to the pair, never to the
+    /// coworker alone: a shared coworker has one transcript per person, and a second replica may
+    /// legitimately be mid-turn on somebody else's.
+    pub async fn streaming_gateway_entries(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<Vec<Value>> {
+        let rows = sqlx::query(
+            "select entry from gateway_entry
+             where coworker_id = $1 and account_id = $2
+               and entry->>'streaming' = 'true' order by seq",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(row.try_get("entry")?))
+            .collect()
     }
 
     /// Delete entries by client id, answering which ids actually went away.

@@ -161,6 +161,54 @@ pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
         .collect()
 }
 
+/// An opaque, stable id for the CONVERSATION this request belongs to, for the gateway's session
+/// affinity — sent as `user`, which is the field its OpenAI-shaped parser reads
+/// (`oag-proto/src/openai.rs`: `client_session: body["user"]`).
+///
+/// WHY IT MATTERS, and why the obvious reading of the gateway is wrong. `SessionKey::resolve`
+/// (`oag-pool/src/sticky.rs`) has three tiers: the client's session, then the prompt blocks marked
+/// cacheable, then `from_caller(api_key_id, model)`. Sending none of the first two does not fail —
+/// tier three always yields a key — so affinity looks configured and is real, but it is ONE pin
+/// for the whole harness. Every conversation is then herded onto a single credential, and every
+/// provider scopes its prompt cache to the credential, so conversations evict each other's caches
+/// while a busy deployment stacks on one key. Nothing errors, and the only symptom is a hit rate
+/// that is quietly lower than it should be.
+///
+/// The pair, not the coworker alone: a coworker two people share holds two transcripts
+/// (`gateway_transcript` keys on `(coworker, account)`), so they are two conversations with two
+/// prefixes, and pinning them together would make each one's turns evict the other's.
+///
+/// HASHED, BECAUSE THIS VALUE LEAVES OUR BOUNDARY. `user` is forwarded upstream; a provider would
+/// otherwise receive our internal coworker and account ids verbatim. The gateway namespaces the
+/// key by principal itself (`from_client_session(principal_id, s)`), so this only has to be
+/// unique within our own principal — a digest is enough, and identifies nobody off-box.
+fn conversation_pin(request: &ModelRequest) -> Option<String> {
+    use std::fmt::Write as _;
+
+    use sha2::{Digest as _, Sha256};
+    let (scope, actor) = (
+        request.spend_scope.as_deref()?,
+        request.spend_actor.as_deref()?,
+    );
+    let mut hasher = Sha256::new();
+    // A separator that cannot occur in either id, so ("ab", "c") and ("a", "bc") differ.
+    hasher.update(scope.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(actor.as_bytes());
+    // Half the digest, which is plenty to keep conversations apart within one principal and keeps
+    // the value short enough to read in a gateway log line.
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .take(16)
+            .fold(String::with_capacity(35), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            }),
+    )
+}
+
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
@@ -180,6 +228,16 @@ impl ModelDoor for GatewayDoor {
             "stream": true,
             "messages": messages,
         });
+        // WHICH CONVERSATION THIS IS, so the gateway can pin it to one credential and the
+        // provider's prompt cache can actually hit. Omitted when the request carries no
+        // scope/actor pair (a judge call, say), which simply leaves the gateway on its
+        // coarser per-caller tier — the behaviour every request had before this line.
+        if let Some(pin) = conversation_pin(&request)
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert("user".to_string(), serde_json::json!(pin));
+        }
+
         // Advertise the run's tools so the model can call them. Only when there are any — an empty
         // `tools: []` makes some gateways reject the request, and "no tools" is a plain chat turn.
         if !request.tools.is_empty()
@@ -247,7 +305,7 @@ impl ModelDoor for GatewayDoor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -336,6 +394,50 @@ mod tests {
             parse_sse_line(line),
             vec![ModelDelta::Text("hi".to_string())]
         );
+    }
+
+    fn pinned(scope: Option<&str>, actor: Option<&str>) -> Option<String> {
+        conversation_pin(&ModelRequest {
+            model: "m".to_string(),
+            messages: Vec::new(),
+            system: None,
+            tools: Vec::new(),
+            gateway_key: None,
+            spend_scope: scope.map(str::to_string),
+            spend_actor: actor.map(str::to_string),
+        })
+    }
+
+    /// The three properties the gateway's tier-1 affinity actually depends on.
+    ///
+    /// Stable, or it pins nothing and every turn picks a fresh credential. Distinct per
+    /// conversation, or two conversations share a credential and evict each other's prompt cache.
+    /// Absent when there is no pair, because falling back to the gateway's coarser per-caller tier
+    /// is the behaviour every request had before this existed, and is not a failure.
+    #[test]
+    fn the_conversation_pin_is_stable_distinct_and_optional() {
+        let a = pinned(Some("cw-1"), Some("acct-1")).expect("a pair pins");
+        assert_eq!(a, pinned(Some("cw-1"), Some("acct-1")).expect("stable"));
+
+        // A shared coworker holds one transcript PER PERSON, so those are two conversations with
+        // two prefixes; one pin between them would have each evicting the other's cache.
+        assert_ne!(
+            a,
+            pinned(Some("cw-1"), Some("acct-2")).expect("other person")
+        );
+        assert_ne!(
+            a,
+            pinned(Some("cw-2"), Some("acct-1")).expect("other coworker")
+        );
+
+        // The separator earns its place: without it these two would hash identically.
+        assert_ne!(pinned(Some("ab"), Some("c")), pinned(Some("a"), Some("bc")));
+
+        assert_eq!(pinned(None, Some("acct-1")), None);
+        assert_eq!(pinned(Some("cw-1"), None), None);
+
+        // It leaves our boundary, so it must not carry the ids themselves.
+        assert!(!a.contains("cw-1") && !a.contains("acct-1"), "{a}");
     }
 
     /// The key must not be printable, however it is logged.

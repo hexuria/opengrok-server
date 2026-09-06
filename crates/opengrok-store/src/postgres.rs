@@ -391,6 +391,22 @@ impl PgStore {
             .collect()
     }
 
+    /// Whose run this is, if the projection knows. Recovery needs it: a run's aggregate carries
+    /// its coworker but not its account, and a transcript is keyed on the pair.
+    pub async fn run_account(&self, id: &RunId) -> StoreResult<Option<AccountId>> {
+        let row = sqlx::query("select account_id from run_view where id = $1")
+            .bind(id.as_str())
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row
+            .and_then(|row| {
+                row.try_get::<Option<String>, _>("account_id")
+                    .ok()
+                    .flatten()
+            })
+            .map(AccountId::from_stored))
+    }
+
     pub async fn run_owned_by(&self, id: &RunId, account: &AccountId) -> StoreResult<bool> {
         let row = sqlx::query("select account_id from run_view where id = $1")
             .bind(id.as_str())
