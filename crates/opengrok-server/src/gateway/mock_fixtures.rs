@@ -403,7 +403,11 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("text", "cards", "the markdown showcase — every construct plus the four chip schemes"),
     ("katex", "cards", "display, bracket-display and inline math; $5 and $6 must stay currency"),
     ("mermaid", "cards", "a flowchart and a sequenceDiagram in ```mermaid fences"),
-    ("text-images", "cards", "one bubble with a three-image gallery (remote https)"),
+    ("text-images", "cards", "gallery of 3 — the common case"),
+    ("text-images-1", "cards", "gallery of 1 — its own layout"),
+    ("text-images-2", "cards", "gallery of 2 — its own layout"),
+    ("text-images-4", "cards", "gallery of 4 — three tiles and a +N fold"),
+    ("text-images-6", "cards", "gallery of 6 — the fold with a larger remainder"),
     ("widget-multi", "cards", "a widget with multiSelect: true — answer is one \\n-joined string"),
     ("widget", "cards", "a choice card with four options"),
     ("cursor-agent", "cards", "cloud-agent card — blank unless the bcId resolves upstream"),
@@ -544,6 +548,35 @@ fn tool_line(name: &str, status: &str, summary: &str, extra: Option<(&str, Value
     entry
 }
 
+/// Images for the count ladder: mixed portrait and landscape so the row planner's shape handling
+/// is visible, and remote `https` because `images[]` is the one path that does NOT go through the
+/// attachment source normaliser (`transcript.tsx:588-591` renders a plain `<img src>`, and the
+/// CSP allows `https:`). Every other media fixture had to be a local path.
+const IMAGE_POOL: &[(&str, &str)] = &[
+    ("https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg", "A cat, landscape"),
+    ("https://upload.wikimedia.org/wikipedia/commons/4/4d/Cat_November_2010-1a.jpg", "A cat, portrait"),
+    ("https://upload.wikimedia.org/wikipedia/commons/b/b6/Felis_catus-cat_on_snow.jpg", "A cat in snow, landscape"),
+    ("https://upload.wikimedia.org/wikipedia/commons/1/15/Cat_August_2010-4.jpg", "A tabby, portrait"),
+    ("https://upload.wikimedia.org/wikipedia/commons/9/9b/Gato_enervado_pola_presenza_dun_can.jpg", "A startled cat, landscape"),
+    ("https://upload.wikimedia.org/wikipedia/commons/2/25/Siam_lilacpoint.jpg", "A Siamese, portrait"),
+];
+
+/// A `text` card carrying `n` images. `images` sits INSIDE `message` beside `content`
+/// (`send-message-text.ts:15-18`, `projectImages :81-90`): `{url: non-empty, alt?}`, extra keys
+/// passed through.
+fn images_card(name: &str, n: usize) -> Value {
+    let images: Vec<Value> = IMAGE_POOL
+        .iter()
+        .take(n)
+        .map(|(url, alt)| json!({ "url": url, "alt": alt }))
+        .collect();
+    let content = match n {
+        1 => "One image — the single-image layout.".to_string(),
+        _ => format!("{n} images in one bubble — the {n}-image layout."),
+    };
+    card(name, json!({ "type": "text", "content": content, "images": images }))
+}
+
 /// The entries one fixture appends, or `None` when there is no such fixture.
 pub fn entries_for(name: &str) -> Option<Vec<Value>> {
     let entries = match name {
@@ -556,18 +589,16 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // plain `<img src>` (`transcript.tsx:588-591`) — it does NOT go through the attachment
         // source normaliser, and the CSP allows `https:`. So this is the ONE place a remote URL
         // draws; every other media fixture had to be a local path.
-        "text-images" => vec![card(
-            "text-images",
-            json!({
-                "type": "text",
-                "content": "Three images in one bubble, as a gallery.",
-                "images": [
-                    { "url": "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg", "alt": "A cat" },
-                    { "url": "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png", "alt": "Dice" },
-                    { "url": "https://upload.wikimedia.org/wikipedia/commons/e/e9/Felis_silvestris_silvestris_small_gradual_decrease_of_quality.png", "alt": "A wildcat" }
-                ]
-            }),
-        )],
+        "text-images" => vec![images_card("text-images", 3)],
+        // The image-count ladder. The row planner lays 1, 2, 3 and 4+ out differently — at four or
+        // more it shows three tiles and a "+N" pill — so a single three-image fixture exercises
+        // exactly one of four layouts and hides the fold entirely. Aspects are deliberately mixed
+        // portrait and landscape, because a planner that only ever sees one shape is not being
+        // asked the question it exists to answer.
+        "text-images-1" => vec![images_card("text-images-1", 1)],
+        "text-images-2" => vec![images_card("text-images-2", 2)],
+        "text-images-4" => vec![images_card("text-images-4", 4)],
+        "text-images-6" => vec![images_card("text-images-6", 6)],
         // `widget.multiSelect: true` (`protocol.ts:45`, projected `:267`). The answer comes back
         // through `respondToWidget` as ONE STRING — the chosen option values joined by "\n" in
         // option order, any custom line last (`views/widget.tsx multiAnswer`) — not an array. So
@@ -1172,16 +1203,39 @@ mod tests {
 
     /// `images` lives INSIDE `message`, three of them, each a non-empty https URL — the one place a
     /// remote URL draws, because this path does not go through the attachment normaliser.
+    /// The count ladder, because 1, 2, 3 and 4+ are four different layouts and the fold only
+    /// appears at four. Every URL must be remote https — this is the one path that skips the
+    /// attachment normaliser, and a local path here would silently draw nothing.
     #[test]
-    fn text_images_is_a_three_image_gallery_of_remote_urls() {
-        let entries = entries_for("text-images").expect("fixture");
-        let images = entries[0]["message"]["images"].as_array().expect("images inside message");
-        assert_eq!(images.len(), 3);
-        for image in images {
-            let url = image["url"].as_str().expect("url");
-            assert!(url.starts_with("https://"), "{url}");
-            assert!(image["alt"].as_str().is_some());
+    fn the_image_ladder_covers_every_layout() {
+        for (fixture, count) in [
+            ("text-images-1", 1),
+            ("text-images-2", 2),
+            ("text-images", 3),
+            ("text-images-4", 4),
+            ("text-images-6", 6),
+        ] {
+            let entries = entries_for(fixture).expect("fixture");
+            let images = entries[0]["message"]["images"]
+                .as_array()
+                .expect("images inside message, beside content");
+            assert_eq!(images.len(), count, "{fixture}");
+            for image in images {
+                let url = image["url"].as_str().expect("url");
+                assert!(url.starts_with("https://"), "{fixture}: {url}");
+                assert!(image["alt"].as_str().is_some_and(|a| !a.is_empty()), "{fixture}");
+            }
         }
+        // Distinct URLs, or a "gallery" of six is one picture six times and the planner is
+        // never asked to lay out anything.
+        let six = entries_for("text-images-6").expect("fixture");
+        let urls: std::collections::BTreeSet<&str> = six[0]["message"]["images"]
+            .as_array()
+            .expect("images")
+            .iter()
+            .filter_map(|i| i["url"].as_str())
+            .collect();
+        assert_eq!(urls.len(), 6, "the six-image gallery must show six different images");
     }
 
     /// `multiSelect` is on `message.widget`, and every option carries the `value` the client echoes
