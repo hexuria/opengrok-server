@@ -724,8 +724,16 @@ fn card(name: &str, message: Value) -> Value {
 /// including the `.env` this module's own comment names as the interesting target. Checking the
 /// path the caller sent is not enough when the ROOT is attacker-controlled.
 ///
-/// `symlink_metadata` does not follow the final component, so this sees the link itself. The
-/// directory is created with `0o700` so a later swap needs the server user rather than any user.
+/// `symlink_metadata` does not follow the final component, so this sees the link itself.
+///
+/// CREATING IT `0o700` IS NOT THE SAME AS FINDING IT `0o700`. `DirBuilder::mode` applies only when
+/// the call actually creates the directory; with `recursive(true)` an existing directory is a
+/// silent success and its mode is left alone. So an attacker who pre-creates `FIXTURE_DIR` as a
+/// real, world-writable directory — not a symlink, so the check above passes — keeps write access
+/// to everything inside it and can plant a link at any fixture NAME. Measured, not assumed: after
+/// the `0o700` create call against an existing `0o777` directory, the mode is still `0o777`.
+/// Hence the permission check: a root anyone else can write to is refused outright, for reads as
+/// well as writes, which fails closed to "no catalogue" rather than to an arbitrary-file verb.
 fn fixture_root() -> Result<std::path::PathBuf, String> {
     let raw = std::path::Path::new(FIXTURE_DIR);
     if let Ok(meta) = std::fs::symlink_metadata(raw)
@@ -737,16 +745,55 @@ fn fixture_root() -> Result<std::path::PathBuf, String> {
         );
         return Err(NO_SUCH.to_string());
     }
-    std::fs::canonicalize(raw).map_err(|_| "the fixture directory does not exist yet".to_string())
+    let resolved =
+        std::fs::canonicalize(raw).map_err(|_| "the fixture directory does not exist yet")?;
+    root_is_ours(&resolved)?;
+    Ok(resolved)
+}
+
+/// Refuse a root that is not a directory, or that any other user can write to.
+///
+/// Takes the path rather than reading `FIXTURE_DIR` so it can be tested against a scratch
+/// directory: the real root is a fixed global path, and a test that chmod'd it would be racing
+/// every other test in the binary.
+fn root_is_ours(resolved: &std::path::Path) -> Result<(), String> {
+    let meta = std::fs::metadata(resolved).map_err(|_| NO_SUCH.to_string())?;
+    if !meta.is_dir() {
+        tracing::error!(dir = %resolved.display(), "the fixture root is not a directory");
+        return Err(NO_SUCH.to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            tracing::error!(
+                dir = %resolved.display(),
+                mode = format!("{mode:o}"),
+                "the fixture directory is writable by other users; refusing to serve. Remove it \
+                 and let the server recreate it 0o700."
+            );
+            return Err(NO_SUCH.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Create the fixture directory owned by this user and readable by nobody else, then write.
 ///
 /// `create_dir_all` alone inherits the umask and would happily adopt a directory somebody else
 /// planted; `fs::write` follows a symlink at `path`, so a pre-planted link would have this
-/// overwrite an arbitrary file as the server user. Mode `0o700` at creation and a symlink check
-/// on the root close both. Best effort by design: a fixture that cannot be written is a fixture
-/// that draws nothing, not a server that fails to start.
+/// overwrite an arbitrary file as the server user.
+///
+/// THREE CHECKS, BECAUSE THE ROOT CHECK ALONE IS NOT ENOUGH. `mode(0o700)` protects a directory
+/// this call creates and says nothing about one it merely finds, and `fixture_root` looks at the
+/// root rather than at the leaf. A directory that is ours and `0o700` is what makes a link at
+/// `path` impossible for anyone else to plant — so the leaf check below is defence in depth for
+/// the window before that is true, and for the case where the planter is the server's own user.
+/// Refuse rather than unlink: removing whatever is there would be doing the overwrite by hand.
+///
+/// Best effort by design: a fixture that cannot be written is a fixture that draws nothing, not a
+/// server that fails to start.
 fn fixture_file(name: &str, body: &[u8]) -> String {
     let path = format!("{FIXTURE_DIR}/{name}");
     #[cfg(unix)]
@@ -765,7 +812,18 @@ fn fixture_file(name: &str, body: &[u8]) -> String {
     if fixture_root().is_err() {
         tracing::error!(
             dir = FIXTURE_DIR,
-            "refusing to write into a symlinked fixture directory"
+            "refusing to write into a fixture directory that is a symlink or writable by others"
+        );
+        return path;
+    }
+    // The LEAF, not the root. `fs::write` opens through a link, so a link planted at this exact
+    // fixture name would have the server truncate whatever it points at, as the server's user.
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && meta.file_type().is_symlink()
+    {
+        tracing::error!(
+            path,
+            "a mock fixture path is a symlink; refusing to write through it"
         );
         return path;
     }
@@ -1547,6 +1605,73 @@ mod tests {
             leaf[0]["message"]["title"].is_null(),
             "a top-level title is dropped"
         );
+    }
+
+    /// A root anyone else can write to is refused, because `mode(0o700)` only applies to a
+    /// directory the call CREATES.
+    ///
+    /// The symlink check next door covers a root that is a link. It does not cover the other way
+    /// in: pre-create `FIXTURE_DIR` as a real, world-writable directory and the symlink check
+    /// passes, `DirBuilder::recursive(true).mode(0o700)` reports success WITHOUT tightening the
+    /// mode it found, and the planter keeps write access to every name inside — including the
+    /// power to plant a link at a fixture name and have `fs::write` truncate its target as the
+    /// server's user. Measured before this test was written: mode after the `0o700` create call
+    /// against an existing `0o777` directory is still `0o777`.
+    #[cfg(unix)]
+    #[test]
+    fn a_fixture_root_other_users_can_write_to_is_refused() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+        let scratch = std::env::temp_dir().join(format!("og-root-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&scratch)
+            .expect("scratch dir");
+
+        assert!(
+            root_is_ours(&scratch).is_ok(),
+            "a 0o700 directory is the one we create ourselves and must be accepted"
+        );
+
+        // Exactly what `fixture_file` does to an existing directory, to show it does not tighten.
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o777))
+            .expect("chmod 777");
+        let readopted = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&scratch);
+        assert!(
+            readopted.is_ok(),
+            "recursive create is a silent success on an existing directory"
+        );
+        let mode = std::fs::metadata(&scratch)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o777,
+            "mode(0o700) does not tighten a directory it merely found — this is the gap"
+        );
+
+        assert!(
+            root_is_ours(&scratch).is_err(),
+            "a world-writable root must be refused, for reads as well as writes"
+        );
+
+        // Group-writable is the same hole with a smaller audience.
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o770))
+            .expect("chmod 770");
+        assert!(
+            root_is_ours(&scratch).is_err(),
+            "group-writable is refused too"
+        );
+
+        std::fs::set_permissions(&scratch, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod 700");
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     /// The containment, which is the only part of the read surface worth reviewing.

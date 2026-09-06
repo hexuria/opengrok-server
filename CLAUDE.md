@@ -107,7 +107,7 @@ scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/
 ~65 KB of embedded sample documents and a filesystem read verb — which is development surface and
 must not reach a production binary, so a release cannot ship it by forgetting to switch something
 off. Turn it on for local dev, tests and CI; `scripts/serve.sh` and `scripts/gate.sh` already do.
-Without it `cargo test --workspace` silently skips the catalogue's 23 tests, and a binary built
+Without it `cargo test --workspace` silently skips the catalogue's own tests, and a binary built
 without it REFUSES TO START under `OG_MODEL_DOOR=mock-cards` rather than quietly falling back to
 a real, billed door. `enabled()` additionally refuses when `OG_HOSTED=1`, the same way
 `provision::local_docker_allowed` does.

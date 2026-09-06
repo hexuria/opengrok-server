@@ -34,7 +34,7 @@ fi
 # it on. That means there are two builds, and a gate that only ever exercises one of them is how
 # the other quietly stops compiling — most likely the DEFAULT one, which is the one that ships.
 # So: check the default build first (that is a release), then do everything else with the feature
-# on (that is a desk, and it is where the catalogue's own 23 tests live).
+# on (that is a desk, and it is where the catalogue's own tests live).
 MOCK_FEATURE="opengrok-server/mock-fixtures"
 
 step "cargo fmt --all --check"
