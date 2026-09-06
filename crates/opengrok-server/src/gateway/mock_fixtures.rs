@@ -581,6 +581,21 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
         "files",
         "user-attachment, .pages — UNSUPPORTED: refused on the extension, Download prompt",
     ),
+    (
+        "broken-png",
+        "broken",
+        ".png that is not a PNG — decode fails, the tile must replace the <img>",
+    ),
+    (
+        "broken-mp4",
+        "broken",
+        ".mp4 with no ftyp box — the video element must not be left spinning",
+    ),
+    (
+        "missing-image",
+        "broken",
+        "an image whose file is NOT on disk — the resolver must get a not-found",
+    ),
     ("rust", "files", "user-attachment, .rs"),
     ("js", "files", "user-attachment, .js"),
     (
@@ -651,6 +666,10 @@ pub fn help_text() -> String {
         (
             "files",
             "User attachments — real files under /tmp/opengrok-mock-fixtures",
+        ),
+        (
+            "broken",
+            "Deliberately unrenderable — these must fall back, never draw",
         ),
         ("kinds", "Other entry kinds"),
         (
@@ -769,6 +788,36 @@ fn user_attachment(name: &str, file_name: &str, body: &[u8]) -> Value {
         "byteSize": body.len() as i64,
         "timestampMs": now_ms(),
     })
+}
+
+/// A `user-attachment` whose file IS NOT THERE, and is never written.
+///
+/// Everything else in this module materialises its bytes, because a chip pointing at nothing
+/// renders as broken rather than as itself. This one wants exactly that: the app's resolver has
+/// to answer not-found so the media-unavailable tile is what gets drawn. The path sits under a
+/// subdirectory of the fixture root that nothing creates, so it cannot be brought into existence
+/// by a later fixture writing next to it.
+///
+/// `byteSize` is a PLAUSIBLE LIE on purpose. This is the shape of a real regression — a row that
+/// remembers a file the disk has since lost — and a row that remembered a size is what the
+/// renderer would actually be handed. Omitting it would test a different, easier case.
+fn missing_attachment(name: &str, file_name: &str) -> Value {
+    json!({
+        "kind": "user-attachment",
+        "id": entry_id(name),
+        "file_path": format!("{FIXTURE_DIR}/does-not-exist/{file_name}"),
+        "file_name": file_name,
+        "byteSize": 48_320,
+        "timestampMs": now_ms(),
+    })
+}
+
+/// Bytes that are emphatically not the format their extension claims: the phrase repeated to a
+/// plausible file size. Text rather than random noise so that anyone who opens the file in a
+/// hex editor reads why it is there instead of wondering what corrupted it.
+fn not_really(what: &str) -> Vec<u8> {
+    let line = format!("this is not {what}\n");
+    line.repeat(2048 / line.len().max(1) + 1).into_bytes()
 }
 
 /// A `tool-call` entry at one status. The client normalizes six input words onto seven rendered
@@ -1065,6 +1114,23 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         "rtf" => vec![user_attachment("rtf", "mock-rich.rtf", RTF_BYTES)],
         "doc" => vec![user_attachment("doc", "mock-legacy.doc", DOC_BYTES)],
         "pages" => vec![user_attachment("pages", "mock-page.pages", PAGES_BYTES)],
+
+        // ---- the three that must NOT render ----
+        // A viewer only proves it handles bad media if it is given bad media. Each of these is a
+        // different failure the app must survive distinctly: bytes that fail to DECODE, a
+        // container with no recognisable box, and a file that is not there at all. The first two
+        // exist on disk and are the wrong thing; the third does not exist and must stay that way.
+        "broken-png" => vec![user_attachment(
+            "broken-png",
+            "mock-broken.png",
+            &not_really("a png"),
+        )],
+        "broken-mp4" => vec![user_attachment(
+            "broken-mp4",
+            "mock-broken.mp4",
+            &not_really("an mp4"),
+        )],
+        "missing-image" => vec![missing_attachment("missing-image", "mock-missing.jpg")],
         "rust" => vec![user_attachment("rust", "mock_sample.rs", RS_BYTES)],
         "js" => vec![user_attachment("js", "mock-sample.js", JS_BYTES)],
         "upload" => vec![user_attachment("upload", "mock-pixel.png", &png_bytes())],
@@ -1763,6 +1829,45 @@ mod tests {
                 String::from_utf8_lossy(folder)
             );
         }
+    }
+
+    /// THE THREE THAT MUST NOT RENDER, pinned the same way the Download-path fixtures are.
+    ///
+    /// Each is one step from being useless: give `broken-png` a real PNG header and it draws;
+    /// give `broken-mp4` an ftyp box and the player accepts it; create the file `missing-image`
+    /// points at and the resolver stops answering not-found. In every case the fixture would
+    /// still LOOK fine in the catalogue and would silently stop testing the fallback it exists
+    /// for. So the absence of each signature is asserted, not assumed.
+    #[test]
+    fn the_unrenderable_three_stay_unrenderable() {
+        let png = entries_for("broken-png").expect("fixture");
+        let path = png[0]["file_path"].as_str().expect("a path");
+        assert!(path.ends_with(".png"), "the extension must still claim PNG");
+        let bytes = std::fs::read(path).expect("the broken png is written");
+        assert!(
+            !bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
+            "broken-png starts with the PNG magic, so it would decode"
+        );
+
+        let mp4 = entries_for("broken-mp4").expect("fixture");
+        let path = mp4[0]["file_path"].as_str().expect("a path");
+        assert!(path.ends_with(".mp4"), "the extension must still claim MP4");
+        let bytes = std::fs::read(path).expect("the broken mp4 is written");
+        assert!(
+            !bytes.windows(4).any(|w| w == b"ftyp"),
+            "broken-mp4 contains an ftyp box, so a player would accept it"
+        );
+
+        // The one that is proved by ABSENCE. Building the entry must not bring the file into
+        // being — every other builder writes, and inheriting that here would quietly delete the
+        // only not-found case in the catalogue.
+        let missing = entries_for("missing-image").expect("fixture");
+        let path = missing[0]["file_path"].as_str().expect("a path");
+        assert!(path.ends_with(".jpg"), "the extension must claim an image");
+        assert!(
+            !std::path::Path::new(path).exists(),
+            "missing-image points at a file that EXISTS, so nothing is missing: {path}"
+        );
     }
 
     /// The markdown showcase is complete on headings: all six ATX levels, plus both setext forms.
