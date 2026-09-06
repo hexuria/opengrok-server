@@ -36,7 +36,7 @@ pub mod vault;
 pub use autonomy::{DueSchedule, LogEvent};
 pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
-    RefreshTokenRow,
+    RefreshTokenRow, UnreadState,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{CredentialUpdate, PgStore, RosterOwner, ThreadRun};

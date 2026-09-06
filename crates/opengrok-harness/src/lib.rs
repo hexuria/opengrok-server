@@ -115,6 +115,30 @@ pub async fn run_turn_with_tools(
 /// The conversation grows as it goes: the model's own reply and the tool results are appended to
 /// the messages, so the next call sees what happened rather than being asked the same question
 /// again.
+/// Somewhere to send a run's events AS THEY ARE PRODUCED, in addition to the `Vec` the run
+/// returns at the end.
+///
+/// WHY A SINK AND NOT A `Stream`. Turning `converse` inside out into a stream is the tidier shape
+/// and a far larger change: five callers take the `Vec`, four of them are not streaming surfaces
+/// (a routine's turn, a room member's turn, the AG-UI replay path), and the durability rules read
+/// off the completed round. A sink is additive — the `Vec` is unchanged, so a caller that does not
+/// pass one cannot behave differently.
+///
+/// THE JOURNAL GUARANTEE IS UNAFFECTED, and this was the question that decided the shape. Events
+/// are journaled once per ROUND, with the whole round, before the next model call
+/// (`journal.record(run_id, &round_events)`); there is no per-event journaling anywhere. Handing
+/// events to a sink earlier changes when bytes leave, not when the journal is written or when the
+/// next call happens — so "journaled before the next model call" still holds.
+///
+/// A SINK MUST BE CHEAP AND MUST NOT FAIL THE RUN. It is awaited inside the delta loop, so slow
+/// work here stalls reading the model's stream; throttle inside the implementation. It returns
+/// nothing: a sink that cannot deliver has not made the run wrong, and the `Vec` still arrives.
+#[async_trait::async_trait]
+pub trait EventSink: Send + Sync {
+    /// Events just produced, in order. Called many times per round, with only what is new.
+    async fn emit(&self, events: &[Event]);
+}
+
 pub async fn run_conversation(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -125,7 +149,35 @@ pub async fn run_conversation(
     at_ms: i64,
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
-    converse(door, tools, journal, request, projection, run_id).await
+    converse(door, tools, journal, request, projection, run_id, None).await
+}
+
+/// `run_conversation`, with a sink that sees each event as it is produced.
+///
+/// For the ONE surface where a person is watching a bubble fill: seam A's `sendPrompt`. Everything
+/// else keeps `run_conversation`, so no other caller can be changed by accident.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_conversation_streaming(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    thread_id: &str,
+    run_id: &str,
+    at_ms: i64,
+    sink: &dyn EventSink,
+) -> Vec<Event> {
+    let projection = Projection::new(thread_id, run_id, at_ms);
+    converse(
+        door,
+        tools,
+        journal,
+        request,
+        projection,
+        run_id,
+        Some(sink),
+    )
+    .await
 }
 
 /// Which run this is, and when. Three values that always travel together, so they travel as one.
@@ -245,12 +297,22 @@ pub async fn resume_conversation(
         return all;
     }
 
-    let mut rest = converse(door, Some(tools), journal, request, projection, &run_id).await;
+    let mut rest = converse(
+        door,
+        Some(tools),
+        journal,
+        request,
+        projection,
+        &run_id,
+        None,
+    )
+    .await;
     all.append(&mut rest);
     all
 }
 
 /// The loop both entry points share.
+#[allow(clippy::too_many_arguments)]
 async fn converse(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -258,6 +320,7 @@ async fn converse(
     mut request: ModelRequest,
     mut projection: Projection,
     run_id: &str,
+    sink: Option<&dyn EventSink>,
 ) -> Vec<Event> {
     let mut all = Vec::new();
 
@@ -299,7 +362,15 @@ async fn converse(
                         if let ModelDelta::Text(text) = &delta {
                             said.push_str(text);
                         }
-                        round_events.extend(projection.push(delta));
+                        let produced = projection.push(delta);
+                        // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
+                        // adds a second reader that does not have to wait for the run to end.
+                        if let Some(sink) = sink
+                            && !produced.is_empty()
+                        {
+                            sink.emit(&produced).await;
+                        }
+                        round_events.extend(produced);
                     }
                     Err(error) => {
                         round_events.extend(projection.fail(error.to_string()));

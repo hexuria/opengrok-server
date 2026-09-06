@@ -641,6 +641,72 @@ pub async fn get_avatar(state: &GatewayState, args: &Value) -> (u16, Value) {
 
 /// Entry mutation: reactions, widget answers, deletion — all edits to a stored entry plus the
 /// SSE frame that tells every open window.
+/// `setAgentUnread {id, isUnread, atMs?}` — Mark as Read / Mark as Unread on the agent row.
+///
+/// NAMES TRANSCRIBED, NOT CHOSEN. Official's roster wrapper is
+/// `setAgentUnread:(id, isUnread) => e.setAgentUnread({id, isUnread})`, its method table declares
+/// `{args:"object", reply:"void"}`, and its two call sites are Mark as Unread (`true`) and Mark as
+/// Read (`false`). The host additionally unpacks a third optional `atMs`. An earlier draft of this
+/// used `{agentId, unread, viewedAtMs}` — all three wrong, and all three would have compiled and
+/// passed our own tests while doing nothing in the app (CLAUDE.md #1).
+///
+/// THE REPLY IS VOID, to match that table. The new row reaches the client through the roster frame
+/// re-broadcast below, which it already coalesces and re-reads — answering the row here as well
+/// would be a second source of the same truth, and the two can disagree.
+///
+/// `isUnread: false` marks it read up to `atMs` (or now). `isUnread: true` rewinds last-viewed to
+/// just before the coworker's newest utterance, so exactly that one entry becomes unread — which
+/// is what "mark unread" means on a row that is already read.
+///
+/// Gated by `may_use`, not `owns`: reading is talking, not managing, and one colleague's badge on
+/// a shared coworker is their own. The stamp is per `(coworker, account)`, so marking yours read
+/// cannot mark anybody else's.
+pub async fn set_unread(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    let Some(agent) = args.get("id").and_then(Value::as_str) else {
+        return (400, json!({ "error": "id is required" }));
+    };
+    let Some(is_unread) = args.get("isUnread").and_then(Value::as_bool) else {
+        return (400, json!({ "error": "isUnread is required" }));
+    };
+    let coworker = CoworkerId::from_stored(agent.to_string());
+    let Some(account) = account(state, caller).await else {
+        return (
+            500,
+            json!({ "error": "the gateway account does not exist yet" }),
+        );
+    };
+
+    let store = &state.agui.auth.store;
+    let changed = if is_unread {
+        match store.mark_unread(&coworker, &account.id).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(%error, "could not mark a coworker unread");
+                return (500, json!({ "error": "could not mark unread" }));
+            }
+        }
+    } else {
+        // The client may name the moment it read up to; a missing one means now. Never a moment
+        // in the future: a client clock ahead of ours would otherwise mark unseen entries read.
+        let at_ms = args
+            .get("atMs")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(now_ms)
+            .min(now_ms());
+        if let Err(error) = store.set_last_viewed(&coworker, &account.id, at_ms).await {
+            tracing::warn!(%error, "could not mark a coworker read");
+            return (500, json!({ "error": "could not mark read" }));
+        }
+        true
+    };
+
+    if changed {
+        // The row the person is looking at, re-read and re-sent for them alone.
+        super::live::emit_roster_for_caller(state, caller).await;
+    }
+    (200, Value::Null)
+}
+
 pub async fn mutate_entry(
     state: &GatewayState,
     args: &Value,

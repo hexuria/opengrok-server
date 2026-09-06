@@ -683,6 +683,30 @@ create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
 -- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.
 alter table coworker_view add column if not exists members jsonb not null default '[]'::jsonb;
+
+-- WHEN THIS PERSON LAST LOOKED AT THIS COWORKER. The roster's `hasUnread`/`unreadCount` are read
+-- from it, and until this table existed they were hard-coded false/0 — so the official renderer's
+-- "New" separator, which anchors at `lastViewedAt` whenever `lastActivityAt` is greater, could
+-- never appear.
+--
+-- PER PAIR, not per coworker: a shared coworker is read by several people and each of them is
+-- somewhere different in it. Per coworker would mark a colleague's reading as yours.
+--
+-- A MISSING ROW MEANS NEVER VIEWED, which is why nothing is backfilled: the renderer already
+-- treats a non-finite or non-positive `lastViewedAt` as never, so absence and "never" agree
+-- without a migration inventing a moment that did not happen.
+create table if not exists coworker_last_viewed (
+    coworker_id  text   not null,
+    account_id   text   not null,
+    viewed_at_ms bigint not null,
+    primary key (coworker_id, account_id)
+);
+-- A DELIBERATE "mark unread" MUST SURVIVE THE APP LOOKING AT THE ROW. The desktop records a view
+-- when a coworker is opened or focused, so without this flag the sequence is: the person marks it
+-- unread, the app's own view-on-open stamps last-viewed, and the badge they just asked for
+-- disappears before they look away. Official keeps the same flag for the same reason
+-- (`agent-db.ts`: markUnread sets it, markViewed takes `preserveManualUnread`).
+alter table coworker_last_viewed add column if not exists manually_unread boolean not null default false;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

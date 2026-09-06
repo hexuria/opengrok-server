@@ -87,12 +87,10 @@ impl MockDoor {
         let Some(delay) = self.per_delta_delay else {
             return Box::pin(stream::iter(script.into_iter().map(Ok)));
         };
-        Box::pin(
-            stream::iter(script.into_iter()).then(move |delta| async move {
-                tokio::time::sleep(delay).await;
-                Ok(delta)
-            }),
-        )
+        Box::pin(stream::iter(script).then(move |delta| async move {
+            tokio::time::sleep(delay).await;
+            Ok(delta)
+        }))
     }
 
     /// Answer judge requests with this word ("allow" | "block" | "ask"); anything else parses to
@@ -298,7 +296,17 @@ impl ModelDoor for MockDoor {
             let script = match Self::result_of(&request, CALL) {
                 // The tool has answered; say it back as an ordinary bubble so `help` reads as
                 // chat rather than as a tool card.
-                Some(answer) => vec![ModelDelta::Text(answer)],
+                //
+                // WORD BY WORD, like `echo_script`. One delta carrying the whole fixture makes the
+                // pacing knob almost useless here: a single pause before the text is shorter than
+                // a roster round-trip plus a paint, so the running state never becomes visible and
+                // neither does the answer arriving. Splitting changes nothing a reader can see —
+                // the deltas are concatenated on the way to the transcript — and it buys the same
+                // observable window the echoing door has.
+                Some(answer) => answer
+                    .split_inclusive(' ')
+                    .map(|word| ModelDelta::Text(word.to_string()))
+                    .collect(),
                 None => {
                     let asked = Self::last_user_message(&request);
                     vec![
@@ -361,7 +369,7 @@ impl ModelDoor for MockDoor {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use futures::StreamExt;

@@ -765,10 +765,13 @@ async fn command(
         "getAgentAvatar" => wrap(super::lifecycle::get_avatar(&state, &args).await),
         // The shipped host answers undefined and does nothing; keeping the no-op IS the contract.
         "setAgentNotificationsEnabled" => reply(StatusCode::OK, Value::Null),
-        "setAgentUnread"
-        | "setAgentNotifyOnUpdates"
-        | "setAgentHiddenFromSidebar"
-        | "kickstartAgent" => reply(StatusCode::OK, Value::Null),
+        // A real verb now, not a no-op: it writes this person's last-viewed stamp, which is what
+        // the roster's hasUnread/unreadCount are derived from. Reply stays `Null` — official
+        // declares it void and the client learns the new row from the roster frame.
+        "setAgentUnread" => wrap(super::lifecycle::set_unread(&state, &args, &caller).await),
+        "setAgentNotifyOnUpdates" | "setAgentHiddenFromSidebar" | "kickstartAgent" => {
+            reply(StatusCode::OK, Value::Null)
+        }
         // Groups (`plan-rooms.md` §2): a coworker with members; the createAgent reply shape.
         "createGroup" => wrap(super::lifecycle::create_group(&state, &args, &caller).await),
         "setGroupMembers" => {
@@ -1153,7 +1156,6 @@ pub const ANSWERS_A_CONSTANT: &[&str] = &[
     "setAgentHiddenFromSidebar",
     "setAgentNotificationsEnabled",
     "setAgentNotifyOnUpdates",
-    "setAgentUnread",
 ];
 
 /// Ids that are definitely NOT a coworker's. `id` on the wire means different things on
@@ -1235,6 +1237,7 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "reactToMessage"
         | "respondToWidget"
         | "dismissWidget"
+        | "setAgentUnread"
         | "discardDraft"
         | "sendDraft"
         | "submitSecret" => (200, Value::Null),

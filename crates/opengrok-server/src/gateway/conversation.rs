@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
 use opengrok_core::id::{CoworkerId, RunId};
-use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
+use opengrok_harness::{ChatMessage, ModelRequest};
 
 use super::{GatewayState, live};
 use crate::agui::routes::StoreJournal;
@@ -732,6 +732,101 @@ pub(crate) fn reply_context(entries: &[Value], entry: &Value) -> Option<String> 
 
 /// An answer entry, carrying the turn's reply link when it has one — every rebuild of the answer
 /// (the suspension, the final text, the resumed turn) goes through here so no update drops it.
+/// How often a growing answer is written and pushed while a turn runs.
+///
+/// 250 ms, matching the desktop's own `OUTLINE_STREAM_COALESCE_MS` — the interval the client
+/// already coalesces its outline at, so we are not inventing a cadence. It applies NOTHING to
+/// inbound transcript frames (confirmed against the packaged app: the only coalescer there is for
+/// roster pushes, at 300 ms), so every `updated` we send is applied as it arrives and the pace is
+/// entirely ours to choose. The client session's guidance was ~100 ms as a floor; 250 ms is inside
+/// it with room to spare, and each frame costs a row write plus a live push.
+const STREAM_FLUSH_MS: i64 = 250;
+
+/// Grows the answer bubble while the model is still talking.
+///
+/// The transcript already carried a `streaming: true` placeholder and the wire already supported
+/// growing it — the server simply updated it once, at the end, so the flag was a promise it never
+/// kept and every answer arrived in one burst however long it took to produce.
+///
+/// PARTIAL TEXT IS PERSISTED, NOT ONLY PUSHED. A row write per flush costs more than a broadcast
+/// alone, and it buys the thing a push cannot: a reconnect mid-turn reads what has been said so
+/// far instead of an empty bubble, and a process that dies leaves a partial answer that recovery
+/// closes with the reason appended rather than a blank. Both were argued the other way first; the
+/// deciding case is that an empty bubble after a crash is exactly the bug next door.
+struct AnswerSink {
+    state: GatewayState,
+    coworker_id: CoworkerId,
+    account_id: opengrok_core::id::AccountId,
+    agent_id: String,
+    answer_id: String,
+    answer_seq: i64,
+    reply_to: Option<String>,
+    /// The text so far and when it was last written. One lock, because they are only ever read
+    /// and written together and a flush decision made from a stale pair would double-write.
+    progress: std::sync::Mutex<(String, i64)>,
+}
+
+#[async_trait::async_trait]
+impl opengrok_harness::EventSink for AnswerSink {
+    async fn emit(&self, events: &[opengrok_wire::agui::Event]) {
+        // Only the message text. TOOL_CALL_ARGS frames carry a `delta` too, and gluing tool
+        // arguments into the visible answer would be nonsense the person reads — the same filter
+        // the final assembly applies, and it has to agree with it or the bubble would change
+        // content when the turn ended.
+        // THE LOCK IS A BLOCK, and it has to be. A std `MutexGuard` is not `Send`, so a guard
+        // still in scope at an await makes this whole future non-Send and the trait will not be
+        // implemented — `drop(guard)` before the await is NOT enough, because the guard's binding
+        // still spans the await point. The block ends the scope, which is what the compiler reads.
+        // Written the other way first, and the compiler was the reviewer that caught it.
+        let said = {
+            let Ok(mut progress) = self.progress.lock() else {
+                return;
+            };
+            let mut grew = false;
+            for event in events {
+                if event.event_type == opengrok_wire::agui::EventType::TextMessageContent
+                    && let Some(delta) = event.extra.get("delta").and_then(Value::as_str)
+                {
+                    progress.0.push_str(delta);
+                    grew = true;
+                }
+            }
+            let now = now_ms();
+            if !grew || now - progress.1 < STREAM_FLUSH_MS {
+                return;
+            }
+            progress.1 = now;
+            progress.0.clone()
+        };
+
+        // STILL STREAMING. The flag stays set on every intermediate write and is absent from the
+        // final entry, so the bubble keeps its live rendering until the turn genuinely ends.
+        let mut entry = answer_entry(&self.answer_id, &said, self.reply_to.as_deref());
+        entry["streaming"] = json!(true);
+
+        if let Err(error) = self
+            .state
+            .agui
+            .auth
+            .store
+            .update_gateway_entry(&self.coworker_id, &self.account_id, self.answer_seq, &entry)
+            .await
+        {
+            // Not fatal, and deliberately not a reason to stop streaming: the final write still
+            // lands the whole answer, so a dropped intermediate frame costs smoothness, not text.
+            tracing::warn!(%error, "could not persist a streaming answer update");
+            return;
+        }
+        live::emit_transcript(
+            &self.state,
+            &self.agent_id,
+            &self.account_id,
+            "updated",
+            entry,
+        );
+    }
+}
+
 fn answer_entry(id: &str, text: &str, reply_to: Option<&str>) -> Value {
     let mut entry = json!({
         "kind": "send-message",
@@ -1148,7 +1243,18 @@ pub(crate) async fn run_turn(
 
     let _lease =
         crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
-    let events = run_conversation(
+    // The bubble grows while the model talks, instead of being written once at the end.
+    let sink = AnswerSink {
+        state: state.clone(),
+        coworker_id: coworker_id.clone(),
+        account_id: account_id.clone(),
+        agent_id: agent_id.clone(),
+        answer_id: answer_id.clone(),
+        answer_seq,
+        reply_to: reply_to.clone(),
+        progress: std::sync::Mutex::new((String::new(), now_ms())),
+    };
+    let events = opengrok_harness::run_conversation_streaming(
         state.agui.door.as_ref(),
         tools.as_ref(),
         &journal,
@@ -1156,6 +1262,7 @@ pub(crate) async fn run_turn(
         &thread_id,
         run_id.as_str(),
         now_ms(),
+        &sink,
     )
     .await;
 
