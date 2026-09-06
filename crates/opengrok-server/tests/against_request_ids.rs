@@ -62,7 +62,11 @@ async fn app(database_url: &str) -> axum::Router {
         Some("test-bearer".to_string()),
         "host@og.local".to_string(),
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it is about the request id riding every response, including an SSE
+    // open. Since 5 Sep 2026 a stream must be asked for by an identified caller, and this one
+    // speaks as the deployment account.
+    .allowing_identity_fallback();
     opengrok_server::router(agui, gateway)
 }
 
