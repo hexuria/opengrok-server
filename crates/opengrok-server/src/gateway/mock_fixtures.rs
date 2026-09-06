@@ -1268,10 +1268,24 @@ mod tests {
     #[test]
     fn the_documents_are_structurally_complete() {
         assert!(PDF_BYTES.windows(8).any(|w| w == b"/Count 3"), "pdf must declare 3 pages");
-        let needle = b"word/_rels/document.xml.rels";
-        assert!(DOCX_BYTES.windows(needle.len()).any(|w| w == needle), "docx lacks its rels part");
-        let numbering = b"word/numbering.xml";
-        assert!(DOCX_BYTES.windows(numbering.len()).any(|w| w == numbering), "docx lacks numbering");
+        for part in [
+            &b"word/_rels/document.xml.rels"[..],
+            b"word/numbering.xml",
+            // WITHOUT styles.xml MAMMOTH THROWS. document.xml references styles by id —
+            // pStyle Heading1-6 and Quote, rStyle Hyperlink, tblStyle TableGrid — and mammoth
+            // resolves every one through the styles part; a referenced table style with no part
+            // at all made it dereference undefined and fail the whole document, so the reader
+            // showed "Couldn't read this document". Measured against mammoth 1.12.2 on
+            // 6 Sep 2026. Its default map also matches by style NAME, not id, so the part must
+            // carry `<w:name w:val="heading 1"/>` or a Heading1 paragraph stays a paragraph.
+            b"word/styles.xml",
+        ] {
+            assert!(
+                DOCX_BYTES.windows(part.len()).any(|w| w == part),
+                "docx lacks {}",
+                String::from_utf8_lossy(part)
+            );
+        }
     }
 
     /// The markdown showcase is complete on headings: all six ATX levels, plus both setext forms.
