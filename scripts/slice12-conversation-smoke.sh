@@ -18,8 +18,17 @@ ok()   { echo "  ok: $*"; }
 
 command -v jq >/dev/null || fail "jq is required"
 
+# WHO THESE CALLS ARE FOR. Seam A fails closed since the identity change: a call or a stream
+# with no `x-opengrok-account` is refused `account_identity_required`, because a headerless
+# connection used to be served as OG_GATEWAY_EMAIL — the admin on a dev box. The real client
+# attaches this header per connection, so the smoke does too, and now covers the identified path
+# rather than the fallback that no longer exists.
+ACCOUNT_TOKEN=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=host@opengrok.local" | jq -r '.accessToken')
+[ -n "$ACCOUNT_TOKEN" ] && [ "$ACCOUNT_TOKEN" != "null" ] || fail "could not mint an account token"
+IDENT=(-H "x-opengrok-account: $ACCOUNT_TOKEN")
+
 echo "1. a coworker exists on the gateway account"
-token=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=host@opengrok.local" | jq -r '.accessToken')
+token="$ACCOUNT_TOKEN"
 cw=$(curl -fsS -X POST "$BASE/coworkers" -H "authorization: Bearer $token" \
   -H 'content-type: application/json' -d '{"name":"Chatter","model":"oag/cheap"}' | jq -r '.id')
 [ -n "$cw" ] && [ "$cw" != "null" ] || fail "no coworker"
@@ -27,35 +36,35 @@ ok "hired $cw"
 
 echo "2. the SSE stream is listening before the send"
 SSE=$(mktemp)
-curl -sN --max-time 20 "$BASE/events?channels=transcript,agent-upserted" > "$SSE" &
+curl -sN --max-time 20 "$BASE/events?channels=transcript,agent-upserted" "${IDENT[@]}" > "$SSE" &
 SSE_PID=$!
 sleep 1
 
 echo "3. sendPrompt answers accepted:true, immediately"
 NONCE="nonce-$(date +%s)-$$"
-send=$(curl -fsS --max-time 5 -X POST "$BASE/api/sendPrompt" -H 'content-type: application/json' \
+send=$(curl -fsS --max-time 5 -X POST "$BASE/api/sendPrompt" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"agentId\":\"$cw\",\"prompt\":\"hello from the smoke\",\"clientNonce\":\"$NONCE\"}")
 echo "$send" | jq -e '.accepted == true' >/dev/null || fail "not accepted: $send"
 ok "{accepted:true}"
 
 echo "4. the same nonce again is accepted without a duplicate send"
-again=$(curl -fsS --max-time 5 -X POST "$BASE/api/sendPrompt" -H 'content-type: application/json' \
+again=$(curl -fsS --max-time 5 -X POST "$BASE/api/sendPrompt" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"agentId\":\"$cw\",\"prompt\":\"hello from the smoke\",\"clientNonce\":\"$NONCE\"}")
 echo "$again" | jq -e '.accepted == true' >/dev/null || fail "retry not accepted: $again"
 ok "idempotent"
 
 echo "5. the same nonce with DIFFERENT input is refused loudly"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/sendPrompt" -H 'content-type: application/json' \
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/sendPrompt" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"agentId\":\"$cw\",\"prompt\":\"a rewritten message\",\"clientNonce\":\"$NONCE\"}")
 [ "$code" = "409" ] || fail "digest mismatch answered $code, expected 409"
 ok "409 NONCE_DIGEST_MISMATCH"
 
 echo "6. promptAcceptanceStatus finds the nonce"
-status=$(curl -fsS -X POST "$BASE/api/promptAcceptanceStatus" -H 'content-type: application/json' \
+status=$(curl -fsS -X POST "$BASE/api/promptAcceptanceStatus" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"clientNonce\":\"$NONCE\"}")
 echo "$status" | jq -e '.outcome == "found" and .record.clientNonce == "'"$NONCE"'"' >/dev/null \
   || fail "acceptance not found: $status"
-missing=$(curl -fsS -X POST "$BASE/api/promptAcceptanceStatus" -H 'content-type: application/json' \
+missing=$(curl -fsS -X POST "$BASE/api/promptAcceptanceStatus" "${IDENT[@]}" -H 'content-type: application/json' \
   -d '{"clientNonce":"never-sent"}')
 echo "$missing" | jq -e '.outcome == "not-found"' >/dev/null || fail "phantom acceptance: $missing"
 ok "found, and not-found for a stranger"
@@ -90,32 +99,32 @@ echo "$frames" | jq -e -s '[.[] | select(.channel=="transcript") | .payload.orde
 ok "ordered stamps are monotonic"
 
 echo "8. the tail reads back, and a window carries threadCounts"
-tail_reply=$(curl -fsS -X POST "$BASE/api/openAgentTail" -H 'content-type: application/json' \
+tail_reply=$(curl -fsS -X POST "$BASE/api/openAgentTail" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"id\":\"$cw\",\"agentId\":\"$cw\",\"limit\":200}")
 echo "$tail_reply" | jq -e '.entries | type == "array" and length >= 2' >/dev/null || fail "tail too short: $tail_reply"
 echo "$tail_reply" | jq -e '[.entries[] | select(.kind=="message" and .role=="user")] | length >= 1' >/dev/null \
   || fail "the user message is not durable"
-window=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptWindow" -H 'content-type: application/json' \
+window=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptWindow" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"id\":\"$cw\",\"agentId\":\"$cw\",\"limit\":10}")
 echo "$window" | jq -e 'has("threadCounts") and (.threadCounts | type == "object")' >/dev/null \
   || fail "the window has no threadCounts — the validated reply rejects: $window"
 ok "durable tail, and threadCounts present"
 
 echo "9. paging walks backwards"
-one=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptTail" -H 'content-type: application/json' \
+one=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptTail" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"id\":\"$cw\",\"agentId\":\"$cw\",\"limit\":1}")
 echo "$one" | jq -e '.entries | length == 1' >/dev/null || fail "limit ignored: $one"
 next=$(echo "$one" | jq -r '.nextBeforeSeq // empty')
 [ -n "$next" ] || fail "no nextBeforeSeq on a truncated tail"
-older=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptTail" -H 'content-type: application/json' \
+older=$(curl -fsS -X POST "$BASE/api/getAgentTranscriptTail" "${IDENT[@]}" -H 'content-type: application/json' \
   -d "{\"id\":\"$cw\",\"agentId\":\"$cw\",\"beforeSeq\":$next,\"limit\":200}")
 echo "$older" | jq -e '.entries | length >= 1' >/dev/null || fail "the older page is empty"
 ok "nextBeforeSeq pages into the past"
 
 echo "10. the empty shapes hold"
-thread=$(curl -fsS -X POST "$BASE/api/getAgentThread" -H 'content-type: application/json' -d "{\"id\":\"$cw\",\"rootId\":\"x\"}")
+thread=$(curl -fsS -X POST "$BASE/api/getAgentThread" "${IDENT[@]}" -H 'content-type: application/json' -d "{\"id\":\"$cw\",\"rootId\":\"x\"}")
 echo "$thread" | jq -e '.entries | type == "array"' >/dev/null || fail "getAgentThread malformed: $thread"
-outline=$(curl -fsS -X POST "$BASE/api/getConversationOutline" )
+outline=$(curl -fsS -X POST "$BASE/api/getConversationOutline" "${IDENT[@]}" )
 echo "$outline" | jq -e 'type == "array"' >/dev/null || fail "outline not an array"
 ok "thread and outline are well-formed empties"
 

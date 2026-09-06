@@ -1,0 +1,18 @@
+# Mock fixture: YAML for the text reader
+fixture: mock-config
+version: 3
+active: true
+retired: null
+limits:
+  daily_points: 500
+  monthly_points: 12000
+coworkers:
+  - name: DoorProbe
+    model: openai/gpt-5.5
+    tags: [probe, door]
+  - name: Hexuria
+    model: anthropic/claude-sonnet-4.5
+    tags: []
+note: >
+  A folded scalar so the reader has a
+  multi-line value to show.

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240">
+  <rect width="320" height="240" fill="#1e293b"/>
+  <circle cx="160" cy="120" r="70" fill="#38bdf8"/>
+  <text x="160" y="128" font-family="sans-serif" font-size="20" text-anchor="middle" fill="#0f172a">mock svg</text>
+</svg>

@@ -776,7 +776,13 @@ pub async fn hire(
         provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
             .await;
     events.extend(provisioned.events);
-    let computer_error = provisioned.error;
+    // Stamped with NOW, because this one is fresh by construction — it is the error from the
+    // provisioning attempt this very request just made. Every `computerError` on the wire carries
+    // `updatedAtMs` or the client cannot tell which of them it may trust; a field that is
+    // sometimes present is worse than one that never is.
+    let computer_error = provisioned
+        .error
+        .map(|(code, message)| (code, message, at_ms));
     // A key of its own, so a cap can be written on it. Never fails the hire; the console says
     // why when it could not be minted.
     let _key =
@@ -869,7 +875,7 @@ pub async fn hire(
             "name": view.name,
             "model": view.model,
             "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": provision::error_json(&computer_error),
+            "computerError": provision::error_json_at(&computer_error),
             // A sentence when something the template promised did not land; null otherwise.
             "templateNote": template_note,
         })),
@@ -980,8 +986,17 @@ pub(crate) fn account_from_bearer(
         .or_else(|| {
             crate::auth::cookies::read_cookie(headers, crate::auth::cookies::ACCESS_COOKIE)
         })?;
-    let claims = state.auth.minter.verify_access(&token).ok()?;
-    Some(opengrok_core::id::AccountId::from_stored(claims.sub))
+    // Name the failure, as the seam-A path does. `.ok()?` here meant a mint refused with
+    // "a signed access token is required" and no record of WHY — ExpiredSignature and
+    // InvalidSignature are different bugs belonging to different people, and the caller cannot
+    // tell you which because it only sees the 401.
+    match state.auth.minter.verify_access(&token) {
+        Ok(claims) => Some(opengrok_core::id::AccountId::from_stored(claims.sub)),
+        Err(error) => {
+            tracing::warn!(%error, token_len = token.len(), "a bearer access token did not verify");
+            None
+        }
+    }
 }
 
 pub(crate) fn now_ms() -> i64 {

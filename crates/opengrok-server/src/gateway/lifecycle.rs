@@ -252,7 +252,7 @@ async fn hire(
         .store
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
 
     // Report a failed box the way REST does — without failing the create.
     let (code, mut reply) = agent_reply(state, id.as_str(), caller).await;
@@ -262,7 +262,7 @@ async fn hire(
     {
         object.insert(
             "computerError".to_string(),
-            provision::error_json(&provisioned.error),
+            provision::error_json_at(&provisioned.error.clone().map(|(c, m)| (c, m, now_ms()))),
         );
     }
     if code == 200
@@ -410,7 +410,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value, caller: &str) -> (
         .store
         .put_seamb_profile(&coworker_id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (code, reply);
@@ -489,7 +489,7 @@ pub async fn delete_agents(state: &GatewayState, ids: &[String], caller: &str) -
             crate::spend::revoke_for(&state.agui, &coworker_id).await;
         }
     }
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     (200, json!({ "deleted": deleted }))
 }
 
@@ -540,14 +540,26 @@ pub async fn duplicate_agent(state: &GatewayState, args: &Value, caller: &str) -
     .await
 }
 
-/// `searchAgents {query}` — the roster, filtered by name. Honest and small.
-pub async fn search_agents(state: &GatewayState, args: &Value) -> (u16, Value) {
+/// `searchAgents {query}` — the command palette's search, over the CALLER's roster.
+///
+/// It used to search `roster_rows(state)`, the deployment-wide read (`OG_GATEWAY_EMAIL`), and took
+/// no caller at all — so whoever typed in the palette matched against the configured account's
+/// coworkers and got back their ids, names, descriptions and titles. The same disclosure as the
+/// stream's opening snapshot, over RPC instead of a frame, and reachable by typing a word.
+///
+/// Rows carry `lastMessagePreview: null` (`summaries.rs:42`) and the ownership gate still refuses
+/// the transcripts, so this was coworker METADATA and never message content — but a name and a
+/// description are somebody's, and a verb that names no caller cannot be scoped by the gate above
+/// it, because there is no id in the arguments for `names_a_coworker` to check.
+pub async fn search_agents(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     let query = args
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_lowercase();
-    let rows = live::roster_rows(state).await.unwrap_or_default();
+    let rows = live::roster_rows_for(state, caller)
+        .await
+        .unwrap_or_default();
     let hits: Vec<Value> = rows
         .into_iter()
         .filter(|row| {
@@ -597,7 +609,7 @@ pub async fn set_avatar(state: &GatewayState, args: &Value, caller: &str) -> (u1
         .store
         .put_seamb_profile(&coworker, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     let (code, reply) = agent_reply(state, id, caller).await;
     if code != 200 {
         return (200, Value::Null);
@@ -668,7 +680,7 @@ pub async fn mutate_entry(
         tracing::error!(%error, "could not mutate an entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, agent, "updated", entry.clone());
+    live::emit_transcript(state, agent, &account.id, "updated", entry.clone());
     (200, entry)
 }
 
@@ -703,7 +715,7 @@ pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) ->
     {
         Ok(removed) => {
             for id in &removed {
-                live::emit_transcript_removed(state, agent, id);
+                live::emit_transcript_removed(state, agent, &account.id, id);
             }
             (200, json!({ "deleted": removed.len() }))
         }
@@ -1415,7 +1427,7 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
         .store
         .put_seamb_profile(&id, &profile, now_ms())
         .await;
-    live::emit_roster(state).await;
+    live::emit_roster_for_caller(state, caller).await;
     agent_reply(state, id.as_str(), caller).await
 }
 
@@ -1488,9 +1500,13 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
             tracing::error!(%error, "setGroupMembers could not save");
             return (500, json!({ "error": "save failed" }));
         }
-        live::emit_roster(state).await;
+        live::emit_roster_for_caller(state, caller).await;
     }
-    let Ok(rows) = live::roster_rows(state).await else {
+    // The CALLER's roster, not the deployment's. `setGroupMembers` looks up the row it has just
+    // been authorised to modify, so reading `OG_GATEWAY_EMAIL`'s roster was never a disclosure —
+    // but it is the same wrong read as the three that were, and on a caller whose group is not in
+    // the deployment account's roster it answers `null` for a group that plainly exists.
+    let Ok(rows) = live::roster_rows_for(state, caller).await else {
         return (500, json!({ "error": "roster unavailable" }));
     };
     match rows.into_iter().find(|row| row["id"] == id) {

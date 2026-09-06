@@ -28,8 +28,12 @@ esac
 PORT="${OG_BIND##*:}"
 PORT="${PORT:-1447}"
 
-echo "=== cargo build -p opengrok"
-cargo build -p opengrok
+# WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
+# Cargo.toml), but a dev server is exactly where it is wanted — and `OG_MODEL_DOOR=mock-cards`
+# refuses to start without it, so a plain `cargo build -p opengrok` would leave you with a binary
+# that will not boot from this .env.
+echo "=== cargo build -p opengrok --features mock-fixtures"
+cargo build -p opengrok --features mock-fixtures
 
 # -x, never -f: -f matches this script's own command line.
 if pids=$(pgrep -x opengrok); then

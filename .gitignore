@@ -10,3 +10,8 @@ web/node_modules
 web/.next
 web/out
 web/.env*.local
+
+# Browser-automation scratch: console logs, page snapshots and screenshots dropped by the
+# Playwright/Chrome MCP servers while driving the desktop client. Evidence worth keeping is
+# copied into docs/verification/ deliberately; this directory is the raw spill.
+.playwright-mcp/
