@@ -835,7 +835,26 @@ async fn command(
         "deleteTranscriptEntries" => {
             wrap(super::lifecycle::delete_entries(&state, &args, &caller).await)
         }
-        "submitSecret" | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
+        // `submitSecret {entryId, value, agentId}` (`secret-request-actions.ts:21-25`). It used to
+        // answer `Null` untouched AND sit in `ANSWERS_A_CONSTANT` — a verb that names a coworker,
+        // bypassing the coworker gate, and dropping the one fact the card needs: the "Saved" state
+        // reverted to the input form on every reload. It is now a gated mutation setting
+        // `secretProvided: true`, which is what `views/secret-request.tsx:31` settles on.
+        //
+        // THE VALUE IS NOT STORED, BY DECISION. There is no store for coworker secrets yet; in
+        // local mode the host routes it to a connector credential store we have no equivalent of,
+        // and improvising one is worse than dropping it. Never log or echo `value` — not even at
+        // debug — and never put it on the entry. The client declares the reply void
+        // (`coordinator.ts:104`) and ignores it, so returning the entry is harmless.
+        "submitSecret" => wrap(
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("secretProvided".to_string(), json!(true));
+                }
+            })
+            .await,
+        ),
+        "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
         "getAgentAutomations" | "listAllAutomations" => {
@@ -1126,7 +1145,6 @@ pub const ANSWERS_A_CONSTANT: &[&str] = &[
     "setAgentNotificationsEnabled",
     "setAgentNotifyOnUpdates",
     "setAgentUnread",
-    "submitSecret",
 ];
 
 /// Ids that are definitely NOT a coworker's. `id` on the wire means different things on
@@ -1209,7 +1227,8 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "respondToWidget"
         | "dismissWidget"
         | "discardDraft"
-        | "sendDraft" => (200, Value::Null),
+        | "sendDraft"
+        | "submitSecret" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
     }
