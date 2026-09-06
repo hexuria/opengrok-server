@@ -801,6 +801,15 @@ fn user_attachment(name: &str, file_name: &str, body: &[u8]) -> Value {
 /// `byteSize` is a PLAUSIBLE LIE on purpose. This is the shape of a real regression — a row that
 /// remembers a file the disk has since lost — and a row that remembered a size is what the
 /// renderer would actually be handed. Omitting it would test a different, easier case.
+///
+/// AND IT CAUGHT ONE, which is why the number stays. On 6 Sep 2026 the client's first build drew
+/// this fixture as "Couldn't load this image · 47kB": its resolver handed out a media URL without
+/// ever touching the disk, so a file that was gone was indistinguishable from one that merely
+/// failed to decode, and the size it printed came from a row rather than from anything real. The
+/// client now classifies on failure with one ranged request — 404 means "File unavailable", with
+/// no size and no Save offered; anything else means "Couldn't load/play". A fixture with no
+/// `byteSize` would not have shown the difference, because there would have been no wrong number
+/// to print. Do not tidy it away.
 fn missing_attachment(name: &str, file_name: &str) -> Value {
     json!({
         "kind": "user-attachment",
