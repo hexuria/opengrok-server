@@ -1,4 +1,13 @@
-coworker,model,turns,spend
-DoorProbe,openai/gpt-5.5,12,0.41
-Hexuria,anthropic/claude-sonnet-4.5,7,0.19
-New chat,xai/grok-4.6,0,0.00
+id,coworker,model,turns,spend_usd,last_active
+1,DoorProbe,openai/gpt-5.5,12,0.41,2026-09-05
+2,Hexuria,anthropic/claude-sonnet-4.5,7,0.19,2026-09-05
+3,New chat,xai/grok-4.6,0,0.0,
+4,"Night Shift, weekends",anthropic/claude-haiku-4.5,31,1.02,2026-09-04
+5,Inbox Triage,anthropic/claude-haiku-4.5,88,2.74,2026-09-04
+6,Gumba,openai/gpt-5.5,3,0.09,2026-09-03
+7,Research,anthropic/claude-opus-5,5,3.3,2026-09-02
+8,Deploy bot,openai/gpt-5.5,19,0.62,2026-09-01
+9,Reviewer,anthropic/claude-sonnet-4.5,44,1.51,2026-08-31
+10,Scheduler,anthropic/claude-haiku-4.5,120,0.88,2026-08-30
+11,Docs,openai/gpt-5.5,2,0.05,2026-08-29
+12,Archivist,anthropic/claude-haiku-4.5,0,0.0,2026-08-28

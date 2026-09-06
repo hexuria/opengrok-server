@@ -1,0 +1,8 @@
+Mock artifact
+
+id	name	model
+1	DoorProbe	gpt-5.5
+2	Hexuria	claude-sonnet-4.5
+3	New chat	grok-4.6
+
+Tabs above, blank lines around. Plain text, no markup.

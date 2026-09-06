@@ -1,5 +1,57 @@
 {
   "fixture": "mock-data",
-  "nested": { "list": [1, 2, 3], "ok": true },
-  "note": "Written by the mock fixture catalogue."
+  "version": 3,
+  "active": true,
+  "retired": null,
+  "coworkers": [
+    {
+      "id": "cw_1",
+      "name": "DoorProbe",
+      "model": "openai/gpt-5.5",
+      "turns": 12,
+      "tags": [
+        "probe",
+        "door"
+      ]
+    },
+    {
+      "id": "cw_2",
+      "name": "Hexuria",
+      "model": "anthropic/claude-sonnet-4.5",
+      "turns": 7,
+      "tags": []
+    },
+    {
+      "id": "cw_3",
+      "name": "New chat",
+      "model": "xai/grok-4.6",
+      "turns": 0,
+      "tags": null
+    }
+  ],
+  "limits": {
+    "daily_points": 500,
+    "monthly_points": 12000,
+    "hard_stop": false,
+    "multiplier": 1.5
+  },
+  "matrix": [
+    [
+      1,
+      2,
+      3
+    ],
+    [
+      4,
+      5,
+      6
+    ],
+    [
+      7,
+      8,
+      9
+    ]
+  ],
+  "note": "A deliberately long string so the JSON reader has something to wrap: written by the mock fixture catalogue on 5 Sep 2026 to exercise nested objects, arrays, numbers, booleans and null in one document.",
+  "unicode": "café — naïve — 日本語"
 }

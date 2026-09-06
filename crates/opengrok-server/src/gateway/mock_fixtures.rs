@@ -77,6 +77,155 @@ const CSV_BYTES: &[u8] = include_bytes!("fixtures/mock-table.csv");
 const JSON_BYTES: &[u8] = include_bytes!("fixtures/mock-data.json");
 const DOCX_BYTES: &[u8] = include_bytes!("fixtures/mock-doc.docx");
 
+/// The text-family readers, and one adversary. `mock-page.html` carries a `<script>` and an
+/// `<img onerror>`: the reader MUST show them as source. A markup showcase that accidentally proves
+/// the renderer executes HTML is a finding, not a fixture — this is the one file where pass and
+/// fail differ in a way that matters beyond cosmetics. The client routes `.html` to `CodeFilePage`
+/// (`workspace/model.ts:170-182` → `file-viewer.tsx`), which renders React text nodes and never
+/// `innerHTML`; the fixture exists so that stays true.
+const HTML_BYTES: &[u8] = include_bytes!("fixtures/mock-page.html");
+const TXT_BYTES: &[u8] = include_bytes!("fixtures/mock-notes.txt");
+const YAML_BYTES: &[u8] = include_bytes!("fixtures/mock-config.yaml");
+const SVG_BYTES: &[u8] = include_bytes!("fixtures/mock-shape.svg");
+const MD_BYTES: &[u8] = include_bytes!("fixtures/mock-notes.md");
+const JS_BYTES: &[u8] = include_bytes!("fixtures/mock-sample.js");
+const RS_BYTES: &[u8] = include_bytes!("fixtures/mock_sample.rs");
+
+/// The markdown showcase, as one bubble — the SAME bytes as `mock-notes.md`, by `include_str!`,
+/// so the text card and the file reader show one document and cannot drift apart. It is
+/// GFM-complete on purpose: ATX headings 1–6 and both setext forms, every inline style, all three
+/// link kinds plus an image, escapes and entities, a hard break, nested bullets/numbers/tasks with
+/// both bullet markers, nested blockquotes, indented and fenced code in five languages, two tables
+/// with all three alignments, all three rule spellings, and a footnote. The four chip schemes are
+/// verbatim from `workspace/inline-chips.tsx` (pinned by `tests/frontend-inline-chips.test.mjs`);
+/// `sand-msg:t1u` addresses turn 1's user message, which always exists. When one construct does not
+/// draw, the reader wants to know WHICH — which is why nothing here is a sample of the set.
+const SHOWCASE: &str = include_str!("fixtures/mock-notes.md");
+
+/// KaTeX. `$$` on its own lines and `\[…\]` are display; `\(…\)` is inline
+/// (`patched-ui/math.ts:3-5` rewrites the bracket forms to `$$`). SINGLE `$…$` IS NOT A
+/// DELIMITER, which is why the last line is there: "$5 and $6" must stay currency. If it turns
+/// into math, the delimiter set widened and that line is the alarm.
+const KATEX: &str = r#"## Display math — `$$` on its own lines
+
+$$
+\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}
+$$
+
+## Display math — bracket form
+
+\[ \sum_{k=1}^{n} k = \frac{n(n+1)}{2} \qquad \prod_{i=1}^{n} i = n! \]
+
+## Inline math mid-sentence
+
+Einstein's \(E = mc^2\), Euler's \(e^{i\pi} + 1 = 0\), and a limit \(\lim_{x \to 0} \frac{\sin x}{x} = 1\) all sit inside this line.
+
+## Fractions, roots, powers
+
+$$
+\frac{a}{b} \quad \dfrac{a}{b} \quad \tfrac{a}{b} \quad \sqrt{2} \quad \sqrt[3]{x^3 + y^3} \quad x^{2^{n}} \quad a_{i,j} \quad \binom{n}{k}
+$$
+
+## Greek, blackboard, calligraphic, roman, bold
+
+$$
+\alpha \beta \gamma \delta \epsilon \zeta \eta \theta \lambda \mu \pi \sigma \phi \omega \quad \Gamma \Delta \Theta \Lambda \Pi \Sigma \Phi \Omega \quad \mathbb{R} \mathbb{N} \mathbb{Z} \quad \mathcal{L} \mathcal{H} \quad \mathrm{d}x \quad \mathbf{v} \quad \mathit{f}
+$$
+
+## Operators and relations
+
+$$
+a \times b \cdot c \pm d \mp e \div f \quad \leq \geq \neq \approx \equiv \sim \propto \ll \gg \quad \infty \ \partial \ \nabla \ \forall \ \exists \ \neg \ \emptyset
+$$
+
+## Sets, logic, arrows
+
+$$
+A \cup B \quad A \cap B \quad A \subseteq B \quad x \in S \quad x \notin S \quad p \land q \quad p \lor q \quad p \implies q \quad p \iff q \quad \to \ \leftarrow \ \leftrightarrow \ \Rightarrow \ \mapsto \ \uparrow \ \downarrow
+$$
+
+## Accents and decorations
+
+$$
+\hat{x} \quad \bar{x} \quad \vec{v} \quad \tilde{n} \quad \dot{x} \quad \ddot{x} \quad \overline{AB} \quad \underline{ab} \quad \overrightarrow{PQ} \quad \widehat{abc} \quad \boxed{E = mc^2}
+$$
+
+## Delimiters that grow
+
+$$
+\left( \frac{a}{b} \right) \quad \left[ \sum_{i} x_i \right] \quad \left\{ \frac{1}{2} \right\} \quad \left\lvert \frac{x}{y} \right\rvert \quad \left\langle u, v \right\rangle \quad \left\lceil x \right\rceil \quad \left\lfloor x \right\rfloor
+$$
+
+## Matrices
+
+$$
+\begin{pmatrix} a & b \\ c & d \end{pmatrix}
+\quad
+\begin{bmatrix} 1 & 0 \\ 0 & 1 \end{bmatrix}
+\quad
+\begin{vmatrix} x & y \\ z & w \end{vmatrix}
+\quad
+\begin{Bmatrix} p \\ q \end{Bmatrix}
+\quad
+\begin{matrix} 1 & 2 & 3 \\ 4 & 5 & 6 \end{matrix}
+$$
+
+## Cases and alignment
+
+$$
+|x| = \begin{cases} x & \text{if } x \geq 0 \\ -x & \text{if } x < 0 \end{cases}
+$$
+
+$$
+\begin{aligned}
+(a+b)^2 &= a^2 + 2ab + b^2 \\
+(a-b)^2 &= a^2 - 2ab + b^2
+\end{aligned}
+$$
+
+## Calculus
+
+$$
+\frac{\mathrm{d}}{\mathrm{d}x} f(x) \quad \frac{\partial^2 u}{\partial x \, \partial y} \quad \int_a^b f(x)\,dx \quad \oint_C \mathbf{F} \cdot d\mathbf{r} \quad \iint_D \, dA \quad \lim_{n \to \infty} \left(1 + \frac{1}{n}\right)^n = e
+$$
+
+## Text, spacing, colour, size
+
+$$
+\text{speed} = \frac{\text{distance}}{\text{time}} \quad a\,b \; c \quad d \qquad e \quad \color{red}{r} \color{blue}{b} \quad \small{small} \ \large{large}
+$$
+
+## Currency must stay currency
+
+Single `$` is NOT a delimiter here: the mock costs $5 and $6 depending on the day, and a coffee is $3.50. If any of those turned into math, the delimiter set widened."#;
+
+/// Mermaid. A ```` ```mermaid ```` fence in a text card's content is the only trigger
+/// (`workspace/transcript.tsx:585`). Two diagram kinds, so a renderer that handles one and not
+/// the other is visibly half-working.
+const MERMAID: &str = r#"A flowchart with a decision:
+
+```mermaid
+flowchart TD
+  A[Prompt arrives] --> B{Mock door?}
+  B -- yes --> C[Serve a fixture]
+  B -- no --> D[Call the gateway]
+  C --> E[Append and emit]
+  D --> E
+```
+
+And a sequence:
+
+```mermaid
+sequenceDiagram
+  participant Desktop
+  participant Server
+  participant Gateway
+  Desktop->>Server: sendPrompt
+  Server->>Gateway: chat completion
+  Gateway-->>Server: stream
+  Server-->>Desktop: transcript frames
+```"#;
+
 /// Is the fixture surface open? Gated on the door being a mock, because the tool writes entries no
 /// real turn could produce. Read from the environment rather than threaded through: the door is
 /// chosen there too (`main.rs`), and `provision::local_docker_allowed` sets the precedent.
@@ -251,7 +400,11 @@ const NO_SUCH: &str = "no such attachment";
 /// exists: `help_text` renders this, and `entries_for` dispatches on it.
 const CATALOGUE: &[(&str, &str, &str)] = &[
     // (name, group, one-line description)
-    ("text", "cards", "the ordinary assistant bubble"),
+    ("text", "cards", "the markdown showcase — every construct plus the four chip schemes"),
+    ("katex", "cards", "display, bracket-display and inline math; $5 and $6 must stay currency"),
+    ("mermaid", "cards", "a flowchart and a sequenceDiagram in ```mermaid fences"),
+    ("text-images", "cards", "one bubble with a three-image gallery (remote https)"),
+    ("widget-multi", "cards", "a widget with multiSelect: true — answer is one \\n-joined string"),
     ("widget", "cards", "a choice card with four options"),
     ("cursor-agent", "cards", "cloud-agent card — blank unless the bcId resolves upstream"),
     ("email-draft", "cards", "an editable email draft"),
@@ -273,10 +426,14 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ("js", "files", "user-attachment, .js"),
     ("upload", "files", "user-attachment, .png (the media branch)"),
     ("audio", "files", "user-attachment, .mp3 — audio has no card path"),
-    ("pdf", "files", "user-attachment, .pdf — a real one-page document"),
+    ("pdf", "files", "user-attachment, .pdf — two real pages, proves the 1 / 2 indicator"),
     ("csv", "files", "user-attachment, .csv — the spreadsheet reader"),
     ("json", "files", "user-attachment, .json — the JSON reader"),
-    ("docx", "files", "user-attachment, .docx — heading + table, the mammoth path"),
+    ("docx", "files", "user-attachment, .docx — H1/H2, bold-italic, bullets, 3-col table, hyperlink"),
+    ("html", "files", "user-attachment, .html — MUST render as text, never execute"),
+    ("txt", "files", "user-attachment, .txt with tabs"),
+    ("yaml", "files", "user-attachment, .yaml"),
+    ("svg", "files", "user-attachment, .svg"),
     ("notice", "kinds", "a muted system line"),
     ("event", "kinds", "a timeline event (name-changed)"),
     ("thinking", "kinds", "a collapsible reasoning block"),
@@ -391,9 +548,48 @@ fn tool_line(name: &str, status: &str, summary: &str, extra: Option<(&str, Value
 pub fn entries_for(name: &str) -> Option<Vec<Value>> {
     let entries = match name {
         // ---- cards: `send-message` with a `message.type` ----
-        "text" => vec![card(
-            "text",
-            json!({ "type": "text", "content": "A plain assistant bubble from the mock door." }),
+        "text" => vec![card("text", json!({ "type": "text", "content": SHOWCASE }))],
+        "katex" => vec![card("katex", json!({ "type": "text", "content": KATEX }))],
+        "mermaid" => vec![card("mermaid", json!({ "type": "text", "content": MERMAID }))],
+        // `images` sits INSIDE `message` beside `content` (`send-message-text.ts:15-18`,
+        // `projectImages :81-90`): `{url: non-empty, alt?}` and nothing else checked. Rendered as a
+        // plain `<img src>` (`transcript.tsx:588-591`) — it does NOT go through the attachment
+        // source normaliser, and the CSP allows `https:`. So this is the ONE place a remote URL
+        // draws; every other media fixture had to be a local path.
+        "text-images" => vec![card(
+            "text-images",
+            json!({
+                "type": "text",
+                "content": "Three images in one bubble, as a gallery.",
+                "images": [
+                    { "url": "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg", "alt": "A cat" },
+                    { "url": "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png", "alt": "Dice" },
+                    { "url": "https://upload.wikimedia.org/wikipedia/commons/e/e9/Felis_silvestris_silvestris_small_gradual_decrease_of_quality.png", "alt": "A wildcat" }
+                ]
+            }),
+        )],
+        // `widget.multiSelect: true` (`protocol.ts:45`, projected `:267`). The answer comes back
+        // through `respondToWidget` as ONE STRING — the chosen option values joined by "\n" in
+        // option order, any custom line last (`views/widget.tsx multiAnswer`) — not an array. So
+        // this fixture is answerable as well as drawable, and the values are what the client echoes.
+        "widget-multi" => vec![card(
+            "widget-multi",
+            json!({
+                "type": "widget",
+                "widget": {
+                    "prompt": "Which fixtures should run tonight?",
+                    "helpText": "Pick any number.",
+                    "multiSelect": true,
+                    "allowCustom": true,
+                    "options": [
+                        { "label": "KaTeX",   "value": "katex" },
+                        { "label": "Mermaid", "value": "mermaid" },
+                        { "label": "Chips",   "value": "text" },
+                        { "label": "Readers", "value": "pdf" },
+                        { "label": "All of them", "value": "all", "style": "primary" }
+                    ]
+                }
+            }),
         )],
         // 1-6 options, each with a non-empty label, or the projector drops the entry.
         "widget" => vec![card(
@@ -552,22 +748,14 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // ---- user attachments: the only path that draws a real file chip ----
         // An attachment CARD whose url ends `.md`/`.zip`/`.rs`/`.js` has no view: it falls through
         // to a bare `<a>` whose text is the raw URL. These kinds draw the chip instead.
-        "markdown" => vec![user_attachment(
-            "markdown",
-            "mock-notes.md",
-            b"# Mock artifact\n\nWritten by the mock fixture catalogue.\n",
-        )],
+        "markdown" => vec![user_attachment("markdown", "mock-notes.md", MD_BYTES)],
+        "html" => vec![user_attachment("html", "mock-page.html", HTML_BYTES)],
+        "txt" => vec![user_attachment("txt", "mock-notes.txt", TXT_BYTES)],
+        "yaml" => vec![user_attachment("yaml", "mock-config.yaml", YAML_BYTES)],
+        "svg" => vec![user_attachment("svg", "mock-shape.svg", SVG_BYTES)],
         "zip" => vec![user_attachment("zip", "mock-bundle.zip", &zip_bytes())],
-        "rust" => vec![user_attachment(
-            "rust",
-            "mock_sample.rs",
-            b"fn main() {\n    println!(\"from the mock fixture\");\n}\n",
-        )],
-        "js" => vec![user_attachment(
-            "js",
-            "mock-sample.js",
-            b"export const from = 'the mock fixture';\n",
-        )],
+        "rust" => vec![user_attachment("rust", "mock_sample.rs", RS_BYTES)],
+        "js" => vec![user_attachment("js", "mock-sample.js", JS_BYTES)],
         "upload" => vec![user_attachment("upload", "mock-pixel.png", &png_bytes())],
 
         // ---- other entry kinds ----
@@ -957,6 +1145,96 @@ mod tests {
             "the refusals must be identical, not merely similar — a suffix that differs \
              reports whether a path outside the root exists"
         );
+    }
+
+    /// Every `$` in the KaTeX fixture is half of a `$$` pair EXCEPT the currency ones. If the
+    /// count drifts, either display math lost a fence or somebody added single-`$` math, which the
+    /// renderer would treat as text — the fixture would then be silently testing nothing.
+    #[test]
+    fn katex_uses_no_single_dollar_math_and_keeps_its_currency() {
+        let entries = entries_for("katex").expect("fixture");
+        let content = entries[0]["message"]["content"].as_str().expect("content");
+        assert!(content.contains("$5 and $6"), "the currency line is the alarm; keep it");
+        assert!(content.contains("$3.50"));
+        let doubles = content.matches("$$").count();
+        let singles = content.matches('$').count();
+        // Three currency amounts, each one lone `$`, plus the one in backticks where the prose
+        // states the rule ("Single `$` is NOT a delimiter"). Anything beyond four is math somebody
+        // wrote with single dollars, which the renderer will show as text — a silent no-op fixture.
+        assert_eq!(singles, doubles * 2 + 4, "a `$` that is neither a `$$` fence nor currency");
+        // both bracket forms present, so the rewrite path is exercised too
+        assert!(content.contains("\\[") && content.contains("\\(") && content.contains("\\]"));
+        // the renderer's `$$`-on-own-line rule: every fence sits at a line boundary
+        for line in content.lines().filter(|l| l.trim() == "$$") {
+            assert_eq!(line.trim(), "$$");
+        }
+    }
+
+    /// `images` lives INSIDE `message`, three of them, each a non-empty https URL — the one place a
+    /// remote URL draws, because this path does not go through the attachment normaliser.
+    #[test]
+    fn text_images_is_a_three_image_gallery_of_remote_urls() {
+        let entries = entries_for("text-images").expect("fixture");
+        let images = entries[0]["message"]["images"].as_array().expect("images inside message");
+        assert_eq!(images.len(), 3);
+        for image in images {
+            let url = image["url"].as_str().expect("url");
+            assert!(url.starts_with("https://"), "{url}");
+            assert!(image["alt"].as_str().is_some());
+        }
+    }
+
+    /// `multiSelect` is on `message.widget`, and every option carries the `value` the client echoes
+    /// back in its `\n`-joined answer — so the fixture is answerable, not only drawable.
+    #[test]
+    fn widget_multi_is_answerable() {
+        let entries = entries_for("widget-multi").expect("fixture");
+        let widget = &entries[0]["message"]["widget"];
+        assert_eq!(widget["multiSelect"], true);
+        let options = widget["options"].as_array().expect("options");
+        assert!(options.len() >= 4 && options.len() <= 6, "1–6 options or the projector drops it");
+        for option in options {
+            assert!(option["label"].as_str().is_some_and(|l| !l.is_empty()));
+            assert!(option["value"].as_str().is_some_and(|v| !v.is_empty()));
+        }
+    }
+
+    /// The html fixture is deliberately adversarial: a `<script>` AND an `onerror` handler, so
+    /// that "showed as text" is a real claim about two execution vectors, not one.
+    #[test]
+    fn the_html_fixture_carries_both_execution_vectors() {
+        let html = std::str::from_utf8(HTML_BYTES).expect("utf8");
+        assert!(html.contains("<script>"), "no <script>");
+        assert!(html.contains("onerror="), "no onerror handler");
+    }
+
+    /// The documents are the real thing, not stubs: three PDF pages declared, and the docx carries
+    /// the relationship part its hyperlink and numbering need. A stub that looks right fails inside
+    /// the reader and teaches nobody which half was wrong.
+    #[test]
+    fn the_documents_are_structurally_complete() {
+        assert!(PDF_BYTES.windows(8).any(|w| w == b"/Count 3"), "pdf must declare 3 pages");
+        let needle = b"word/_rels/document.xml.rels";
+        assert!(DOCX_BYTES.windows(needle.len()).any(|w| w == needle), "docx lacks its rels part");
+        let numbering = b"word/numbering.xml";
+        assert!(DOCX_BYTES.windows(numbering.len()).any(|w| w == numbering), "docx lacks numbering");
+    }
+
+    /// The markdown showcase is complete on headings: all six ATX levels, plus both setext forms.
+    #[test]
+    fn the_showcase_has_every_heading_level() {
+        for level in 1..=6 {
+            // Anchored on the trailing newline, not a leading one: level 1 is the file's first line.
+            let atx = format!("{} Heading {level}\n", "#".repeat(level));
+            assert!(SHOWCASE.contains(&atx), "missing ATX heading level {level}");
+        }
+        assert!(SHOWCASE.contains("\n==="), "missing setext h1");
+        assert!(SHOWCASE.contains("\n---\n"), "missing setext h2 / rule");
+        // and the four chip schemes, verbatim
+        for chip in ["(sand-msg:t1u)", "(grokbot://app/v1/settings?id=theme)",
+                     "(grokbot://app/v1/plugin/add?id=404)", "(sand-workflow:deploy-prod)"] {
+            assert!(SHOWCASE.contains(chip), "missing chip {chip}");
+        }
     }
 
     #[test]
