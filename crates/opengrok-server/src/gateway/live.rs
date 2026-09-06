@@ -161,7 +161,11 @@ fn active_agent_id(state: &GatewayState) -> Value {
 
 /// One §8.1 row with the live run-state and the stored profile overlaid — what a static
 /// projection cannot know, and what the profile row knows better.
-async fn live_summary(state: &GatewayState, view: &opengrok_core::coworker::CoworkerView) -> Value {
+async fn live_summary(
+    state: &GatewayState,
+    view: &opengrok_core::coworker::CoworkerView,
+    account: &opengrok_core::id::AccountId,
+) -> Value {
     let mut row = summaries::summary(view);
     if let Ok(Some(profile)) = state.agui.auth.store.seamb_profile(&view.id).await {
         // The model stays the description's fallback — it is also the blank-agent defence.
@@ -194,8 +198,15 @@ async fn live_summary(state: &GatewayState, view: &opengrok_core::coworker::Cowo
     if running {
         row["currentActivity"] = json!({ "kind": "thinking" });
     }
-    if let Ok(active) = state.active_agent.lock()
-        && active.as_deref() == Some(view.id.as_str())
+    // PER VIEWER, from the account's own viewing map — not from the one global slot.
+    //
+    // The global answers "which coworker did this desktop last open", which is the right fallback
+    // for a verb that names none and the wrong answer for a roster row: with two people signed in,
+    // one person opening a chat lit the active pip on the OTHER person's sidebar, for a coworker
+    // they were not looking at. Same class as the roster and transcript leaks #63 closed, one row
+    // field later.
+    if let Ok(viewing) = state.viewing.lock()
+        && viewing.get(account.as_str()).map(String::as_str) == Some(view.id.as_str())
     {
         row["isActive"] = json!(true);
     }
@@ -439,7 +450,7 @@ pub async fn roster_rows_for(
     let mut rows = Vec::new();
     for (view, owner) in coworkers.iter().filter(|(view, _)| !view.retired) {
         let mine = owner.id == account.id;
-        let mut row = live_summary(state, view).await;
+        let mut row = live_summary(state, view, &account.id).await;
         // A group has members instead of a computer: the account's provisioning error is not
         // its problem, and a "no computer" note on a group would send a person chasing one.
         // Somebody else's coworker carries null too — their provisioning trouble is theirs, and

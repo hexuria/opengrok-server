@@ -308,6 +308,13 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     };
     live::emit_transcript(state, &agent_id, &account.id, "appended", placeholder);
 
+    // TYPING TO A COWORKER MEANS LOOKING AT IT. Official derives its view from open and focus
+    // rather than from sending, but the arrival rule below needs to know which chat is in front of
+    // the person and a prompt is the least ambiguous evidence there is — the desktop cannot send
+    // one from a chat it does not have open. Without this, a person who opened the chat before a
+    // restart would have their own answer arrive as unread.
+    note_viewing(state, &coworker_id, &account.id).await;
+
     live::set_running(state, &agent_id, true, json!({})).await;
 
     // The turn, off this request's clock. `accepted` means accepted, not answered. Keep the task's
@@ -732,6 +739,48 @@ pub(crate) fn reply_context(entries: &[Value], entry: &Value) -> Option<String> 
 
 /// An answer entry, carrying the turn's reply link when it has one — every rebuild of the answer
 /// (the suspension, the final text, the resumed turn) goes through here so no update drops it.
+/// Record that this account is now looking at this coworker, and mark what it can already see as
+/// read.
+///
+/// THE VIEW IS INCIDENTAL, NOT DELIBERATE. The desktop opens and focuses chats on its own, so this
+/// must never clear a Mark as Unread the person asked for — `record_incidental_view` refuses to,
+/// and only an explicit `setAgentUnread {isUnread:false}` does. Without that distinction the badge
+/// a person just asked for is wiped by the app's own open before they look away.
+///
+/// Best effort: a view that cannot be written is a badge that lingers, not a read that fails.
+async fn note_viewing(
+    state: &GatewayState,
+    coworker: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+) {
+    if let Ok(mut viewing) = state.viewing.lock() {
+        viewing.insert(account.as_str().to_string(), coworker.as_str().to_string());
+    }
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .record_incidental_view(coworker, account, now_ms())
+        .await
+    {
+        tracing::warn!(%error, "could not record a view");
+    }
+}
+
+/// Is this account looking at this coworker right now?
+fn is_viewing(
+    state: &GatewayState,
+    coworker: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+) -> bool {
+    state
+        .viewing
+        .lock()
+        .ok()
+        .and_then(|viewing| viewing.get(account.as_str()).cloned())
+        .is_some_and(|open| open == coworker.as_str())
+}
+
 /// How often a growing answer is written and pushed while a turn runs.
 ///
 /// 250 ms, matching the desktop's own `OUTLINE_STREAM_COALESCE_MS` — the interval the client
@@ -1326,6 +1375,30 @@ pub(crate) async fn run_turn(
     }
     live::emit_transcript(&state, &agent_id, &account_id, "updated", final_entry);
 
+    // ARRIVAL IN THE CHAT THE PERSON IS WATCHING IS NOT UNREAD. Without this the roster paints a
+    // blue unread marker on the very conversation being read — and because the client's status
+    // projection ranks unread ABOVE working, it also masks the green "working" dot for the whole
+    // run: measured at 58 of 60 samples during one reply. Official has the same rule
+    // (`session-runtime.ts::markActiveSessionArrival`).
+    //
+    // Preserved, like every incidental view: a deliberate Mark as Unread on a chat you then watch
+    // stays unread until you say otherwise.
+    if is_viewing(&state, &coworker_id, &account_id) {
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .record_incidental_view(&coworker_id, &account_id, now_ms())
+            .await
+        {
+            tracing::warn!(%error, "could not mark an arrival read");
+        }
+        // The roster carries the count, so it has to be told the count changed. Addressed by id
+        // rather than by email: `run_turn` holds the account, and looking its address up again to
+        // hand to a by-email emitter would be a round trip to re-derive what we already have.
+        live::emit_roster_to(&state, std::slice::from_ref(&account_id)).await;
+    }
+
     let preview: String = text.chars().take(120).collect();
     live::set_running(
         &state,
@@ -1409,6 +1482,10 @@ pub async fn transcript_reply(
         if let Ok(mut active) = state.active_agent.lock() {
             *active = Some(agent_id.clone());
         }
+        // OPENING IS READING. Official marks the session viewed on open
+        // (`session-runtime.ts::openAgentBounded` → `markAgentViewed`), which is what stops a
+        // badge sitting on the chat the person has in front of them.
+        note_viewing(state, &coworker, &account.id).await;
         // Opening an agent is a roster fact (the active pip moved), and §8.3 allows the
         // escalation to a full emit.
         live::emit_roster_for_caller(state, caller).await;
@@ -1455,6 +1532,7 @@ pub async fn full_transcript(
                 if let Ok(mut active) = state.active_agent.lock() {
                     *active = Some(agent_id);
                 }
+                note_viewing(state, &coworker, &account.id).await;
                 live::emit_roster_for_caller(state, caller).await;
             }
             (200, Value::Array(entries))
