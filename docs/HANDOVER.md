@@ -26,7 +26,8 @@ the model every turn; an owner marks a coworker `org`; two people hold one cowor
 sharing a conversation, a gateway key, a pool or a permission card. Building it uncovered that
 **seam A authorised nothing per coworker** — every verb checked that the caller was somebody and
 none checked the coworker was theirs — which is now one gate before the dispatch. A dev instance
-runs on `:1447` against the real judge, rebuilt from `main` after the last merge.
+runs on `:1447` when `scripts/serve.sh` was the last thing to touch the port — `gate.sh --smoke` kills
+whatever is there and leaves nothing behind, so after a local gate, `serve.sh` again before trusting the desktop.
 [`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
 true. Unticked work is the `*.later` boxes and the Later bucket, not a missing slice.
 
@@ -59,7 +60,8 @@ by drift.
 | A PR is based on `main`, never stacked on a branch about to merge — GitHub closes a PR whose base branch is deleted and it cannot be reopened | this page, 2 Sep 2026 |
 | Sharing lets somebody TALK to a coworker; it is never a write grant. The gate asks two questions — `may_use` (owner or org-shared) and `owns` (owner only) — and the two lists fail in opposite directions on purpose, so only the ownership one has a drift test | `gateway/routes.rs`, `tests/against_constant_verbs.rs` |
 | A refusal is the verb's OWN not-found answer, per verb — never 403, and never a uniform 404. A 404 where the verb answers `null` for an unknown id is the same disclosure one step removed | `gateway/routes.rs::never_heard_of_it` |
-| A live frame carries WHO IT IS FOR. `None` is a payload naming nobody; `Some(account)` reaches that account's streams alone. Stamped frames carry no audience — filtering one spends a sequence other streams expect | `gateway/live.rs`, issue #59 |
+| A live frame carries WHO IT IS FOR, stamped or not. Per-person rosters needed per-person SEQUENCES, and that cost a map key (`counter_key`), not a replica-contract change: the `replicaKey` on the wire is unchanged and each account sees a contiguous run under it. A transcript frame takes the ENTRY's account, never the coworker's viewers — a shared coworker has one transcript per person | `gateway/live.rs`, #63 |
+| A seam-A request with no identity is REFUSED (`account_identity_required`, 401), never served as `OG_GATEWAY_EMAIL`. The old fallback authenticated a headerless connection as the admin on 5 Sep 2026; both ends cited the other's fallback. `OG_GATEWAY_IDENTITY_FALLBACK=1` is the only way back, and an unverifiable header is never a fallback candidate | `gateway/mod.rs::Caller` |
 | Points: a member's pool is the PAYER's — the person talking, not the hirer. Three caches key on three different things on purpose (pair, pair, payer-alone) and harmonising them reintroduces the bug | `opengrok-server/src/spend.rs` |
 | Every model call the server makes is metered, including the auto-review judge — which needs a scope AND a key AND an actor; any two of the three is a silent half-fix | `opengrok-harness/src/review.rs` |
 
@@ -67,7 +69,7 @@ by drift.
 
 In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
 
-**The queue is empty as of 4 Sep 2026.** Seven pull requests merged in order, each verified the
+**The queue is empty as of 6 Sep 2026.** Eight pull requests merged in order, each verified the
 same way — local clean-env gate, CI on the branch, CI on `main` after the merge, and a live
 rebuild of `:1447` — then `main` was deployed and its schema checked in the database:
 
@@ -80,12 +82,13 @@ rebuild of `:1447` — then `main` was deployed and its schema checked in the da
 | #53 | a gateway key per person, not per coworker | `97db9ed` |
 | #55 | a conversation each — and the door that was never locked | `b54ea4e` |
 | #60 | a live frame goes to the stream it is for | `c1555b4` |
+| #63 | identity is asked for, never assumed; per-account sequences (closes #59); the mock catalogue, off by default | `132f45b` |
 
 The full account — what each was for, what broke, what was found reviewing it, and the wrong
-turns kept in rather than tidied away — is in [`../clearing-up-pr.md`](../clearing-up-pr.md).
+turns kept in rather than tidied away — is in [`archive/pr-queue-2026-09-04.md`](archive/pr-queue-2026-09-04.md).
 Read that before re-opening any of it.
 
-**Three issues are open and none is guessed at.** Each was investigated to the point where the
+**Two issues are open and neither is guessed at.** Each was investigated to the point where the
 next person can act, and deliberately not started:
 
 - **#61 — chat renders in one burst.** The app's answer arrives all at once. The bubble is
@@ -95,10 +98,10 @@ next person can act, and deliberately not started:
   property the code does not have. **A restart mid-answer leaves an empty bubble marked
   "typing" forever**; nothing anywhere flips that flag off. That last part is broken today,
   independent of streaming, and is the smallest useful thing to fix first.
-- **#59 — the roster stream sends the deployment's roster to everybody.** `listAgents` is
-  correctly per-caller; the SSE opener and every update frame are not. It cannot take #60's fix
-  because those frames are stamped: filtering one per person spends a sequence the other streams
-  expect. Needs per-account sequences, which is a replica-contract change.
+- ~~**#59 — the roster stream sends the deployment's roster to everybody.**~~ Closed by #63.
+  The entry that stood here said the fix needed per-account sequences and that those were a
+  replica-contract change. Half right: they were needed, and they cost a map key in the server's
+  own counter, not a contract change. Kept so the next reader does not re-derive the wrong half.
 - **Three gaps in the points meter**, recorded in the plan file: no ceiling above a member
   (`PointsScope` has only `Member` and `Coworker`); a limit can be overshot by one turn (the
   meter is read before the call and never reconciled after); and turns inside the 15s freshness
