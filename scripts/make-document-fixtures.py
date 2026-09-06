@@ -12,13 +12,15 @@ works. So the OOXML and ODF files here are structurally complete packages — co
 relationships, masters, manifests — and open in real applications, not just in ours.
 
 THE TWO EXCEPTIONS ARE DELIBERATE. `mock-legacy.doc` and `mock-page.pages` exist to be REFUSED:
-the desktop has no reader for either and must fall to its Download prompt. The refusal is decided
-on the magic (doc) or the package shape (pages), and neither is parsed further, so building a
-real OLE compound document would prove nothing the header does not. `mock-page.pages` is a real
-zip anyway, because its shape IS the signal; `mock-legacy.doc` is a header and zeroes, and the
-comment on it says so, so nobody later "fixes" it into something listable and quietly removes the
-Download path's only coverage. Same call as `mock-bundle.7z`, and the opposite of the one made
-for the pdf and docx, whose readers really do parse.
+the desktop has no reader for either and falls to its Download prompt. It decides that on the
+EXTENSION and never opens the file — legacy .doc/.ppt and iWork .key/.pages/.numbers have no
+browser-side reader at all — so building a real OLE compound document would prove nothing.
+
+They are still built honestly rather than filled with noise, because `file(1)` naming them
+correctly is what lets a person debugging an unexpected Download tell a wrong fixture from a
+wrong branch. Nobody should "fix" either into something a reader can open: the refusal is the
+coverage. Same call as `mock-bundle.7z`, and the opposite of the one made for the pdf and docx,
+whose readers really do parse.
 """
 
 import pathlib
@@ -433,9 +435,9 @@ RTF = (
 
 def write_doc(path):
     """A .doc HEADER and nothing else — see this module's docstring. 512 bytes: the OLE compound
-    file magic, the version and byte-order fields `file(1)` reads, and zeroes. It is meant to be
-    refused on the magic; if anything ever tries to read the directory it will fail cleanly rather
-    than walk into garbage."""
+    file magic, the version and byte-order fields `file(1)` reads, and zeroes. The client refuses
+    it on the extension and never gets here; if anything ever does try to read the directory it
+    will fail cleanly rather than walk into garbage."""
     header = bytearray(512)
     header[0:8] = bytes([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])  # magic
     header[24:26] = struct.pack("<H", 0x003E)  # minor version

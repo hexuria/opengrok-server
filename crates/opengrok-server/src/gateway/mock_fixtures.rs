@@ -114,10 +114,18 @@ const PPTX_BYTES: &[u8] = include_bytes!("fixtures/mock-deck.pptx");
 const ODT_BYTES: &[u8] = include_bytes!("fixtures/mock-notes.odt");
 const ODP_BYTES: &[u8] = include_bytes!("fixtures/mock-deck.odp");
 const RTF_BYTES: &[u8] = include_bytes!("fixtures/mock-rich.rtf");
-// The other two Download-path fixtures, alongside `sevenzip`. `.doc` is refused on the OLE magic
-// and `.pages` on its package shape, and neither is parsed further — so the doc is a 512-byte
-// header and zeroes, and the pages is a real zip whose `Index/` and `Metadata/` folders ARE the
-// signal. Do not "improve" either into something a reader can open: the refusal is the coverage.
+// The other two Download-path fixtures, alongside `sevenzip`. THE CLIENT REFUSES BOTH ON THE
+// EXTENSION, before it reads a byte: legacy `.doc`/`.ppt` and iWork `.key`/`.pages`/`.numbers`
+// have no browser-side reader, so the viewer diverts to Download without opening the file (told
+// to us by the client session on 6 Sep 2026, correcting an earlier note here that said the doc
+// was refused on its OLE magic and the pages on its package shape — neither is looked at).
+//
+// The bytes are still built honestly, and that is a deliberate second-order choice: `file(1)`
+// names both correctly, so a person debugging a Download that should not have happened can tell
+// a wrong fixture from a wrong branch. The magic and the `Index/`+`Metadata/` folders are
+// therefore documentation and a hedge against a future sniff, not the current trigger.
+//
+// Do not "improve" either into something a reader can open: the refusal is the coverage.
 const DOC_BYTES: &[u8] = include_bytes!("fixtures/mock-legacy.doc");
 const PAGES_BYTES: &[u8] = include_bytes!("fixtures/mock-page.pages");
 
@@ -549,12 +557,12 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     (
         "doc",
         "files",
-        "user-attachment, .doc — UNSUPPORTED: refused on the OLE magic, Download prompt",
+        "user-attachment, .doc — UNSUPPORTED: refused on the extension, Download prompt",
     ),
     (
         "pages",
         "files",
-        "user-attachment, .pages — UNSUPPORTED: refused on the package shape, Download prompt",
+        "user-attachment, .pages — UNSUPPORTED: refused on the extension, Download prompt",
     ),
     ("rust", "files", "user-attachment, .rs"),
     ("js", "files", "user-attachment, .js"),
@@ -1722,12 +1730,14 @@ mod tests {
                 String::from_utf8_lossy(token)
             );
         }
-        // The two refusals. Both must stay unopenable — a later "fix" that makes either readable
-        // removes the only coverage the Download path has, which is why this is asserted and not
-        // merely commented.
+        // The two refusals. The client diverts these on the EXTENSION and never reads them, so
+        // these assertions do not guard the trigger — they guard that the files stay honestly
+        // what they claim to be, and that neither is quietly turned into something a reader
+        // could open, which would remove the Download path's only coverage.
         assert!(
             DOC_BYTES.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]),
-            "doc: wrong OLE magic, so the client would not reach the unsupported branch"
+            "doc: wrong OLE magic — the client refuses on the extension, but a fixture that \
+             does not identify as a .doc cannot tell a wrong branch from a wrong file"
         );
         for folder in [&b"Index/"[..], b"Metadata/"] {
             assert!(
