@@ -1795,20 +1795,25 @@ impl PgStore {
         Ok(())
     }
 
-    /// The account's last provisioning error as (code, message), or None when it has none.
+    /// The account's last provisioning error as (code, message, updated_at_ms), or None when it
+    /// has none. The STAMP is part of the answer: without it an hours-old refusal is
+    /// indistinguishable from one a second old, which is exactly how a stale `quota_exceeded` was
+    /// read as the live state of a box on 5 Sep 2026.
     pub async fn account_computer_error(
         &self,
         account_id: &str,
-    ) -> StoreResult<Option<(String, String)>> {
-        let row =
-            sqlx::query("select code, message from account_computer_error where account_id = $1")
-                .bind(account_id)
-                .fetch_optional(&self.pool)
-                .await?;
+    ) -> StoreResult<Option<(String, String, i64)>> {
+        let row = sqlx::query(
+            "select code, message, updated_at_ms from account_computer_error where account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| {
             Ok((
                 row.try_get::<String, _>("code")?,
                 row.try_get::<String, _>("message")?,
+                row.try_get::<i64, _>("updated_at_ms")?,
             ))
         })
         .transpose()

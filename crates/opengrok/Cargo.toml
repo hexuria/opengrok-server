@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Forwards to opengrok-server; the binary's `mock-cards` door needs the catalogue that feature
+# compiles in, and refuses to boot without it rather than falling back to a real (billed) door.
+mock-fixtures = ["opengrok-server/mock-fixtures"]
+
 [lints]
 workspace = true
 

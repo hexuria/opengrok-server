@@ -368,7 +368,10 @@ async fn harness(database_url: &str, host_email: &str) -> Harness {
         Some("test-bearer".to_string()),
         host_email.to_string(),
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
+    // must be asked for rather than assumed.
+    .allowing_identity_fallback();
     let app = opengrok_server::router(agui.clone(), gateway_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

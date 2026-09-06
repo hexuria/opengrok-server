@@ -257,7 +257,13 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         tracing::error!(%error, "could not append the user's message");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, "appended", user_entry.clone());
+    live::emit_transcript(
+        state,
+        &agent_id,
+        &account.id,
+        "appended",
+        user_entry.clone(),
+    );
 
     // A group answers as a ROOM: its members take turns (`group.rs`), each posting under its
     // own name, so there is no single answer bubble to grow into.
@@ -300,7 +306,7 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
             return (500, json!({ "error": "transcript unavailable" }));
         }
     };
-    live::emit_transcript(state, &agent_id, "appended", placeholder);
+    live::emit_transcript(state, &agent_id, &account.id, "appended", placeholder);
 
     live::set_running(state, &agent_id, true, json!({})).await;
 
@@ -416,7 +422,10 @@ pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u1
                 "agentId": agent_id,
                 "state": if stopped { "stopped" } else { "unknown" },
                 "vncUrl": Value::Null,
-                "computerError": { "code": code, "message": message },
+                // Stamped like every other computerError: these are fresh by construction
+                // (this request just asked the provider), and a field the client sees only
+                // sometimes is worse than one it never sees.
+                "computerError": { "code": code, "message": message, "updatedAtMs": now_ms() },
             }),
         );
     };
@@ -477,7 +486,7 @@ pub async fn box_control(
             "agentId": agent_id,
             "state": "absent",
             "vncUrl": Value::Null,
-            "computerError": { "code": code, "message": message },
+            "computerError": { "code": code, "message": message, "updatedAtMs": now_ms() },
         })
     };
     let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
@@ -537,6 +546,7 @@ pub async fn box_control(
                                         "computerError": {
                                             "code": error.code(),
                                             "message": error.to_string(),
+                                            "updatedAtMs": now_ms(),
                                         },
                                     }),
                                 );
@@ -950,7 +960,7 @@ async fn emit_suspension(
     {
         tracing::error!(%error, "could not append the suspension card entry");
     }
-    live::emit_transcript(state, agent_id, "appended", card);
+    live::emit_transcript(state, agent_id, account, "appended", card);
     // The turn is paused, not running. It resumes when the card is answered.
     live::set_running(state, agent_id, false, json!({})).await;
     true
@@ -1044,6 +1054,28 @@ pub(crate) async fn run_turn(
         crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await;
+    // The fixture tool, offered only under a mock door. It records into `fixtures`; the turn
+    // appends whatever it finds there once the rounds are done, so the entries arrive through the
+    // ordinary append path rather than through a private one the door would otherwise need.
+    let fixtures = super::mock_fixtures::enabled().then(super::mock_fixtures::tool);
+    // WHETHER THIS COWORKER REALLY HAS A COMPUTER, decided before the fixture tool is folded in.
+    // `tools.is_some()` used to answer it, and the fixture arm below hands a boxless coworker a
+    // `local_only()` runner — so under a mock door the prompt began claiming a machine that does
+    // not exist. That is the exact failure the prompt's own comment warns about: a system prompt
+    // contradicting the tool list silently disables the tool.
+    let has_computer = tools.is_some();
+    let tools = match (&fixtures, tools) {
+        (Some((handler, _)), Some(runner)) => {
+            Some(runner.with_local(super::mock_fixtures::schema(), handler.clone()))
+        }
+        // A coworker with no computer still gets the fixtures: they touch nothing but the
+        // transcript, and a boxless coworker is exactly where a rendering pass tends to start.
+        (Some((handler, _)), None) => Some(
+            opengrok_harness::ToolRunner::local_only()
+                .with_local(super::mock_fixtures::schema(), handler.clone()),
+        ),
+        (None, runner) => runner,
+    };
     // Whether this turn can actually reach the user's machine — read from the offered schemas so
     // the prompt can never contradict the tool list again. The enrolled label is decoration on top
     // of that schema-derived fact: fetched only when the tool is truly offered, and its absence
@@ -1083,7 +1115,7 @@ pub(crate) async fn run_turn(
         &name,
         &persona,
         Some(&computer_system_prompt(
-            tools.is_some(),
+            has_computer,
             reaches_user_machine,
             user_machine_label.as_deref(),
         )),
@@ -1127,6 +1159,10 @@ pub(crate) async fn run_turn(
     )
     .await;
 
+    if let Some((_, sink)) = &fixtures {
+        super::mock_fixtures::drain_into(&state, &coworker_id, &account_id, sink, now_ms()).await;
+    }
+
     // The answer is whatever the run's message deltas add up to; a run that produced nothing
     // still ends its bubble, with the failure said out loud rather than a spinner forever.
     let mut text = String::new();
@@ -1153,7 +1189,7 @@ pub(crate) async fn run_turn(
             .store
             .update_gateway_entry(&coworker_id, &account_id, answer_seq, &answer_entry)
             .await;
-        live::emit_transcript(&state, &agent_id, "updated", answer_entry);
+        live::emit_transcript(&state, &agent_id, &account_id, "updated", answer_entry);
         if emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await {
             finished.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
@@ -1181,7 +1217,7 @@ pub(crate) async fn run_turn(
     {
         tracing::error!(%error, "could not finalise the answer entry");
     }
-    live::emit_transcript(&state, &agent_id, "updated", final_entry);
+    live::emit_transcript(&state, &agent_id, &account_id, "updated", final_entry);
 
     let preview: String = text.chars().take(120).collect();
     live::set_running(
@@ -1268,7 +1304,7 @@ pub async fn transcript_reply(
         }
         // Opening an agent is a roster fact (the active pip moved), and §8.3 allows the
         // escalation to a full emit.
-        live::emit_roster(state).await;
+        live::emit_roster_for_caller(state, caller).await;
     }
 
     let mut reply = json!({ "entries": entries });
@@ -1312,7 +1348,7 @@ pub async fn full_transcript(
                 if let Ok(mut active) = state.active_agent.lock() {
                     *active = Some(agent_id);
                 }
-                live::emit_roster(state).await;
+                live::emit_roster_for_caller(state, caller).await;
             }
             (200, Value::Array(entries))
         }
@@ -1460,7 +1496,7 @@ pub async fn resolve_local_tool_permission(
                 .set_gateway_ask_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
-            live::emit_transcript(state, &agent_id, "updated", card);
+            live::emit_transcript(state, &agent_id, &account_id, "updated", card);
         }
         return (
             410,
@@ -1599,7 +1635,7 @@ pub async fn resolve_local_tool_permission(
         .store
         .update_gateway_entry_by_id(&coworker_id, &account_id, &entry_id, &card)
         .await;
-    live::emit_transcript(state, &agent_id, "updated", card);
+    live::emit_transcript(state, &agent_id, &account_id, "updated", card);
 
     // Carry the turn on in the background EITHER WAY: on approval the resumed run dispatches the
     // command and the model's own summary lands in the transcript; on refusal the model is told
@@ -1716,7 +1752,7 @@ pub async fn resolve_auto_review_approval(
                 .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, "expired")
                 .await
         {
-            live::emit_transcript(state, &agent_id, "updated", card);
+            live::emit_transcript(state, &agent_id, &account_id, "updated", card);
         }
         return (
             410,
@@ -1783,7 +1819,7 @@ pub async fn resolve_auto_review_approval(
             .set_gateway_approval_status(&coworker_id, &account_id, &entry_id, status)
             .await
     {
-        live::emit_transcript(state, &agent_id, "updated", card);
+        live::emit_transcript(state, &agent_id, &account_id, "updated", card);
     }
 
     // An MCP-synthesized run is not a conversation. Resuming it would execute the tool on this
@@ -2051,7 +2087,7 @@ async fn resume_gateway_run(
             .append_gateway_entry(&coworker_id, &account_id, &answer, now_ms())
             .await
         {
-            live::emit_transcript(&state, &agent_id, "appended", answer);
+            live::emit_transcript(&state, &agent_id, &account_id, "appended", answer);
         }
     }
     // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its

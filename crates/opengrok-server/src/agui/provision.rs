@@ -219,11 +219,23 @@ async fn record_error(
     }
 }
 
-/// Render a provisioning error as the client contract `{code, message}`, or null when there is
-/// none. The same shape on every surface: create responses, listOpenGrokComputers, and agent rows.
-pub fn error_json(error: &Option<(String, String)>) -> Value {
+/// A provisioning error as the client contract `{code, message, updatedAtMs}`, or null. The same
+/// shape on every surface: create responses, listOpenGrokComputers, and agent rows.
+///
+/// THE STAMP IS PART OF THE ANSWER. On 5 Sep 2026 a `quota_exceeded` recorded at 13:44 was shown
+/// as the live state of a box at 20:11, and nothing in the payload could tell the two apart —
+/// both sessions reasoned from a six-hour-old row for an hour before anyone checked the
+/// timestamp in the database. A client that cannot say "since 13:44" will say "now" by omission.
+///
+/// There is deliberately no unstamped variant. `{code, message}` was the shape until this landed,
+/// and leaving both would let a caller emit the ambiguous one by accident — the field is only
+/// worth having if it is always there. It is additive, so a client that ignores the third key is
+/// unaffected.
+pub fn error_json_at(error: &Option<(String, String, i64)>) -> Value {
     match error {
-        Some((code, message)) => json!({ "code": code, "message": message }),
+        Some((code, message, at_ms)) => {
+            json!({ "code": code, "message": message, "updatedAtMs": at_ms })
+        }
         None => Value::Null,
     }
 }
@@ -308,8 +320,15 @@ pub async fn ensure_computer_for(
                 )
                 .await;
             };
+            // NAME THE PROVIDER CALL. Until 6 Sep 2026 a create left no trace at all: the only
+            // record was the error row it wrote on failure, so "did we ask box.ascii.dev today,
+            // and what did it say" had no answer and an hours-old row got read as live. One line
+            // before, one after, with the upstream code — the same gap as a request line that
+            // logged only `auth_len`.
+            tracing::info!(scope, scope_id = %scope_id, kind, "computer: asking the provider for a box");
             match provider.create(None).await {
                 Ok(box_id) => {
+                    tracing::info!(scope, scope_id = %scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
                     if let Err(error) = store
                         .set_scoped_computer(
                             scope,
@@ -416,8 +435,15 @@ pub async fn ensure_scope_box(
                 .to_string(),
         ));
     };
+    tracing::info!(
+        scope,
+        scope_id,
+        kind,
+        "computer: asking the provider for a box"
+    );
     match provider.create(None).await {
         Ok(box_id) => {
+            tracing::info!(scope, scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
             match store
                 .set_scoped_computer(scope, scope_id, &box_id, kind, org_id, at_ms)
                 .await
@@ -426,7 +452,12 @@ pub async fn ensure_scope_box(
                 Err(error) => Err(("unknown".to_string(), error.to_string())),
             }
         }
-        Err(error) => Err((error.code().to_string(), error.to_string())),
+        Err(error) => {
+            // The upstream refusal, in full, at WARN. This is the line whose absence meant a
+            // `quota_exceeded` from hours earlier could not be told from one from a second ago.
+            tracing::warn!(scope, scope_id, kind, code = %error.code(), %error, "computer: the provider refused");
+            Err((error.code().to_string(), error.to_string()))
+        }
     }
 }
 

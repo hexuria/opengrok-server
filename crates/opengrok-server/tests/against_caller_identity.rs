@@ -1,9 +1,12 @@
-//! A routine belongs to the person who set it, and a duplicate to the person who made it.
+//! Seam A serves the caller it can identify, and nobody when it cannot.
 //!
-//! Both used to belong to the DEPLOYMENT account: five seam-A handlers resolved
-//! `account(state, &state.email)` and never looked at the caller. That pooled every member's
-//! routines into one identity — invisible to their owners, and listable, editable and deletable
-//! by anyone signed in. Needs Postgres; skips loudly without OG_DATABASE_URL.
+//! Routines and duplicates used to belong to the DEPLOYMENT account: five seam-A handlers
+//! resolved `account(state, &state.email)` and never looked at the caller. That pooled every
+//! member's routines into one identity — invisible to their owners, and listable, editable and
+//! deletable by anyone signed in. Then the fallback itself went: a request or a stream with no
+//! usable identity is refused with a code the client branches on, `searchAgents` answers the
+//! caller's roster, and a stream sees only its own account's frames.
+//! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -83,7 +86,19 @@ struct Harness {
     account: AccountId,
 }
 
+/// The existing tests here are about which ACCOUNT owns a routine, not about how a caller is
+/// identified, so they speak as the deployment account and opt into the fallback. The identity
+/// tests at the bottom of this file use `strict_harness` and must never be switched to this one.
 async fn harness(database_url: &str, email: &str) -> Harness {
+    build_harness(database_url, email, true).await
+}
+
+/// A gateway with the fallback OFF — the shipped default since 5 Sep 2026.
+async fn strict_harness(database_url: &str, email: &str) -> Harness {
+    build_harness(database_url, email, false).await
+}
+
+async fn build_harness(database_url: &str, email: &str, identity_fallback: bool) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -119,6 +134,11 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         email.to_string(),
         Some("http://opengrok.lan:1447".to_string()),
     );
+    let gateway = if identity_fallback {
+        gateway.allowing_identity_fallback()
+    } else {
+        gateway
+    };
     let app = opengrok_server::router(agui.clone(), gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -361,5 +381,275 @@ async fn a_duplicate_belongs_to_the_caller_not_the_deployment() {
             .as_array()
             .is_some_and(|rows| rows.iter().any(|r| r["id"] == copy_id.as_str())),
         "somebody else's copy appeared on the deployment account's roster: {theirs}"
+    );
+}
+
+/// A seam-A call with NO account identity is refused, not served as the deployment account.
+///
+/// This is the 5 Sep 2026 incident as a test. The desktop attaches the account header once per
+/// CONNECTION; one empty read of its token secret at connect time dropped the header for the whole
+/// life of that connection, and every call over it — `listAgents` through `sendPrompt` — was served
+/// as `OG_GATEWAY_EMAIL`, which on that deployment was the org admin. The person saw another
+/// account's coworkers and could have written to that account's transcripts. Nothing degraded,
+/// nothing retried, nothing logged.
+///
+/// The code matters as much as the status: the header is attached per connect, so the client must
+/// REBUILD its connection (re-reading the secret) rather than retry the call, which would carry
+/// the same absence. `account_identity_required` is what tells it which.
+#[tokio::test]
+async fn a_call_with_no_account_identity_is_refused_not_served_as_the_deployment() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let (status, body) = harness.api("listAgents", json!({})).await;
+
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["code"], json!("account_identity_required"), "{body}");
+    assert!(
+        !body["error"].as_str().unwrap_or_default().is_empty(),
+        "a refusal must say why in words too: {body}"
+    );
+}
+
+/// A header that does not verify is refused DIFFERENTLY, and never falls back.
+///
+/// Two codes, because they need different client behaviour. An absent header is a connection that
+/// failed to read its secret — rebuilding fixes it. A present-but-invalid one is an expired or
+/// wrong token, where rebuilding re-attaches the same dead credential and would spin forever. So
+/// `account_identity_invalid` must surface rather than trigger a reconnect.
+///
+/// It is also refused even where the fallback is opted in: an invalid header is an active claim we
+/// rejected, and answering it as somebody else would be the original bug wearing a signature.
+#[tokio::test]
+async fn an_unverifiable_account_header_is_refused_as_invalid() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let (status, body) = harness
+        .api_as("listAgents", json!({}), "not-a-real-token")
+        .await;
+
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["code"], json!("account_identity_invalid"), "{body}");
+}
+
+/// 401, never 403. 403 asserts we know who the caller is and are refusing them, which is a lie
+/// about the absent case — not knowing is the entire condition being reported.
+#[tokio::test]
+async fn identity_refusals_are_401_and_never_403() {
+    let url = database_or_skip!();
+    // A unique deployment email per test: the seed is an append and a repeat is a Conflict.
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    for (label, status) in [
+        ("absent", harness.api("listAgents", json!({})).await.0),
+        (
+            "invalid",
+            harness.api_as("listAgents", json!({}), "nope").await.0,
+        ),
+    ] {
+        assert_eq!(status, 401, "the {label} case must be 401, not 403");
+    }
+}
+
+/// The event stream refuses an unidentified opener instead of adopting the deployment account.
+///
+/// The 5 Sep 2026 fail-closed change landed on the seam-A dispatch and left the stream open: it
+/// resolved its audience through `caller_email`, which falls back to `OG_GATEWAY_EMAIL`. A stream
+/// that offered no identity was therefore given the deployment account as its audience and
+/// received that account's ADDRESSED frames — the delivery the audience check exists to prevent.
+/// It never showed up in the `seam-A call` log lines either, because a stream open is not one.
+#[tokio::test]
+async fn the_event_stream_refuses_an_unidentified_opener() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let res = harness
+        .client
+        .get(format!("{}/events", harness.base))
+        .header("authorization", "Bearer test-bearer")
+        .send()
+        .await
+        .expect("stream open");
+
+    assert_eq!(res.status().as_u16(), 401);
+    let body: Value = serde_json::from_str(&res.text().await.expect("body")).expect("json");
+    assert_eq!(body["code"], json!("account_identity_required"), "{body}");
+}
+
+/// A stream carrying a header that does not verify is refused as invalid, not as absent — the
+/// client must renew rather than merely rebuild, and only the code distinguishes those.
+#[tokio::test]
+async fn the_event_stream_refuses_an_unverifiable_opener_as_invalid() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let harness = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let res = harness
+        .client
+        .get(format!("{}/events", harness.base))
+        .header("authorization", "Bearer test-bearer")
+        .header("x-opengrok-account", "not-a-real-token")
+        .send()
+        .await
+        .expect("stream open");
+
+    assert_eq!(res.status().as_u16(), 401);
+    let body: Value = serde_json::from_str(&res.text().await.expect("body")).expect("json");
+    assert_eq!(body["code"], json!("account_identity_invalid"), "{body}");
+}
+
+/// `searchAgents` searches the CALLER's roster, not the deployment's.
+///
+/// It took no caller at all and filtered the deployment-wide read, so the command palette matched
+/// against `OG_GATEWAY_EMAIL`'s coworkers for whoever typed in it. Metadata rather than message
+/// content — rows carry `lastMessagePreview: null` and the ownership gate still refused the
+/// transcripts — but somebody else's coworker names and descriptions all the same. It is also the
+/// shape the authorisation gate above the dispatch cannot catch: no id in the arguments means
+/// `names_a_coworker` has nothing to check, so the verb has to scope itself.
+#[tokio::test]
+async fn search_agents_matches_only_the_callers_own_coworkers() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let deployment = format!("deployment-{tag}@og.local");
+    let h = harness(&url, &deployment).await;
+
+    // The deployment account hires one; a DIFFERENT signed-in person hires another.
+    h.hire("Findme").await;
+    let other_email = format!("other-{tag}@og.local");
+    let other = seed_account(&h.store, &other_email).await;
+    let other_token = h.access_token(&other, &other_email);
+    let (status, created) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "Findmetoo", "clientNonce": format!("s-{tag}") }),
+            &other_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{created}");
+
+    // "findme" matches both by name — but each caller may only see their own.
+    let (status, hits) = h
+        .api_as("searchAgents", json!({ "query": "findme" }), &other_token)
+        .await;
+    assert_eq!(status, 200, "{hits}");
+    let names: Vec<&str> = hits
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Findmetoo"],
+        "the other account's search leaked: {hits}"
+    );
+}
+
+/// Read `data:` frames from an open SSE response until one arrives or the wait runs out.
+async fn next_frame(res: &mut reqwest::Response, buffer: &mut String, secs: u64) -> Option<Value> {
+    loop {
+        if let Some(start) = buffer.find("data: ")
+            && let Some(end) = buffer[start..].find("\n\n")
+        {
+            let line = buffer[start + 6..start + end].to_string();
+            buffer.replace_range(..start + end + 2, "");
+            return serde_json::from_str(&line).ok();
+        }
+        let chunk =
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), res.chunk()).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                // Timed out, or the stream ended: no frame, which for this test is the point.
+                _ => return None,
+            };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// A stream opens on its OWN roster, and never receives another account's frames.
+///
+/// #58, and it was two bugs sharing a mechanism. The stream's opening snapshot was built from the
+/// deployment account, so every subscriber's first frame was somebody else's roster; and every
+/// stamped emit went out with `audience: None`, so roster deltas AND transcript frames — message
+/// content included — reached every open stream. The only thing standing in front of it was the
+/// client declining to render an agent it did not recognise, which is obscurity rather than a
+/// check, and it stopped being even that when a coworker could be shared.
+///
+/// The old comment said scoping meant per-person SEQUENCES and therefore a change to the replica
+/// contract. It meant per-person COUNTERS: the wire `replicaKey` is still `"roster"`, the split
+/// lives in the server's map, and no account can see a gap because no account receives the frames
+/// that would have skipped its numbers.
+#[tokio::test]
+async fn a_stream_sees_only_its_own_account() {
+    let url = database_or_skip!();
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let h = strict_harness(&url, &format!("deployment-{tag}@og.local")).await;
+
+    let a_email = format!("a-{tag}@og.local");
+    let b_email = format!("b-{tag}@og.local");
+    let a = seed_account(&h.store, &a_email).await;
+    let b = seed_account(&h.store, &b_email).await;
+    let a_token = h.access_token(&a, &a_email);
+    let b_token = h.access_token(&b, &b_email);
+
+    // A hires; B hires nothing.
+    let (status, made) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "AlphasBot", "clientNonce": format!("a-{tag}") }),
+            &a_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{made}");
+
+    // B opens a stream. Its OPENING SNAPSHOT must be B's roster — empty — not A's or the
+    // deployment's. Before the fix this frame carried whatever OG_GATEWAY_EMAIL could see.
+    let mut b_stream = h
+        .client
+        .get(format!("{}/events?channels=agents", h.base))
+        .header("authorization", "Bearer test-bearer")
+        .header("x-opengrok-account", &b_token)
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .expect("b stream");
+    assert_eq!(b_stream.status().as_u16(), 200);
+
+    let mut buffer = String::new();
+    let opening = next_frame(&mut b_stream, &mut buffer, 5)
+        .await
+        .expect("an opening snapshot");
+    assert_eq!(opening["channel"], "agents");
+    let names: Vec<&str> = opening["payload"]["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .filter_map(|row| row["name"].as_str())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "B's stream opened on somebody else's roster: {names:?}"
+    );
+
+    // Now A changes its roster. B must hear NOTHING — not the delta, not a snapshot.
+    let (status, second) = h
+        .api_as(
+            "createAgent",
+            json!({ "name": "AlphasSecond", "clientNonce": format!("a2-{tag}") }),
+            &a_token,
+        )
+        .await;
+    assert_eq!(status, 200, "{second}");
+
+    let leaked = next_frame(&mut b_stream, &mut buffer, 3).await;
+    assert!(
+        leaked.is_none(),
+        "A's roster change reached B's stream: {leaked:?}"
     );
 }

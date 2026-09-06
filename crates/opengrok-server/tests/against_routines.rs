@@ -123,7 +123,10 @@ async fn app(database_url: &str, email: &str) -> (axum::Router, GatewayState) {
         Some("test-bearer".to_string()),
         email.to_string(),
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
+    // must be asked for rather than assumed.
+    .allowing_identity_fallback();
     (opengrok_server::router(agui, gateway.clone()), gateway)
 }
 
@@ -447,7 +450,9 @@ async fn a_routine_change_refreshes_the_pane_without_spending_a_roster_sequence(
         "the pane frame is unstamped: {refresh}"
     );
 
-    live::emit_roster(&gateway).await;
+    // Since #58 the roster emit is per-account: it takes the caller whose roster changed, and
+    // delivers only to that account's streams.
+    live::emit_roster_for_caller(&gateway, &email).await;
     let roster = next_frame(&mut stream, &mut buffer).await;
     assert_eq!(roster["channel"], "agents");
     assert_eq!(

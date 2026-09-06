@@ -52,7 +52,10 @@ async fn spawn_with_a_dead_store() -> String {
         Some("test-bearer".to_string()),
         email,
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
+    // must be asked for rather than assumed.
+    .allowing_identity_fallback();
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -220,7 +223,10 @@ async fn a_stream_opened_during_the_outage_is_seeded_once_the_store_is_back() {
         Some("test-bearer".to_string()),
         email,
         Some("http://opengrok.lan:1447".to_string()),
-    );
+    )
+    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
+    // must be asked for rather than assumed.
+    .allowing_identity_fallback();
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

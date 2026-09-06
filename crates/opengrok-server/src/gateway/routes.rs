@@ -8,6 +8,8 @@
 
 use std::convert::Infallible;
 
+use base64::Engine as _;
+
 use axum::Router;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -100,6 +102,50 @@ fn refusal(code: u16, message: &str) -> Response {
     )
 }
 
+/// The counter an unaddressable stream is seeded from. It has no frames and never will, so the
+/// number only has to be stable and never collide with a real account's — no account id is empty.
+fn unaddressable() -> opengrok_core::id::AccountId {
+    opengrok_core::id::AccountId::from_stored(String::new())
+}
+
+/// Stamp `accepted: true` onto a successful entry reply. The widget verbs' client-side
+/// `actionReply` requires a record with a boolean `accepted` or it rolls back; the entry from
+/// `mutate_entry` is a record, so the flag rides on it. A non-object reply (the `Null` for an
+/// unknown entry) passes through untouched — `Null` already means "nothing to settle".
+fn accepted(reply: (u16, Value)) -> (u16, Value) {
+    let (code, mut body) = reply;
+    if code == 200
+        && let Some(map) = body.as_object_mut()
+    {
+        map.insert("accepted".to_string(), json!(true));
+    }
+    (code, body)
+}
+
+/// The one refusal that carries a machine-readable `code`.
+///
+/// `code` is additive and appears ONLY here. Every other refusal keeps the `{"error": …}` shape
+/// the client already parses, because widening a reply shape the client reads is how a client we
+/// do not compile starts diverting (CLAUDE.md #1, and its third header fact).
+///
+/// 401 rather than 403 on both: 403 asserts we know who the caller is and are refusing them,
+/// which is a lie about the absent case — the whole point is that we do not know.
+///
+/// The two codes mean different things to the client and must stay distinct. On this seam the
+/// account header is attached per CONNECTION, so `account_identity_required` says "rebuild the
+/// connection, which re-reads the token secret" — retrying the call carries the same absence.
+/// `account_identity_invalid` says the opposite: a rebuild will not help, surface it.
+fn identity_refusal(code: &str) -> Response {
+    let message = match code {
+        "account_identity_invalid" => "the account identity header did not verify; sign in again",
+        _ => "this call carried no account identity; reconnect so the account header is attached",
+    };
+    reply(
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": message, "code": code }),
+    )
+}
+
 /// `GET /health` — the supervisor probes this on a 1500 ms deadline and only accepts
 /// `ok === true`. The busy flag is real: it reports whether any run is live right now.
 ///
@@ -165,15 +211,28 @@ async fn events(
         .as_deref()
         .filter(|raw| !raw.trim().is_empty())
         .map(|raw| raw.split(',').map(|name| name.trim().to_string()).collect());
-    // WHOSE STREAM THIS IS, resolved once. A frame addressed to one account is dropped for
-    // every other stream; a stream whose account cannot be resolved receives addressed frames
-    // from nobody, which is the narrow side — an unidentified subscriber is not a licence to
-    // deliver somebody's data to it.
+
+    // WHOSE STREAM THIS IS, resolved once and FAIL-CLOSED, exactly as the seam-A dispatch does.
+    //
+    // This used to go through `caller_email`, which falls back to `OG_GATEWAY_EMAIL` — so a
+    // stream that offered no identity was given the deployment account as its audience and
+    // received that account's ADDRESSED frames, the very delivery the audience check exists to
+    // prevent. The 5 Sep 2026 fail-closed change landed on `/api/*` and left its twin here open;
+    // the stream open is not a seam-A call, so it never even appeared in the `seam-A call` lines
+    // that were being read to prove the fix. Same seam, same fallback, one surface later.
+    let resolved = super::caller_of(&state, &headers).await;
+    tracing::info!(account = %resolved.logged(), "events: stream open");
+    if let Some(code) = resolved.refusal_code() {
+        return identity_refusal(code);
+    }
+    let Some(caller) = resolved.email().map(str::to_string) else {
+        return identity_refusal("account_identity_required");
+    };
     let audience = state
         .agui
         .auth
         .store
-        .account_by_email(&super::caller_email(&state, &headers).await)
+        .account_by_email(&caller)
         .await
         .ok()
         .flatten()
@@ -222,12 +281,33 @@ async fn events(
     // read succeeds, stamped `current` like the opener's own. The task ends with the stream: it
     // checks the channel before every read and the receiver is dropped with the body.
     let (late_tx, late_rx) = tokio::sync::mpsc::channel::<String>(1);
-    let snapshot = match super::live::roster_rows(&state).await {
+    // The baseline sequence for THIS account — the number their own stream has already reached,
+    // not a global one. Since #58 each account has its own counter under the same `replicaKey`,
+    // so seeding from anyone else's would hand the replica a gap on its very first frame.
+    // AN UNRESOLVED ACCOUNT IS NOT AN AUTH FAILURE. The identity already verified above; if the
+    // account cannot be read it is because the STORE could not answer, and a store outage must not
+    // present as "sign in again" — `against_events_when_the_store_is_down` exists precisely
+    // because the stream has to open through an outage and seed itself when the store returns.
+    // Refusing here would turn a database blip into a credential error the person is asked to
+    // fix by signing in. Opening with no audience is the narrow side — the stream receives no
+    // addressed frames — and it recovers on the client's next connect.
+    let seed_stamp = match &audience {
+        Some(account) => super::live::current_for(&state, "roster", account),
+        None => super::live::current_for(&state, "roster", &unaddressable()),
+    };
+
+    // THE OPENER'S ROSTER, not the deployment's. This read used to be `roster_rows(&state)`,
+    // which is `roster_rows_for(state, &state.email)` — so every stream, however well identified,
+    // was handed the `OG_GATEWAY_EMAIL` account's coworkers as its first frame. A correct
+    // `listAgents` answered the caller's own roster over RPC and this frame replaced it 420 ms
+    // later; the client that adopted it showed one account another account's bots. The caller was
+    // resolved twenty lines above and simply was not used here.
+    let snapshot = match super::live::roster_rows_for(&state, &caller).await {
         Ok(rows) => {
             let payload = json!({
                 "activeAgentId": state.active_agent.lock().ok().and_then(|a| a.clone()),
                 "agents": rows,
-                "ordered": super::live::current(&state, "roster"),
+                "ordered": seed_stamp.clone(),
                 "coverage": { "kind": "complete-roster" },
             });
             frame("agents", &payload, wanted.as_ref())
@@ -240,6 +320,12 @@ async fn events(
             );
             let retry_state = state.clone();
             let retry_wanted = wanted.clone();
+            // The retry is the same frame, so it takes the same caller — a late snapshot that
+            // fell back to the deployment account would reintroduce the bug on the slow path.
+            let retry_caller = caller.clone();
+            // The account this stream is for, or the unaddressable placeholder — the same choice
+            // the opener made, so the retry stamps from the same counter the live frames use.
+            let retry_audience = audience.clone().unwrap_or_else(unaddressable);
             let id = guard.id.clone();
             tokio::spawn(async move {
                 let mut wait_secs = 1u64;
@@ -248,12 +334,22 @@ async fn events(
                     if late_tx.is_closed() {
                         return;
                     }
-                    match super::live::roster_rows(&retry_state).await {
+                    match super::live::roster_rows_for(&retry_state, &retry_caller).await {
                         Ok(rows) => {
                             let payload = json!({
                                 "activeAgentId": retry_state.active_agent.lock().ok().and_then(|a| a.clone()),
                                 "agents": rows,
-                                "ordered": super::live::current(&retry_state, "roster"),
+                                // STAMPED AT SEND, not at open. Freezing the opener's stamp here
+                                // meant that if a roster emit for this account landed while the
+                                // retry was still backing off, the late snapshot arrived stamped
+                                // BEHIND the live frame — and the replica discards a snapshot
+                                // older than what it holds, which is exactly the seeding this
+                                // path exists to guarantee.
+                                "ordered": super::live::current_for(
+                                    &retry_state,
+                                    "roster",
+                                    &retry_audience,
+                                ),
                                 "coverage": { "kind": "complete-roster" },
                             });
                             tracing::info!(
@@ -393,7 +489,23 @@ async fn command(
     // The per-account pivot: whose account this call is FOR. The caller's own account when it sends
     // a valid account token in `ACCOUNT_HEADER`, else the `OG_GATEWAY_EMAIL` fallback — so a client
     // that has not yet learned to send the header keeps working. Resolved once, per request.
-    let caller = super::caller_email(&state, &headers).await;
+    // WHO this request is for, or a refusal. Resolved once and handed to the whole dispatch, so
+    // getting it wrong here is wrong for every verb — which is precisely how a headerless
+    // connection came to read and write as the admin. See `gateway::Caller`.
+    let resolved = super::caller_of(&state, &headers).await;
+    // INFO, not DEBUG: this is the line that answers "who was this request for", and it was the
+    // missing one. A debug-level answer is one nobody has when they need it.
+    tracing::info!(method = %method, account = %resolved.logged(), "seam-A call");
+    if let Some(code) = resolved.refusal_code() {
+        return identity_refusal(code);
+    }
+    let caller = match resolved.email() {
+        Some(email) => email.to_string(),
+        // Unreachable: `refusal_code` is Some for exactly the variants with no email, and we have
+        // just returned on those. Refuse rather than unwrap — the workspace denies `expect`, and a
+        // wrong guess here is an identity bug, which is the one kind we are not repeating.
+        None => return identity_refusal("account_identity_required"),
+    };
 
     // An empty body is `{}` (`parseCommandArgs`); a malformed one is a command error, not a
     // gateway outage, so it answers < 500.
@@ -647,7 +759,7 @@ async fn command(
             wrap(super::lifecycle::delete_agents(&state, &ids, &caller).await)
         }
         "duplicateAgent" => wrap(super::lifecycle::duplicate_agent(&state, &args, &caller).await),
-        "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args).await),
+        "searchAgents" => wrap(super::lifecycle::search_agents(&state, &args, &caller).await),
         "searchMedia" => reply(StatusCode::OK, json!([])),
         "setAgentAvatarBytes" => wrap(super::lifecycle::set_avatar(&state, &args, &caller).await),
         "getAgentAvatar" => wrap(super::lifecycle::get_avatar(&state, &args).await),
@@ -682,29 +794,73 @@ async fn command(
                 .await,
             )
         }
+        // `accepted: true` on both widget replies: the client's `actionReply`
+        // (`widget-interactions.ts:35-39`) requires a record with a boolean `accepted` and rolls
+        // the optimistic state back otherwise. Returning the bare entry made the card flicker
+        // back and settle only when the `updated` frame landed. Additive — the entry still comes
+        // back — and it is set on the ENTRY the client receives, not written to the store, because
+        // `accepted` is a reply fact and not a transcript one.
         "respondToWidget" => {
             let value = args.get("value").cloned().unwrap_or(Value::Null);
-            wrap(
+            wrap(accepted(
                 super::lifecycle::mutate_entry(&state, &args, &caller, move |entry| {
                     if let Some(map) = entry.as_object_mut() {
                         map.insert("respondedValue".to_string(), value);
                     }
                 })
                 .await,
-            )
+            ))
         }
-        "dismissWidget" => wrap(
+        "dismissWidget" => wrap(accepted(
             super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
                 if let Some(map) = entry.as_object_mut() {
                     map.insert("widgetDismissed".to_string(), json!(true));
                 }
             })
             .await,
+        )),
+        // `discardDraft {entryId, agentId}` — official 0.29/0.30 verb, transcribed at
+        // `client-versions-0.18-0.30.md:944`. The client collapses the card to "Discarded"
+        // optimistically and rolls back on error; until this arm existed it was answered
+        // `unknown gateway method` and Discard visibly did nothing. Same tier as `dismissWidget`:
+        // discarding a draft on a shared coworker is talking, not managing, so `may_use` not
+        // `owns`. No `accepted` check on the client side; any 2xx settles it.
+        "discardDraft" => wrap(
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("draftSendState".to_string(), json!("discarded"));
+                }
+            })
+            .await,
         ),
+        // `sendDraft {entryId, draft, agentId}` — its sibling at `:943`. The projector already
+        // draws `"sent"`, but no client button sends the verb yet, so mutating on it would be
+        // inventing behaviour ahead of the client. A placeholder keeps the shape stable; it
+        // becomes a real arm when the button does.
+        "sendDraft" => reply(StatusCode::OK, Value::Null),
         "deleteTranscriptEntries" => {
             wrap(super::lifecycle::delete_entries(&state, &args, &caller).await)
         }
-        "submitSecret" | "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
+        // `submitSecret {entryId, value, agentId}` (`secret-request-actions.ts:21-25`). It used to
+        // answer `Null` untouched AND sit in `ANSWERS_A_CONSTANT` — a verb that names a coworker,
+        // bypassing the coworker gate, and dropping the one fact the card needs: the "Saved" state
+        // reverted to the input form on every reload. It is now a gated mutation setting
+        // `secretProvided: true`, which is what `views/secret-request.tsx:31` settles on.
+        //
+        // THE VALUE IS NOT STORED, BY DECISION. There is no store for coworker secrets yet; in
+        // local mode the host routes it to a connector credential store we have no equivalent of,
+        // and improvising one is worse than dropping it. Never log or echo `value` — not even at
+        // debug — and never put it on the entry. The client declares the reply void
+        // (`coordinator.ts:104`) and ignores it, so returning the entry is harmless.
+        "submitSecret" => wrap(
+            super::lifecycle::mutate_entry(&state, &args, &caller, |entry| {
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("secretProvided".to_string(), json!(true));
+                }
+            })
+            .await,
+        ),
+        "appendConnectorCard" => reply(StatusCode::OK, Value::Null),
 
         // ---- P9: automations are slice 6's schedules wearing the client's names ----
         "getAgentAutomations" | "listAllAutomations" => {
@@ -770,10 +926,60 @@ async fn command(
         "listBoxMcpServers" => reply(StatusCode::OK, json!({ "servers": [] })),
 
         // ---- P7: attachments wait on the artifacts store, and say so ----
-        "uploadAttachment"
-        | "readAttachmentImage"
-        | "readAttachmentText"
-        | "readAttachmentChunk" => refusal(
+        //
+        // Except the two READ verbs under a mock door. Every desktop viewer that is not
+        // image/video/audio reaches its bytes through these — the PDF, spreadsheet, markdown,
+        // json and text readers all go `attachments.readBytes` → `readAttachmentChunk` in 4 MB
+        // chunks — so refusing them unconditionally meant the fixture catalogue could show a file
+        // chip that no reader could ever open. `mock_fixtures::read_fixture` serves the fixture
+        // directory and nothing else, and only while a mock door is selected; the general feature
+        // is the artifacts slice and stays parked (`ROADMAP.md` Later).
+        "readAttachmentChunk" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            match super::mock_fixtures::read_fixture(path) {
+                Ok(bytes) => {
+                    let total = bytes.len();
+                    // The desktop probes with `length: 0` first, purely to learn `totalSize`.
+                    // That probe must answer the size and NO bytes, or it pays for the whole
+                    // file before deciding whether it wants any of it.
+                    let offset = args
+                        .get("offset")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        .min(total as u64) as usize;
+                    // ABSENT AND ZERO ARE DIFFERENT. `length: 0` is the desktop's probe for
+                    // `totalSize` and must return no bytes; an OMITTED length means "the rest",
+                    // and defaulting it to zero answered a correct size with an empty body — an
+                    // empty success, which this file's own header calls the dangerous reply.
+                    let length = match args.get("length").and_then(Value::as_u64) {
+                        Some(asked) => asked.min((total - offset) as u64) as usize,
+                        None => total - offset,
+                    };
+                    let slice = &bytes[offset..offset + length];
+                    reply(
+                        StatusCode::OK,
+                        json!({
+                            "totalSize": total,
+                            "bytesBase64": base64::engine::general_purpose::STANDARD.encode(slice),
+                        }),
+                    )
+                }
+                Err(why) => refusal(400, &why),
+            }
+        }
+        "readAttachmentText" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            match super::mock_fixtures::read_fixture(path) {
+                // Lossy on purpose: a reader asking for TEXT wants to see the file, and half a
+                // markdown fixture is more use than a decode error. The desktop truncates.
+                Ok(bytes) => reply(
+                    StatusCode::OK,
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                ),
+                Err(why) => refusal(400, &why),
+            }
+        }
+        "uploadAttachment" | "readAttachmentImage" => refusal(
             400,
             "attachments are not stored by this server yet (artifacts is a planned slice)",
         ),
@@ -948,7 +1154,6 @@ pub const ANSWERS_A_CONSTANT: &[&str] = &[
     "setAgentNotificationsEnabled",
     "setAgentNotifyOnUpdates",
     "setAgentUnread",
-    "submitSecret",
 ];
 
 /// Ids that are definitely NOT a coworker's. `id` on the wire means different things on
@@ -1029,7 +1234,10 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "runAgentAutomationNow"
         | "reactToMessage"
         | "respondToWidget"
-        | "dismissWidget" => (200, Value::Null),
+        | "dismissWidget"
+        | "discardDraft"
+        | "sendDraft"
+        | "submitSecret" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
     }
