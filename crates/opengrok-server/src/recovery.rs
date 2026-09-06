@@ -133,8 +133,112 @@ async fn resolve(state: &AgUiState, run_id: &RunId) -> Result<(), opengrok_store
         .append_run(run_id, seq, &events, &view, None)
         .await?;
 
+    // THE RUN IS FAILED; THE BUBBLE IS NOT. Everything above settles the run aggregate, and until
+    // this existed that was the whole of recovery — which left the thing the person is actually
+    // looking at untouched. `sendPrompt` appends an entry marked `streaming: true` before the turn
+    // starts and clears the flag when it finishes, so a process that died in between leaves it set
+    // with nothing coming to clear it.
+    //
+    // The client has NO timeout for that state (verified against the packaged app by the client
+    // session: `hasText = content.trim().length > 0 || streaming` keeps an empty bubble on screen,
+    // with typing dots and `aria-busy`, until a frame says otherwise). So the person watches a
+    // coworker type forever, after every restart mid-answer, and the only escape is a new
+    // conversation. Failing the run without closing the entry is a half-fix that looks complete
+    // from the server's own logs.
+    //
+    // Best effort on purpose: the run is already correctly failed, and a transcript that cannot be
+    // reached must not turn a tidy-up into a failed sweep that retries forever.
+    close_streaming_entries(state, run_id, &run, &reason).await;
+
     tracing::info!(run = %run_id, unresolved = ?unresolved, "ended an abandoned run");
     Ok(())
+}
+
+/// Clear the `streaming` flag a dead process left set, and say why in the bubble.
+///
+/// Whatever the coworker had already said is KEPT and the reason appended after it. Once a turn
+/// streams its answer progressively there will usually be partial text here, and throwing away
+/// what the person already read to replace it with an error would lose the useful half of the
+/// turn. An empty bubble simply becomes the sentence.
+async fn close_streaming_entries(
+    state: &AgUiState,
+    run_id: &RunId,
+    run: &opengrok_core::run::Run,
+    reason: &str,
+) {
+    let Some(coworker) = run.coworker_id.clone() else {
+        // A run with no coworker is the bare `/ag-ui` endpoint, which owns no transcript.
+        return;
+    };
+    // The aggregate knows its coworker but not its account, and a transcript is keyed on the pair
+    // — a shared coworker holds one per person. The projection is where the owner is recorded.
+    let account = match state.auth.store.run_account(run_id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, run = %run_id, "could not read a run's account to close its bubble");
+            return;
+        }
+    };
+
+    let entries = match state
+        .auth
+        .store
+        .streaming_gateway_entries(&coworker, &account)
+        .await
+    {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, run = %run_id, "could not read a run's streaming entries");
+            return;
+        }
+    };
+
+    for mut entry in entries {
+        let Some(id) = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let said = entry
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let closed = if said.trim().is_empty() {
+            format!("This turn did not finish: {reason}.")
+        } else {
+            format!("{said}\n\n(This turn did not finish: {reason}.)")
+        };
+        if let Some(object) = entry.as_object_mut() {
+            // REMOVED, not set false. The client reads the key's presence through
+            // `transcriptStreaming(value)`; the final frame of a healthy turn omits it, and a
+            // recovered one should be indistinguishable from that.
+            object.remove("streaming");
+            object["message"] = serde_json::json!({ "type": "text", "content": closed });
+        }
+        if let Err(error) = state
+            .auth
+            .store
+            .update_gateway_entry_by_id(&coworker, &account, &id, &entry)
+            .await
+        {
+            tracing::warn!(%error, run = %run_id, entry = %id, "could not close a streaming entry");
+            continue;
+        }
+        // NO LIVE FRAME, AND THAT IS ENOUGH HERE. The sweep holds `AgUiState`, which has no path
+        // to the live bus (`GatewayState` owns it, and it owns `AgUiState`, not the reverse) — and
+        // plumbing one through for this would be the wrong trade. The case this exists for is a
+        // process that died: the client is reconnecting to a NEW process and re-reads the
+        // transcript as it does, so it sees the closed row without ever needing a push.
+        //
+        // The gap is the multi-replica case — replica A dies mid-turn, replica B sweeps it, and a
+        // client still attached to B keeps its dots until it next reloads. Worth fixing when a
+        // second replica is actually run; not worth restructuring the sweep for today.
+        tracing::info!(run = %run_id, entry = %id, "closed a streaming entry a restart abandoned");
+    }
 }
 
 /// A tool call that was started and never answered.

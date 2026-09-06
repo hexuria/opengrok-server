@@ -28,6 +28,15 @@ esac
 PORT="${OG_BIND##*:}"
 PORT="${PORT:-1447}"
 
+# A MOCK TURN THAT TAKES OBSERVABLE TIME. Every mock door replays a script already in memory, so
+# without this a turn starts and finishes inside one millisecond: `isRunning` flips true then false
+# with no roster frame in between, the client's green "working" dot is never drawn, and an answer
+# cannot be watched arriving. Exported rather than defaulted in the binary because the tests and
+# the smokes drive these same doors hundreds of times and pacing them would buy no assertion.
+# Set OG_MOCK_DELTA_MS=0 to turn it off for a run that wants the old instant behaviour.
+export OG_MOCK_DELTA_MS="${OG_MOCK_DELTA_MS:-90}"
+echo "=== mock doors paced at ${OG_MOCK_DELTA_MS}ms per delta (OG_MOCK_DELTA_MS)"
+
 # WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
 # Cargo.toml), but a dev server is exactly where it is wanted — and `OG_MODEL_DOOR=mock-cards`
 # refuses to start without it, so a plain `cargo build -p opengrok` would leave you with a binary

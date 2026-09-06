@@ -93,12 +93,27 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
+    // HOW SLOWLY A MOCK DOOR SPEAKS, in milliseconds per delta. Zero or unset is the old
+    // behaviour: the whole answer arrives inside one millisecond, because every mock path is a
+    // synchronous `stream::iter` over a script already in memory.
+    //
+    // That instantaneity is why the client's green "working" dot never appears against a mock
+    // door — `isRunning` goes true and false again with no roster frame in between — and it is
+    // equally why an answer cannot be watched arriving. It is opt-in rather than defaulted
+    // because the tests and the smokes run these same doors hundreds of times, and pacing them
+    // would spend real seconds to make no assertion truer. `scripts/serve.sh` sets it, because a
+    // dev server is exactly where a turn should look like a model typing.
+    let paced = std::env::var("OG_MOCK_DELTA_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(0);
+
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.
     let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
         Ok("mock") => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
-            Arc::new(with_mock_verdict(MockDoor::echoing()))
+            Arc::new(with_mock_verdict(MockDoor::echoing().paced_by_ms(paced)))
         }
         // Every renderable transcript shape on demand, so client rendering can be worked on
         // without a provider. `gateway::mock_fixtures` owns the catalogue; the door only forwards.
@@ -123,14 +138,18 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!(
                     "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
                 );
-                Arc::new(with_mock_verdict(MockDoor::serving_fixtures()))
+                Arc::new(with_mock_verdict(
+                    MockDoor::serving_fixtures().paced_by_ms(paced),
+                ))
             }
         }
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
         Ok("mock-tools") => {
             tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
-            Arc::new(with_mock_verdict(MockDoor::asking_for_a_tool()))
+            Arc::new(with_mock_verdict(
+                MockDoor::asking_for_a_tool().paced_by_ms(paced),
+            ))
         }
         door => {
             let url = std::env::var("OG_GATEWAY_URL")

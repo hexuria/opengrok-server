@@ -290,6 +290,34 @@ impl PgStore {
             .transpose()
     }
 
+    /// Entries still flagged `streaming` for one reader, oldest first.
+    ///
+    /// FOR RECOVERY, which has to close what a dead process left open. The flag is written when a
+    /// turn starts and cleared when it finishes; a process that died in between leaves it set with
+    /// nothing coming to clear it, and the client draws an empty bubble with typing dots for as
+    /// long as the row says so — it has no timeout of its own (verified against the packaged app:
+    /// `hasText = content.trim().length > 0 || streaming`). Scoped to the pair, never to the
+    /// coworker alone: a shared coworker has one transcript per person, and a second replica may
+    /// legitimately be mid-turn on somebody else's.
+    pub async fn streaming_gateway_entries(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<Vec<Value>> {
+        let rows = sqlx::query(
+            "select entry from gateway_entry
+             where coworker_id = $1 and account_id = $2
+               and entry->>'streaming' = 'true' order by seq",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(row.try_get("entry")?))
+            .collect()
+    }
+
     /// Delete entries by client id, answering which ids actually went away.
     pub async fn delete_gateway_entries(
         &self,
