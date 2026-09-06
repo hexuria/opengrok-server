@@ -102,11 +102,29 @@ async fn main() -> anyhow::Result<()> {
         }
         // Every renderable transcript shape on demand, so client rendering can be worked on
         // without a provider. `gateway::mock_fixtures` owns the catalogue; the door only forwards.
+        //
+        // REFUSES TO BOOT WITHOUT THE CATALOGUE COMPILED IN, rather than falling through to the
+        // real gateway door. The door and the catalogue are two halves of one thing: this door
+        // answers every turn by calling `mock_fixture`, so without the tool it would ask for a
+        // tool nobody offers and fill the transcript with tool-not-found. Silently serving a REAL
+        // door instead would be worse still — an operator who asked for a mock would be billed
+        // for models. An operator who names a door this binary does not have has made a mistake
+        // worth stopping for (CLAUDE.md #8: fail closed and say why).
         Ok("mock-cards") => {
-            tracing::warn!(
-                "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
+            #[cfg(not(feature = "mock-fixtures"))]
+            anyhow::bail!(
+                "OG_MODEL_DOOR=mock-cards, but this binary was built without the `mock-fixtures` \
+                 feature, so there is no catalogue for that door to serve. Build with \
+                 `--features opengrok-server/mock-fixtures` (scripts/serve.sh does), or choose \
+                 another door."
             );
-            Arc::new(with_mock_verdict(MockDoor::serving_fixtures()))
+            #[cfg(feature = "mock-fixtures")]
+            {
+                tracing::warn!(
+                    "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
+                );
+                Arc::new(with_mock_verdict(MockDoor::serving_fixtures()))
+            }
         }
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.

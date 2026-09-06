@@ -264,10 +264,27 @@ sequenceDiagram
   Server-->>Desktop: transcript frames
 ```"#;
 
-/// Is the fixture surface open? Gated on the door being a mock, because the tool writes entries no
-/// real turn could produce. Read from the environment rather than threaded through: the door is
-/// chosen there too (`main.rs`), and `provision::local_docker_allowed` sets the precedent.
+/// Is the fixture surface open? Two locks, and they fail in different ways on purpose.
+///
+/// The first is the BUILD: this function only exists when the `mock-fixtures` feature is on, and
+/// the stub next door answers `false` unconditionally otherwise. That is the lock that matters,
+/// because it removes the capability rather than switching it off.
+///
+/// The second is the DOOR, checked here: the tool writes entries no real turn could produce, so
+/// it is offered only when a mock door is selected. Read from the environment rather than threaded
+/// through — the door is chosen there too (`main.rs`), and `provision::local_docker_allowed` sets
+/// the precedent.
+///
+/// And the same refusal that function makes: NEVER ON A HOSTED DEPLOYMENT. `OG_HOSTED=1` says this
+/// process serves other people's accounts, where a tool that fabricates transcript entries and a
+/// verb that reads files off the host are not a development convenience but a way in. A hosted
+/// build should not carry the feature at all; if one does, this is the second lock, and it is the
+/// cheap one — it costs an env read and closes the case where the feature was compiled in by
+/// mistake and the door set by mistake.
 pub fn enabled() -> bool {
+    if std::env::var("OG_HOSTED").as_deref() == Ok("1") {
+        return false;
+    }
     matches!(
         std::env::var("OG_MODEL_DOOR").as_deref(),
         Ok("mock") | Ok("mock-tools") | Ok("mock-cards")

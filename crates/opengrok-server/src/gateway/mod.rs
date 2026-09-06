@@ -20,6 +20,16 @@ pub mod conversation;
 pub mod group;
 pub mod lifecycle;
 pub mod live;
+// THE MOCK CATALOGUE IS A BUILD-TIME CHOICE, not just a runtime one. `mock_fixtures` carries
+// ~65 KB of embedded fixture files and a filesystem read verb; both are development surface and
+// neither belongs in a production binary, where the only thing standing between them and a caller
+// would be an environment variable. Off by default, so shipping it is something a build has to
+// ask for rather than something a release has to remember to remove. `mock_fixtures_absent`
+// answers the same five functions honestly, so no call site knows which one it got.
+#[cfg(feature = "mock-fixtures")]
+pub mod mock_fixtures;
+#[cfg(not(feature = "mock-fixtures"))]
+#[path = "mock_fixtures_absent.rs"]
 pub mod mock_fixtures;
 pub mod routes;
 pub mod summaries;

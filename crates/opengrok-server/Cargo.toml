@@ -5,6 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# The mock fixture catalogue: ~65 KB of embedded sample documents plus a filesystem read verb,
+# for developing the client's renderers with no provider and no spend. OFF BY DEFAULT because it
+# is development surface — a release build should not have to remember to exclude it, and a
+# production binary that does not contain it cannot be talked into serving it by an environment
+# variable. Turn it on for local dev, tests and CI: scripts/serve.sh and scripts/gate.sh do.
+mock-fixtures = []
+
 [dev-dependencies]
 sqlx.workspace = true
 base64.workspace = true

@@ -96,12 +96,21 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 ## Commands
 
 ```sh
-cargo check --workspace          # must stay clean
+cargo check --workspace          # must stay clean — this is the DEFAULT build, the one that ships
 cargo clippy --workspace --all-targets
-cargo test --workspace
+cargo test --workspace --features opengrok-server/mock-fixtures   # see below
 scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/setup/gate.md
 ```
+
+**`mock-fixtures` is a cargo feature, off by default.** It carries the mock transcript catalogue —
+~65 KB of embedded sample documents and a filesystem read verb — which is development surface and
+must not reach a production binary, so a release cannot ship it by forgetting to switch something
+off. Turn it on for local dev, tests and CI; `scripts/serve.sh` and `scripts/gate.sh` already do.
+Without it `cargo test --workspace` silently skips the catalogue's 23 tests, and a binary built
+without it REFUSES TO START under `OG_MODEL_DOOR=mock-cards` rather than quietly falling back to
+a real, billed door. `enabled()` additionally refuses when `OG_HOSTED=1`, the same way
+`provision::local_docker_allowed` does.
 
 ## Writing style in this repo
 
