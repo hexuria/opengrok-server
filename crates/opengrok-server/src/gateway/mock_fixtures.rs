@@ -164,7 +164,7 @@ pub fn tool() -> (opengrok_harness::LocalTool, Arc<Mutex<Vec<Value>>>) {
 
 /// Append whatever the turn's fixture calls recorded. Called once the turn's rounds are done.
 pub async fn drain_into(
-    store: &opengrok_store::PgStore,
+    state: &super::GatewayState,
     coworker: &CoworkerId,
     account: &AccountId,
     sink: &Arc<Mutex<Vec<Value>>>,
@@ -175,9 +175,23 @@ pub async fn drain_into(
         Err(_) => return,
     };
     for entry in entries {
-        if let Err(error) = store.append_gateway_entry(coworker, account, &entry, at_ms).await {
+        // APPEND THEN EMIT, in that order, exactly as every other append path does
+        // (`conversation.rs` user message, placeholder, final answer). Appending alone put the
+        // fixture in history and nowhere else, so every card needed a reload to appear — which is
+        // why the whole catalogue was verified "after Cmd+R" and never live. The append is the
+        // durable half and the frame is the visible one; a fixture that only half-arrives teaches
+        // the reader that the catalogue is unreliable rather than that a card is wrong.
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(coworker, account, &entry, at_ms)
+            .await
+        {
             tracing::warn!(%error, "mock fixture could not be appended");
+            continue;
         }
+        super::live::emit_transcript(state, coworker.as_str(), "appended", entry).await;
     }
 }
 

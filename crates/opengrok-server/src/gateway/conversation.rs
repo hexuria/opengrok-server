@@ -1145,7 +1145,7 @@ pub(crate) async fn run_turn(
 
     if let Some((_, sink)) = &fixtures {
         super::mock_fixtures::drain_into(
-            &state.agui.auth.store,
+            &state,
             &coworker_id,
             &account_id,
             sink,
