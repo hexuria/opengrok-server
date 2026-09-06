@@ -270,13 +270,19 @@ pub async fn emit_agent_upserted(state: &GatewayState, coworker_id: &str, patch:
             }
         }
         let active = active.clone();
-        emit_ordered_to(state, "agent-upserted", "roster", &account, move |ordered| {
-            json!({
-                "activeAgentId": active,
-                "agent": row,
-                "ordered": ordered,
-            })
-        });
+        emit_ordered_to(
+            state,
+            "agent-upserted",
+            "roster",
+            &account,
+            move |ordered| {
+                json!({
+                    "activeAgentId": active,
+                    "agent": row,
+                    "ordered": ordered,
+                })
+            },
+        );
     }
 }
 

@@ -532,7 +532,9 @@ async fn search_agents_matches_only_the_callers_own_coworkers() {
     assert_eq!(status, 200, "{created}");
 
     // "findme" matches both by name — but each caller may only see their own.
-    let (status, hits) = h.api_as("searchAgents", json!({ "query": "findme" }), &other_token).await;
+    let (status, hits) = h
+        .api_as("searchAgents", json!({ "query": "findme" }), &other_token)
+        .await;
     assert_eq!(status, 200, "{hits}");
     let names: Vec<&str> = hits
         .as_array()
@@ -540,7 +542,11 @@ async fn search_agents_matches_only_the_callers_own_coworkers() {
         .iter()
         .filter_map(|row| row["name"].as_str())
         .collect();
-    assert_eq!(names, vec!["Findmetoo"], "the other account's search leaked: {hits}");
+    assert_eq!(
+        names,
+        vec!["Findmetoo"],
+        "the other account's search leaked: {hits}"
+    );
 }
 
 /// Read `data:` frames from an open SSE response until one arrives or the wait runs out.
@@ -553,16 +559,12 @@ async fn next_frame(res: &mut reqwest::Response, buffer: &mut String, secs: u64)
             buffer.replace_range(..start + end + 2, "");
             return serde_json::from_str(&line).ok();
         }
-        let chunk = match tokio::time::timeout(
-            std::time::Duration::from_secs(secs),
-            res.chunk(),
-        )
-        .await
-        {
-            Ok(Ok(Some(bytes))) => bytes,
-            // Timed out, or the stream ended: no frame, which for this test is the point.
-            _ => return None,
-        };
+        let chunk =
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), res.chunk()).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                // Timed out, or the stream ended: no frame, which for this test is the point.
+                _ => return None,
+            };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
     }
 }

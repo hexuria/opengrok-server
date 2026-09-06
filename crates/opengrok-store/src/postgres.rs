@@ -1803,11 +1803,12 @@ impl PgStore {
         &self,
         account_id: &str,
     ) -> StoreResult<Option<(String, String, i64)>> {
-        let row =
-            sqlx::query("select code, message, updated_at_ms from account_computer_error where account_id = $1")
-                .bind(account_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query(
+            "select code, message, updated_at_ms from account_computer_error where account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| {
             Ok((
                 row.try_get::<String, _>("code")?,

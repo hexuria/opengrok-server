@@ -136,9 +136,7 @@ async fn trace_request(
     // another — which is why a cross-account bug was read three different wrong ways from a log
     // that looked clean. This flag is the cheapest thing that would have settled it here; the
     // account it resolved to is logged by the seam-A dispatch, which has the store to resolve it.
-    let account_hdr = req
-        .headers()
-        .contains_key(crate::gateway::ACCOUNT_HEADER);
+    let account_hdr = req.headers().contains_key(crate::gateway::ACCOUNT_HEADER);
     let started = std::time::Instant::now();
     let span = tracing::info_span!("http", id = %id);
     let response = next.run(req).instrument(span).await;

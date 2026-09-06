@@ -90,12 +90,14 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
     // caller wants is the id, not the honour of having written it.
     match store.append_account(&id, 0, &events, &view).await {
         Ok(_) => id,
-        Err(_) => store
-            .account_by_email(email)
-            .await
-            .expect("lookup after a lost race")
-            .expect("somebody else seeded it")
-            .id,
+        Err(_) => {
+            store
+                .account_by_email(email)
+                .await
+                .expect("lookup after a lost race")
+                .expect("somebody else seeded it")
+                .id
+        }
     }
 }
 
@@ -126,7 +128,10 @@ async fn seed_coworker(store: &PgStore, account: &AccountId, name: &str) -> Cowo
         role: None,
         visibility: Default::default(),
     };
-    store.append_coworker(&id, account, 0, &events, &view).await.expect("append coworker");
+    store
+        .append_coworker(&id, account, 0, &events, &view)
+        .await
+        .expect("append coworker");
     id
 }
 

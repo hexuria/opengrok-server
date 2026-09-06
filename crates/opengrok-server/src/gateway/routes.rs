@@ -137,9 +137,7 @@ fn accepted(reply: (u16, Value)) -> (u16, Value) {
 /// `account_identity_invalid` says the opposite: a rebuild will not help, surface it.
 fn identity_refusal(code: &str) -> Response {
     let message = match code {
-        "account_identity_invalid" => {
-            "the account identity header did not verify; sign in again"
-        }
+        "account_identity_invalid" => "the account identity header did not verify; sign in again",
         _ => "this call carried no account identity; reconnect so the account header is attached",
     };
     reply(

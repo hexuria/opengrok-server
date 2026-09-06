@@ -400,55 +400,135 @@ const NO_SUCH: &str = "no such attachment";
 /// exists: `help_text` renders this, and `entries_for` dispatches on it.
 const CATALOGUE: &[(&str, &str, &str)] = &[
     // (name, group, one-line description)
-    ("text", "cards", "the markdown showcase — every construct plus the four chip schemes"),
-    ("katex", "cards", "display, bracket-display and inline math; $5 and $6 must stay currency"),
-    ("mermaid", "cards", "a flowchart and a sequenceDiagram in ```mermaid fences"),
+    (
+        "text",
+        "cards",
+        "the markdown showcase — every construct plus the four chip schemes",
+    ),
+    (
+        "katex",
+        "cards",
+        "display, bracket-display and inline math; $5 and $6 must stay currency",
+    ),
+    (
+        "mermaid",
+        "cards",
+        "a flowchart and a sequenceDiagram in ```mermaid fences",
+    ),
     ("text-images", "cards", "gallery of 3 — the common case"),
     ("text-images-1", "cards", "gallery of 1 — its own layout"),
     ("text-images-2", "cards", "gallery of 2 — its own layout"),
-    ("text-images-4", "cards", "gallery of 4 — three tiles and a +N fold"),
-    ("text-images-6", "cards", "gallery of 6 — the fold with a larger remainder"),
-    ("widget-multi", "cards", "a widget with multiSelect: true — answer is one \\n-joined string"),
+    (
+        "text-images-4",
+        "cards",
+        "gallery of 4 — three tiles and a +N fold",
+    ),
+    (
+        "text-images-6",
+        "cards",
+        "gallery of 6 — the fold with a larger remainder",
+    ),
+    (
+        "widget-multi",
+        "cards",
+        "a widget with multiSelect: true — answer is one \\n-joined string",
+    ),
     ("widget", "cards", "a choice card with four options"),
-    ("cursor-agent", "cards", "cloud-agent card — blank unless the bcId resolves upstream"),
+    (
+        "cursor-agent",
+        "cards",
+        "cloud-agent card — blank unless the bcId resolves upstream",
+    ),
     ("email-draft", "cards", "an editable email draft"),
     ("slack-draft", "cards", "an editable Slack draft"),
-    ("auto-review-approval", "cards", "the approval card (interactive)"),
+    (
+        "auto-review-approval",
+        "cards",
+        "the approval card (interactive)",
+    ),
     ("listener-connect", "cards", "connect-a-listener (github)"),
     ("secret-request", "cards", "a secret prompt"),
     ("connector", "cards", "the plugin-connect card"),
     ("connectors", "cards", "the multi-connect card"),
-    ("permission", "cards", "local-tool-permission — projects, but never drawn from history"),
-    ("permission-request", "cards", "the retired read-only leaf (title only, NOT interactive)"),
+    (
+        "permission",
+        "cards",
+        "local-tool-permission — projects, but never drawn from history",
+    ),
+    (
+        "permission-request",
+        "cards",
+        "the retired read-only leaf (title only, NOT interactive)",
+    ),
     ("image", "media", "attachment card, remote .jpg"),
     ("video", "media", "attachment card, remote .webm"),
-    ("box", "media", "attachment card, sand://box — the Computer card"),
-    ("link", "media", "attachment card, non-media http URL (legacy-link)"),
+    (
+        "box",
+        "media",
+        "attachment card, sand://box — the Computer card",
+    ),
+    (
+        "link",
+        "media",
+        "attachment card, non-media http URL (legacy-link)",
+    ),
     ("markdown", "files", "user-attachment, .md"),
     ("zip", "files", "user-attachment, .zip"),
     ("rust", "files", "user-attachment, .rs"),
     ("js", "files", "user-attachment, .js"),
-    ("upload", "files", "user-attachment, .png (the media branch)"),
-    ("audio", "files", "user-attachment, .mp3 — audio has no card path"),
-    ("pdf", "files", "user-attachment, .pdf — two real pages, proves the 1 / 2 indicator"),
-    ("csv", "files", "user-attachment, .csv — the spreadsheet reader"),
+    (
+        "upload",
+        "files",
+        "user-attachment, .png (the media branch)",
+    ),
+    (
+        "audio",
+        "files",
+        "user-attachment, .mp3 — audio has no card path",
+    ),
+    (
+        "pdf",
+        "files",
+        "user-attachment, .pdf — two real pages, proves the 1 / 2 indicator",
+    ),
+    (
+        "csv",
+        "files",
+        "user-attachment, .csv — the spreadsheet reader",
+    ),
     ("json", "files", "user-attachment, .json — the JSON reader"),
-    ("docx", "files", "user-attachment, .docx — every run style mammoth maps; colour and alignment cannot survive"),
-    ("html", "files", "user-attachment, .html — MUST render as text, never execute"),
+    (
+        "docx",
+        "files",
+        "user-attachment, .docx — every run style mammoth maps; colour and alignment cannot survive",
+    ),
+    (
+        "html",
+        "files",
+        "user-attachment, .html — MUST render as text, never execute",
+    ),
     ("txt", "files", "user-attachment, .txt with tabs"),
     ("yaml", "files", "user-attachment, .yaml"),
     ("svg", "files", "user-attachment, .svg"),
     ("notice", "kinds", "a muted system line"),
     ("event", "kinds", "a timeline event (name-changed)"),
     ("thinking", "kinds", "a collapsible reasoning block"),
-    ("computer-handoff", "kinds", "the box card mid-handoff — attachment + boxRequestId"),
+    (
+        "computer-handoff",
+        "kinds",
+        "the box card mid-handoff — attachment + boxRequestId",
+    ),
     ("tool-running", "tools", "tool line — running"),
     ("tool-success", "tools", "tool line — success"),
     ("tool-error", "tools", "tool line — error"),
     ("tool-denied", "tools", "tool line — denied"),
     ("tool-rejected", "tools", "tool line — rejected"),
     ("tool-cancelled", "tools", "tool line — cancelled"),
-    ("tool-background", "tools", "tool line — success + isBackground"),
+    (
+        "tool-background",
+        "tools",
+        "tool line — success + isBackground",
+    ),
     ("all", "bulk", "every fixture above, in order"),
 ];
 
@@ -461,9 +541,15 @@ pub fn help_text() -> String {
     for (group, title) in [
         ("cards", "Cards (send-message)"),
         ("media", "Attachment cards — classified by URL alone"),
-        ("files", "User attachments — real files under /tmp/opengrok-mock-fixtures"),
+        (
+            "files",
+            "User attachments — real files under /tmp/opengrok-mock-fixtures",
+        ),
         ("kinds", "Other entry kinds"),
-        ("tools", "Tool lines — the seven statuses that draw distinctly"),
+        (
+            "tools",
+            "Tool lines — the seven statuses that draw distinctly",
+        ),
         ("bulk", "Everything"),
     ] {
         out.push_str(&format!("\n{title}\n"));
@@ -553,12 +639,30 @@ fn tool_line(name: &str, status: &str, summary: &str, extra: Option<(&str, Value
 /// attachment source normaliser (`transcript.tsx:588-591` renders a plain `<img src>`, and the
 /// CSP allows `https:`). Every other media fixture had to be a local path.
 const IMAGE_POOL: &[(&str, &str)] = &[
-    ("https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg", "A cat, landscape"),
-    ("https://upload.wikimedia.org/wikipedia/commons/4/4d/Cat_November_2010-1a.jpg", "A cat, portrait"),
-    ("https://upload.wikimedia.org/wikipedia/commons/b/b6/Felis_catus-cat_on_snow.jpg", "A cat in snow, landscape"),
-    ("https://upload.wikimedia.org/wikipedia/commons/1/15/Cat_August_2010-4.jpg", "A tabby, portrait"),
-    ("https://upload.wikimedia.org/wikipedia/commons/9/9b/Gato_enervado_pola_presenza_dun_can.jpg", "A startled cat, landscape"),
-    ("https://upload.wikimedia.org/wikipedia/commons/2/25/Siam_lilacpoint.jpg", "A Siamese, portrait"),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg",
+        "A cat, landscape",
+    ),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/4/4d/Cat_November_2010-1a.jpg",
+        "A cat, portrait",
+    ),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/b/b6/Felis_catus-cat_on_snow.jpg",
+        "A cat in snow, landscape",
+    ),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/1/15/Cat_August_2010-4.jpg",
+        "A tabby, portrait",
+    ),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/9/9b/Gato_enervado_pola_presenza_dun_can.jpg",
+        "A startled cat, landscape",
+    ),
+    (
+        "https://upload.wikimedia.org/wikipedia/commons/2/25/Siam_lilacpoint.jpg",
+        "A Siamese, portrait",
+    ),
 ];
 
 /// A `text` card carrying `n` images. `images` sits INSIDE `message` beside `content`
@@ -574,7 +678,10 @@ fn images_card(name: &str, n: usize) -> Value {
         1 => "One image — the single-image layout.".to_string(),
         _ => format!("{n} images in one bubble — the {n}-image layout."),
     };
-    card(name, json!({ "type": "text", "content": content, "images": images }))
+    card(
+        name,
+        json!({ "type": "text", "content": content, "images": images }),
+    )
 }
 
 /// The entries one fixture appends, or `None` when there is no such fixture.
@@ -583,7 +690,10 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // ---- cards: `send-message` with a `message.type` ----
         "text" => vec![card("text", json!({ "type": "text", "content": SHOWCASE }))],
         "katex" => vec![card("katex", json!({ "type": "text", "content": KATEX }))],
-        "mermaid" => vec![card("mermaid", json!({ "type": "text", "content": MERMAID }))],
+        "mermaid" => vec![card(
+            "mermaid",
+            json!({ "type": "text", "content": MERMAID }),
+        )],
         // `images` sits INSIDE `message` beside `content` (`send-message-text.ts:15-18`,
         // `projectImages :81-90`): `{url: non-empty, alt?}` and nothing else checked. Rendered as a
         // plain `<img src>` (`transcript.tsx:588-591`) — it does NOT go through the attachment
@@ -882,11 +992,26 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         })],
 
         // ---- tool lines ----
-        "tool-running" => vec![tool_line("tool-running", "running", "Running a command", None)],
-        "tool-success" => vec![tool_line("tool-success", "success", "Command finished", None)],
+        "tool-running" => vec![tool_line(
+            "tool-running",
+            "running",
+            "Running a command",
+            None,
+        )],
+        "tool-success" => vec![tool_line(
+            "tool-success",
+            "success",
+            "Command finished",
+            None,
+        )],
         "tool-error" => vec![tool_line("tool-error", "error", "Command failed", None)],
         "tool-denied" => vec![tool_line("tool-denied", "denied", "Policy denied it", None)],
-        "tool-rejected" => vec![tool_line("tool-rejected", "rejected", "The person said no", None)],
+        "tool-rejected" => vec![tool_line(
+            "tool-rejected",
+            "rejected",
+            "The person said no",
+            None,
+        )],
         "tool-cancelled" => vec![tool_line("tool-cancelled", "cancelled", "Cancelled", None)],
         // `background` is not a status you can send: it is `success` plus the flag.
         "tool-background" => vec![tool_line(
@@ -981,12 +1106,21 @@ mod tests {
     #[test]
     fn media_fixtures_are_local_paths_to_real_files() {
         for (fixture, extensions) in [
-            ("image", [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"].as_slice()),
-            ("video", [".webm", ".mp4", ".mov", ".m4v", ".ogv"].as_slice()),
+            (
+                "image",
+                [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"].as_slice(),
+            ),
+            (
+                "video",
+                [".webm", ".mp4", ".mov", ".m4v", ".ogv"].as_slice(),
+            ),
         ] {
             let entries = entries_for(fixture).expect("fixture");
             let url = entries[0]["message"]["url"].as_str().expect("a url");
-            assert!(url.starts_with('/'), "{fixture} must be an absolute path: {url}");
+            assert!(
+                url.starts_with('/'),
+                "{fixture} must be an absolute path: {url}"
+            );
             // `new URL(path)` throws on an absolute path, which is exactly why it survives; a
             // scheme would make it parse, and a parsed non-`file:` URL resolves to null.
             assert!(
@@ -1018,7 +1152,10 @@ mod tests {
                 };
                 // `sand://box` is the one deliberate exception: it is a sentinel the card matches
                 // before any host resolution, not a source anything fetches.
-                if url == "sand://box" || entry["message"]["type"] == "attachment" && url.starts_with("https://example.com") {
+                if url == "sand://box"
+                    || entry["message"]["type"] == "attachment"
+                        && url.starts_with("https://example.com")
+                {
                     continue;
                 }
                 assert!(!url.starts_with("data:"), "`{name}` ships a data: URL");
@@ -1037,7 +1174,11 @@ mod tests {
         let entries = entries_for("thinking").expect("fixture");
         let entry = &entries[0];
         assert_eq!(entry["kind"], "thinking");
-        assert!(entry["content"].as_str().is_some_and(|text| !text.is_empty()));
+        assert!(
+            entry["content"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())
+        );
     }
 
     /// A handoff IS the attachment box branch, carrying the box fields at the entry's top level.
@@ -1055,7 +1196,11 @@ mod tests {
         assert_eq!(entry["kind"], "send-message");
         assert_eq!(entry["message"]["type"], "attachment");
         assert_eq!(entry["message"]["url"], "sand://box");
-        assert!(entry["boxRequestId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(
+            entry["boxRequestId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
         assert!(entry["boxInstruction"].as_str().is_some());
         // `box` is the same card WITHOUT a request, so the two states stay distinguishable.
         let plain = entries_for("box").expect("fixture");
@@ -1119,8 +1264,15 @@ mod tests {
     #[test]
     fn all_covers_every_other_fixture() {
         let all = entries_for("all").expect("fixture");
-        let others = CATALOGUE.iter().filter(|(_, group, _)| *group != "bulk").count();
-        assert!(all.len() >= others, "expected at least {others} entries, got {}", all.len());
+        let others = CATALOGUE
+            .iter()
+            .filter(|(_, group, _)| *group != "bulk")
+            .count();
+        assert!(
+            all.len() >= others,
+            "expected at least {others} entries, got {}",
+            all.len()
+        );
     }
 
     /// Both of these were WRONG and drew nothing, silently, until the catalogue was run against
@@ -1133,11 +1285,16 @@ mod tests {
         let event = entries_for("event").expect("fixture");
         assert_eq!(event[0]["event"]["type"], "name-changed");
         assert!(
-            event[0]["event"]["to"].as_str().is_some_and(|to| !to.is_empty()),
+            event[0]["event"]["to"]
+                .as_str()
+                .is_some_and(|to| !to.is_empty()),
             "name-changed needs a string `to`: {}",
             event[0]
         );
-        assert!(event[0]["event"]["name"].is_null(), "`name` is the spelling that was dropped");
+        assert!(
+            event[0]["event"]["name"].is_null(),
+            "`name` is the spelling that was dropped"
+        );
 
         // permission-request reads `message.permission.title`, not `message.title`.
         let leaf = entries_for("permission-request").expect("fixture");
@@ -1148,7 +1305,10 @@ mod tests {
             "the title is nested under `permission`: {}",
             leaf[0]
         );
-        assert!(leaf[0]["message"]["title"].is_null(), "a top-level title is dropped");
+        assert!(
+            leaf[0]["message"]["title"].is_null(),
+            "a top-level title is dropped"
+        );
     }
 
     /// The containment, which is the only part of the read surface worth reviewing.
@@ -1187,7 +1347,8 @@ mod tests {
     fn outside_and_absent_are_indistinguishable() {
         let _ = entries_for("markdown");
         let outside = read_contained("/etc/hosts").expect_err("must refuse");
-        let absent = read_contained(&format!("{FIXTURE_DIR}/not-a-real-file.md")).expect_err("must refuse");
+        let absent =
+            read_contained(&format!("{FIXTURE_DIR}/not-a-real-file.md")).expect_err("must refuse");
         assert_eq!(
             outside, absent,
             "the refusals must be identical, not merely similar — a suffix that differs \
@@ -1202,14 +1363,21 @@ mod tests {
     fn katex_uses_no_single_dollar_math_and_keeps_its_currency() {
         let entries = entries_for("katex").expect("fixture");
         let content = entries[0]["message"]["content"].as_str().expect("content");
-        assert!(content.contains("$5 and $6"), "the currency line is the alarm; keep it");
+        assert!(
+            content.contains("$5 and $6"),
+            "the currency line is the alarm; keep it"
+        );
         assert!(content.contains("$3.50"));
         let doubles = content.matches("$$").count();
         let singles = content.matches('$').count();
         // Three currency amounts, each one lone `$`, plus the one in backticks where the prose
         // states the rule ("Single `$` is NOT a delimiter"). Anything beyond four is math somebody
         // wrote with single dollars, which the renderer will show as text — a silent no-op fixture.
-        assert_eq!(singles, doubles * 2 + 4, "a `$` that is neither a `$$` fence nor currency");
+        assert_eq!(
+            singles,
+            doubles * 2 + 4,
+            "a `$` that is neither a `$$` fence nor currency"
+        );
         // both bracket forms present, so the rewrite path is exercised too
         assert!(content.contains("\\[") && content.contains("\\(") && content.contains("\\]"));
         // the renderer's `$$`-on-own-line rule: every fence sits at a line boundary
@@ -1240,7 +1408,10 @@ mod tests {
             for image in images {
                 let url = image["url"].as_str().expect("url");
                 assert!(url.starts_with("https://"), "{fixture}: {url}");
-                assert!(image["alt"].as_str().is_some_and(|a| !a.is_empty()), "{fixture}");
+                assert!(
+                    image["alt"].as_str().is_some_and(|a| !a.is_empty()),
+                    "{fixture}"
+                );
             }
         }
         // Distinct URLs, or a "gallery" of six is one picture six times and the planner is
@@ -1252,7 +1423,11 @@ mod tests {
             .iter()
             .filter_map(|i| i["url"].as_str())
             .collect();
-        assert_eq!(urls.len(), 6, "the six-image gallery must show six different images");
+        assert_eq!(
+            urls.len(),
+            6,
+            "the six-image gallery must show six different images"
+        );
     }
 
     /// `multiSelect` is on `message.widget`, and every option carries the `value` the client echoes
@@ -1263,7 +1438,10 @@ mod tests {
         let widget = &entries[0]["message"]["widget"];
         assert_eq!(widget["multiSelect"], true);
         let options = widget["options"].as_array().expect("options");
-        assert!(options.len() >= 4 && options.len() <= 6, "1–6 options or the projector drops it");
+        assert!(
+            options.len() >= 4 && options.len() <= 6,
+            "1–6 options or the projector drops it"
+        );
         for option in options {
             assert!(option["label"].as_str().is_some_and(|l| !l.is_empty()));
             assert!(option["value"].as_str().is_some_and(|v| !v.is_empty()));
@@ -1284,7 +1462,10 @@ mod tests {
     /// the reader and teaches nobody which half was wrong.
     #[test]
     fn the_documents_are_structurally_complete() {
-        assert!(PDF_BYTES.windows(8).any(|w| w == b"/Count 3"), "pdf must declare 3 pages");
+        assert!(
+            PDF_BYTES.windows(8).any(|w| w == b"/Count 3"),
+            "pdf must declare 3 pages"
+        );
         for part in [
             &b"word/_rels/document.xml.rels"[..],
             b"word/numbering.xml",
@@ -1316,8 +1497,12 @@ mod tests {
         assert!(SHOWCASE.contains("\n==="), "missing setext h1");
         assert!(SHOWCASE.contains("\n---\n"), "missing setext h2 / rule");
         // and the four chip schemes, verbatim
-        for chip in ["(sand-msg:t1u)", "(grokbot://app/v1/settings?id=theme)",
-                     "(grokbot://app/v1/plugin/add?id=404)", "(sand-workflow:deploy-prod)"] {
+        for chip in [
+            "(sand-msg:t1u)",
+            "(grokbot://app/v1/settings?id=theme)",
+            "(grokbot://app/v1/plugin/add?id=404)",
+            "(sand-workflow:deploy-prod)",
+        ] {
             assert!(SHOWCASE.contains(chip), "missing chip {chip}");
         }
     }

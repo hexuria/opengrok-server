@@ -1148,14 +1148,7 @@ pub(crate) async fn run_turn(
     .await;
 
     if let Some((_, sink)) = &fixtures {
-        super::mock_fixtures::drain_into(
-            &state,
-            &coworker_id,
-            &account_id,
-            sink,
-            now_ms(),
-        )
-        .await;
+        super::mock_fixtures::drain_into(&state, &coworker_id, &account_id, sink, now_ms()).await;
     }
 
     // The answer is whatever the run's message deltas add up to; a run that produced nothing

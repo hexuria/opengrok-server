@@ -436,7 +436,12 @@ pub async fn ensure_scope_box(
                 .to_string(),
         ));
     };
-    tracing::info!(scope, scope_id, kind, "computer: asking the provider for a box");
+    tracing::info!(
+        scope,
+        scope_id,
+        kind,
+        "computer: asking the provider for a box"
+    );
     match provider.create(None).await {
         Ok(box_id) => {
             tracing::info!(scope, scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
