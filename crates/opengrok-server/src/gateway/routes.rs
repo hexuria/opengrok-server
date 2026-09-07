@@ -982,7 +982,35 @@ async fn command(
                 Err(why) => refusal(400, &why),
             }
         }
-        "uploadAttachment" | "readAttachmentImage" => refusal(
+        // A DROPPED FILE ROUND-TRIPS UNDER A MOCK DOOR. The desktop's `commitStaged` calls this,
+        // and an unconditional refusal surfaced as "The desktop bridge could not commit the staged
+        // attachments" — so no PDF, image or spreadsheet could reach a viewer that was not already
+        // shipped as a fixture. `write_upload` stores it under the fixture root, which means the
+        // read verbs serve it back with no new read code and no widening of the containment.
+        //
+        // Args and reply are transcribed, not chosen: `attachments-service.ts:231` takes
+        // `{filename, bytesBase64}` and answers `{path}`. The general feature is still the
+        // artifacts slice; `readAttachmentImage` and every non-mock build keep the old refusal.
+        "uploadAttachment" => {
+            let file_name = args
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let decoded = args
+                .get("bytesBase64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "bytesBase64 is required".to_string())
+                .and_then(|raw| {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(raw)
+                        .map_err(|_| "bytesBase64 is not valid base64".to_string())
+                });
+            match decoded.and_then(|bytes| super::mock_fixtures::write_upload(file_name, &bytes)) {
+                Ok(path) => reply(StatusCode::OK, json!({ "path": path })),
+                Err(why) => refusal(400, &why),
+            }
+        }
+        "readAttachmentImage" => refusal(
             400,
             "attachments are not stored by this server yet (artifacts is a planned slice)",
         ),

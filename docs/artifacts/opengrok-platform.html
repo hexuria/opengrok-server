@@ -140,6 +140,19 @@
   .claims b{font-family:var(--sans);font-weight:600;display:block;font-size:.98rem}
   .claims span{color:var(--muted);font-size:.9rem;display:block;margin-top:.2rem;line-height:1.45}
 
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem}
+  ol.steps li{
+    counter-increment:s;position:relative;padding:.6rem .9rem .6rem 2.7rem;
+    background:var(--card);border:1px solid var(--line);border-radius:6px;
+    font-size:.93rem;line-height:1.5;
+  }
+  ol.steps li::before{
+    content:counter(s);position:absolute;left:.85rem;top:.62rem;
+    font-family:var(--sans);font-size:.72rem;font-weight:600;color:var(--accent);
+  }
+  ol.steps b{font-family:var(--sans);font-weight:600}
+  ol.steps i{font-style:italic}
+
   .callout{
     background:var(--accent-soft);border-radius:6px;padding:1rem 1.15rem;margin:1.5rem 0 0;
   }
@@ -383,50 +396,50 @@
 
   <figure>
     <div class="fig">
-      <svg viewBox="0 0 760 300" role="img" aria-label="A request path: the client submits, identity authenticates, the conversation is recorded, the agent runtime asks the inference gateway what to do, the model proposes an action, policy decides, the action executes in an environment, the result is recorded, and the loop repeats until complete.">
-        <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <svg viewBox="0 0 760 250" role="img" aria-label="A request path across four lanes: the client submits; the platform authenticates and records; the model is asked; the platform applies policy to the proposed action; the action runs in an execution environment; the platform records the result; the answer is delivered to the client.">
+        <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+        <marker id="ar2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--accent)"/></marker></defs>
 
-        <line class="hair" x1="118" y1="44" x2="744" y2="44"/>
-        <line class="hair" x1="118" y1="112" x2="744" y2="112"/>
-        <line class="hair" x1="118" y1="180" x2="744" y2="180"/>
-        <line class="hair" x1="118" y1="248" x2="744" y2="248"/>
-        <text class="tc accT" x="16" y="40">CLIENT</text>
-        <text class="tc accT" x="16" y="108">PLATFORM</text>
-        <text class="tc accT" x="16" y="176">MODEL</text>
-        <text class="tc accT" x="16" y="244">ENVIRONMENT</text>
+        <line class="hair" x1="132" y1="40" x2="744" y2="40"/>
+        <line class="hair" x1="132" y1="100" x2="744" y2="100"/>
+        <line class="hair" x1="132" y1="160" x2="744" y2="160"/>
+        <line class="hair" x1="132" y1="212" x2="744" y2="212"/>
+        <text class="tc accT" x="16" y="36">CLIENT</text>
+        <text class="tc accT" x="16" y="96">PLATFORM</text>
+        <text class="tc accT" x="16" y="156">MODEL</text>
+        <text class="tc accT" x="16" y="208">ENVIRONMENT</text>
 
-        <polyline class="ln" points="150,44 150,112 232,112 232,180" marker-end="url(#ar2)"/>
-        <polyline class="ln" points="232,180 316,180 316,112" marker-end="url(#ar2)"/>
-        <polyline class="ln acc" points="316,112 400,112 400,248" marker-end="url(#ar2)"/>
-        <polyline class="ln acc" points="400,248 486,248 486,112" marker-end="url(#ar2)"/>
-        <polyline class="ln" points="486,112 570,112 570,180" marker-end="url(#ar2)"/>
-        <polyline class="ln" points="570,180 654,180 654,44" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="168,40 168,100 246,100" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="264,100 264,160 342,160" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="360,160 438,160 438,118" marker-end="url(#ar2)"/>
+        <polyline class="ln acc" points="438,100 516,100 516,194" marker-end="url(#ar2a)"/>
+        <polyline class="ln acc" points="516,212 594,212 594,118" marker-end="url(#ar2a)"/>
+        <polyline class="ln" points="612,100 690,100 690,58" marker-end="url(#ar2)"/>
 
-        <circle class="card ln" cx="150" cy="44" r="12"/><text class="ts" x="150" y="48" text-anchor="middle">1</text>
-        <circle class="card ln" cx="232" cy="112" r="12"/><text class="ts" x="232" y="116" text-anchor="middle">2</text>
-        <circle class="card ln" cx="232" cy="180" r="12"/><text class="ts" x="232" y="184" text-anchor="middle">3</text>
-        <circle class="card ln" cx="316" cy="112" r="12"/><text class="ts" x="316" y="116" text-anchor="middle">4</text>
-        <circle class="accS acc" cx="400" cy="112" r="12"/><text class="ts accT" x="400" y="116" text-anchor="middle">5</text>
-        <circle class="accS acc" cx="400" cy="248" r="12"/><text class="ts accT" x="400" y="252" text-anchor="middle">6</text>
-        <circle class="card ln" cx="486" cy="112" r="12"/><text class="ts" x="486" y="116" text-anchor="middle">7</text>
-        <circle class="card ln" cx="654" cy="44" r="12"/><text class="ts" x="654" y="48" text-anchor="middle">8</text>
+        <circle class="card ln" cx="168" cy="40" r="13"/><text class="ts" x="168" y="44" text-anchor="middle">1</text>
+        <circle class="card ln" cx="264" cy="100" r="13"/><text class="ts" x="264" y="104" text-anchor="middle">2</text>
+        <circle class="card ln" cx="360" cy="160" r="13"/><text class="ts" x="360" y="164" text-anchor="middle">3</text>
+        <circle class="accS acc" cx="438" cy="100" r="13"/><text class="ts accT" x="438" y="104" text-anchor="middle">4</text>
+        <circle class="accS acc" cx="516" cy="212" r="13"/><text class="ts accT" x="516" y="216" text-anchor="middle">5</text>
+        <circle class="card ln" cx="594" cy="100" r="13"/><text class="ts" x="594" y="104" text-anchor="middle">6</text>
+        <circle class="card ln" cx="690" cy="40" r="13"/><text class="ts" x="690" y="44" text-anchor="middle">7</text>
 
-        <text class="ts" x="150" y="24" text-anchor="middle">instruction</text>
-        <text class="ts" x="232" y="90" text-anchor="middle">authenticate · record</text>
-        <text class="ts" x="232" y="208" text-anchor="middle">model asked</text>
-        <text class="ts" x="316" y="90" text-anchor="middle">action proposed</text>
-        <text class="ts accT" x="400" y="82" text-anchor="middle">policy decides</text>
-        <text class="ts accT" x="400" y="96" text-anchor="middle">allow · approve · decline</text>
-        <text class="ts accT" x="400" y="276" text-anchor="middle">action runs</text>
-        <text class="ts" x="486" y="90" text-anchor="middle">result recorded</text>
-        <text class="ts" x="654" y="24" text-anchor="middle">delivered</text>
-
-        <text class="ts soft" x="118" y="294">Steps 4–7 repeat for as many actions as the task requires. The model participates only in step 3.</text>
+        <text class="ts soft" x="132" y="242">Steps 3–6 repeat for as many actions as the task requires. The model takes part in step 3 alone.</text>
       </svg>
     </div>
     <figcaption>Authentication, recording, permission, execution and accounting are all platform
     decisions. The model’s sole role is to propose what should happen next.</figcaption>
   </figure>
+
+  <ol class="steps">
+    <li><b>An instruction arrives</b> — typed by a member, or raised by a schedule or an event. The client submits it and holds nothing.</li>
+    <li><b>The platform authenticates it and writes it down</b> — the request is attributed to a person and an organisation, and appended to the durable record before anything else happens.</li>
+    <li><b>The model is asked what should happen next</b> — through the inference gateway, on your organisation’s own credentials. This is the only step a model takes part in.</li>
+    <li><b>Policy decides</b> — the proposed action is checked against capability, review rules, device access and budget. The outcome is <i>allow</i>, <i>request approval</i>, or <i>decline with a reason</i>.</li>
+    <li><b>The action runs where it belongs</b> — in the coworker’s execution environment, against a connected business system, or on a member’s own device. Identity is replaced with the session’s before it runs.</li>
+    <li><b>The result is recorded</b> — outcome, cost and decision, all against the action that caused them.</li>
+    <li><b>The answer is delivered</b> — to every client watching, live. If none is open, it waits in the record.</li>
+  </ol>
 </section>
 
 <p class="part">Part III · Where your organisation sits</p>
@@ -452,26 +465,26 @@
         <text class="ts soft" x="30" y="182">no model credentials</text>
         <text class="ts soft" x="30" y="200">no sole copy of anything</text>
 
-        <rect class="accS acc" x="198" y="30" width="266" height="286" rx="5"/>
+        <rect class="accS acc" x="198" y="30" width="250" height="286" rx="5"/>
         <text class="tc accT" x="212" y="52">THE PLATFORM</text>
-        <rect class="card ln hair" x="212" y="64" width="238" height="40" rx="4"/>
+        <rect class="card ln hair" x="212" y="64" width="222" height="40" rx="4"/>
         <text class="ts" x="222" y="82">conversations and activity history</text>
         <text class="ts soft" x="222" y="97">the durable record of all work</text>
-        <rect class="card ln hair" x="212" y="112" width="238" height="40" rx="4"/>
+        <rect class="card ln hair" x="212" y="112" width="222" height="40" rx="4"/>
         <text class="ts" x="222" y="130">people, organisations, roles, keys</text>
         <text class="ts soft" x="222" y="145">and the policy configuration</text>
-        <rect class="card ln hair" x="212" y="160" width="238" height="40" rx="4"/>
+        <rect class="card ln hair" x="212" y="160" width="222" height="40" rx="4"/>
         <text class="ts" x="222" y="178">integration credentials (vault)</text>
         <text class="ts soft" x="222" y="193">scoped, revocable, never copied out</text>
-        <rect class="card ln hair" x="212" y="208" width="238" height="40" rx="4"/>
+        <rect class="card ln hair" x="212" y="208" width="222" height="40" rx="4"/>
         <text class="ts" x="222" y="226">your model provider credentials</text>
         <text class="ts soft" x="222" y="241">held by the gateway alone</text>
-        <rect class="card ln hair" x="212" y="256" width="238" height="44" rx="4"/>
+        <rect class="card ln hair" x="212" y="256" width="222" height="44" rx="4"/>
         <text class="ts" x="222" y="274">environment access credentials</text>
         <text class="ts soft" x="222" y="289">one per environment, issued at creation</text>
 
-        <line class="ln acc" x1="464" y1="130" x2="494" y2="130" marker-end="url(#ar3)"/>
-        <text class="ts accT" x="479" y="120" text-anchor="middle">one-time</text>
+        <line class="ln acc" x1="450" y1="132" x2="494" y2="132" marker-end="url(#ar3)"/>
+        <text class="ts accT" x="472" y="122" text-anchor="middle">single use</text>
 
         <rect class="yrS yr" x="500" y="30" width="120" height="286" rx="5"/>
         <text class="tc yrT" x="512" y="52">ENVIRONMENTS</text>
@@ -542,7 +555,7 @@
         <rect class="card ln hair" x="198" y="160" width="156" height="40" rx="4"/><text class="ts" x="208" y="184">model credentials</text>
         <rect class="card ln hair" x="30" y="208" width="160" height="40" rx="4"/><text class="ts" x="40" y="232">policy and approvals</text>
         <rect class="card ln hair" x="198" y="208" width="156" height="40" rx="4"/><text class="ts" x="208" y="232">budgets and usage</text>
-        <text class="ts yrT" x="30" y="268">membership is by invitation, or by a domain your administrator has proven</text>
+        <text class="ts yrT" x="30" y="268">joined by invitation, or by a verified domain</text>
 
         <rect class="card ln dash soft" x="384" y="30" width="164" height="248" rx="6"/>
         <text class="tc" x="398" y="52">ANOTHER ORGANISATION</text>
@@ -614,8 +627,9 @@
         <text class="ts" x="182" y="132">plus review rules</text>
         <text class="ts" x="382" y="116">a scoped credential, lent</text>
         <text class="ts" x="382" y="132">to this worker by rule</text>
-        <text class="ts" x="582" y="116">the above, plus a device</text>
-        <text class="ts" x="582" y="132">setting, plus per-action consent</text>
+        <text class="ts" x="582" y="110">the above, plus a device</text>
+        <text class="ts" x="582" y="124">setting, and consent</text>
+        <text class="ts" x="582" y="138">for each action</text>
 
         <text class="tx" x="16" y="180">when unavailable</text>
         <text class="ts" x="182" y="176">the platform restores it</text>

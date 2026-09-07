@@ -70,6 +70,13 @@ pub async fn drain_into(
 /// catalogue existed — `uploadAttachment` and `readAttachmentImage` still answer it in every
 /// build, so a server built without the feature gives one consistent answer across all four
 /// rather than two different stories about the same missing slice.
+/// THE SAME REFUSAL UPLOADS ALWAYS GOT. A build without the catalogue stores nothing, so a
+/// dropped file is answered exactly as it was before the mock door learned to keep one — one
+/// story about the missing slice, not two.
+pub fn write_upload(_file_name: &str, _bytes: &[u8]) -> Result<String, String> {
+    Err("attachments are not stored by this server yet (artifacts is a planned slice)".to_string())
+}
+
 pub fn read_fixture(_path: &str) -> Result<Vec<u8>, String> {
     Err("attachments are not stored by this server yet (artifacts is a planned slice)".to_string())
 }
