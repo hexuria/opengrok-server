@@ -20,10 +20,6 @@ use serde_json::{Value, json};
 
 use super::{GatewayState, summaries};
 
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
 fn stamp(state: &GatewayState, replica_key: &str, sequence: i64) -> Value {
     json!({ "replicaKey": replica_key, "epoch": state.epoch, "sequence": sequence })
 }
@@ -503,6 +499,18 @@ pub async fn roster_rows_for(
             row["lastViewedAt"] = json!(unread.last_viewed_ms.unwrap_or(0));
             if let Some(activity) = unread.last_activity_ms {
                 row["lastActivityAt"] = json!(activity);
+                // THE SORT KEY, MADE HONEST. `updatedAt` is `CoworkerView::updated_at_ms`, which
+                // only moves when the COWORKER record changes — hired, renamed, repinned. A
+                // conversation never touched it, so the sidebar could only reorder because
+                // `set_running` stamped `now_ms()` onto every push, which quietly redefined the
+                // field as "when the server last sent this row". `last_activity_ms` is
+                // `max(at_ms)` over this pair's entries, which is the question the sort key is
+                // actually asking. Taking the LATER of the two keeps a rename reordering the row
+                // as well, and keeps this per-viewer: on a shared coworker my row sorts by my
+                // conversation, not by somebody else's.
+                if row["updatedAt"].as_i64().unwrap_or(0) < activity {
+                    row["updatedAt"] = json!(activity);
+                }
             }
             row["unreadCount"] = json!(unread.unread);
             row["hasUnread"] = json!(unread.unread > 0);
@@ -585,12 +593,12 @@ pub async fn set_running(state: &GatewayState, coworker_id: &str, running: bool,
     if !running && let Ok(mut activity) = state.activity.lock() {
         activity.remove(coworker_id);
     }
-    let mut overlay = patch;
-    if overlay.as_object().is_none() {
-        overlay = json!({});
-    }
-    if let Some(map) = overlay.as_object_mut() {
-        map.insert("updatedAt".to_string(), json!(now_ms()));
-    }
+    // NOTHING INVENTS `updatedAt` HERE ANY MORE. This stamped `now_ms()` on every call, so the
+    // roster's sort key recorded when the server last pushed a row rather than when anything
+    // happened in it — and `set_running` fires TWICE a turn, so a turn that produced no message
+    // at all still hauled the row to the top of the sidebar, twice. The row builder now raises
+    // `updatedAt` to the pair's newest real entry, which keeps reordering working on exactly the
+    // events that deserve it.
+    let overlay = if patch.is_object() { patch } else { json!({}) };
     emit_agent_upserted(state, coworker_id, overlay).await;
 }
