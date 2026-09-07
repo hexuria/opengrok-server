@@ -198,7 +198,11 @@ async fn the_roster_carries_real_unread_state() {
          the old hard-coded `updatedAt` claimed the opposite: {fresh}"
     );
 
-    // It speaks.
+    // It answers a prompt the person just sent. THAT IS NOT UNREAD: typing to a coworker means
+    // looking at it, and its reply lands in the chat in front of them. The first version of this
+    // test asserted the opposite — "the coworker spoke and nobody has read it" — which is the
+    // exact badge the follow-up removed: a blue marker on the very conversation being read,
+    // masking the green working dot for the whole run.
     let (status, sent) = api(
         &client,
         &base,
@@ -208,17 +212,47 @@ async fn the_roster_carries_real_unread_state() {
     .await;
     assert_eq!(status, 200, "{sent}");
     wait_for_an_answer(&client, &base, &agent).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
+    let answered = row(&client, &base, &agent).await;
+    assert_eq!(
+        answered["unreadCount"],
+        json!(0),
+        "an answer to the person's own prompt is read, not unread: {answered}"
+    );
+    assert!(
+        answered["lastActivityAt"].as_i64().unwrap_or(0) > 0,
+        "lastActivityAt must move with the newest entry: {answered}"
+    );
+
+    // Something lands while they are NOT looking — appended fresh, outside any turn, so no arrival
+    // rule can see it. This is what a badge is for.
+    {
+        let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+        agui_store
+            .append_gateway_entry(
+                &coworker,
+                &account_id,
+                &json!({
+                    "kind": "send-message",
+                    "id": format!("later-{}", now_ms()),
+                    "message": { "type": "text", "content": "while you were away" },
+                    "timestampMs": now_ms(),
+                }),
+                // Stamped NOW, not in the future: Mark as Read clamps its stamp to now, so a row
+                // dated ahead of the clock could never be marked read — which is a test defect,
+                // not a badge. The sleep above already puts this after the turn's arrival stamp.
+                now_ms(),
+            )
+            .await
+            .expect("append");
+    }
     let spoken = row(&client, &base, &agent).await;
     assert!(
         spoken["unreadCount"].as_i64().unwrap_or(0) >= 1,
-        "the coworker spoke and nobody has read it: {spoken}"
+        "an utterance that landed while nobody was looking must be unread: {spoken}"
     );
     assert_eq!(spoken["hasUnread"], json!(true), "{spoken}");
-    assert!(
-        spoken["lastActivityAt"].as_i64().unwrap_or(0) > 0,
-        "lastActivityAt must move with the newest entry: {spoken}"
-    );
 
     // Mark as Read — official's `isUnread: false`.
     let (status, reply) = api(

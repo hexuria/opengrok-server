@@ -233,6 +233,22 @@ pub struct GatewayState {
     pub public_gateway_url: Option<String>,
     /// Which agent the client last opened. `getTranscript` and `sendPrompt` fall back to it.
     pub active_agent: Arc<Mutex<Option<String>>>,
+    /// WHICH COWORKER EACH ACCOUNT IS LOOKING AT — account id to coworker id.
+    ///
+    /// Separate from `active_agent`, which is one global slot and answers a different question:
+    /// "which coworker did this desktop last open", the fallback `agent_or_active` uses when a
+    /// verb names none. That fallback is a single-surface convenience and is read by eight call
+    /// sites before an account is even loaded, so it stays as it is.
+    ///
+    /// This map exists because unread cannot be answered globally. Whether a message counts as
+    /// unread depends on whether THAT PERSON was looking at THAT chat when it landed, and a
+    /// shared coworker has two readers who are in different places in it. With one global slot,
+    /// one person opening a chat would mark another person's messages read.
+    ///
+    /// In memory on purpose: it describes a live surface, not a durable fact. A restart forgets
+    /// who was looking at what, which is correct — nobody is looking at anything through a
+    /// process that is gone, and the next open says so again.
+    pub viewing: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     /// Coworkers with a turn in flight right now — the roster's `isRunning`.
     pub running: Arc<Mutex<std::collections::HashSet<String>>>,
     /// The abort handle of each in-flight turn, keyed by agent id, so `stopAgentTurn` can cancel a
@@ -260,6 +276,7 @@ impl GatewayState {
             epoch: uuid::Uuid::now_v7().to_string(),
             seqs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_agent: Arc::new(Mutex::new(None)),
+            viewing: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
