@@ -1,0 +1,816 @@
+<title>The OpenGrok Platform</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+
+  :root{
+    --paper:#F5F7F6;
+    --card:#FFFFFF;
+    --sunk:#EDF1EF;
+    --ink:#16201E;
+    --muted:#5B6664;
+    --line:#DBE2DF;
+    --accent:#0D6E62;
+    --accent-soft:#E3EFEC;
+    --yours:#2E6B4E;
+    --yours-soft:#E6F0E8;
+    --later:#8A6512;
+    --later-soft:#F5EDDC;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:"Bricolage Grotesque",-apple-system,"Segoe UI",Helvetica,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#101615;
+      --card:#171F1D;
+      --sunk:#1C2523;
+      --ink:#E6EDEA;
+      --muted:#93A19D;
+      --line:#2A3634;
+      --accent:#4FBFAE;
+      --accent-soft:#12302A;
+      --yours:#79C08F;
+      --yours-soft:#15271B;
+      --later:#D6AC5A;
+      --later-soft:#2A2113;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#101615;
+    --card:#171F1D;
+    --sunk:#1C2523;
+    --ink:#E6EDEA;
+    --muted:#93A19D;
+    --line:#2A3634;
+    --accent:#4FBFAE;
+    --accent-soft:#12302A;
+    --yours:#79C08F;
+    --yours-soft:#15271B;
+    --later:#D6AC5A;
+    --later-soft:#2A2113;
+  }
+
+  body{
+    margin:0;background:var(--paper);color:var(--ink);
+    font-family:"Source Serif 4",Georgia,serif;
+    font-size:17.5px;line-height:1.6;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{width:min(100% - 2.5rem,60rem);margin-inline:auto}
+
+  h1,h2,h3,h4{font-family:var(--sans);font-weight:800;letter-spacing:-.015em;text-wrap:balance;margin:0 0 .5rem}
+  h1{font-size:clamp(2.1rem,5.2vw,3.2rem);line-height:1.05}
+  h2{font-size:clamp(1.45rem,3.2vw,1.95rem);line-height:1.15;margin-top:0}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.3;margin:2rem 0 .4rem}
+  h4{font-size:.95rem;font-weight:600;margin:1.4rem 0 .3rem}
+  p{margin:0 0 1rem;max-width:64ch}
+  .lede{font-size:1.12rem;color:var(--muted);max-width:50ch;margin:0 0 1.5rem}
+
+  .eyebrow{
+    font-family:var(--sans);font-size:.66rem;font-weight:600;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--accent);margin:0 0 .7rem;
+  }
+  .cover{padding:4rem 0 2.6rem}
+  .meta{
+    display:flex;gap:2rem;flex-wrap:wrap;border-top:1px solid var(--line);
+    padding-top:1.1rem;margin-top:2rem;font-family:var(--sans);font-size:.8rem;
+  }
+  .meta div{display:grid;gap:.15rem}
+  .meta span{color:var(--muted);font-size:.66rem;letter-spacing:.14em;text-transform:uppercase}
+
+  .part{
+    margin:3.2rem 0 0;padding-top:1rem;border-top:2px solid var(--ink);
+    font-family:var(--sans);font-size:.7rem;font-weight:600;letter-spacing:.2em;text-transform:uppercase;
+  }
+  section{padding:1.8rem 0 2.2rem;border-top:1px solid var(--line)}
+  section:first-of-type{border-top:none}
+
+  figure{margin:1.5rem 0}
+  .fig{
+    background:var(--card);border:1px solid var(--line);border-radius:6px;
+    padding:1.5rem 1.25rem;overflow-x:auto;
+  }
+  .fig svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{
+    color:var(--muted);font-size:.9rem;margin-top:.65rem;max-width:62ch;
+    padding-left:.9rem;border-left:2px solid var(--line);
+  }
+
+  /* svg vocabulary */
+  .ln{stroke:currentColor;stroke-width:1.5;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .hair{stroke:currentColor;stroke-width:1;fill:none;opacity:.35}
+  .card{fill:var(--card)}
+  .sunk{fill:var(--sunk)}
+  .accS{fill:var(--accent-soft)}
+  .yrS{fill:var(--yours-soft)}
+  .ltS{fill:var(--later-soft)}
+  .acc{stroke:var(--accent)}.accT{fill:var(--accent)}
+  .yr{stroke:var(--yours)}.yrT{fill:var(--yours)}
+  .lt{stroke:var(--later)}.ltT{fill:var(--later)}
+  .dash{stroke-dasharray:5 4}.soft{opacity:.55}
+  text{font-family:var(--sans);fill:currentColor}
+  .t{font-size:12.5px}
+  .ts{font-size:10.5px;opacity:.72}
+  .tm{font-size:10.5px;font-family:var(--mono);opacity:.8}
+  .tb{font-size:13px;font-weight:600}
+  .tc{font-size:9px;letter-spacing:.16em;font-weight:600}
+  .tx{font-size:11px;font-weight:600}
+
+  table{width:100%;border-collapse:collapse;margin:1.3rem 0 0;font-size:.93rem}
+  th,td{text-align:left;padding:.65rem .75rem;border-bottom:1px solid var(--line);vertical-align:top}
+  thead th{
+    font-family:var(--sans);font-size:.64rem;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;border-bottom:1px solid var(--ink);
+  }
+  tbody tr:last-child td{border-bottom:none}
+  td code{font-family:var(--mono);font-size:.83rem}
+  .tw{overflow-x:auto}
+
+  .grid{display:grid;gap:.8rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));margin:1.3rem 0 0;padding:0;list-style:none}
+  .grid li{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:.85rem .95rem}
+  .grid b{font-family:var(--sans);font-size:.95rem;font-weight:600;display:block;margin-bottom:.25rem}
+  .grid span{color:var(--muted);font-size:.88rem;line-height:1.45;display:block}
+
+  .claims{list-style:none;padding:0;margin:1.3rem 0 0;display:grid;gap:.6rem}
+  .claims li{
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+    border-radius:0 6px 6px 0;padding:.75rem .95rem;
+  }
+  .claims b{font-family:var(--sans);font-weight:600;display:block;font-size:.98rem}
+  .claims span{color:var(--muted);font-size:.9rem;display:block;margin-top:.2rem;line-height:1.45}
+
+  .callout{
+    background:var(--accent-soft);border-radius:6px;padding:1rem 1.15rem;margin:1.5rem 0 0;
+  }
+  .callout p{margin:0;max-width:62ch}
+  .callout b{font-family:var(--sans)}
+
+  .tag{
+    display:inline-block;font-family:var(--sans);font-size:.62rem;font-weight:600;
+    letter-spacing:.1em;text-transform:uppercase;padding:.18rem .45rem;border-radius:3px;
+    background:var(--sunk);color:var(--muted);vertical-align:middle;margin-left:.4rem;
+  }
+  .tag.now{background:var(--yours-soft);color:var(--yours)}
+  .tag.next{background:var(--later-soft);color:var(--later)}
+
+  dl.gloss{margin:1.3rem 0 0;display:grid;grid-template-columns:auto 1fr;gap:.5rem 1.4rem;font-size:.93rem}
+  dl.gloss dt{font-family:var(--sans);font-weight:600;white-space:nowrap}
+  dl.gloss dd{margin:0;color:var(--muted)}
+  @media (max-width:34rem){dl.gloss{grid-template-columns:1fr;gap:.15rem 0}dl.gloss dd{margin-bottom:.7rem}}
+
+  .end{padding:2.4rem 0 4rem;border-top:2px solid var(--ink);margin-top:2.5rem}
+  a{color:var(--accent)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="cover">
+  <p class="eyebrow">Platform architecture · target state</p>
+  <h1>The OpenGrok Platform</h1>
+  <p class="lede">What the system is, what it guarantees, and where your organisation’s data,
+  compute and credentials sit inside it — described as it stands when complete.</p>
+  <div class="meta">
+    <div><span>Document</span>Target-state architecture</div>
+    <div><span>Audience</span>Technical and commercial evaluation</div>
+    <div><span>Scope</span>The platform as designed, not a delivery plan</div>
+    <div><span>Version</span>September 2026</div>
+  </div>
+</header>
+
+<p class="part">Part I · What it is</p>
+
+<section>
+  <h2>In one page</h2>
+  <p><b>OpenGrok is a platform for AI coworkers that keep working when you close your laptop.</b>
+  A coworker is a durable, named worker that belongs to a person and an organisation. It holds a
+  conversation, it has its own computer to work on, it reaches your systems through governed
+  integrations, and it can act on a schedule or in response to events without anyone present.</p>
+
+  <p>The distinguishing property is where the work lives. In most AI tools the work happens inside
+  a browser tab or a desktop application; close it and the work stops. In OpenGrok the client
+  applications are views. Everything that matters — the conversation, the runtime, the computer, the
+  policy, the credentials — lives on the server. A coworker started from a phone can be watched from
+  a laptop and will finish whether or not either is open.</p>
+
+  <p>The second property is that the organisation, not the model, decides what may happen. Every
+  action a coworker attempts passes through policy that the organisation configures: what a worker
+  may do at all, what a given person may make it do, which actions require a human’s explicit
+  approval, and how much it may spend. A model can propose an action. It cannot perform one.</p>
+
+  <div class="callout">
+    <p><b>How to read this document.</b> Part I is what the platform is and what it guarantees.
+    Part II is its structure. Part III is the part most organisations care about most — where your
+    data rests, where your boundary sits, and what your administrators control. Part IV is how it
+    operates and what is deliberately outside its scope. Nothing here is a delivery schedule;
+    this is the destination, not the route.</p>
+  </div>
+</section>
+
+<section>
+  <h2>What it does</h2>
+  <p>Six capabilities. Everything else in this document exists to make one of these safe,
+  durable, or accountable.</p>
+
+  <ul class="grid">
+    <li><b>Persistent AI coworkers</b><span>Named workers with their own instructions, tools, memory and conversation history. They belong to a person and an organisation, and they outlive any session, device or browser tab.</span></li>
+    <li><b>A real computer each</b><span>Every coworker can be given an isolated Linux environment with a shell, a filesystem, a browser and a graphical screen — so it can do work that has file and application state, not only produce text.</span></li>
+    <li><b>Governed access to your systems</b><span>Coworkers reach your business systems through standards-based integrations with scoped credentials held centrally, rather than through credentials distributed to individual workers.</span></li>
+    <li><b>Work on your own machines, with consent</b><span>A coworker can run a task on a member’s own computer, but only through an application that person installed, only while it is running, and only after that person approves the specific action.</span></li>
+    <li><b>Unattended operation</b><span>Coworkers act on a schedule or in response to events in the system. Unattended work is governed identically to attended work — same permissions, same approvals, same budget, same record.</span></li>
+    <li><b>Cost control across your own model accounts</b><span>All model usage exits through a single gateway that routes each request to an appropriate model, spends your organisation’s own provider credentials, and records both actual and comparable cost.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>What holds true, always</h2>
+  <p>These are architectural properties rather than features: they are consequences of how the
+  system is built, they apply to every client and every entry point, and they cannot be disabled by
+  configuration.</p>
+
+  <ul class="claims">
+    <li><b>Work survives everything a user can do to it</b><span>Closing an application, losing a network, restarting a device — none of these are events the platform has to handle, because no work is held in a client. Server restarts and instance failures are equally survivable: in-progress work is recorded before each external call and resumed by whichever instance next picks it up.</span></li>
+    <li><b>Policy is enforced on every action, not once per session</b><span>Permission is re-evaluated for each individual action a coworker attempts. A session that was authorised an hour ago has no standing authority now.</span></li>
+    <li><b>The model never chooses whose data it touches</b><span>Before any action runs, identity arguments are overwritten with the identity of the session that caused it. This is a replacement, not a validation — there is no input the model can produce that reaches another person’s or organisation’s data.</span></li>
+    <li><b>Permission layers narrow, never widen</b><span>Where several controls apply, the most restrictive answer governs. A misconfigured rule can only reduce access; it cannot grant it.</span></li>
+    <li><b>A refusal is an outcome, not a failure</b><span>When an action is declined, the coworker receives that as information and continues working. Denying something does not abandon the task, and does not require a person to restart it.</span></li>
+    <li><b>Approval requests do not expire</b><span>A request for human approval is held on the server and is answerable from any of that person’s devices. Nothing times out into a silent yes or a silent no.</span></li>
+    <li><b>Every action is recorded before it happens</b><span>The conversation record and the action log are the same durable, append-only history. There is no state in which something occurred and no record of it exists.</span></li>
+    <li><b>Provider credentials stay in one place</b><span>Model credentials are held by a single component. They are never written to a worker’s configuration, sent to a client, included in a log, or exposed to a model.</span></li>
+  </ul>
+</section>
+
+<p class="part">Part II · The shape of the system</p>
+
+<section>
+  <h2>System map</h2>
+  <p>One deployable platform, a set of client applications that hold no state, isolated execution
+  environments, and clearly bounded connections to the outside. The platform is internally divided
+  into subsystems with strict boundaries — each owns its own data and is reached only through its
+  interface — which is what allows any one of them to be operated separately later without changing
+  the others.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 640" role="img" aria-label="Target-state system map. Client applications and member devices at the top; the OpenGrok platform in the middle divided into ten subsystems over a shared event log and data store; isolated execution environments below; external model providers and business systems to the right.">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+          <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--accent)"/></marker>
+          <marker id="ary" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--yours)"/></marker>
+        </defs>
+
+        <!-- ACCESS -->
+        <rect class="card ln hair" x="16" y="16" width="470" height="76" rx="5"/>
+        <text class="tc accT" x="30" y="36">CLIENT APPLICATIONS · hold no state</text>
+        <text class="ts" x="30" y="56">desktop application · web console · mobile</text>
+        <text class="ts" x="30" y="72">third-party agent clients · other AI agents via tool protocol</text>
+
+        <rect class="yrS yr" x="500" y="16" width="244" height="76" rx="5"/>
+        <text class="tc yrT" x="514" y="36">MEMBER DEVICES</text>
+        <text class="ts" x="514" y="56">an optional local agent inside the</text>
+        <text class="ts" x="514" y="72">desktop app · consent required per action</text>
+
+        <line class="ln" x1="120" y1="92" x2="120" y2="122" marker-end="url(#ar)"/>
+        <text class="ts" x="132" y="112">requests · live updates</text>
+
+        <!-- PLATFORM -->
+        <rect class="sunk acc" x="16" y="126" width="728" height="336" rx="6" stroke-width="2"/>
+        <text class="tc accT" x="30" y="148">THE OPENGROK PLATFORM · one deployable unit, bounded subsystems</text>
+
+        <rect class="card ln hair" x="30" y="158" width="600" height="34" rx="4"/>
+        <text class="tx" x="42" y="174">ACCESS &amp; PROTOCOL ADAPTERS</text>
+        <text class="ts" x="230" y="174">translate each client protocol into one internal request. no business rules.</text>
+
+        <rect class="card ln hair" x="30" y="200" width="294" height="46" rx="4"/>
+        <text class="tx" x="42" y="218">IDENTITY &amp; TENANCY</text>
+        <text class="ts" x="42" y="236">people · organisations · roles · API keys</text>
+        <rect class="card ln hair" x="336" y="200" width="294" height="46" rx="4"/>
+        <text class="tx" x="348" y="218">POLICY &amp; GOVERNANCE</text>
+        <text class="ts" x="348" y="236">permissions · approvals · review · spend limits</text>
+
+        <rect class="card ln hair" x="30" y="254" width="294" height="46" rx="4"/>
+        <text class="tx" x="42" y="272">CONVERSATION &amp; RECORDS</text>
+        <text class="ts" x="42" y="290">history · live activity · multi-party rooms</text>
+        <rect class="card ln hair" x="336" y="254" width="294" height="46" rx="4"/>
+        <text class="tx" x="348" y="272">AGENT RUNTIME</text>
+        <text class="ts" x="348" y="290">coworkers · the durable work loop · memory</text>
+
+        <rect class="card ln hair" x="30" y="308" width="294" height="46" rx="4"/>
+        <text class="tx" x="42" y="326">TOOL ORCHESTRATION</text>
+        <text class="ts" x="42" y="344">what a worker may do · where each action runs</text>
+        <rect class="card ln hair" x="336" y="308" width="294" height="46" rx="4"/>
+        <text class="tx" x="348" y="326">COMPUTE MANAGEMENT</text>
+        <text class="ts" x="348" y="344">environment lifecycle · assignment · screen access</text>
+
+        <rect class="card ln hair" x="30" y="362" width="294" height="46" rx="4"/>
+        <text class="tx" x="42" y="380">INTEGRATIONS &amp; SECRETS</text>
+        <text class="ts" x="42" y="398">connected systems · credential vault</text>
+        <rect class="card ln hair" x="336" y="362" width="294" height="46" rx="4"/>
+        <text class="tx" x="348" y="380">AUTOMATION</text>
+        <text class="ts" x="348" y="398">schedules · event triggers · fan-out delivery</text>
+
+        <rect class="accS acc" x="30" y="416" width="600" height="34" rx="4"/>
+        <text class="tx accT" x="42" y="432">INFERENCE GATEWAY</text>
+        <text class="ts" x="230" y="432">model selection · your provider credentials · usage and cost accounting</text>
+
+        <rect class="accS acc" x="642" y="158" width="88" height="292" rx="4"/>
+        <text class="tc accT" transform="translate(686 304) rotate(-90)" text-anchor="middle">EVENT LOG · DATA STORE</text>
+
+        <!-- EXECUTION -->
+        <line class="ln yr" x1="180" y1="462" x2="180" y2="496" marker-end="url(#ary)"/>
+        <text class="ts yrT" x="192" y="484">isolated · authenticated per environment</text>
+
+        <rect class="yrS yr" x="16" y="500" width="420" height="124" rx="5"/>
+        <text class="tc yrT" x="30" y="522">EXECUTION ENVIRONMENTS · one per coworker, or shared by policy</text>
+        <rect class="card ln hair" x="30" y="532" width="190" height="34" rx="4"/>
+        <text class="ts" x="42" y="553">shell · filesystem · package tools</text>
+        <rect class="card ln hair" x="230" y="532" width="192" height="34" rx="4"/>
+        <text class="ts" x="242" y="553">graphical screen · browser</text>
+        <text class="ts" x="30" y="586">isolated per environment · persistent storage across restarts</text>
+        <text class="ts" x="30" y="604">reachable only from the platform, on a private network</text>
+
+        <!-- EXTERNAL -->
+        <line class="ln acc" x1="636" y1="433" x2="672" y2="433"/>
+        <path class="ln acc" d="M672 433 L672 496" marker-end="url(#ara)"/>
+
+        <rect class="card ln dash" x="456" y="500" width="288" height="124" rx="5"/>
+        <text class="tc" x="470" y="522">OUTSIDE THE PLATFORM</text>
+        <text class="ts" x="470" y="546">model providers — your own accounts</text>
+        <text class="ts" x="470" y="566">your business systems, via integrations</text>
+        <text class="ts" x="470" y="586">identity provider · outbound email</text>
+        <text class="ts soft" x="470" y="610">no third-party service holds your work</text>
+      </svg>
+    </div>
+    <figcaption>Every arrow crossing a boundary is authenticated and carries an explicit identity.
+    Client applications never hold execution credentials; execution environments never hold model
+    credentials.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>The subsystems, and what each is responsible for</h2>
+  <p>Boundaries are strict by design: a subsystem owns its own data, exposes a defined interface,
+  and learns what happened elsewhere through recorded events rather than by reading another
+  subsystem’s data. This is what makes the platform operable as a single unit today and separable
+  later without redesign.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Subsystem</th><th>Owns</th><th>Answers one question</th></tr></thead>
+    <tbody>
+      <tr><td><b>Access &amp; protocol adapters</b></td><td>Protocol translation only</td><td>What is this client asking for, expressed once?</td></tr>
+      <tr><td><b>Identity &amp; tenancy</b></td><td>People, organisations, roles, keys, sessions</td><td>Who is asking, and on whose behalf?</td></tr>
+      <tr><td><b>Conversation &amp; records</b></td><td>Conversation history, live activity, rooms</td><td>What has been said and done, in order?</td></tr>
+      <tr><td><b>Agent runtime</b></td><td>Coworkers, the work loop, memory</td><td>What should this coworker do next?</td></tr>
+      <tr><td><b>Tool orchestration</b></td><td>Available actions, routing, execution</td><td>Which action, and where should it run?</td></tr>
+      <tr><td><b>Policy &amp; governance</b></td><td>Permissions, approvals, review rules, budgets</td><td>Is this action allowed, right now?</td></tr>
+      <tr><td><b>Compute management</b></td><td>Environment lifecycle, assignment, access</td><td>Which computer, and is it ready?</td></tr>
+      <tr><td><b>Integrations &amp; secrets</b></td><td>Connected systems, the credential vault</td><td>How do we reach that system, as whom?</td></tr>
+      <tr><td><b>Automation</b></td><td>Schedules, triggers, delivery ledger</td><td>Should something start with no one present?</td></tr>
+      <tr><td><b>Inference gateway</b></td><td>Model routing, provider credentials, usage records</td><td>Which model, on which credential, at what cost?</td></tr>
+      <tr><td><b>Event log &amp; data store</b></td><td>The durable record everything is built on</td><td>—  <span class="tag">shared foundation</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>How a request moves through it</h2>
+  <p>A single instruction — typed by a person or raised by a schedule — crosses the platform
+  repeatedly. The important structural point is where each decision is made, and that the model
+  participates in exactly one of them.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 300" role="img" aria-label="A request path: the client submits, identity authenticates, the conversation is recorded, the agent runtime asks the inference gateway what to do, the model proposes an action, policy decides, the action executes in an environment, the result is recorded, and the loop repeats until complete.">
+        <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <line class="hair" x1="118" y1="44" x2="744" y2="44"/>
+        <line class="hair" x1="118" y1="112" x2="744" y2="112"/>
+        <line class="hair" x1="118" y1="180" x2="744" y2="180"/>
+        <line class="hair" x1="118" y1="248" x2="744" y2="248"/>
+        <text class="tc accT" x="16" y="40">CLIENT</text>
+        <text class="tc accT" x="16" y="108">PLATFORM</text>
+        <text class="tc accT" x="16" y="176">MODEL</text>
+        <text class="tc accT" x="16" y="244">ENVIRONMENT</text>
+
+        <polyline class="ln" points="150,44 150,112 232,112 232,180" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="232,180 316,180 316,112" marker-end="url(#ar2)"/>
+        <polyline class="ln acc" points="316,112 400,112 400,248" marker-end="url(#ar2)"/>
+        <polyline class="ln acc" points="400,248 486,248 486,112" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="486,112 570,112 570,180" marker-end="url(#ar2)"/>
+        <polyline class="ln" points="570,180 654,180 654,44" marker-end="url(#ar2)"/>
+
+        <circle class="card ln" cx="150" cy="44" r="12"/><text class="ts" x="150" y="48" text-anchor="middle">1</text>
+        <circle class="card ln" cx="232" cy="112" r="12"/><text class="ts" x="232" y="116" text-anchor="middle">2</text>
+        <circle class="card ln" cx="232" cy="180" r="12"/><text class="ts" x="232" y="184" text-anchor="middle">3</text>
+        <circle class="card ln" cx="316" cy="112" r="12"/><text class="ts" x="316" y="116" text-anchor="middle">4</text>
+        <circle class="accS acc" cx="400" cy="112" r="12"/><text class="ts accT" x="400" y="116" text-anchor="middle">5</text>
+        <circle class="accS acc" cx="400" cy="248" r="12"/><text class="ts accT" x="400" y="252" text-anchor="middle">6</text>
+        <circle class="card ln" cx="486" cy="112" r="12"/><text class="ts" x="486" y="116" text-anchor="middle">7</text>
+        <circle class="card ln" cx="654" cy="44" r="12"/><text class="ts" x="654" y="48" text-anchor="middle">8</text>
+
+        <text class="ts" x="150" y="24" text-anchor="middle">instruction</text>
+        <text class="ts" x="232" y="90" text-anchor="middle">authenticate · record</text>
+        <text class="ts" x="232" y="208" text-anchor="middle">model asked</text>
+        <text class="ts" x="316" y="90" text-anchor="middle">action proposed</text>
+        <text class="ts accT" x="400" y="82" text-anchor="middle">policy decides</text>
+        <text class="ts accT" x="400" y="96" text-anchor="middle">allow · approve · decline</text>
+        <text class="ts accT" x="400" y="276" text-anchor="middle">action runs</text>
+        <text class="ts" x="486" y="90" text-anchor="middle">result recorded</text>
+        <text class="ts" x="654" y="24" text-anchor="middle">delivered</text>
+
+        <text class="ts soft" x="118" y="294">Steps 4–7 repeat for as many actions as the task requires. The model participates only in step 3.</text>
+      </svg>
+    </div>
+    <figcaption>Authentication, recording, permission, execution and accounting are all platform
+    decisions. The model’s sole role is to propose what should happen next.</figcaption>
+  </figure>
+</section>
+
+<p class="part">Part III · Where your organisation sits</p>
+
+<section>
+  <h2>Where your data rests</h2>
+  <p>Data is classified by where it is allowed to be stored, not only by who may read it. The
+  classification below is enforced structurally: each class has one resting place, and the paths
+  between them are fixed.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 340" role="img" aria-label="Four zones — member devices, the platform, execution environments, and external services — with each class of data placed in the single zone where it rests.">
+        <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--accent)"/></marker></defs>
+
+        <rect class="card ln dash" x="16" y="30" width="170" height="286" rx="5"/>
+        <text class="tc" x="30" y="52">MEMBER DEVICES</text>
+        <rect class="sunk ln hair" x="30" y="64" width="142" height="52" rx="4"/>
+        <text class="ts" x="40" y="84">their own sign-in</text>
+        <text class="ts" x="40" y="102">session, nothing else</text>
+        <text class="ts soft" x="30" y="146">no execution credentials</text>
+        <text class="ts soft" x="30" y="164">no integration tokens</text>
+        <text class="ts soft" x="30" y="182">no model credentials</text>
+        <text class="ts soft" x="30" y="200">no sole copy of anything</text>
+
+        <rect class="accS acc" x="198" y="30" width="266" height="286" rx="5"/>
+        <text class="tc accT" x="212" y="52">THE PLATFORM</text>
+        <rect class="card ln hair" x="212" y="64" width="238" height="40" rx="4"/>
+        <text class="ts" x="222" y="82">conversations and activity history</text>
+        <text class="ts soft" x="222" y="97">the durable record of all work</text>
+        <rect class="card ln hair" x="212" y="112" width="238" height="40" rx="4"/>
+        <text class="ts" x="222" y="130">people, organisations, roles, keys</text>
+        <text class="ts soft" x="222" y="145">and the policy configuration</text>
+        <rect class="card ln hair" x="212" y="160" width="238" height="40" rx="4"/>
+        <text class="ts" x="222" y="178">integration credentials (vault)</text>
+        <text class="ts soft" x="222" y="193">scoped, revocable, never copied out</text>
+        <rect class="card ln hair" x="212" y="208" width="238" height="40" rx="4"/>
+        <text class="ts" x="222" y="226">your model provider credentials</text>
+        <text class="ts soft" x="222" y="241">held by the gateway alone</text>
+        <rect class="card ln hair" x="212" y="256" width="238" height="44" rx="4"/>
+        <text class="ts" x="222" y="274">environment access credentials</text>
+        <text class="ts soft" x="222" y="289">one per environment, issued at creation</text>
+
+        <line class="ln acc" x1="464" y1="130" x2="494" y2="130" marker-end="url(#ar3)"/>
+        <text class="ts accT" x="479" y="120" text-anchor="middle">one-time</text>
+
+        <rect class="yrS yr" x="500" y="30" width="120" height="286" rx="5"/>
+        <text class="tc yrT" x="512" y="52">ENVIRONMENTS</text>
+        <rect class="card ln hair" x="512" y="64" width="96" height="52" rx="4"/>
+        <text class="ts" x="520" y="84">work files</text>
+        <text class="ts soft" x="520" y="100">on storage</text>
+        <rect class="card ln hair" x="512" y="124" width="96" height="52" rx="4"/>
+        <text class="ts" x="520" y="144">browser</text>
+        <text class="ts soft" x="520" y="160">sessions</text>
+        <rect class="card ln hair" x="512" y="184" width="96" height="60" rx="4"/>
+        <text class="ts" x="520" y="204">single-use</text>
+        <text class="ts" x="520" y="220">values, for</text>
+        <text class="ts soft" x="520" y="236">one task only</text>
+        <text class="ts soft" x="512" y="272">never leave the</text>
+        <text class="ts soft" x="512" y="288">environment</text>
+
+        <rect class="card ln dash" x="634" y="30" width="110" height="286" rx="5"/>
+        <text class="tc" x="646" y="52">EXTERNAL</text>
+        <text class="ts" x="646" y="76">your business</text>
+        <text class="ts" x="646" y="92">systems hold</text>
+        <text class="ts" x="646" y="108">their own data</text>
+        <text class="ts soft" x="646" y="140">model providers</text>
+        <text class="ts soft" x="646" y="156">receive only the</text>
+        <text class="ts soft" x="646" y="172">content of a</text>
+        <text class="ts soft" x="646" y="188">given request</text>
+      </svg>
+    </div>
+    <figcaption>Two placements are worth noting for review. Credentials for third-party websites
+    that have no API are captured by a person signing in directly on the environment’s browser —
+    the password never reaches the platform. Single-use values supplied for one task are passed to
+    an environment and not stored anywhere.</figcaption>
+  </figure>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Data</th><th>Rests in</th><th>Reaches a model?</th><th>Exposure if lost</th></tr></thead>
+    <tbody>
+      <tr><td>Conversation and activity history</td><td>The platform</td><td>The relevant portion, per request</td><td>The organisation’s work record</td></tr>
+      <tr><td>Work files produced by a coworker</td><td>Its execution environment</td><td>Only when explicitly read</td><td>One environment’s contents</td></tr>
+      <tr><td>Integration credentials</td><td>Platform vault</td><td>Never</td><td>One connected system, one scope</td></tr>
+      <tr><td>Model provider credentials</td><td>Inference gateway only</td><td>Never</td><td>Model spend — the widest exposure in the system</td></tr>
+      <tr><td>Environment access credentials</td><td>Platform, per environment</td><td>Never</td><td>One environment, on a private network</td></tr>
+      <tr><td>Third-party website sessions</td><td>The environment’s browser</td><td>Never</td><td>One site session, on one environment</td></tr>
+      <tr><td>Member’s local files</td><td>Their own device</td><td>Only what an approved action returns</td><td>Governed by that person’s approvals</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>Your organisation’s boundary</h2>
+  <p>The organisation is the unit of isolation. It bounds who can see what, whose credentials are
+  spent, which computers exist, and what the spending limits are. Nothing crosses that boundary
+  without an explicit act by someone inside it.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 300" role="img" aria-label="One platform deployment serving multiple organisations. Each organisation has its own members, coworkers, execution environments, integration credentials, model credentials, policy and budgets. Only the software, the schedulers and the operational infrastructure are shared.">
+        <defs><marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <rect class="yrS yr" x="16" y="30" width="352" height="248" rx="6" stroke-width="2"/>
+        <text class="tc yrT" x="30" y="52">YOUR ORGANISATION · isolated</text>
+        <rect class="card ln hair" x="30" y="64" width="160" height="40" rx="4"/><text class="ts" x="40" y="88">members and roles</text>
+        <rect class="card ln hair" x="198" y="64" width="156" height="40" rx="4"/><text class="ts" x="208" y="88">coworkers</text>
+        <rect class="card ln hair" x="30" y="112" width="160" height="40" rx="4"/><text class="ts" x="40" y="136">execution environments</text>
+        <rect class="card ln hair" x="198" y="112" width="156" height="40" rx="4"/><text class="ts" x="208" y="136">conversations</text>
+        <rect class="card ln hair" x="30" y="160" width="160" height="40" rx="4"/><text class="ts" x="40" y="184">integration credentials</text>
+        <rect class="card ln hair" x="198" y="160" width="156" height="40" rx="4"/><text class="ts" x="208" y="184">model credentials</text>
+        <rect class="card ln hair" x="30" y="208" width="160" height="40" rx="4"/><text class="ts" x="40" y="232">policy and approvals</text>
+        <rect class="card ln hair" x="198" y="208" width="156" height="40" rx="4"/><text class="ts" x="208" y="232">budgets and usage</text>
+        <text class="ts yrT" x="30" y="268">membership is by invitation, or by a domain your administrator has proven</text>
+
+        <rect class="card ln dash soft" x="384" y="30" width="164" height="248" rx="6"/>
+        <text class="tc" x="398" y="52">ANOTHER ORGANISATION</text>
+        <text class="ts soft" x="398" y="80">the same list,</text>
+        <text class="ts soft" x="398" y="98">entirely separate</text>
+        <text class="ts soft" x="398" y="126">no shared computers</text>
+        <text class="ts soft" x="398" y="144">no shared credentials</text>
+        <text class="ts soft" x="398" y="162">no shared records</text>
+        <text class="ts soft" x="398" y="180">no shared spend</text>
+
+        <rect class="accS acc" x="564" y="30" width="180" height="248" rx="6"/>
+        <text class="tc accT" x="578" y="52">SHARED</text>
+        <text class="ts" x="578" y="80">the software itself</text>
+        <text class="ts" x="578" y="104">the operational</text>
+        <text class="ts" x="578" y="120">infrastructure</text>
+        <text class="ts" x="578" y="144">the automation timer</text>
+        <text class="ts" x="578" y="160">that fires each</text>
+        <text class="ts" x="578" y="176">organisation’s own</text>
+        <text class="ts" x="578" y="192">schedules</text>
+        <text class="ts soft" x="578" y="224">nothing on this list</text>
+        <text class="ts soft" x="578" y="240">holds or exposes</text>
+        <text class="ts soft" x="578" y="256">tenant content</text>
+      </svg>
+    </div>
+    <figcaption>For organisations requiring physical separation of compute, execution environments
+    can be placed on infrastructure the organisation nominates rather than on shared infrastructure.
+    The platform reaches them identically either way.</figcaption>
+  </figure>
+
+  <h3>Sharing within your organisation</h3>
+  <p>Inside the boundary, three things can be shared deliberately: a computer can be shared by
+  several coworkers or reserved to one; an integration connected by one person can be lent to
+  specific coworkers under a rule, without copying the credential; and a conversation can include
+  several coworkers at once. Each of these is a configuration your administrators control, and each
+  narrows rather than widens what a coworker may do.</p>
+</section>
+
+<section>
+  <h2>Where a coworker’s actions can actually happen</h2>
+  <p>There are exactly three destinations. Every action a coworker takes resolves to one of them,
+  and each has a different security posture that your administrators configure independently.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 290" role="img" aria-label="Three execution destinations compared: the coworker's own isolated environment, an integration with a business system, and a member's own device. Each row compares what it touches, what authorises it, and what happens when it is unavailable.">
+        <text class="tc accT" x="16" y="24">DESTINATION</text>
+        <text class="tc accT" x="180" y="24">ISOLATED ENVIRONMENT</text>
+        <text class="tc accT" x="380" y="24">BUSINESS SYSTEM</text>
+        <text class="tc accT" x="580" y="24">MEMBER’S OWN DEVICE</text>
+
+        <rect class="yrS yr" x="172" y="32" width="192" height="242" rx="5"/>
+        <rect class="card ln hair" x="372" y="32" width="192" height="242" rx="5"/>
+        <rect class="card ln dash" x="572" y="32" width="172" height="242" rx="5"/>
+
+        <line class="hair" x1="16" y1="92" x2="744" y2="92"/>
+        <line class="hair" x1="16" y1="152" x2="744" y2="152"/>
+        <line class="hair" x1="16" y1="212" x2="744" y2="212"/>
+
+        <text class="tx" x="16" y="60">what it touches</text>
+        <text class="ts" x="182" y="56">a Linux environment the</text>
+        <text class="ts" x="182" y="72">platform created and owns</text>
+        <text class="ts" x="382" y="56">your business system,</text>
+        <text class="ts" x="382" y="72">through its own interface</text>
+        <text class="ts" x="582" y="56">that person’s real files</text>
+        <text class="ts" x="582" y="72">and applications</text>
+
+        <text class="tx" x="16" y="120">what authorises it</text>
+        <text class="ts" x="182" y="116">worker permissions,</text>
+        <text class="ts" x="182" y="132">plus review rules</text>
+        <text class="ts" x="382" y="116">a scoped credential, lent</text>
+        <text class="ts" x="382" y="132">to this worker by rule</text>
+        <text class="ts" x="582" y="116">the above, plus a device</text>
+        <text class="ts" x="582" y="132">setting, plus per-action consent</text>
+
+        <text class="tx" x="16" y="180">when unavailable</text>
+        <text class="ts" x="182" y="176">the platform restores it</text>
+        <text class="ts" x="182" y="192">and the work continues</text>
+        <text class="ts" x="382" y="176">the action is declined,</text>
+        <text class="ts" x="382" y="192">naming the connection</text>
+        <text class="ts" x="582" y="176">the action is declined;</text>
+        <text class="ts" x="582" y="192">other work is unaffected</text>
+
+        <text class="tx" x="16" y="240">typical use</text>
+        <text class="ts" x="182" y="236">building, analysing,</text>
+        <text class="ts" x="182" y="252">researching, drafting</text>
+        <text class="ts" x="382" y="236">reading and updating</text>
+        <text class="ts" x="382" y="252">records of record</text>
+        <text class="ts" x="582" y="236">work on material that</text>
+        <text class="ts" x="582" y="252">cannot leave that device</text>
+      </svg>
+    </div>
+    <figcaption>The third destination is optional and off until a member installs the desktop
+    application and enables it. It is the only path that reaches a personal device, and it requires
+    that device to be switched on and the application running.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>What your administrators control</h2>
+  <p>Governance is configured, not coded. Each control answers a single question and applies to
+  every entry point — the desktop application, the web console, integrations and any third-party
+  client alike.</p>
+
+  <figure>
+    <div class="fig">
+      <svg viewBox="0 0 760 270" role="img" aria-label="Five controls set by administrators and owners — capability grants, review rules, approval requirements, device access, and budgets — all converging on a single decision made for every action.">
+        <defs><marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <rect class="card ln hair" x="16" y="30" width="140" height="72" rx="5"/>
+        <text class="tx" x="28" y="52">Capability</text>
+        <text class="ts" x="28" y="70">what a coworker may</text>
+        <text class="ts" x="28" y="86">ever do, and who may</text>
+        <text class="ts" x="28" y="98">make it do that</text>
+
+        <rect class="card ln hair" x="164" y="30" width="140" height="72" rx="5"/>
+        <text class="tx" x="176" y="52">Review rules</text>
+        <text class="ts" x="176" y="70">plain-language limits,</text>
+        <text class="ts" x="176" y="86">set for the organisation</text>
+        <text class="ts" x="176" y="98">and per coworker</text>
+
+        <rect class="card ln hair" x="312" y="30" width="140" height="72" rx="5"/>
+        <text class="tx" x="324" y="52">Approvals</text>
+        <text class="ts" x="324" y="70">which actions need a</text>
+        <text class="ts" x="324" y="86">person’s explicit yes</text>
+        <text class="ts" x="324" y="98">before proceeding</text>
+
+        <rect class="card ln hair" x="460" y="30" width="140" height="72" rx="5"/>
+        <text class="tx" x="472" y="52">Device access</text>
+        <text class="ts" x="472" y="70">whether coworkers may</text>
+        <text class="ts" x="472" y="86">reach a member’s own</text>
+        <text class="ts" x="472" y="98">computer at all</text>
+
+        <rect class="card ln hair" x="608" y="30" width="136" height="72" rx="5"/>
+        <text class="tx" x="620" y="52">Budgets</text>
+        <text class="ts" x="620" y="70">per member and per</text>
+        <text class="ts" x="620" y="86">coworker, monthly</text>
+        <text class="ts" x="620" y="98">and daily</text>
+
+        <line class="ln" x1="86" y1="102" x2="330" y2="146" marker-end="url(#ar5)"/>
+        <line class="ln" x1="234" y1="102" x2="356" y2="146" marker-end="url(#ar5)"/>
+        <line class="ln" x1="382" y1="102" x2="382" y2="146" marker-end="url(#ar5)"/>
+        <line class="ln" x1="530" y1="102" x2="408" y2="146" marker-end="url(#ar5)"/>
+        <line class="ln" x1="676" y1="102" x2="434" y2="146" marker-end="url(#ar5)"/>
+
+        <rect class="accS acc" x="242" y="152" width="280" height="52" rx="5" stroke-width="2"/>
+        <text class="tb accT" x="382" y="174" text-anchor="middle">one decision, for every single action</text>
+        <text class="ts" x="382" y="192" text-anchor="middle">the most restrictive answer governs</text>
+
+        <text class="ts" x="16" y="238">Everything an administrator sets is visible and reversible: standing approvals appear as a list a person can review and remove,</text>
+        <text class="ts" x="16" y="256">and every decision the platform makes — allowed, approved, or declined — is recorded against the action that caused it.</text>
+      </svg>
+    </div>
+    <figcaption>An approval request is held on the server rather than on the device that raised it,
+    which is why it can be answered from a phone and why it does not expire into a default.</figcaption>
+  </figure>
+
+  <h3>What is visible for audit</h3>
+  <ul class="grid">
+    <li><b>Every action attempted</b><span>What was attempted, by which coworker, on whose behalf, where it ran, and what came back — including actions that were declined and why.</span></li>
+    <li><b>Every approval</b><span>What was asked, who answered, when, and whether the answer created a standing rule.</span></li>
+    <li><b>Every model call</b><span>Which model, on which credential, how many tokens, actual cost, and comparable cost had a premium model been used throughout.</span></li>
+    <li><b>Every integration call</b><span>Which connected system, under which connection, on whose authority.</span></li>
+  </ul>
+</section>
+
+<p class="part">Part IV · Operating it</p>
+
+<section>
+  <h2>What runs, and what it needs</h2>
+  <p>The platform is deliberately a single deployable unit with a small dependency surface. The
+  subsystem boundaries described in Part II are internal; they do not translate into separate
+  services to operate.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Component</th><th>What it is</th><th>Scaling</th></tr></thead>
+    <tbody>
+      <tr><td>The platform</td><td>One application, run as several identical instances behind a load balancer</td><td>Add instances. Any instance can serve any request and resume any interrupted work.</td></tr>
+      <tr><td>The database</td><td>A relational database holding the record, the configuration and the credentials</td><td>Standard practice for the engine in use. It is the system of record.</td></tr>
+      <tr><td>Execution environments</td><td>Container images, one running instance per active coworker environment</td><td>The dominant cost. Idle environments are stopped automatically and retain their storage.</td></tr>
+      <tr><td>Environment hosting</td><td>Shared infrastructure by default, or infrastructure an organisation nominates</td><td>Chosen per organisation. Independent of platform scaling.</td></tr>
+      <tr><td>Model providers</td><td>Your own accounts, reached through the gateway</td><td>Multiple credentials per provider are used in rotation, with automatic recovery from limits.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="callout">
+    <p><b>On deployment location.</b> The platform can run on infrastructure you control, on
+    infrastructure we operate, or split — with execution environments on your own machines and the
+    platform hosted. The boundary drawn in Part III is the same in all three cases; what changes is
+    who operates the hardware.</p>
+  </div>
+</section>
+
+<section>
+  <h2>How it behaves when something fails</h2>
+  <p>Degradation is designed to be partial and specific. The table below is the intended behaviour
+  for each failure, and it is a fair summary of what an operations team should expect.</p>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>If this fails</th><th>What stops</th><th>What continues</th></tr></thead>
+    <tbody>
+      <tr><td>A platform instance</td><td>Nothing. Work in progress is picked up by another instance.</td><td>Everything.</td></tr>
+      <tr><td>A member’s device or application</td><td>Actions targeting that device.</td><td>All coworkers, all environments, all scheduled work.</td></tr>
+      <tr><td>One execution environment</td><td>That coworker’s environment actions, briefly.</td><td>Other coworkers. The environment is restored with its storage intact.</td></tr>
+      <tr><td>One model provider</td><td>Nothing, if another credential or model is available.</td><td>Work continues on an alternative; the failure is recorded.</td></tr>
+      <tr><td>One connected business system</td><td>Actions against that system, which are declined with the reason.</td><td>The coworker continues and can report the problem.</td></tr>
+      <tr><td>The database</td><td>The platform. This is the single point of consistency by design.</td><td>Running environments persist; work resumes when the database returns.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p style="margin-top:1.2rem">The pattern is that the platform records intent before acting, so an
+  interruption leaves a known state rather than an ambiguous one. Work is resumed rather than
+  restarted, and an action is not repeated merely because a component restarted.</p>
+</section>
+
+<section>
+  <h2>Scope</h2>
+  <p>Stated plainly, because an architecture is judged as much by what it declines to do.</p>
+
+  <h4>In scope</h4>
+  <ul class="grid">
+    <li><b>Durable coworkers and their record</b><span>Conversation, activity and audit history as one append-only record.</span></li>
+    <li><b>Isolated execution</b><span>Per-coworker Linux environments with shell, files, browser and screen.</span></li>
+    <li><b>Governance</b><span>Capability, review, approval, device access and spend, enforced per action.</span></li>
+    <li><b>Standards-based integration</b><span>Connections to business systems through a published tool protocol, with a central credential vault.</span></li>
+    <li><b>Unattended operation</b><span>Schedules and event triggers, governed identically to attended work.</span></li>
+    <li><b>Model routing and accounting</b><span>One gateway over your own provider accounts, with usage and comparable-cost records.</span></li>
+    <li><b>Multiple client surfaces</b><span>Desktop, web console, and any client speaking the supported agent protocol.</span></li>
+    <li><b>Organisational identity</b><span>Organisations, invitations, verified domains and roles.</span></li>
+  </ul>
+
+  <h4>Deliberately not in scope</h4>
+  <ul class="grid">
+    <li><b>Training or hosting models</b><span>The platform routes to providers. It does not train, fine-tune or serve model weights.</span></li>
+    <li><b>Remote control of a member’s screen</b><span>No component can view or drive a personal display. Actions on a personal device are file and command level, and consented individually.</span></li>
+    <li><b>Being a system of record for your business data</b><span>Business data stays in your systems. The platform holds the record of work, not a copy of your operational data.</span></li>
+    <li><b>Reselling model access</b><span>The gateway spends your organisation’s own provider credentials for your own members.</span></li>
+    <li><b>Unbounded autonomy</b><span>Unattended work carries the same permissions, approvals and budgets as attended work. There is no mode that removes them.</span></li>
+    <li><b>Cross-organisation visibility</b><span>Collaboration across organisational boundaries is a defined, explicitly enabled capability — not a default, and not implicit in shared infrastructure.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>Terms used in this document</h2>
+  <dl class="gloss">
+    <dt>Coworker</dt><dd>A durable AI worker with its own instructions, permissions, history and computer. Belongs to a person and an organisation.</dd>
+    <dt>Execution environment</dt><dd>The isolated Linux computer a coworker works on: shell, filesystem, browser and graphical screen.</dd>
+    <dt>Action</dt><dd>Anything a coworker does other than produce text — run a command, read or write a file, call a connected system, use a screen.</dd>
+    <dt>Integration</dt><dd>A connection to a business system through a published tool protocol, authorised by a scoped credential held in the platform’s vault.</dd>
+    <dt>Inference gateway</dt><dd>The single component through which all model requests leave, holding your provider credentials and recording usage.</dd>
+    <dt>Approval request</dt><dd>A question put to a named person before a specific action proceeds. Held on the server; answerable from any of that person’s devices; does not expire.</dd>
+    <dt>Review rules</dt><dd>Plain-language limits on what coworkers may do, set for the organisation and optionally narrowed per coworker, applied to every action.</dd>
+    <dt>Organisation</dt><dd>The unit of isolation: members, coworkers, environments, credentials, policy, records and budgets.</dd>
+  </dl>
+</section>
+
+<footer class="end">
+  <p class="eyebrow">Summary</p>
+  <p style="font-family:var(--sans);font-size:1.25rem;font-weight:600;line-height:1.4;max-width:44ch;margin-bottom:1.4rem">
+    Durable AI workers, each with a real computer, operating under governance the organisation
+    sets — with the work, the credentials and the record held by the platform rather than by any
+    device.</p>
+  <p style="color:var(--muted);font-size:.9rem;max-width:60ch">This document describes the platform
+  as designed and does not constitute a delivery schedule or a commitment to dates. Capabilities
+  are at differing stages of completion; a current status review is available on request.</p>
+</footer>
+
+</div>

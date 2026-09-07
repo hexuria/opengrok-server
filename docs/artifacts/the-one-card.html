@@ -1,0 +1,330 @@
+<title>The One Card</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 2</p>
+  <h1>The One Card</h1>
+  <p class="lede">A coworker wants to do something you might not want done. There is exactly one
+  place you are asked, one card, four answers — and it never expires. Here is why each of those
+  words was chosen.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The controls</p>
+  <h2>Four controls, and each answers a different question</h2>
+  <p>People imagine one big permission setting. There are four, they are not alternatives, and
+  every one of them can only <em>narrow</em> what happens.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 330" role="img" aria-label="Four controls in sequence: the machine's own switch on the person's machine, the remote-control gate on the server per machine, the card for this specific command, and auto-review across all tools. Each narrows what is allowed.">
+      <defs><marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="60" width="165" height="120" rx="7"/>
+      <text class="tcap accT" x="34" y="82">ON THE MACHINE</text>
+      <text class="tb" x="34" y="106">The switch</text>
+      <text class="ts" x="34" y="128">“does this computer accept</text>
+      <text class="ts" x="34" y="142">bot commands at all?”</text>
+      <text class="ts" x="34" y="162">on / off. no “ask”.</text>
+
+      <line class="ln" x1="185" y1="120" x2="211" y2="120" marker-end="url(#c1)"/>
+
+      <rect class="fill ln" x="219" y="60" width="165" height="120" rx="7"/>
+      <text class="tcap accT" x="233" y="82">ON THE SERVER</text>
+      <text class="tb" x="233" y="106">Remote control</text>
+      <text class="ts" x="233" y="128">“may bots reach this</text>
+      <text class="ts" x="233" y="142">machine, and how?”</text>
+      <text class="ts" x="233" y="162">off / ask / always · per machine</text>
+
+      <line class="ln" x1="384" y1="120" x2="410" y2="120" marker-end="url(#c1)"/>
+
+      <rect class="raise acc" x="418" y="60" width="165" height="120" rx="7" stroke-width="2"/>
+      <text class="tcap accT" x="432" y="82">ON THE SERVER</text>
+      <text class="tb accT" x="432" y="106">The card</text>
+      <text class="ts" x="432" y="128">“consent for THIS</text>
+      <text class="ts" x="432" y="142">command, right now”</text>
+      <text class="ts" x="432" y="162">the one surface a human sees</text>
+
+      <line class="ln" x1="583" y1="120" x2="609" y2="120" marker-end="url(#c1)"/>
+
+      <rect class="fill ln" x="617" y="60" width="123" height="120" rx="7"/>
+      <text class="tcap accT" x="631" y="82">ON THE SERVER</text>
+      <text class="tb" x="631" y="106">Auto-review</text>
+      <text class="ts" x="631" y="128">“what may bots</text>
+      <text class="ts" x="631" y="142">do at all?”</text>
+      <text class="ts" x="631" y="162">a model judges</text>
+
+      <text class="ts soft" x="20" y="212">the switch is the only one the building cannot touch. it is the local brake, enforced by the daemon alone.</text>
+      <text class="ts soft" x="20" y="230">the other three live on the server, because consent has to be answerable from a phone.</text>
+
+      <rect class="fill ln dash" x="20" y="252" width="720" height="58" rx="7"/>
+      <text class="tx" x="36" y="274">Only the machine’s switch and the remote-control gate are about the person’s own computer.</text>
+      <text class="ts" x="36" y="294">A desk needs neither: it is the building’s own machine. The card and auto-review apply everywhere.</text>
+    </svg>
+  </div><figcaption>Read left to right and the sequence is a funnel. Nothing further right can widen what something further left already closed.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The card</p>
+  <h2>Four answers, and what each one writes down</h2>
+  <p>Two answers are about this moment. Two are about every moment after it. That is the only
+  difference — and it is why “always” must be written on the server, not whispered to a client.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="The card has four answers: allow once and deny affect only this call; allow always and never also write a standing rule on the server that future calls consult.">
+      <defs><marker id="c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="goldsoft acc" x="250" y="20" width="260" height="66" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="380" y="46" text-anchor="middle">“May I run npm test?”</text>
+      <text class="ts" x="380" y="66" text-anchor="middle">one card · shown on every device you own</text>
+
+      <line class="ln liv" x1="300" y1="86" x2="150" y2="130" marker-end="url(#c2)"/>
+      <line class="ln liv" x1="345" y1="86" x2="330" y2="130" marker-end="url(#c2)"/>
+      <line class="ln bad" x1="415" y1="86" x2="470" y2="130" marker-end="url(#c2)"/>
+      <line class="ln bad" x1="460" y1="86" x2="650" y2="130" marker-end="url(#c2)"/>
+
+      <rect class="fill liv" x="20" y="136" width="170" height="72" rx="7"/>
+      <text class="t livT" x="34" y="158">Allow once</text>
+      <text class="ts" x="34" y="178">this call proceeds.</text>
+      <text class="ts" x="34" y="194">nothing is remembered.</text>
+
+      <rect class="fill liv" x="200" y="136" width="170" height="72" rx="7"/>
+      <text class="t livT" x="214" y="158">Allow always</text>
+      <text class="ts" x="214" y="178">this call proceeds</text>
+      <text class="ts" x="214" y="194">+ a standing rule</text>
+
+      <rect class="fill bad" x="390" y="136" width="170" height="72" rx="7"/>
+      <text class="t badT" x="404" y="158">Deny</text>
+      <text class="ts" x="404" y="178">refusal result.</text>
+      <text class="ts" x="404" y="194">nothing is remembered.</text>
+
+      <rect class="fill bad" x="570" y="136" width="170" height="72" rx="7"/>
+      <text class="t badT" x="584" y="158">Never</text>
+      <text class="ts" x="584" y="178">refusal result</text>
+      <text class="ts" x="584" y="194">+ a standing rule</text>
+
+      <line class="ln acc" x1="285" y1="208" x2="285" y2="240" marker-end="url(#c2)"/>
+      <line class="ln acc" x1="655" y1="208" x2="655" y2="240" marker-end="url(#c2)"/>
+
+      <rect class="raise acc" x="180" y="246" width="560" height="44" rx="7" stroke-width="2"/>
+      <text class="tx accT" x="196" y="266">STANDING RULES — on the server, visible, listable, deletable</text>
+      <text class="ts" x="196" y="282">a rule is a row a person can see and remove. it is never a hidden flag on a machine or in an app.</text>
+    </svg>
+  </div><figcaption>“Always” and “never” write a rule and nothing else. The window does not reach
+  into your machine and flip its switch on your behalf.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The design decision</p>
+  <h2>Why the card never expires — and what that costs</h2>
+  <p>The obvious design puts the question on the machine being asked about. It fails the moment
+  you walk away from that machine, and it fails silently.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Left: a card asked on the machine can only be answered at that machine and must time out, and a timeout is a silent no. Right: a card held on the server can be answered from any device and never needs to expire.">
+      <defs><marker id="c3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <line class="thin" x1="380" y1="10" x2="380" y2="290"/>
+      <text class="tcap badT" x="20" y="24">IF THE CARD LIVED ON THE MACHINE</text>
+      <text class="tcap livT" x="400" y="24">THE CARD LIVES ON THE SERVER</text>
+
+      <rect class="fill bad" x="20" y="40" width="150" height="52" rx="7"/>
+      <text class="t" x="34" y="62">the machine asks</text>
+      <text class="ts" x="34" y="80">on its own screen</text>
+      <line class="ln bad" x1="170" y1="66" x2="204" y2="66" marker-end="url(#c3)"/>
+      <rect class="fill ln soft" x="212" y="40" width="140" height="52" rx="7"/>
+      <text class="ts" x="226" y="62">you are not there.</text>
+      <text class="ts" x="226" y="80">you are on a phone.</text>
+      <path class="ln bad" d="M282 92 L282 130" marker-end="url(#c3)"/>
+      <rect class="fill bad" x="180" y="136" width="172" height="52" rx="7"/>
+      <text class="t badT" x="194" y="158">it must time out</text>
+      <text class="ts" x="194" y="176">nothing can wait forever there</text>
+      <path class="ln bad" d="M266 188 L266 220" marker-end="url(#c3)"/>
+      <rect class="fill bad" x="150" y="226" width="202" height="52" rx="7"/>
+      <text class="t badT" x="164" y="248">a timeout is a silent no</text>
+      <text class="ts" x="164" y="266">and nobody knows it happened</text>
+
+      <rect class="fill liv" x="400" y="40" width="150" height="52" rx="7"/>
+      <text class="t" x="414" y="62">the server asks</text>
+      <text class="ts" x="414" y="80">and holds the question</text>
+      <line class="ln liv" x1="550" y1="66" x2="584" y2="66" marker-end="url(#c3)"/>
+      <rect class="fill ln" x="592" y="40" width="148" height="52" rx="7"/>
+      <text class="ts" x="606" y="62">any device you own</text>
+      <text class="ts" x="606" y="80">shows it</text>
+      <path class="ln liv" d="M666 92 L666 130" marker-end="url(#c3)"/>
+      <rect class="raise liv" x="560" y="136" width="180" height="52" rx="7" stroke-width="2"/>
+      <text class="t livT" x="574" y="158">the run just waits</text>
+      <text class="ts" x="574" y="176">suspended, saved, cheap</text>
+      <path class="ln liv" d="M650 188 L650 220" marker-end="url(#c3)"/>
+      <rect class="fill liv" x="500" y="226" width="240" height="52" rx="7"/>
+      <text class="t livT" x="514" y="248">answer tomorrow if you like</text>
+      <text class="ts" x="514" y="266">no expiry, so no silent failure</text>
+    </svg>
+  </div><figcaption>A suspended run costs a row in a table. Waiting is free, so nothing has to
+  guess on your behalf.</figcaption></figure>
+
+  <div class="note">
+    <p><strong>The trade-off, stated plainly.</strong> Moving consent to the server removes the
+    machine’s per-command veto. A compromised server could drive an enrolled machine whose switch
+    is on. That is exactly why the switch exists, why it has no “ask”, and why the daemon enforces
+    it with no server involvement. One brake that the building genuinely cannot reach.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The judge</p>
+  <h2>Auto-review: two tiers, per-field, and a model reading the actual command</h2>
+  <p>Grants answer “is this tool allowed at all?”. Auto-review answers the harder question: “is
+  <em>this particular command</em>, with these arguments, something we said yes to?” A model reads
+  the call against instructions written in plain language.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Organisation rules are inherited field by field by each coworker's rules. The merged instruction plus the redacted tool call go to a judge model which returns allow, block or ask.">
+      <defs><marker id="c4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="30" width="200" height="80" rx="7"/>
+      <text class="tcap accT" x="34" y="52">TIER 1 · THE ORG</text>
+      <text class="ts" x="34" y="72">“never install software”</text>
+      <text class="ts" x="34" y="88">“never touch production”</text>
+      <text class="ts" x="34" y="102">on / off, allow text, block text</text>
+
+      <line class="ln" x1="120" y1="110" x2="120" y2="140" marker-end="url(#c4)"/>
+      <text class="ts accT" x="132" y="130">inherited field by field</text>
+
+      <rect class="fill ln" x="20" y="146" width="200" height="80" rx="7"/>
+      <text class="tcap accT" x="34" y="168">TIER 2 · THIS COWORKER</text>
+      <text class="ts" x="34" y="188">may override any one field</text>
+      <text class="ts" x="34" y="204">and leave the rest inherited</text>
+      <text class="ts" x="34" y="218">off by default</text>
+
+      <line class="ln" x1="220" y1="186" x2="270" y2="186" marker-end="url(#c4)"/>
+
+      <rect class="fill ln" x="278" y="118" width="180" height="96" rx="7"/>
+      <text class="tb" x="292" y="142">What the judge sees</text>
+      <text class="ts" x="292" y="162">the merged instructions</text>
+      <text class="ts" x="292" y="178">+ the tool name</text>
+      <text class="ts" x="292" y="194">+ the arguments, redacted</text>
+      <text class="ts badT" x="292" y="208">secrets never reach it</text>
+
+      <line class="ln" x1="458" y1="166" x2="508" y2="166" marker-end="url(#c4)"/>
+
+      <rect class="raise acc" x="516" y="118" width="224" height="96" rx="7" stroke-width="2"/>
+      <text class="tb accT" x="530" y="142">The verdict</text>
+      <text class="ts livT" x="530" y="164">allow — it proceeds</text>
+      <text class="ts badT" x="530" y="182">block — a refusal result</text>
+      <text class="ts accT" x="530" y="200">ask — raise the card</text>
+
+      <text class="ts soft" x="20" y="252">a device tier was designed and cut: “what may bots do on this machine” is already that machine’s standing rules.</text>
+      <text class="ts soft" x="20" y="268">one answer per question. adding a tier that answers a question already answered is how consent models rot.</text>
+    </svg>
+  </div><figcaption>Because the judge reads every tool the same way, one plain-language rule
+  covers shell commands, file writes, connector calls and every click of computer use at once.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariant</p>
+  <h2>At most one card per tool call</h2>
+  <p>Two gates can both want to ask. If both asked, a person would answer the same question twice
+  and learn to click through. So the first one to raise a card wins, and the rest stand down.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 200" role="img" aria-label="If the remote-control gate already suspended the run for consent, auto-review does not raise a second card for the same call.">
+      <defs><marker id="c5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="50" width="180" height="60" rx="7"/><text class="t" x="34" y="74">remote-control gate</text><text class="ts" x="34" y="92">says: ask</text>
+      <line class="ln acc" x1="200" y1="80" x2="252" y2="80" marker-end="url(#c5)"/>
+      <rect class="goldsoft acc" x="260" y="50" width="180" height="60" rx="7" stroke-width="2"/><text class="t accT" x="274" y="74">card raised</text><text class="ts" x="274" y="92">run suspends here</text>
+      <line class="ln bad dash" x1="440" y1="80" x2="492" y2="80"/>
+      <line class="ln bad" x1="458" y1="68" x2="474" y2="92"/><line class="ln bad" x1="458" y1="92" x2="474" y2="68"/>
+      <rect class="fill ln soft" x="500" y="50" width="240" height="60" rx="7"/><text class="t" x="514" y="74">auto-review also wanted to ask</text><text class="ts badT" x="514" y="92">it does not. one call, one card.</text>
+      <text class="ts soft" x="20" y="152">the same holds in reverse: if auto-review asked first, the gate does not ask again.</text>
+      <text class="ts soft" x="20" y="170">what a person sees is one question about one command — never a queue of gates introducing themselves.</text>
+    </svg>
+  </div><figcaption>This is an invariant, not an optimisation. A consent surface people click
+  through is worse than no consent surface, because it looks like protection.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The fourth control</p>
+  <h2>Spend is a brake, not a card</h2>
+  <p>Money gets its own control because it fails differently: nobody wants to be asked to approve
+  every model call, and nobody wants to find out afterwards. So it is a limit, checked before the
+  call, and crossing it is a refusal — not a question.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Limit</th><th>Set by</th><th>Window</th><th>What crossing it does</th></tr></thead>
+    <tbody>
+      <tr><td>Pool</td><td>The org admin, per member</td><td>The month</td><td>Every coworker that member owns stops. A refusal result naming the pool.</td></tr>
+      <tr><td>Cap</td><td>The coworker’s owner</td><td>The month</td><td>That one coworker stops. Never larger than the pool.</td></tr>
+      <tr><td>Brake</td><td>The coworker’s owner</td><td>Rolling 24 hours</td><td>That one coworker pauses until the window rolls. Off by default.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <p><strong>Why points and not currency.</strong> A subscription seat truthfully costs nothing
+    per call, so a currency budget would let seat traffic run unlimited while API traffic is
+    capped. Points charge from what the call <em>would</em> have cost at list price, so a seat and
+    a key count the same and the limit means one thing.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What consent never does</h2>
+  <ul class="never">
+    <li>Expire. There is no timeout, because there is nothing that has to guess.</li>
+    <li>Live in a client. A rule enforced in one window is enforced for one window.</li>
+    <li>Get checked once at sign-in. Policy is asked on every action, every time.</li>
+    <li>Combine by union. Layers intersect; the narrowest answer wins.</li>
+    <li>Widen on a mistake. A broken deny rule matches; a broken allow rule does not.</li>
+    <li>Kill the run. A refusal is a result the model reads and reasons about.</li>
+    <li>Let a window flip the machine’s switch. That brake is the person’s alone.</li>
+    <li>Ask twice for one call.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    One question, asked once, in a place every device can reach — and it waits as long as you
+    need it to.</p>
+</footer>
+
+</div>

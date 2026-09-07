@@ -87,6 +87,44 @@ async fn api(client: &reqwest::Client, base: &str, method: &str, body: Value) ->
     )
 }
 
+/// Wait until the arrival stamp has landed, rather than sleeping a guess.
+///
+/// THE TURN'S LAST ACT IS NOT THE ANSWER. `note_arrival` runs AFTER the final entry is written, so
+/// `wait_for_an_answer` returning says nothing about whether the stamp has been made — and a fixed
+/// sleep after it is a bet on how fast the machine is. That bet lost on CI: 400 ms was enough on
+/// this desk and not on a loaded runner, and it took a green PR red on `main` after the merge.
+/// Polling the condition costs the same on a fast box and does not fail on a slow one.
+async fn wait_until_read(
+    store: &PgStore,
+    coworker: &opengrok_core::id::CoworkerId,
+    account: &AccountId,
+) -> i64 {
+    let mut unread = -1;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(state) = store.unread_state(coworker, account).await {
+            unread = state.unread;
+            if unread == 0 {
+                return 0;
+            }
+        }
+    }
+    unread
+}
+
+/// The same, for the roster row the client actually reads.
+async fn wait_until_row_read(client: &reqwest::Client, base: &str, agent: &str) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        last = row(client, base, agent).await;
+        if last["unreadCount"] == json!(0) {
+            return last;
+        }
+    }
+    last
+}
+
 /// The roster row for one coworker, as this caller sees it.
 async fn row(client: &reqwest::Client, base: &str, agent: &str) -> Value {
     let (_, list) = api(client, base, "listAgents", json!({})).await;
@@ -204,14 +242,14 @@ async fn an_answer_in_the_chat_you_are_watching_is_not_unread() {
     .await;
     assert_eq!(status, 200, "{sent}");
     wait_for_an_answer(&client, &base, &agent).await;
-    // The arrival stamp lands just after the final entry; give the roster a beat to catch up.
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // The arrival stamp lands just AFTER the final entry, so wait for the condition rather than
+    // for a clock: a fixed sleep is a bet on the machine, and that bet took `main` red once.
+    let watched = wait_until_row_read(&client, &base, &agent).await;
 
     // The answer itself cannot out-date the view: `update_gateway_entry` leaves `at_ms` alone, so
     // the row keeps the placeholder's stamp from the moment the prompt was sent. What USED to
     // raise the badge here is the placeholder — an empty `send-message` row appended a
     // millisecond after a Mark as Read — which is why sending now records a view.
-    let watched = row(&client, &base, &agent).await;
     assert_eq!(
         watched["unreadCount"],
         json!(0),
@@ -244,9 +282,11 @@ async fn an_answer_in_the_chat_you_are_watching_is_not_unread() {
     .await;
     assert_eq!(status, 200);
     wait_for_an_answer(&client, &base, &agent).await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let still = row(&client, &base, &agent).await;
+    // A deliberate unread must SURVIVE. Give the stamp that would clear it every chance to land —
+    // `wait_until_row_read` polls until the count reaches zero and gives up after its bound — and
+    // then assert it did not. Waiting for the wrong outcome is the honest way to test a negative:
+    // a fixed sleep would pass here by being too short.
+    let still = wait_until_row_read(&client, &base, &agent).await;
     assert!(
         still["unreadCount"].as_i64().unwrap_or(0) >= 1,
         "a deliberate Mark as Unread must survive an arrival in the same chat: {still}"
@@ -406,14 +446,9 @@ async fn an_entry_appended_while_watching_is_marked_read() {
     .await;
     assert_eq!(status, 200);
     wait_for_an_answer(&client, &base, &agent).await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let after = store
-        .unread_state(&coworker, &account)
-        .await
-        .expect("after");
+    let after_unread = wait_until_read(&store, &coworker, &account).await;
     assert_eq!(
-        after.unread, 0,
+        after_unread, 0,
         "an entry that landed while the person was watching must be marked read when the turn \
          ends — otherwise the badge paints blue over the working dot for the whole run"
     );
@@ -468,14 +503,9 @@ async fn sending_without_opening_still_counts_as_looking() {
     .await;
     assert_eq!(status, 200);
     wait_for_an_answer(&client, &base, &agent).await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-    let after = store
-        .unread_state(&coworker, &account)
-        .await
-        .expect("after");
+    let after_unread = wait_until_read(&store, &coworker, &account).await;
     assert_eq!(
-        after.unread, 0,
+        after_unread, 0,
         "typing to a coworker means looking at it: the answer must not arrive as unread on the \
          chat the person is typing into"
     );

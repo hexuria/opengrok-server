@@ -1,0 +1,264 @@
+<title>The Window and the Machine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 8</p>
+  <h1>The Window and the Machine</h1>
+  <p class="lede">The app on your laptop does two completely different jobs. One is showing you
+  things — and it owns none of them. The other is the single path by which a coworker can touch
+  your real computer, and it is the most carefully fenced thing in the system.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">Job one</p>
+  <h2>A window shows; it does not hold</h2>
+  <p>Everything you can see in the app lives on the server. The app is a view onto it. This sounds
+  like a technicality until you close the lid.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 320" role="img" aria-label="Left: when work lives in the app, closing it stops the work. Right: when work lives in the building, closing the app changes nothing and any other window shows the same state.">
+      <defs><marker id="w1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+      <marker id="w1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--dead)"/></marker></defs>
+      <line class="thin" x1="380" y1="10" x2="380" y2="300"/>
+      <text class="tcap badT" x="20" y="26">IF THE WORK LIVED IN THE APP</text>
+      <text class="tcap livT" x="400" y="26">THE WORK LIVES IN THE BUILDING</text>
+
+      <rect class="fill bad" x="40" y="46" width="280" height="86" rx="8"/>
+      <text class="tb badT" x="56" y="72">the app</text>
+      <text class="ts" x="56" y="94">the loop, the state, the queue,</text>
+      <text class="ts" x="56" y="112">the half-finished turn</text>
+      <path class="ln bad" d="M180 132 L180 168" marker-end="url(#w1b)"/>
+      <rect class="fill bad" x="40" y="174" width="280" height="52" rx="8"/>
+      <text class="ts badT" x="56" y="196">you close the lid</text>
+      <text class="ts" x="56" y="214">and the work stops mid-sentence</text>
+      <text class="ts badT" x="40" y="256">this is the bug that created this project.</text>
+      <text class="ts" x="40" y="274">a working app was not enough, because the app</text>
+      <text class="ts" x="40" y="290">was where everything lived.</text>
+
+      <rect class="fill ln" x="400" y="46" width="150" height="60" rx="8"/>
+      <text class="ts" x="414" y="70">the app</text>
+      <text class="ts" x="414" y="88">renders, and asks</text>
+      <rect class="fill ln soft" x="570" y="46" width="170" height="60" rx="8"/>
+      <text class="ts" x="584" y="70">a phone, a browser,</text>
+      <text class="ts" x="584" y="88">another laptop</text>
+
+      <line class="ln liv" x1="475" y1="106" x2="530" y2="150" marker-end="url(#w1)"/>
+      <line class="ln liv" x1="655" y1="106" x2="600" y2="150" marker-end="url(#w1)"/>
+
+      <rect class="raise acc" x="430" y="156" width="290" height="86" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="446" y="182">the building</text>
+      <text class="ts" x="446" y="204">the loop, the record, the queue,</text>
+      <text class="ts" x="446" y="222">the coworker, the desk</text>
+
+      <text class="ts livT" x="400" y="270">close anything you like. the coworker keeps working,</text>
+      <text class="ts livT" x="400" y="288">and every other window already agrees with itself.</text>
+    </svg>
+  </div><figcaption>“Nothing that matters lives in a client” is not a style preference. It is what
+  makes a second device possible at all.</figcaption></figure>
+
+  <div class="tw"><table>
+    <thead><tr><th>The window</th><th>Renders</th><th>Owns</th></tr></thead>
+    <tbody>
+      <tr><td>Transcript</td><td>Yes — and streams it live</td><td>No. The record is the building’s.</td></tr>
+      <tr><td>Activity (“what is it doing now”)</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Consent card</td><td>Yes — and sends your answer</td><td>No. The decision is Policy’s.</td></tr>
+      <tr><td>Secret entry</td><td>Yes — masked</td><td>No. It relays and forgets.</td></tr>
+      <tr><td>Desk screen</td><td>Yes — an embedded viewer</td><td>No. The URL comes from Computers.</td></tr>
+      <tr><td>Settings</td><td>Yes</td><td>No. It configures; the building decides.</td></tr>
+      <tr><td>Its own session</td><td>—</td><td><b>Yes.</b> The one secret a window holds.</td></tr>
+      <tr><td>A local-exec daemon</td><td>—</td><td><b>Yes.</b> Job two, below.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Job two</p>
+  <h2>The only path to your real computer</h2>
+  <p>A coworker on a desk cannot reach your laptop. There is no route. The only way anything
+  touches your real files is a daemon that lives inside the app you installed — and the building
+  cannot call it directly. It has to ask through the window.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="The tool router cannot dial the person's machine. It pushes a request down the connection the window already opened, the daemon inside the app runs it, and the result returns the same way. If the app is closed there is no path at all.">
+      <defs><marker id="w2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+      <marker id="w2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--dead)"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="110" width="160" height="70" rx="8"/>
+      <text class="tb" x="34" y="136">tool router</text>
+      <text class="ts" x="34" y="156">in the building</text>
+      <text class="ts" x="34" y="172">has a request for you</text>
+
+      <path class="ln bad dash" d="M180 100 C 300 60 460 60 560 96"/>
+      <line class="ln bad" x1="360" y1="58" x2="376" y2="78"/><line class="ln bad" x1="360" y1="78" x2="376" y2="58"/>
+      <text class="ts badT" x="370" y="40" text-anchor="middle">it cannot dial your machine. there is no route in.</text>
+
+      <line class="ln acc" x1="180" y1="145" x2="238" y2="145" marker-end="url(#w2)"/>
+      <text class="ts accT" x="209" y="136" text-anchor="middle">pushed down</text>
+
+      <rect class="raise acc" x="246" y="106" width="200" height="78" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="260" y="132">the window’s own line</text>
+      <text class="ts" x="260" y="152">already open, because the</text>
+      <text class="ts" x="260" y="168">app is signed in and watching</text>
+
+      <line class="ln acc" x1="446" y1="145" x2="504" y2="145" marker-end="url(#w2)"/>
+
+      <rect class="fill ln" x="512" y="106" width="228" height="78" rx="8"/>
+      <text class="tb" x="526" y="132">the daemon, inside the app</text>
+      <text class="ts" x="526" y="152">runs it on your real machine</text>
+      <text class="ts" x="526" y="168">and sends the result back the same way</text>
+
+      <rect class="fill bad" x="20" y="216" width="350" height="66" rx="8"/>
+      <text class="tx badT" x="36" y="238">APP CLOSED · MACHINE ASLEEP</text>
+      <text class="ts" x="36" y="258">there is no line, so there is no path.</text>
+      <text class="ts" x="36" y="274">the tool gets a refusal result. the run carries on.</text>
+
+      <rect class="fill liv" x="390" y="216" width="350" height="66" rx="8"/>
+      <text class="tx livT" x="406" y="238">MEANWHILE, THE DESK</text>
+      <text class="ts" x="406" y="258">completely unaffected. the coworker keeps working</text>
+      <text class="ts" x="406" y="274">on its own computer all night.</text>
+    </svg>
+  </div><figcaption>The direction of the arrow is the security property. Nothing outside can
+  initiate a connection to your machine; your machine holds a line open and things arrive on it.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The fence</p>
+  <h2>Three gates, and one of them the building cannot open</h2>
+  <p>The path above is fenced three times. Two fences are on the server, where you can answer them
+  from any device. One is on your machine, on purpose, and nothing remote can move it.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Three gates in order: the machine's own switch enforced by the daemon, the remote-control gate on the server per machine, and the consent card for this specific command. Only the first is beyond the building's reach.">
+      <defs><marker id="w3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="raise acc" x="20" y="50" width="220" height="130" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="74">GATE 1 · ON YOUR MACHINE</text>
+      <text class="tb accT" x="36" y="100">The switch</text>
+      <text class="ts" x="36" y="122">on or off. no “ask”.</text>
+      <text class="ts" x="36" y="140">enforced by the daemon,</text>
+      <text class="ts" x="36" y="156">with no server involved.</text>
+      <text class="ts livT" x="36" y="174">the building cannot flip it</text>
+
+      <line class="ln" x1="240" y1="115" x2="266" y2="115" marker-end="url(#w3)"/>
+
+      <rect class="fill ln" x="274" y="50" width="220" height="130" rx="8"/>
+      <text class="tcap accT" x="290" y="74">GATE 2 · ON THE SERVER</text>
+      <text class="tb" x="290" y="100">Remote control</text>
+      <text class="ts" x="290" y="122">off / ask / always,</text>
+      <text class="ts" x="290" y="140">set per machine, plus a</text>
+      <text class="ts" x="290" y="156">visible list of standing</text>
+      <text class="ts" x="290" y="172">rules you can delete</text>
+
+      <line class="ln" x1="494" y1="115" x2="520" y2="115" marker-end="url(#w3)"/>
+
+      <rect class="fill ln" x="528" y="50" width="212" height="130" rx="8"/>
+      <text class="tcap accT" x="544" y="74">GATE 3 · ON THE SERVER</text>
+      <text class="tb" x="544" y="100">The card</text>
+      <text class="ts" x="544" y="122">this exact command,</text>
+      <text class="ts" x="544" y="140">right now. answerable</text>
+      <text class="ts" x="544" y="156">from any device.</text>
+      <text class="ts" x="544" y="172">never expires</text>
+
+      <text class="ts soft" x="20" y="222">gates 2 and 3 are on the server because consent must be answerable from the phone in your pocket.</text>
+      <text class="ts soft" x="20" y="240">gate 1 is on your machine because that argument does not apply to a brake — a brake should work when nothing else does.</text>
+      <text class="ts accT" x="20" y="266">the trade-off, said out loud: a compromised server could drive an enrolled machine whose switch is on. that is exactly what gate 1 is for.</text>
+    </svg>
+  </div><figcaption>The window renders gates 2 and 3. It does not decide them, and it never flips
+  gate 1 on your behalf — a “remember this” answer writes a server rule instead.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Presence</p>
+  <h2>“Connected” means one specific thing</h2>
+  <p>The building needs to know whether your machine is reachable — but only for one purpose. It
+  is not a status light, and it must never become a reason a coworker stops working.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 220" role="img" aria-label="Presence affects only whether local-machine tools are available. Everything else — the coworker, the desk, schedules, other people's windows — is unaffected by whether one window is open.">
+      <rect class="raise acc" x="20" y="40" width="340" height="76" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="64">WHAT PRESENCE DECIDES</text>
+      <text class="ts" x="36" y="88">whether tools that touch YOUR machine can run</text>
+      <text class="ts" x="36" y="106">and nothing else at all</text>
+
+      <rect class="fill ln" x="400" y="40" width="340" height="160" rx="8"/>
+      <text class="tcap accT" x="416" y="64">WHAT IT DOES NOT DECIDE</text>
+      <text class="ts" x="416" y="88">whether the coworker runs</text>
+      <text class="ts" x="416" y="106">whether the desk is awake</text>
+      <text class="ts" x="416" y="124">whether a schedule fires</text>
+      <text class="ts" x="416" y="142">whether a card can be answered</text>
+      <text class="ts" x="416" y="160">whether anyone else can see the transcript</text>
+      <text class="ts" x="416" y="184">whether the work survives — it always does</text>
+
+      <text class="ts soft" x="20" y="152">a window opening or closing is not a state change in the building.</text>
+      <text class="ts soft" x="20" y="170">it is one capability appearing or disappearing, and the router already knows what to do.</text>
+      <text class="ts accT" x="20" y="196">so “I closed my laptop” is never an incident.</text>
+    </svg>
+  </div><figcaption>Every other client — a phone, the console, another agent through the tool door
+  — keeps driving the same coworkers while your laptop is shut.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What a window never does</h2>
+  <ul class="never">
+    <li>Hold a desk token, a connector token, or a model credential.</li>
+    <li>Decide a permission. It renders the question and sends your answer.</li>
+    <li>Flip the switch on your machine because you tapped “always”.</li>
+    <li>Keep the only copy of anything.</li>
+    <li>Run the agent loop. That is the building’s, and it is why closing the app is safe.</li>
+    <li>Be required for a coworker to work.</li>
+    <li>Enforce a rule. A rule enforced in one window is enforced for one window.</li>
+    <li>Let the building dial into your machine. Requests travel down a line you opened.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    The app is a pane of glass with one door in it — and the door only opens outward, from your
+    side, after you say so.</p>
+</footer>
+
+</div>
