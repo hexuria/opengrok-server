@@ -184,6 +184,22 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         return (400, json!({ "error": "no agent named and none active" }));
     };
 
+    // A SEND THAT FAILS, ON PURPOSE. The client's failed-send path is otherwise unreachable from a
+    // dev machine — every mock fixture succeeds, so the bubble left behind by a refused send could
+    // only be exercised by breaking the server for real.
+    //
+    // BEFORE THE ACCEPTANCE LEDGER, deliberately. Consuming the nonce first would let the client's
+    // retry dedupe into `accepted: true`, so the fixture would refuse once and then quietly
+    // succeed — a fixture that lies on the second call is worse than no fixture. Refusing here
+    // also means nothing is appended and no turn starts, which is what a failed send IS: argument
+    // validation still runs first, so a malformed send is still answered as malformed.
+    if super::mock_fixtures::enabled()
+        && let Some((code, message)) = super::mock_fixtures::refusal_for(&prompt)
+    {
+        tracing::info!(code, agent = %agent_id, "sendPrompt: refused by a mock fixture");
+        return (code, json!({ "error": message }));
+    }
+
     let coworker_id = CoworkerId::from_stored(agent_id.clone());
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
         return (404, json!({ "error": format!("no agent {agent_id}") }));

@@ -80,3 +80,12 @@ pub fn write_upload(_file_name: &str, _bytes: &[u8]) -> Result<String, String> {
 pub fn read_fixture(_path: &str) -> Result<Vec<u8>, String> {
     Err("attachments are not stored by this server yet (artifacts is a planned slice)".to_string())
 }
+
+/// NOTHING REFUSES A SEND HERE. Unreachable in practice — `send_prompt` checks `enabled()` first
+/// — but it answers honestly anyway, because the failure mode if that guard were ever dropped is
+/// a production binary that could be talked into failing a real person's send with the text they
+/// typed. That would be far worse than the bug the fixture exists to reproduce, so the stub does
+/// not rely on being unreachable.
+pub fn refusal_for(_prompt: &str) -> Option<(u16, String)> {
+    None
+}

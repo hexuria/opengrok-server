@@ -37,16 +37,20 @@ PORT="${PORT:-1447}"
 export OG_MOCK_DELTA_MS="${OG_MOCK_DELTA_MS:-90}"
 # And a floor under every mock model call: per-delta pacing cannot make a one-line fixture answer
 # visible, because it is one delta. Measured on the packaged app — the row was complete before the
-# first sample and the working dot never painted. A fixture turn is two visible calls, so 1.2 s
-# gives the two-to-three seconds of "thinking" that reads as reassuring rather than as slow; 0 off.
-export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-1200}"
+# first sample and the working dot never painted. A fixture turn is two visible calls, so 0.6 s
+# still clears a sampling interval twice over while keeping the whole turn near a second. It was
+# 1.2 s first, which made every trivial answer feel deliberate; the client session watching real
+# bubbles asked for half. Raise it if the working dot starts being missed again; 0 turns it off.
+export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-600}"
 # And a ceiling on what the PACING may add, per model call — not a cap on the call. The floor is
-# paid on top, so a floored call's worst case is floor+ceiling, and a turn is several calls: the
-# 79 s help text measured on the dev server came down to 14.5 s, not to 6. The catalogue answer is
-# chunked word-per-delta, so 90 ms makes 4,632 characters ~795 deltas; the pause is shared out
-# rather than lowered — min(90ms, ceiling/deltas) — so a one-liner still types and a long answer
-# scrolls. Set the ceiling BELOW the pacing and everything is hurried, one-liners included.
-export OG_MOCK_MAX_TURN_MS="${OG_MOCK_MAX_TURN_MS:-6000}"
+# paid on top, so a floored call's worst case is floor+ceiling, and a turn is several calls: at
+# 6000 the 79 s help text measured on the dev server came down to 14.5 s, not to 6. Halving the
+# ceiling halves the pacing share, so that same answer lands near 7 s — still typed, no longer a
+# wait. The catalogue answer is chunked word-per-delta, so 90 ms makes 4,632 characters ~795
+# deltas; the pause is shared out rather than lowered — min(90ms, ceiling/deltas) — so a one-liner
+# still types and a long answer scrolls. Set the ceiling BELOW the pacing and everything is
+# hurried, one-liners included.
+export OG_MOCK_MAX_TURN_MS="${OG_MOCK_MAX_TURN_MS:-3000}"
 echo "=== mock doors: ${OG_MOCK_DELTA_MS}ms/delta, floor ${OG_MOCK_MIN_TURN_MS}ms/call, pacing capped at ${OG_MOCK_MAX_TURN_MS}ms/call (floor is extra)"
 
 # WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
