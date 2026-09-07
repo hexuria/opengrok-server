@@ -88,8 +88,8 @@ fn a_store_that_cannot_answer() -> PgStore {
 
 #[tokio::test]
 async fn a_dead_store_is_not_a_healthy_host() {
-    let (status, body) = health_through_the_router(a_store_that_cannot_answer(), "outage@og.local")
-        .await;
+    let (status, body) =
+        health_through_the_router(a_store_that_cannot_answer(), "outage@og.local").await;
 
     assert_eq!(
         status, 503,
@@ -101,7 +101,10 @@ async fn a_dead_store_is_not_a_healthy_host() {
         "`ok` is the only field the supervisor reads; it must be false here: {body}"
     );
     assert!(
-        body["reason"].as_str().unwrap_or_default().contains("not answering"),
+        body["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not answering"),
         "fail closed AND say why — the reply must name the cause: {body}"
     );
     // The failure reply is unauthenticated, so it must not carry the store's own sentence: a sqlx
@@ -128,8 +131,7 @@ async fn a_live_store_still_answers_ok() {
         .await
         .expect("migrations");
 
-    let (status, body) =
-        health_through_the_router(PgStore::new(pool), "healthy@og.local").await;
+    let (status, body) = health_through_the_router(PgStore::new(pool), "healthy@og.local").await;
 
     assert_eq!(
         status, 200,
