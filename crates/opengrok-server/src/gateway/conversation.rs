@@ -815,9 +815,52 @@ struct AnswerSink {
     progress: std::sync::Mutex<(String, i64)>,
 }
 
+impl AnswerSink {
+    /// The verb these events imply, if they change it.
+    ///
+    /// READ FROM THE EVENTS, not from a guess about where the turn is. A tool call and a text
+    /// delta are both observable facts on the same stream, so the label cannot drift from what the
+    /// person is watching — which is the whole failure being fixed: `thinking` was true when the
+    /// turn began and stayed on screen while the answer typed itself out underneath it.
+    fn verb_for(events: &[opengrok_wire::agui::Event]) -> Option<Value> {
+        use opengrok_wire::agui::EventType;
+        // Last one wins: a batch may carry a tool ending and text beginning, and the newest fact
+        // is the true one.
+        let mut verb = None;
+        for event in events {
+            match event.event_type {
+                // The model asked for a tool. `tool` is the name the client maps onto a verb and
+                // an icon; it falls back to "Working" for a name it does not know, so an unknown
+                // tool is safe to name rather than something to hide.
+                EventType::ToolCallStart => {
+                    let name = event
+                        .extra
+                        .get("toolCallName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    verb = Some(json!({ "kind": "tool", "tool": name }));
+                }
+                // The tool answered; the model is deciding again, and has not spoken yet.
+                EventType::ToolCallEnd => verb = Some(json!({ "kind": "thinking" })),
+                // WORDS ARE ARRIVING. This is the transition that matters: from here the bubble
+                // is filling, and any label but "writing" contradicts what is on screen.
+                EventType::TextMessageContent => verb = Some(json!({ "kind": "writing" })),
+                _ => {}
+            }
+        }
+        verb
+    }
+}
+
 #[async_trait::async_trait]
 impl opengrok_harness::EventSink for AnswerSink {
     async fn emit(&self, events: &[opengrok_wire::agui::Event]) {
+        // Cheap and idempotent: `set_activity` only reads the roster and emits when the verb
+        // actually changed, which is about three times a turn rather than once per delta.
+        if let Some(verb) = Self::verb_for(events) {
+            live::set_activity(&self.state, &self.agent_id, verb).await;
+        }
+
         // Only the message text. TOOL_CALL_ARGS frames carry a `delta` too, and gluing tool
         // arguments into the visible answer would be nonsense the person reads — the same filter
         // the final assembly applies, and it has to agree with it or the bubble would change
