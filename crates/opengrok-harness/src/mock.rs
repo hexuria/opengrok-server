@@ -81,6 +81,65 @@ pub struct MockDoor {
     /// state for two floors — which, for the purpose of watching a coworker think, is a feature.
     /// `None` by default and in every test; a dev server opts in through `OG_MOCK_MIN_TURN_MS`.
     turn_floor: Option<std::time::Duration>,
+    /// The most time the PACING may add to one model call, however many deltas it has.
+    ///
+    /// A FLOOR AND A CEILING ANSWER DIFFERENT QUESTIONS. The floor exists because a short answer
+    /// was over before the working state could paint. The ceiling exists because a long one is now
+    /// chunked word-per-delta, so the same 90 ms that makes a one-liner type turns a 4,632-
+    /// character help text into ~795 deltas. The pacing alone is ~72 s of that; the 79 s actually
+    /// measured on the dev server is the whole turn, floors and tool round included. It read as a
+    /// stuck turn and was reported as one.
+    ///
+    /// Lowering the pacing instead would fix the long case by ruining the short one, which is the
+    /// case the pacing was added for. So the per-delta pause becomes
+    /// `min(per_delta_delay, ceiling / deltas)` — see `paced_pause`, which owns the arithmetic and
+    /// documents what it does NOT promise. `None` by default and in tests; a dev server opts in
+    /// with `OG_MOCK_MAX_TURN_MS`.
+    ///
+    /// IT CAPS THE PACING, NOT THE CALL. The floor is paid on top, so a floored call's worst case
+    /// is `floor + ceiling`, and a turn is several calls. The name is the shortest true thing;
+    /// `serve.sh` prints both numbers for the same reason.
+    turn_ceiling: Option<std::time::Duration>,
+}
+
+/// The pause before each delta: the pacing, reduced so the whole script fits the ceiling.
+///
+/// SEPARATE AND PURE SO IT CAN BE TESTED EXACTLY. Asserting this through the clock means asserting
+/// a CEILING on elapsed time, which this file's own convention forbids — a sleep may overrun on a
+/// loaded machine but can never fire early, so a "finished within N" assertion can only fail
+/// spuriously. As arithmetic it is checked precisely instead, and a threshold loose enough not to
+/// flake is not needed.
+///
+/// SHARED OUT, NOT COUNTED DOWN: the whole script is in hand before the first delta, so the pause
+/// that fits is decided once rather than measured against a clock a slow consumer would skew.
+///
+/// TWO THINGS THIS DOES NOT PROMISE, both of which an earlier comment here claimed:
+///
+/// - A one-liner is unaffected only while `ceiling >= pace`. Set a ceiling BELOW the pacing and
+///   every answer is hurried, including the short one the pacing exists for — `min` has no opinion
+///   about which knob the operator meant. That is a legitimate way to configure it and the
+///   arithmetic is honest, but it is not "one-liners are never touched".
+/// - The total is not an exact bound. `tokio::time::sleep` rounds each deadline up to the next
+///   timer tick, so a share below that tick is realised as the tick: 4,000 deltas sharing 6 s is
+///   1.5 ms each, realised as ~2 ms, which overshoots by a third. It bounds the runaway case it
+///   was added for — 79 s down to seconds — and it is not a guarantee.
+fn paced_pause(
+    pace: Option<std::time::Duration>,
+    ceiling: Option<std::time::Duration>,
+    deltas: usize,
+) -> Option<std::time::Duration> {
+    let pace = pace?;
+    let Some(ceiling) = ceiling else {
+        return Some(pace);
+    };
+    // An empty script is reachable — `serving_fixtures` splits an empty tool result into no deltas
+    // at all — and `Duration / 0` panics, which is denied workspace-wide. It also has nothing to
+    // pace, so the pacing is simply whatever it was.
+    let deltas = u32::try_from(deltas).unwrap_or(u32::MAX);
+    if deltas == 0 {
+        return Some(pace);
+    }
+    Some(pace.min(ceiling / deltas))
 }
 
 impl MockDoor {
@@ -103,8 +162,16 @@ impl MockDoor {
         self
     }
 
-    /// The script as a stream, paced and — unless this is a judge request — floored. Every path
-    /// in `stream` ends here, so a new answer shape cannot forget either.
+    /// Cap what the pacing may add to one model call. See `turn_ceiling`. `0` is off.
+    #[must_use]
+    pub fn max_turn_ms(mut self, ms: u64) -> Self {
+        self.turn_ceiling = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        self
+    }
+
+    /// The script as a stream: paced per delta, reduced to fit the ceiling, and — unless this is
+    /// a judge request — floored once before the first delta. Every path in `stream` ends here, so
+    /// a new answer shape cannot forget any of the three.
     ///
     /// THE FLOOR IS FOR CALLS A PERSON IS WATCHING. The auto-review judge is a second model call
     /// per tool call, invisible in the transcript, and flooring it multiplies the wait by
@@ -122,8 +189,8 @@ impl MockDoor {
             .system
             .as_deref()
             .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER));
-        let delay = self.per_delta_delay;
         let floor = if is_judge { None } else { self.turn_floor };
+        let delay = paced_pause(self.per_delta_delay, self.turn_ceiling, script.len());
         if delay.is_none() && floor.is_none() {
             return Box::pin(stream::iter(script.into_iter().map(Ok)));
         }
@@ -520,6 +587,115 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_millis(50),
             "zero is off, exactly as unset — the suite depends on it"
+        );
+    }
+
+    /// The pause the ceiling produces, checked as arithmetic rather than by the clock.
+    ///
+    /// The earlier version of this test asserted `elapsed < 4s` for 200 deltas. That is a CEILING
+    /// on elapsed time, which the test above forbids in as many words — a sleep can overrun on a
+    /// loaded machine but never fire early, so such an assertion can only fail spuriously. It was
+    /// also too loose to be worth the risk: with 0.4 s expected and 10 s unfixed, a 4 s threshold
+    /// caught only the ceiling being ignored ENTIRELY, and would have passed a regression that
+    /// divided by `len/2`, or used `max` instead of `min`, or overshot fivefold.
+    ///
+    /// The arithmetic is exact and has no clock in it, so it can assert the precise value.
+    #[test]
+    fn the_pause_is_the_pacing_reduced_to_fit_the_ceiling() {
+        let ms = std::time::Duration::from_millis;
+
+        // The case this exists for: 200 deltas that would take 10 s, held to 400 ms.
+        assert_eq!(paced_pause(Some(ms(50)), Some(ms(400)), 200), Some(ms(2)));
+
+        // A SHORT ANSWER KEEPS ITS PACING. `min` picks the pause because the share is bigger —
+        // and this is the assertion that distinguishes the fix from its inverse: with `max` the
+        // answer would be 2 s, and with the ceiling ignored it would still be 50 ms, so only an
+        // exact check tells the three apart.
+        assert_eq!(paced_pause(Some(ms(50)), Some(ms(4_000)), 2), Some(ms(50)));
+
+        // Each knob alone behaves as it did before the other existed.
+        assert_eq!(paced_pause(Some(ms(40)), None, 4), Some(ms(40)));
+        assert_eq!(paced_pause(None, Some(ms(400)), 4), None);
+        assert_eq!(paced_pause(None, None, 4), None);
+
+        // An empty script is REACHABLE — `serving_fixtures` splits an empty tool result into no
+        // deltas — and `Duration / 0` panics, which is denied workspace-wide.
+        assert_eq!(paced_pause(Some(ms(40)), Some(ms(400)), 0), Some(ms(40)));
+
+        // A ceiling BELOW the pacing hurries everything, including a one-liner. Honest arithmetic
+        // rather than a promise: an operator who tightens the ceiling to fix long answers does
+        // reach the short ones, and this pins it so nobody has to rediscover it.
+        assert_eq!(paced_pause(Some(ms(90)), Some(ms(50)), 1), Some(ms(50)));
+    }
+
+    /// The ceiling still bounds a real stream, and a short one still takes its time.
+    ///
+    /// Only FLOORS on elapsed time here, per this file's convention: the long case asserts the
+    /// deltas all arrived (which the arithmetic test cannot observe), and the short case asserts
+    /// it was not hurried. Neither can fail on a slow machine.
+    #[tokio::test]
+    async fn the_ceiling_leaves_a_short_answer_paced() {
+        let long: Vec<_> = (0..200)
+            .map(|i| ModelDelta::Text(format!("w{i} ")))
+            .collect();
+        let out: Vec<_> = MockDoor::with_script(long)
+            .paced_by_ms(50)
+            .max_turn_ms(400)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert_eq!(
+            out.len(),
+            200,
+            "the ceiling must not change what is emitted"
+        );
+
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(vec![
+            ModelDelta::Text("one ".to_string()),
+            ModelDelta::Text("two".to_string()),
+        ])
+        .paced_by_ms(50)
+        .max_turn_ms(4_000)
+        .stream(request("hi"))
+        .await
+        .expect("stream")
+        .collect()
+        .await;
+        assert_eq!(out.len(), 2);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "a short answer under a generous ceiling still paces: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The shipped configuration: a floor AND a ceiling, which is what `serve.sh` sets and the
+    /// only combination a dev server ever runs — and which no test covered.
+    #[tokio::test]
+    async fn a_floored_and_capped_call_pays_the_floor_on_top_of_the_capped_pacing() {
+        let script: Vec<_> = (0..100)
+            .map(|i| ModelDelta::Text(format!("w{i} ")))
+            .collect();
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(script)
+            .paced_by_ms(50)
+            .max_turn_ms(200)
+            .min_turn_ms(150)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert_eq!(out.len(), 100);
+        // THE FLOOR IS PAID ON TOP OF THE CEILING, not inside it — the knob caps the pacing, not
+        // the call. A floor assertion, so a slow machine cannot fail it.
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(150),
+            "the floor is still paid when a ceiling is set: {:?}",
+            started.elapsed()
         );
     }
 
