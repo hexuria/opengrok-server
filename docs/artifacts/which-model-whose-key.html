@@ -1,0 +1,300 @@
+<title>Which Model, Whose Key</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 6</p>
+  <h1>Which Model, Whose Key</h1>
+  <p class="lede">Every model call in the building leaves through one door. That door picks the
+  model, picks which of your credentials to spend, speaks whatever dialect the provider wants, and
+  writes down what it cost — including what it would have cost if you had not been careful.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The path</p>
+  <h2>Six things happen to every call</h2>
+  <p>Two of them save you money, two of them keep the call alive when something breaks, and two
+  of them are bookkeeping. None of them are optional.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="A call passes through authenticate, route, pick a credential, translate, forward and stream, then meter. Route and meter are the money steps; credential pick and its failure handling keep the call alive.">
+      <defs><marker id="g1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="70" width="106" height="80" rx="7"/>
+      <text class="tx accT" x="32" y="92">1 · WHO</text>
+      <text class="ts" x="32" y="112">a key names a</text>
+      <text class="ts" x="32" y="128">principal, and</text>
+      <text class="ts" x="32" y="144">its budget</text>
+
+      <rect class="raise acc" x="134" y="70" width="106" height="80" rx="7" stroke-width="2"/>
+      <text class="tx accT" x="146" y="92">2 · WHICH</text>
+      <text class="ts" x="146" y="112">a name, or a</text>
+      <text class="ts" x="146" y="128">tier, or “you</text>
+      <text class="ts" x="146" y="144">choose”</text>
+
+      <rect class="fill ln" x="248" y="70" width="106" height="80" rx="7"/>
+      <text class="tx accT" x="260" y="92">3 · WHOSE</text>
+      <text class="ts" x="260" y="112">which of the</text>
+      <text class="ts" x="260" y="128">org’s keys or</text>
+      <text class="ts" x="260" y="144">seats to spend</text>
+
+      <rect class="fill ln" x="362" y="70" width="106" height="80" rx="7"/>
+      <text class="tx accT" x="374" y="92">4 · SPEAK</text>
+      <text class="ts" x="374" y="112">convert to the</text>
+      <text class="ts" x="374" y="128">provider’s own</text>
+      <text class="ts" x="374" y="144">dialect</text>
+
+      <rect class="fill ln" x="476" y="70" width="106" height="80" rx="7"/>
+      <text class="tx accT" x="488" y="92">5 · STREAM</text>
+      <text class="ts" x="488" y="112">forward, and</text>
+      <text class="ts" x="488" y="128">pass tokens back</text>
+      <text class="ts" x="488" y="144">as they arrive</text>
+
+      <rect class="raise acc" x="590" y="70" width="150" height="80" rx="7" stroke-width="2"/>
+      <text class="tx accT" x="602" y="92">6 · COUNT</text>
+      <text class="ts" x="602" y="112">tokens, real cost,</text>
+      <text class="ts" x="602" y="128">and what it would</text>
+      <text class="ts" x="602" y="144">have cost otherwise</text>
+
+      <line class="ln" x1="126" y1="110" x2="130" y2="110" marker-end="url(#g1)"/>
+      <line class="ln" x1="240" y1="110" x2="244" y2="110" marker-end="url(#g1)"/>
+      <line class="ln" x1="354" y1="110" x2="358" y2="110" marker-end="url(#g1)"/>
+      <line class="ln" x1="468" y1="110" x2="472" y2="110" marker-end="url(#g1)"/>
+      <line class="ln" x1="582" y1="110" x2="586" y2="110" marker-end="url(#g1)"/>
+
+      <text class="ts accT" x="187" y="182" text-anchor="middle">saves money</text>
+      <text class="ts accT" x="665" y="182" text-anchor="middle">proves it saved money</text>
+      <line class="ln acc thin" x1="187" y1="150" x2="187" y2="170"/>
+      <line class="ln acc thin" x1="665" y1="150" x2="665" y2="170"/>
+
+      <rect class="fill ln dash" x="20" y="212" width="720" height="66" rx="8"/>
+      <text class="tx" x="36" y="234">Everything inside this door speaks ONE shape.</text>
+      <text class="ts" x="36" y="254">Four dialects in, four dialects out, one canonical shape in the middle — so adding a fifth costs two converters, not eight.</text>
+      <text class="ts accT" x="36" y="270">The building’s own coworkers speak that canonical shape directly, so their calls skip steps 4 entirely.</text>
+    </svg>
+  </div><figcaption>Steps 1–3 and 6 are the reason this is a floor and not a library. They need
+  identity, the org’s credentials and durable rows — all things the building already has.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Which model</p>
+  <h2>A coworker names a route, not a model</h2>
+  <p>If every coworker named a specific model, every model change would be an edit to every
+  coworker. Instead a pin is a name the door resolves — and three of those names deliberately
+  refuse to be specific.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="Four kinds of pin: auto lets policy choose from the task, cheap and frontier pin a rung, and a real model name is honoured exactly. All four are route names resolved at call time, never provider keys.">
+      <defs><marker id="g2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="raise acc" x="20" y="40" width="170" height="112" rx="8" stroke-width="2"/>
+      <text class="tm accT" x="34" y="64">auto</text>
+      <text class="ts" x="34" y="86">the door reads the task</text>
+      <text class="ts" x="34" y="102">and picks a rung.</text>
+      <text class="ts" x="34" y="124">most requests do not need</text>
+      <text class="ts" x="34" y="140">a frontier model.</text>
+
+      <rect class="fill ln" x="204" y="40" width="170" height="112" rx="8"/>
+      <text class="tm accT" x="218" y="64">cheap</text>
+      <text class="ts" x="218" y="86">pin the bottom rung.</text>
+      <text class="ts" x="218" y="102">for the routine edit,</text>
+      <text class="ts" x="218" y="118">the classification,</text>
+      <text class="ts" x="218" y="134">the summary.</text>
+
+      <rect class="fill ln" x="388" y="40" width="170" height="112" rx="8"/>
+      <text class="tm accT" x="402" y="64">frontier</text>
+      <text class="ts" x="402" y="86">pin the top rung.</text>
+      <text class="ts" x="402" y="102">for the work that</text>
+      <text class="ts" x="402" y="118">actually needs it —</text>
+      <text class="ts" x="402" y="134">and only that work.</text>
+
+      <rect class="fill ln" x="572" y="40" width="168" height="112" rx="8"/>
+      <text class="tm accT" x="586" y="64">a real name</text>
+      <text class="ts" x="586" y="86">honoured exactly.</text>
+      <text class="ts" x="586" y="102">for when a coworker</text>
+      <text class="ts" x="586" y="118">genuinely needs one</text>
+      <text class="ts" x="586" y="134">specific model.</text>
+
+      <line class="ln" x1="105" y1="152" x2="105" y2="186" marker-end="url(#g2)"/>
+      <line class="ln" x1="289" y1="152" x2="289" y2="186" marker-end="url(#g2)"/>
+      <line class="ln" x1="473" y1="152" x2="473" y2="186" marker-end="url(#g2)"/>
+      <line class="ln" x1="656" y1="152" x2="656" y2="186" marker-end="url(#g2)"/>
+
+      <rect class="fill liv" x="20" y="192" width="720" height="48" rx="8"/>
+      <text class="tx livT" x="36" y="214">All four are ROUTE NAMES, resolved when the call is made.</text>
+      <text class="ts" x="36" y="230">None of them is a provider key. A coworker’s record never holds a credential, which is why coworkers are safe to share and copy.</text>
+    </svg>
+  </div><figcaption>The escalation this enables is the point: start a task cheap, and let a
+  capability failure move it one rung up rather than starting everything at the top.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">When it breaks</p>
+  <h2>Two kinds of failure, and mixing them up wastes money or breaks the run</h2>
+  <p>A failed call is not just “a failed call”. There are two species with opposite correct
+  responses, and one pure decision decides which you are looking at.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="A credential problem such as rate limits or an expired key means fail over: cool that credential down, exclude it, retry the same model. A capability problem such as context too long means escalate: retry one tier up. Doing the wrong one either burns money or loops forever.">
+      <defs><marker id="g3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="290" y="20" width="180" height="50" rx="7"/>
+      <text class="tb" x="380" y="42" text-anchor="middle">the call failed</text>
+      <text class="ts" x="380" y="60" text-anchor="middle">one pure decision, no guessing</text>
+
+      <line class="ln" x1="330" y1="70" x2="200" y2="110" marker-end="url(#g3)"/>
+      <line class="ln" x1="430" y1="70" x2="560" y2="110" marker-end="url(#g3)"/>
+
+      <rect class="fill ln" x="20" y="116" width="330" height="150" rx="8"/>
+      <text class="tcap accT" x="36" y="140">A CREDENTIAL PROBLEM</text>
+      <text class="ts" x="36" y="164">rate limited · expired key · seat exhausted</text>
+      <text class="ts" x="36" y="182">the model was fine. the key was not.</text>
+      <text class="tb livT" x="36" y="212">→ fail over</text>
+      <text class="ts" x="36" y="232">cool that credential down, exclude it,</text>
+      <text class="ts" x="36" y="248">retry the SAME model with another key</text>
+
+      <rect class="fill ln" x="410" y="116" width="330" height="150" rx="8"/>
+      <text class="tcap accT" x="426" y="140">A CAPABILITY PROBLEM</text>
+      <text class="ts" x="426" y="164">context too long · this model cannot do it</text>
+      <text class="ts" x="426" y="182">the key was fine. the model was not.</text>
+      <text class="tb livT" x="426" y="212">→ escalate</text>
+      <text class="ts" x="426" y="232">retry ONE tier up.</text>
+      <text class="ts" x="426" y="248">a different key would not have helped</text>
+
+      <text class="ts badT" x="20" y="290">get it backwards and you either retry a too-small model against every key you own, or escalate to a frontier model because one key was rate limited.</text>
+    </svg>
+  </div><figcaption>Because the classification is one pure function of the error, it can be tested
+  exhaustively without a network, and it behaves the same on every provider.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The counterfactual</p>
+  <h2>The number that makes the saving real</h2>
+  <p>Anyone can claim their routing saves money. The claim is only checkable if, on every single
+  call, you also record what that exact call would have cost at the top rung. So the door does.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="Each call records two numbers: what it actually cost and what it would have cost on a frontier model. The gap accumulated across all calls is the saving, and it is a stored fact rather than an estimate.">
+      <rect class="fill ln" x="20" y="40" width="340" height="130" rx="8"/>
+      <text class="tcap accT" x="36" y="64">ON EVERY CALL, TWO NUMBERS</text>
+      <text class="ts" x="36" y="92">what it actually cost</text>
+      <text class="ts" x="36" y="112">what it would have cost at the top rung</text>
+      <text class="ts" x="36" y="140">both stored on the row, both exact,</text>
+      <text class="ts" x="36" y="156">neither estimated later</text>
+
+      <rect class="raise acc" x="400" y="40" width="340" height="130" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="416" y="64">WHY THIS AND NOT A PERCENTAGE</text>
+      <text class="ts" x="416" y="92">a percentage is an argument.</text>
+      <text class="ts" x="416" y="112">a column you can sum is a fact.</text>
+      <text class="ts" x="416" y="140">it survives you changing the routing,</text>
+      <text class="ts" x="416" y="156">because every past row keeps its own pair</text>
+
+      <text class="ts soft" x="20" y="204">the same pair is what makes a subscription seat comparable to an API key: a seat truthfully costs nothing per call,</text>
+      <text class="ts soft" x="20" y="222">so its list price — the bill it displaced — is the honest number to charge a budget against.</text>
+      <text class="ts accT" x="20" y="242">that is where points come from: one point is one token at a reference price you set. See the consent book for how the limits work.</text>
+    </svg>
+  </div><figcaption>Metering is on this floor; deciding what to do when a budget is crossed is on
+  the Policy floor. Measure here, judge there.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The two doors</p>
+  <h2>The same floor answers your coworkers and your developers</h2>
+  <p>The building’s own coworkers call this floor in-process. Outside tools — a coding agent on a
+  laptop, a script, an SDK — reach the same machinery through the model door. One set of
+  credentials, one meter, one budget.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 240" role="img" aria-label="Coworkers inside the building call the inference floor directly with no translation; outside tools reach it through the model door which translates their dialect. Both share one credential pool and one meter.">
+      <defs><marker id="g4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="30" width="200" height="60" rx="7"/>
+      <text class="t" x="34" y="54">your coworkers</text>
+      <text class="ts" x="34" y="72">inside the building</text>
+
+      <rect class="fill ln" x="20" y="130" width="200" height="60" rx="7"/>
+      <text class="t" x="34" y="154">a coding agent, a script</text>
+      <text class="ts" x="34" y="172">outside, over the network</text>
+
+      <line class="ln liv" x1="220" y1="60" x2="330" y2="96" marker-end="url(#g4)"/>
+      <text class="ts livT" x="240" y="84">no translation</text>
+
+      <line class="ln" x1="220" y1="160" x2="278" y2="160" marker-end="url(#g4)"/>
+      <rect class="fill ln" x="286" y="134" width="90" height="52" rx="6"/>
+      <text class="ts" x="331" y="156" text-anchor="middle">model door</text>
+      <text class="ts" x="331" y="172" text-anchor="middle">translates</text>
+      <line class="ln" x1="376" y1="152" x2="420" y2="128" marker-end="url(#g4)"/>
+
+      <rect class="raise acc" x="430" y="60" width="310" height="110" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="446" y="84">INFERENCE · one floor, one pool, one meter</text>
+      <text class="ts" x="446" y="110">the same routing rules for both</text>
+      <text class="ts" x="446" y="128">the same credentials for both</text>
+      <text class="ts" x="446" y="146">the same budget for both</text>
+
+      <text class="ts soft" x="20" y="222">this is why a developer’s spend and a coworker’s spend appear on one bill, under one org, with no reconciliation step.</text>
+    </svg>
+  </div><figcaption>Moving this inside the building removed the piece that used to hurt: two sets of
+  principals that had to be kept in sync.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What the door never does</h2>
+  <ul class="never">
+    <li>Execute a tool. It returns a request to; something else decides and does.</li>
+    <li>Manage a container, a desk, or a volume. It has never heard of them.</li>
+    <li>Let a credential reach a coworker’s record, a window, or a log.</li>
+    <li>Let a model pin be a key. A pin is a name it resolves at call time.</li>
+    <li>Escalate because a key was rate limited, or fail over because a model was too small.</li>
+    <li>Report a saving it cannot show you the two columns for.</li>
+    <li>Charge a subscription seat as free. The list price it displaced is the honest figure.</li>
+    <li>Decide what happens when a budget is crossed. It measures; Policy judges.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    One door for every model call, so the decision is made once, centrally, and the saving is a
+    column you can add up rather than a claim.</p>
+</footer>
+
+</div>

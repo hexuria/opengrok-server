@@ -1,0 +1,363 @@
+<title>A Desk Is Made</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  ol.steps li{counter-increment:s;position:relative;padding:.6rem .8rem .6rem 2.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+  ol.steps li::before{content:counter(s);position:absolute;left:.8rem;top:.6rem;font-family:var(--mono);font-size:.78rem;color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:1.5rem;height:1.5rem;display:grid;place-items:center}
+  ol.steps b{font-weight:600}ol.steps span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 3</p>
+  <h1>A Desk Is Made</h1>
+  <p class="lede">A coworker needs a computer to type on. Where does it come from, what does it
+  remember when it sleeps, and what exactly is lost when it dies? This is the floor that replaces
+  renting one from somebody else.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The life</p>
+  <h2>Six things can happen to a desk</h2>
+  <p>Only six. Every button, every timer, every sweep in the building maps onto one of them —
+  and the difference between the two that look alike is the whole point of the picture.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 340" role="img" aria-label="State machine: nothing to created to ready to in use; in use can stop to stopped, which can resume back to ready; destroy from any state leads to gone and deletes the volumes.">
+      <defs><marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+      <marker id="d1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--dead)"/></marker></defs>
+
+      <rect class="fill ln dash" x="20" y="90" width="120" height="56" rx="28"/>
+      <text class="t" x="80" y="116" text-anchor="middle">nothing</text>
+      <text class="ts" x="80" y="132" text-anchor="middle">no row, no cost</text>
+
+      <line class="ln" x1="140" y1="118" x2="186" y2="118" marker-end="url(#d1)"/>
+      <text class="ts accT" x="163" y="108" text-anchor="middle">create</text>
+
+      <rect class="fill ln" x="194" y="90" width="120" height="56" rx="28"/>
+      <text class="t" x="254" y="116" text-anchor="middle">created</text>
+      <text class="ts" x="254" y="132" text-anchor="middle">running, not usable</text>
+
+      <line class="ln" x1="314" y1="118" x2="360" y2="118" marker-end="url(#d1)"/>
+      <text class="ts accT" x="337" y="108" text-anchor="middle">ready?</text>
+
+      <rect class="raise acc" x="368" y="90" width="120" height="56" rx="28" stroke-width="2"/>
+      <text class="t accT" x="428" y="116" text-anchor="middle">ready</text>
+      <text class="ts" x="428" y="132" text-anchor="middle">the only usable state</text>
+
+      <line class="ln" x1="488" y1="118" x2="534" y2="118" marker-end="url(#d1)"/>
+
+      <rect class="fill liv" x="542" y="90" width="120" height="56" rx="28"/>
+      <text class="t livT" x="602" y="116" text-anchor="middle">in use</text>
+      <text class="ts" x="602" y="132" text-anchor="middle">tools land here</text>
+
+      <path class="ln" d="M602 146 L602 200 L428 200" marker-end="url(#d1)"/>
+      <text class="ts accT" x="530" y="192" text-anchor="middle">stop · or idle too long</text>
+
+      <rect class="fill ln" x="308" y="174" width="120" height="52" rx="26"/>
+      <text class="t" x="368" y="198" text-anchor="middle">stopped</text>
+      <text class="ts" x="368" y="214" text-anchor="middle">volumes kept</text>
+
+      <path class="ln" d="M308 200 L250 200 L250 152" marker-end="url(#d1)"/>
+      <text class="ts accT" x="230" y="180" text-anchor="middle">resume</text>
+
+      <path class="ln bad" d="M368 226 L368 268" marker-end="url(#d1b)"/>
+      <text class="ts badT" x="382" y="252">destroy</text>
+
+      <rect class="fill bad" x="288" y="274" width="160" height="52" rx="26"/>
+      <text class="t badT" x="368" y="298" text-anchor="middle">gone</text>
+      <text class="ts" x="368" y="314" text-anchor="middle">volumes deleted too</text>
+
+      <text class="ts soft" x="20" y="250">“stopped” and “gone” look the same from outside — nothing is running.</text>
+      <text class="ts soft" x="20" y="268">the difference is the volumes, and it is the only difference that matters.</text>
+      <text class="ts soft" x="20" y="286">hibernate is not a seventh state. it is “stopped”, chosen on purpose rather than by a sweep.</text>
+    </svg>
+  </div><figcaption>The desk itself has no idea any of this is happening. Every one of these six
+  is the building’s decision, made on the Computers floor.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Create</p>
+  <h2>What “make me a desk” actually does</h2>
+  <p>Six things, in this order, and the order matters: the secret must exist before the container
+  that needs it, and the ports must be private before anything is listening on them.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="Create: mint a token, pick the desk host, prepare two volumes, start the container from the image with the token injected, publish three ports on a private network, and record the row.">
+      <defs><marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="40" width="112" height="86" rx="7"/>
+      <text class="tx accT" x="32" y="60">1 · SECRET</text>
+      <text class="ts" x="32" y="80">mint a token</text>
+      <text class="ts" x="32" y="96">high entropy,</text>
+      <text class="ts" x="32" y="112">this desk only</text>
+
+      <rect class="fill ln" x="140" y="40" width="112" height="86" rx="7"/>
+      <text class="tx accT" x="152" y="60">2 · WHERE</text>
+      <text class="ts" x="152" y="80">the org’s desk</text>
+      <text class="ts" x="152" y="96">host: our own</text>
+      <text class="ts" x="152" y="112">runtime, or theirs</text>
+
+      <rect class="fill ln" x="260" y="40" width="112" height="86" rx="7"/>
+      <text class="tx accT" x="272" y="60">3 · MEMORY</text>
+      <text class="ts" x="272" y="80">two volumes:</text>
+      <text class="ts" x="272" y="96">the workspace,</text>
+      <text class="ts" x="272" y="112">the browser profile</text>
+
+      <rect class="raise acc" x="380" y="40" width="112" height="86" rx="7" stroke-width="2"/>
+      <text class="tx accT" x="392" y="60">4 · START</text>
+      <text class="ts" x="392" y="80">the image, with</text>
+      <text class="ts" x="392" y="96">the token and an</text>
+      <text class="ts" x="392" y="112">id in its env</text>
+
+      <rect class="fill ln" x="500" y="40" width="112" height="86" rx="7"/>
+      <text class="tx accT" x="512" y="60">5 · WIRES</text>
+      <text class="tm" x="512" y="80">1337 · 1340</text>
+      <text class="tm" x="512" y="96">6080</text>
+      <text class="ts badT" x="512" y="112">private only</text>
+
+      <rect class="fill ln" x="620" y="40" width="120" height="86" rx="7"/>
+      <text class="tx accT" x="632" y="60">6 · RECORD</text>
+      <text class="ts" x="632" y="80">one row: whose,</text>
+      <text class="ts" x="632" y="96">which kind, where,</text>
+      <text class="ts" x="632" y="112">the token</text>
+
+      <line class="ln" x1="132" y1="83" x2="136" y2="83" marker-end="url(#d2)"/>
+      <line class="ln" x1="252" y1="83" x2="256" y2="83" marker-end="url(#d2)"/>
+      <line class="ln" x1="372" y1="83" x2="376" y2="83" marker-end="url(#d2)"/>
+      <line class="ln" x1="492" y1="83" x2="496" y2="83" marker-end="url(#d2)"/>
+      <line class="ln" x1="612" y1="83" x2="616" y2="83" marker-end="url(#d2)"/>
+
+      <rect class="fill bad" x="20" y="156" width="360" height="76" rx="7"/>
+      <text class="tx badT" x="34" y="178">NEVER PUBLISHED</text>
+      <text class="ts" x="34" y="198">the browser’s debug port — full control of the browser</text>
+      <text class="ts" x="34" y="214">the raw screen protocol — unencrypted pixels and input</text>
+
+      <rect class="fill liv" x="396" y="156" width="344" height="76" rx="7"/>
+      <text class="tx livT" x="410" y="178">PUBLISHED, PRIVATELY</text>
+      <text class="ts" x="410" y="198">exec (tools) · host (health) · viewer (a human watching)</text>
+      <text class="ts" x="410" y="214">on a private fabric. never straight to the internet.</text>
+    </svg>
+  </div><figcaption>The token is minted here and stored beside the desk’s row. It goes to the
+  container and to the executor, and to nothing else — never to a window, never to a model.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Ready</p>
+  <h2>“Running” is not “ready”, and the difference has bitten everyone</h2>
+  <p>A container reports itself started the instant the process exists. At that moment nothing
+  inside it works. If the building trusts “started”, the first tool call of every session fails and
+  it looks like a bug in the tool.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="Timeline: the container starts, then the exec service binds, then the display comes up, then ready returns 200. Using the desk before ready fails; the building polls ready instead.">
+      <defs><marker id="d3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <line class="ln" x1="40" y1="120" x2="720" y2="120" marker-end="url(#d3)"/>
+      <text class="ts" x="700" y="142" text-anchor="end">time</text>
+
+      <line class="ln thin" x1="110" y1="100" x2="110" y2="140"/>
+      <text class="ts" x="110" y="92" text-anchor="middle">container exists</text>
+      <text class="ts badT" x="110" y="162" text-anchor="middle">tools fail here</text>
+
+      <line class="ln thin" x1="290" y1="100" x2="290" y2="140"/>
+      <text class="ts" x="290" y="92" text-anchor="middle">exec service listening</text>
+      <text class="ts badT" x="290" y="162" text-anchor="middle">screenshots fail here</text>
+
+      <line class="ln thin" x1="470" y1="100" x2="470" y2="140"/>
+      <text class="ts" x="470" y="92" text-anchor="middle">display up</text>
+
+      <line class="ln acc" x1="620" y1="94" x2="620" y2="146" stroke-width="3"/>
+      <text class="tb accT" x="620" y="86" text-anchor="middle">ready = 200</text>
+      <text class="ts livT" x="620" y="166" text-anchor="middle">only now is it a desk</text>
+
+      <rect class="fill ln" x="40" y="196" width="330" height="42" rx="7"/>
+      <text class="ts" x="54" y="214">the building polls one endpoint until it answers 200.</text>
+      <text class="ts" x="54" y="230">it does not guess, and it does not sleep for a fixed number of seconds.</text>
+
+      <rect class="raise acc" x="390" y="196" width="330" height="42" rx="7" stroke-width="2"/>
+      <text class="ts accT" x="404" y="214">the desk decides what “ready” means, not the building:</text>
+      <text class="ts" x="404" y="230">exec answering, and the display up when a display is required.</text>
+    </svg>
+  </div><figcaption>The browser is deliberately <em>not</em> on the ready path. A desk with a
+  crashed browser is still a perfectly good desk for shell and files.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Sleep and death</p>
+  <h2>What survives a nap, and what a funeral takes with it</h2>
+  <p>Everything expensive to rebuild lives on the two volumes. Everything cheap lives in the
+  container. That split is the whole hibernation design — there is no snapshot, no freeze, no
+  clever state capture.</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Thing</th><th>Lives in</th><th>Survives stop?</th><th>Survives destroy?</th></tr></thead>
+    <tbody>
+      <tr><td>Files the coworker wrote</td><td>The workspace volume</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Website logins (cookies)</td><td>The browser profile volume</td><td>Yes</td><td>No — and the person must log in again</td></tr>
+      <tr><td>Installed packages</td><td>The container’s own disk</td><td><b>No</b> — reinstalled or rebaked into the image</td><td>No</td></tr>
+      <tr><td>Running processes, the desktop</td><td>Memory</td><td>No</td><td>No</td></tr>
+      <tr><td>Which coworker this desk belongs to</td><td>The building’s row</td><td>Yes</td><td>No</td></tr>
+      <tr><td>The bearer token</td><td>The building’s row</td><td>Yes</td><td>No</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <p><strong>The one that surprises people.</strong> Packages installed during a run do not
+    survive a stop. If a coworker keeps installing the same tool every morning, that is a message
+    about the image, not a bug in hibernation — put the tool in the image and every desk has it at
+    birth.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Where</p>
+  <h2>Two places a desk can run, chosen per organisation</h2>
+  <p>The wire to a desk is identical either way — the same three ports, the same bearer token, the
+  same six endpoints. Only the thing being asked to start a container changes.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Left: desks on the building's own container runtime. Right: desks on a machine the organisation points at, reached over a private network. The assignment row records which, and the desk wire is identical.">
+      <defs><marker id="d4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="250" y="20" width="260" height="52" rx="7"/>
+      <text class="tb" x="380" y="42" text-anchor="middle">Computers · Lifecycle</text>
+      <text class="ts" x="380" y="60" text-anchor="middle">reads the org’s desk host from the assignment row</text>
+
+      <line class="ln" x1="320" y1="72" x2="190" y2="122" marker-end="url(#d4)"/>
+      <line class="ln" x1="440" y1="72" x2="570" y2="122" marker-end="url(#d4)"/>
+
+      <rect class="raise acc" x="20" y="128" width="330" height="120" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="150">THE BUILDING’S OWN RUNTIME · default</text>
+      <text class="ts" x="36" y="172">one machine to stand up, nothing to configure</text>
+      <text class="ts" x="36" y="190">desks share the host with the building</text>
+      <text class="ts" x="36" y="208">ports bound to loopback; nothing leaves the box</text>
+      <text class="ts livT" x="36" y="232">right answer until desks outgrow the machine</text>
+
+      <rect class="fill ln" x="410" y="128" width="330" height="120" rx="8"/>
+      <text class="tcap accT" x="426" y="150">A DESK HOST THE ORG POINTS AT</text>
+      <text class="ts" x="426" y="172">a machine or pool of its own</text>
+      <text class="ts" x="426" y="190">reached over a private network</text>
+      <text class="ts" x="426" y="208">scales without touching the building</text>
+      <text class="ts livT" x="426" y="232">also the answer for “our data stays on our metal”</text>
+    </svg>
+  </div><figcaption>Because the choice is a field on a row, an organisation can move from one to
+  the other without any other floor knowing it happened.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Whose</p>
+  <h2>One desk each, or one desk shared</h2>
+  <p>A desk is assigned to a scope, not to a coworker directly. That one indirection is what makes
+  both models possible without a second code path.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="Three scopes: a desk per coworker gives isolation; a desk per person shares files across that person's coworkers; a desk per organisation shares one machine across everyone.">
+      <rect class="fill ln" x="20" y="40" width="230" height="150" rx="8"/>
+      <text class="tcap accT" x="34" y="62">PER COWORKER</text>
+      <text class="ts" x="34" y="86">strongest isolation</text>
+      <text class="ts" x="34" y="104">one coworker’s mess cannot</text>
+      <text class="ts" x="34" y="118">break another’s</text>
+      <text class="ts" x="34" y="142">most desks to pay for</text>
+      <text class="ts livT" x="34" y="168">use when coworkers do</text>
+      <text class="ts livT" x="34" y="182">unrelated work</text>
+
+      <rect class="raise acc" x="265" y="40" width="230" height="150" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="279" y="62">PER PERSON · common</text>
+      <text class="ts" x="279" y="86">all of one person’s coworkers</text>
+      <text class="ts" x="279" y="104">share files and logins</text>
+      <text class="ts" x="279" y="118">— usually what people expect</text>
+      <text class="ts" x="279" y="142">they still get separate screens</text>
+      <text class="ts livT" x="279" y="168">use when coworkers collaborate</text>
+      <text class="ts livT" x="279" y="182">on the same material</text>
+
+      <rect class="fill ln" x="510" y="40" width="230" height="150" rx="8"/>
+      <text class="tcap accT" x="524" y="62">PER ORGANISATION</text>
+      <text class="ts" x="524" y="86">one machine for everyone</text>
+      <text class="ts" x="524" y="104">cheapest, least isolated</text>
+      <text class="ts" x="524" y="118">one shared filesystem</text>
+      <text class="ts" x="524" y="142">a sharing policy decides</text>
+      <text class="ts livT" x="524" y="168">use for a small team on</text>
+      <text class="ts livT" x="524" y="182">one shared project</text>
+
+      <text class="ts soft" x="20" y="224">sharing a machine is not sharing a screen: each coworker gets its own display on that machine.</text>
+      <text class="ts soft" x="20" y="240">so two coworkers can be clicking around at the same time without fighting over the mouse.</text>
+    </svg>
+  </div><figcaption>Idle desks stop themselves on a timer. The volumes stay, so the next
+  message wakes the same desk with everything where it was left.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The order</p>
+  <h2>Standing it up, provable at every step</h2>
+  <ol class="steps">
+    <li><b>Run the image by hand</b><span>No building involved. Ask it for health, run a command, open the viewer. If this does not work, nothing built on top of it can.</span></li>
+    <li><b>Make one desk from the building, and stop there</b><span>Create, wait for ready, print the address and token, and do nothing else. A desk you can see but not yet use is a real milestone.</span></li>
+    <li><b>Route the three tools you already have</b><span>Run a command, read a file, write a file. No new tool definitions — if these work, the wire is right.</span></li>
+    <li><b>Stop it and wake it</b><span>Write a file, stop the desk, resume it, read the file back. That single test proves the volumes are mounted where you think.</span></li>
+    <li><b>Turn on the screen</b><span>Hand the viewer URL to the window. A human watching a desk work is the moment the whole thing stops being abstract.</span></li>
+    <li><b>Add eyes and hands</b><span>Screenshot, click, type. Now it is a computer, not a shell with extra steps.</span></li>
+    <li><b>Destroy one on purpose</b><span>Confirm the volumes are gone and the row is gone. An untested destroy path is how a bill grows in the dark.</span></li>
+  </ol>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What a desk never does</h2>
+  <ul class="never">
+    <li>Call a model. It has no key and no route to one.</li>
+    <li>Know which coworker is using it. It takes commands; the building keeps the meaning.</li>
+    <li>Reach outside its jail. Paths resolve under one root, after symlinks.</li>
+    <li>Expose its browser debug port or its raw screen port. Ever, to anyone.</li>
+    <li>Die because the browser was closed. Only the services that matter are watched.</li>
+    <li>Keep a secret the building did not give it for this run.</li>
+    <li>Be reachable without the token — except health, which orchestrators must probe.</li>
+    <li>Outlive its volumes on destroy. Gone means gone.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    A desk is a container plus two volumes plus a secret — and the only hard part is waiting until
+    it is genuinely ready.</p>
+</footer>
+
+</div>

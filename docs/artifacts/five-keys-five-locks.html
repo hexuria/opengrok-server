@@ -1,0 +1,247 @@
+<title>Five Keys, Five Locks</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  ol.steps li{counter-increment:s;position:relative;padding:.6rem .8rem .6rem 2.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+  ol.steps li::before{content:counter(s);position:absolute;left:.8rem;top:.6rem;font-family:var(--mono);font-size:.78rem;color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:1.5rem;height:1.5rem;display:grid;place-items:center}
+  ol.steps b{font-weight:600}ol.steps span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 5</p>
+  <h1>Five Keys, Five Locks</h1>
+  <p class="lede">Every secret in the system is one of five kinds. Each kind has exactly one place
+  it is allowed to rest, one path it may travel, and one blast radius if it leaks. Mixing two of
+  them up is how a password ends up in a transcript.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The map</p>
+  <h2>Five kinds, five homes, and the lines they may not cross</h2>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 400" role="img" aria-label="Three zones — window, building, desk — with five secret kinds placed in them: account session in window and building, connector tokens and provider credentials in the building only, desk tokens in the building, and website cookies on the desk only. One-off secrets pass through the building to the desk and expire.">
+      <defs><marker id="k1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln dash" x="20" y="30" width="230" height="340" rx="10"/>
+      <text class="tcap accT" x="36" y="54">THE WINDOW</text>
+      <rect class="fill ln dash" x="266" y="30" width="230" height="340" rx="10"/>
+      <text class="tcap accT" x="282" y="54">THE BUILDING</text>
+      <rect class="fill ln dash" x="512" y="30" width="228" height="340" rx="10"/>
+      <text class="tcap accT" x="528" y="54">THE DESK</text>
+
+      <rect class="fill ln" x="36" y="70" width="444" height="46" rx="6"/>
+      <text class="t" x="50" y="90">① Account session</text>
+      <text class="ts" x="50" y="106">who you are in this product · lives in both, by design</text>
+
+      <rect class="fill ln" x="282" y="132" width="198" height="56" rx="6"/>
+      <text class="t" x="296" y="152">② Connector tokens</text>
+      <text class="ts" x="296" y="168">OAuth for other services,</text>
+      <text class="ts" x="296" y="182">in the vault, per scope</text>
+
+      <rect class="fill ln" x="282" y="200" width="198" height="56" rx="6"/>
+      <text class="t" x="296" y="220">③ Provider credentials</text>
+      <text class="ts" x="296" y="236">model keys and seats.</text>
+      <text class="ts" x="296" y="250">the Inference floor only</text>
+
+      <rect class="raise acc" x="282" y="268" width="198" height="56" rx="6" stroke-width="2"/>
+      <text class="t accT" x="296" y="288">④ Desk tokens</text>
+      <text class="ts" x="296" y="304">one per desk, minted at</text>
+      <text class="ts" x="296" y="318">birth, kept on its row</text>
+
+      <line class="ln acc" x1="480" y1="296" x2="524" y2="296" marker-end="url(#k1)"/>
+
+      <rect class="fill ln" x="528" y="132" width="198" height="70" rx="6"/>
+      <text class="t" x="542" y="152">⑤ Website cookies</text>
+      <text class="ts" x="542" y="170">the browser profile volume.</text>
+      <text class="ts" x="542" y="186">typed by a human, here,</text>
+      <text class="ts" x="542" y="200">and they never leave</text>
+
+      <rect class="goldsoft acc" x="528" y="218" width="198" height="70" rx="6"/>
+      <text class="t accT" x="542" y="238">⑥ One-off secrets</text>
+      <text class="ts" x="542" y="256">passing through only:</text>
+      <text class="ts" x="542" y="272">one run’s environment,</text>
+      <text class="ts" x="542" y="286">then gone</text>
+
+      <path class="ln acc dash" d="M140 340 C 140 356 380 356 380 340" marker-end="url(#k1)"/>
+      <path class="ln acc dash" d="M400 340 C 400 356 620 356 620 300" marker-end="url(#k1)"/>
+      <text class="ts accT" x="240" y="372">a one-off secret is typed masked, relayed, injected — and never stored anywhere along the way</text>
+    </svg>
+  </div><figcaption>Five resting places, and the sixth kind that has none. If you can say which
+  number a secret is, you know where it lives and who may see it.</figcaption></figure>
+
+  <div class="tw"><table>
+    <thead><tr><th>Kind</th><th>Rests in</th><th>Who can read it</th><th>If it leaks</th></tr></thead>
+    <tbody>
+      <tr><td>① Account session</td><td>Window + building</td><td>The person, the building</td><td>That one person’s account, until revoked</td></tr>
+      <tr><td>② Connector token</td><td>The vault</td><td>The Connectors floor, at call time</td><td>One external service, for one connection scope</td></tr>
+      <tr><td>③ Provider credential</td><td>The Inference floor’s pool</td><td>That floor only</td><td>Your model bill. The widest blast radius in the system.</td></tr>
+      <tr><td>④ Desk token</td><td>The desk’s row</td><td>Computers, the executor, the desk</td><td>One desk — and it is on a private network anyway</td></tr>
+      <tr><td>⑤ Website cookie</td><td>The desk’s browser profile</td><td>The desk’s browser</td><td>One site session, on one desk. Never the password.</td></tr>
+      <tr><td>⑥ One-off secret</td><td>Nowhere — in flight only</td><td>One run’s environment</td><td>Whatever it opened, and only while that run lived</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The best trick in the system</p>
+  <h2>Handoff: how a coworker gets logged in without anyone learning the password</h2>
+  <p>A site with no API. The coworker needs to be signed in. The naive answers are all bad: store
+  the password in the vault, or put it in the model’s context, or ask the model to type it. The
+  actual answer is to move the human, not the secret.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Handoff: the coworker opens the login page on the desk, asks for a human, the person watches the desk's screen and types the password directly into that browser, cookies persist on the desk's volume, the person ends the handoff, and the coworker resumes signed in.">
+      <defs><marker id="k2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="40" width="140" height="60" rx="7"/><text class="ts" x="90" y="64" text-anchor="middle">coworker opens</text><text class="ts" x="90" y="80" text-anchor="middle">the login page</text>
+      <line class="ln" x1="160" y1="70" x2="196" y2="70" marker-end="url(#k2)"/>
+      <rect class="fill ln" x="204" y="40" width="140" height="60" rx="7"/><text class="ts" x="274" y="64" text-anchor="middle">asks for a human</text><text class="ts" x="274" y="80" text-anchor="middle">and stops</text>
+      <line class="ln" x1="344" y1="70" x2="380" y2="70" marker-end="url(#k2)"/>
+      <rect class="raise acc" x="388" y="40" width="180" height="60" rx="7" stroke-width="2"/><text class="ts accT" x="478" y="64" text-anchor="middle">you watch the desk’s screen</text><text class="ts accT" x="478" y="80" text-anchor="middle">and type it yourself</text>
+      <line class="ln" x1="568" y1="70" x2="604" y2="70" marker-end="url(#k2)"/>
+      <rect class="fill liv" x="612" y="40" width="128" height="60" rx="7"/><text class="ts livT" x="676" y="64" text-anchor="middle">cookies land on</text><text class="ts livT" x="676" y="80" text-anchor="middle">the desk’s volume</text>
+
+      <path class="ln" d="M676 100 L676 130 L90 130 L90 160" marker-end="url(#k2)"/>
+      <rect class="fill ln" x="20" y="166" width="180" height="56" rx="7"/><text class="ts" x="110" y="188" text-anchor="middle">you end the handoff</text><text class="ts" x="110" y="204" text-anchor="middle">the building is told</text>
+      <line class="ln" x1="200" y1="194" x2="236" y2="194" marker-end="url(#k2)"/>
+      <rect class="fill liv" x="244" y="166" width="220" height="56" rx="7"/><text class="ts livT" x="354" y="188" text-anchor="middle">the coworker resumes,</text><text class="ts livT" x="354" y="204" text-anchor="middle">signed in, on that desk</text>
+
+      <rect class="fill bad" x="490" y="160" width="250" height="68" rx="7"/>
+      <text class="tx badT" x="504" y="182">WHAT NEVER HAPPENED</text>
+      <text class="ts" x="504" y="200">the password did not reach the building,</text>
+      <text class="ts" x="504" y="216">the model, the transcript, or the vault</text>
+
+      <text class="ts soft" x="20" y="262">the coworker keeps the session for as long as the volume lives — a stop and resume does not lose it.</text>
+      <text class="ts soft" x="20" y="280">destroy the desk and the cookies go with it, which is the correct behaviour and worth knowing in advance.</text>
+    </svg>
+  </div><figcaption>The security property in one line: third-party passwords stay in the
+  human-to-browser path, and only a cookie survives, on one machine.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The other path</p>
+  <h2>A one-off secret: masked in, used once, gone</h2>
+  <p>Sometimes a tool needs an API key that is not worth an OAuth connection. It travels, it is
+  used, and it is not kept — which means the interesting design work is all about what does
+  <em>not</em> happen at each step.</p>
+
+  <ol class="steps">
+    <li><b>The coworker says it needs one, and names it</b><span>“I need <code>SOME_API_KEY</code> to call this.” The run suspends — the same suspension as a consent card, because it is the same kind of wait.</span></li>
+    <li><b>You type it into a masked field</b><span>In the window. Not echoed, not autofilled into a normal text box, not written into the window’s own storage.</span></li>
+    <li><b>The building relays it without keeping it</b><span>It goes to the run that asked. It is not written to the vault, not written to the transcript, and not written to a log line.</span></li>
+    <li><b>It lands in one run’s environment on the desk</b><span>The tool that asked can read it. The next run cannot.</span></li>
+    <li><b>The transcript records that a secret was supplied</b><span>Not its value. The record says a key named <code>SOME_API_KEY</code> was provided at this step — which is the auditable fact.</span></li>
+  </ol>
+
+  <div class="note">
+    <p><strong>When to use a connector instead.</strong> If the service has OAuth, use it: a
+    connector token can be revoked centrally, is scoped, and does not need a person present. A
+    one-off secret is for the long tail — the internal service with a static key, the thing nobody
+    has built a connector for yet.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Connectors</p>
+  <h2>The vault, and why tokens are lent rather than copied</h2>
+  <p>A connection belongs to a person or an organisation, not to a coworker. Coworkers are lent
+  the use of it, under a rule, and the lending is what gets revoked — not the token.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="One connection in the vault is lent to several coworkers by rule. Revoking a lending stops one coworker; revoking the connection stops all of them and is the only thing that touches the external service.">
+      <defs><marker id="k3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="raise acc" x="20" y="80" width="200" height="86" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="34" y="104">One connection</text>
+      <text class="ts" x="34" y="124">“my company mail”</text>
+      <text class="ts" x="34" y="140">one token, in the vault,</text>
+      <text class="ts" x="34" y="156">owned by a person or an org</text>
+
+      <line class="ln" x1="220" y1="106" x2="286" y2="70" marker-end="url(#k3)"/>
+      <line class="ln" x1="220" y1="123" x2="286" y2="123" marker-end="url(#k3)"/>
+      <line class="ln" x1="220" y1="140" x2="286" y2="176" marker-end="url(#k3)"/>
+      <text class="ts accT" x="253" y="98" text-anchor="middle">lent</text>
+
+      <rect class="fill ln" x="294" y="46" width="180" height="48" rx="7"/><text class="ts" x="384" y="70" text-anchor="middle">coworker A · read only</text><text class="ts" x="384" y="86" text-anchor="middle">a rule, not a copy</text>
+      <rect class="fill ln" x="294" y="100" width="180" height="48" rx="7"/><text class="ts" x="384" y="124" text-anchor="middle">coworker B · read + send</text><text class="ts" x="384" y="140" text-anchor="middle">a rule, not a copy</text>
+      <rect class="fill ln soft" x="294" y="154" width="180" height="48" rx="7"/><text class="ts" x="384" y="178" text-anchor="middle">coworker C · lending revoked</text><text class="ts badT" x="384" y="194" text-anchor="middle">stops instantly</text>
+
+      <line class="ln" x1="474" y1="123" x2="530" y2="123" marker-end="url(#k3)"/>
+      <rect class="fill ln dash" x="538" y="88" width="202" height="70" rx="8"/>
+      <text class="tcap" x="552" y="110">THE EXTERNAL SERVICE</text>
+      <text class="ts" x="552" y="130">sees one connection, ours.</text>
+      <text class="ts" x="552" y="146">it has never heard of coworkers.</text>
+
+      <text class="ts soft" x="20" y="228">revoking C’s lending needs nothing from the external service — it is our row. revoking the connection is the real disconnect.</text>
+    </svg>
+  </div><figcaption>Because the token is never copied to a coworker, there is no “which coworkers
+  still have a copy?” question to answer when someone leaves.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The boundaries</p>
+  <h2>The five lines nothing crosses</h2>
+  <ul class="never">
+    <li><b>Window → building.</b> A window never holds a desk token, a connector token, or a provider credential. It holds one session: its own.</li>
+    <li><b>Building → desk.</b> A desk receives its own token and one run’s environment. It never receives the vault, and never a model key.</li>
+    <li><b>Desk → building.</b> Cookies stay on the desk. The building has no copy and wants none.</li>
+    <li><b>Anything → the model.</b> The model’s context never contains a credential. Arguments are redacted before the judge sees them, too.</li>
+    <li><b>Anything → the record.</b> The transcript says <em>that</em> a secret was used, never what it was. Same for logs.</li>
+  </ul>
+  <div class="note">
+    <p><strong>The one to guard hardest.</strong> Provider credentials — kind ③ — have the widest
+    blast radius of anything in the system, because they are the only secret that costs money
+    per use and is not scoped to one person or one service. They live on exactly one floor, they
+    never appear on a coworker’s record, and a model pin is a route name rather than a key
+    precisely so that nothing else ever needs to hold one.</p>
+  </div>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    Name the kind and you know the home; know the home and you know exactly how bad it would be
+    to lose it.</p>
+</footer>
+
+</div>

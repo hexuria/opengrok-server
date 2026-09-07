@@ -1,0 +1,311 @@
+<title>The Run That Won't Die</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 4</p>
+  <h1>The Run That Won't Die</h1>
+  <p class="lede">Close the app. Kill the process. Reboot the machine the building runs on. The
+  coworker picks up exactly where it was. This is the machinery that makes that true — and the
+  one ordering rule everything else hangs off.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The word</p>
+  <h2>“Harness” means two things. Say which.</h2>
+  <p>Almost every confusing conversation about this subject is two people using the same word for
+  different things.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 220" role="img" aria-label="Two meanings: the harness as the runtime loop that drives turns, and harness as a setting on a coworker saying whether it is bound to a desk or is a server-only workflow.">
+      <rect class="raise acc" x="20" y="30" width="350" height="150" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="54">MEANING ① · THE RUNTIME</text>
+      <text class="tb" x="36" y="80">The loop that drives a turn</text>
+      <text class="ts" x="36" y="104">assemble the prompt · ask the model</text>
+      <text class="ts" x="36" y="122">· emit tool calls · take the results</text>
+      <text class="ts" x="36" y="140">· write the record · go again</text>
+      <text class="ts accT" x="36" y="166">this book is about this one</text>
+
+      <rect class="fill ln" x="390" y="30" width="350" height="150" rx="8"/>
+      <text class="tcap accT" x="406" y="54">MEANING ② · A SETTING</text>
+      <text class="tb" x="406" y="80">Where this coworker is bound</text>
+      <text class="ts" x="406" y="104">a field on the coworker’s record:</text>
+      <text class="ts" x="406" y="122">bound to a desk, or a server-only</text>
+      <text class="ts" x="406" y="140">workflow with no computer</text>
+      <text class="ts" x="406" y="166">read by the router to pick a destination</text>
+    </svg>
+  </div><figcaption>Meaning ② is one field. Meaning ① is the engine. Neither is “the gateway”,
+  neither is the desk’s own services, and neither is the product.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The shape</p>
+  <h2>A run is a graph, not a function call</h2>
+  <p>If the loop were an ordinary function, its state would live in memory and die with the
+  process. Instead each step is a node that gets written down before it is attempted, so the run’s
+  position is a fact in a database rather than a place in a stack.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="A run drawn as nodes: start, ask model, tool call, waiting for a human, tool call again, ask model, finish. Every node is written to the journal before it is attempted, so the current position is recoverable.">
+      <defs><marker id="r1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <circle class="fill ln" cx="60" cy="80" r="22"/><text class="ts" x="60" y="84" text-anchor="middle">start</text>
+      <line class="ln" x1="82" y1="80" x2="118" y2="80" marker-end="url(#r1)"/>
+      <rect class="fill ln" x="126" y="56" width="110" height="48" rx="6"/><text class="ts" x="181" y="76" text-anchor="middle">ask the model</text><text class="ts" x="181" y="92" text-anchor="middle">step 1</text>
+      <line class="ln" x1="236" y1="80" x2="272" y2="80" marker-end="url(#r1)"/>
+      <rect class="fill ln" x="280" y="56" width="110" height="48" rx="6"/><text class="ts" x="335" y="76" text-anchor="middle">tool: read file</text><text class="ts" x="335" y="92" text-anchor="middle">step 2</text>
+      <line class="ln" x1="390" y1="80" x2="426" y2="80" marker-end="url(#r1)"/>
+      <rect class="goldsoft acc" x="434" y="56" width="110" height="48" rx="6" stroke-width="2"/><text class="ts accT" x="489" y="76" text-anchor="middle">tool: install</text><text class="ts accT" x="489" y="92" text-anchor="middle">step 3 · waiting</text>
+      <line class="ln soft dash" x1="544" y1="80" x2="580" y2="80" marker-end="url(#r1)"/>
+      <rect class="fill ln soft" x="588" y="56" width="110" height="48" rx="6"/><text class="ts" x="643" y="76" text-anchor="middle">…and onward</text><text class="ts" x="643" y="92" text-anchor="middle">not yet written</text>
+
+      <line class="ln thin" x1="181" y1="104" x2="181" y2="150"/>
+      <line class="ln thin" x1="335" y1="104" x2="335" y2="150"/>
+      <line class="ln acc" x1="489" y1="104" x2="489" y2="150"/>
+
+      <rect class="fill ln" x="60" y="156" width="640" height="70" rx="8"/>
+      <text class="tcap accT" x="76" y="178">THE JOURNAL · rows in a table</text>
+      <text class="ts" x="76" y="200">step 1: asked, answered · step 2: asked, answered · step 3: asked, WAITING</text>
+      <text class="ts" x="76" y="216">the run’s position is this last row. no stack, no memory, nothing that dies with a process.</text>
+
+      <text class="ts soft" x="60" y="258">because the position is data, two different things can read it: the loop, to continue —</text>
+      <text class="ts soft" x="60" y="276">and a recovery sweep, to notice that nobody has continued it for a while.</text>
+    </svg>
+  </div><figcaption>A branch is just a second run that starts from an existing node. An inspection
+  is reading the rows. Neither needs a feature — they fall out of the shape.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The one rule</p>
+  <h2>Write down that you are about to call, before you call</h2>
+  <p>The tempting order is: do the work, then record it. It is wrong, and the reason is a window
+  of time about as wide as a network request.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 330" role="img" aria-label="Top: recording after the call means a crash between the call and the record loses the fact that the call happened, so it is repeated. Bottom: recording before the call means a crash leaves a row saying it was attempted, which recovery can resolve.">
+      <defs><marker id="r2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+      <marker id="r2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--dead)"/></marker></defs>
+
+      <text class="tcap badT" x="20" y="24">RECORD AFTER — the money-losing order</text>
+      <rect class="fill ln" x="20" y="38" width="150" height="46" rx="6"/><text class="ts" x="95" y="66" text-anchor="middle">call the model</text>
+      <line class="ln bad" x1="170" y1="61" x2="222" y2="61" marker-end="url(#r2b)"/>
+      <rect class="fill bad" x="230" y="38" width="150" height="46" rx="6"/><text class="ts badT" x="305" y="60" text-anchor="middle">CRASH</text><text class="ts" x="305" y="76" text-anchor="middle">here</text>
+      <line class="ln bad dash" x1="380" y1="61" x2="432" y2="61" marker-end="url(#r2b)"/>
+      <rect class="fill ln soft dash" x="440" y="38" width="150" height="46" rx="6"/><text class="ts" x="515" y="66" text-anchor="middle">record it — never runs</text>
+      <text class="ts badT" x="20" y="108">on restart nothing says the call happened. so it happens again.</text>
+      <text class="ts badT" x="20" y="124">you paid twice, and if it was a tool, the side effect happened twice.</text>
+
+      <line class="thin" x1="20" y1="146" x2="740" y2="146"/>
+
+      <text class="tcap livT" x="20" y="176">RECORD BEFORE — the only safe order</text>
+      <rect class="raise acc" x="20" y="190" width="170" height="46" rx="6" stroke-width="2"/><text class="ts accT" x="105" y="212" text-anchor="middle">write “about to call”</text><text class="ts" x="105" y="228" text-anchor="middle">same transaction as its cause</text>
+      <line class="ln liv" x1="190" y1="213" x2="232" y2="213" marker-end="url(#r2)"/>
+      <rect class="fill ln" x="240" y="190" width="150" height="46" rx="6"/><text class="ts" x="315" y="218" text-anchor="middle">call the model</text>
+      <line class="ln bad" x1="390" y1="213" x2="432" y2="213" marker-end="url(#r2b)"/>
+      <rect class="fill bad" x="440" y="190" width="120" height="46" rx="6"/><text class="ts badT" x="500" y="218" text-anchor="middle">CRASH</text>
+      <line class="ln liv" x1="560" y1="213" x2="602" y2="213" marker-end="url(#r2)"/>
+      <rect class="fill liv" x="610" y="190" width="130" height="46" rx="6"/><text class="ts livT" x="675" y="212" text-anchor="middle">restart finds</text><text class="ts" x="675" y="228" text-anchor="middle">“attempted, unknown”</text>
+
+      <text class="ts livT" x="20" y="262">now the situation is knowable: we know we tried, and we know we do not know the outcome.</text>
+      <text class="ts" x="20" y="278">that is a decision the building can make deliberately — retry, or ask, or fail — instead of guessing.</text>
+      <text class="ts soft" x="20" y="304">the same rule applies to events: an event is written in the same transaction as the thing that caused it.</text>
+      <text class="ts soft" x="20" y="320">so there is no state of the world where a thing happened but nothing knows about it.</text>
+    </svg>
+  </div><figcaption>“Journal before the call” is one sentence and it is the load-bearing sentence
+  of the whole floor. Everything else here is a consequence of it.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Pausing</p>
+  <h2>Three reasons a run stops, and only one is interesting</h2>
+  <p>Two of these are ordinary waiting, measured in seconds, and the loop just holds. The third
+  can last a week, so it is a saved state rather than a held breath.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 240" role="img" aria-label="Waiting on the model and waiting on a tool are short waits held in the loop. Waiting on a human is a saved suspension that survives restarts.">
+      <rect class="fill ln" x="20" y="40" width="230" height="130" rx="8"/>
+      <text class="tcap" x="34" y="62">WAITING ON THE MODEL</text>
+      <text class="ts" x="34" y="86">seconds</text>
+      <text class="ts" x="34" y="104">the loop holds</text>
+      <text class="ts" x="34" y="122">a crash here is recoverable</text>
+      <text class="ts" x="34" y="140">because of the journal row</text>
+
+      <rect class="fill ln" x="265" y="40" width="230" height="130" rx="8"/>
+      <text class="tcap" x="279" y="62">WAITING ON A TOOL</text>
+      <text class="ts" x="279" y="86">seconds to minutes</text>
+      <text class="ts" x="279" y="104">bounded by a timeout</text>
+      <text class="ts" x="279" y="122">a hung tool cannot hang</text>
+      <text class="ts" x="279" y="140">the run forever</text>
+
+      <rect class="raise acc" x="510" y="40" width="230" height="130" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="524" y="62">WAITING ON A HUMAN</text>
+      <text class="ts accT" x="524" y="86">minutes to days</text>
+      <text class="ts" x="524" y="104">the run is SUSPENDED:</text>
+      <text class="ts" x="524" y="122">written down and let go of.</text>
+      <text class="ts" x="524" y="140">nothing is held open</text>
+
+      <text class="ts soft" x="20" y="204">a suspended run costs one row. no connection, no thread, no timer counting down to a wrong answer.</text>
+      <text class="ts soft" x="20" y="222">this is why a consent card can wait as long as it needs to — the cost of waiting is genuinely nothing.</text>
+    </svg>
+  </div><figcaption>Suspension is a state in the graph like any other. Resuming is not a special
+  path — it is the ordinary path, entered from a row instead of from the previous step.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Recovery</p>
+  <h2>Nobody notices a crash. A sweep notices a run nobody is driving.</h2>
+  <p>There is no crash handler, because a process that has died cannot handle anything. Instead
+  the building periodically looks for runs that claim to be in progress and have not moved.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="A sweep looks for runs marked in progress whose heartbeat is stale, claims one atomically so only one replica takes it, and continues it from its last journal row.">
+      <defs><marker id="r3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="40" width="160" height="76" rx="7"/>
+      <text class="tb" x="34" y="64">The sweep</text>
+      <text class="ts" x="34" y="84">runs on a timer, in</text>
+      <text class="ts" x="34" y="100">every replica</text>
+
+      <line class="ln" x1="180" y1="78" x2="222" y2="78" marker-end="url(#r3)"/>
+
+      <rect class="fill ln" x="230" y="40" width="180" height="76" rx="7"/>
+      <text class="tb" x="244" y="64">“who is stuck?”</text>
+      <text class="ts" x="244" y="84">in progress, but no</text>
+      <text class="ts" x="244" y="100">heartbeat for a while</text>
+
+      <line class="ln acc" x1="410" y1="78" x2="452" y2="78" marker-end="url(#r3)"/>
+
+      <rect class="raise acc" x="460" y="40" width="180" height="76" rx="7" stroke-width="2"/>
+      <text class="tb accT" x="474" y="64">claim it, atomically</text>
+      <text class="ts" x="474" y="84">one row, one winner.</text>
+      <text class="ts" x="474" y="100">the others move on.</text>
+
+      <path class="ln" d="M550 116 L550 156 L300 156" marker-end="url(#r3)"/>
+
+      <rect class="fill liv" x="140" y="132" width="160" height="48" rx="7"/>
+      <text class="t livT" x="220" y="152" text-anchor="middle">continue it</text>
+      <text class="ts" x="220" y="170" text-anchor="middle">from its last row</text>
+
+      <text class="ts soft" x="20" y="212">the claim is what makes replicas safe: two servers can both notice the same stuck run,</text>
+      <text class="ts soft" x="20" y="230">and exactly one of them will win the row. the loser did not waste anything but a query.</text>
+      <text class="ts accT" x="20" y="252">the same claim-a-row trick is how scheduled runs avoid firing twice. one mechanism, two uses.</text>
+    </svg>
+  </div><figcaption>This is why “the server restarted” is not an event anyone has to handle. It is
+  indistinguishable from “that replica got slow”, and both are already covered.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Exactly once</p>
+  <h2>The same answer, sent twice, must land once</h2>
+  <p>People double-tap buttons. Networks retry. A phone and a laptop can both have the same
+  consent card open. So every answer carries the identity of the thing it answers, and the second
+  arrival is recognised rather than applied.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 220" role="img" aria-label="Two devices answer the same card. The first answer flips the row from waiting to answered. The second finds it already answered and returns the same result instead of resuming the run twice.">
+      <defs><marker id="r4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="40" width="150" height="48" rx="7"/><text class="ts" x="95" y="62" text-anchor="middle">phone: “allow”</text><text class="ts" x="95" y="78" text-anchor="middle">card #77</text>
+      <rect class="fill ln" x="20" y="120" width="150" height="48" rx="7"/><text class="ts" x="95" y="142" text-anchor="middle">laptop: “allow”</text><text class="ts" x="95" y="158" text-anchor="middle">card #77</text>
+
+      <line class="ln liv" x1="170" y1="64" x2="252" y2="88" marker-end="url(#r4)"/>
+      <line class="ln bad" x1="170" y1="144" x2="252" y2="112" marker-end="url(#r4)"/>
+
+      <rect class="raise acc" x="260" y="72" width="220" height="56" rx="7" stroke-width="2"/>
+      <text class="tb accT" x="370" y="96" text-anchor="middle">flip #77: waiting → answered</text>
+      <text class="ts" x="370" y="114" text-anchor="middle">one row, one status change</text>
+
+      <line class="ln liv" x1="480" y1="88" x2="536" y2="72" marker-end="url(#r4)"/>
+      <line class="ln bad" x1="480" y1="112" x2="536" y2="130" marker-end="url(#r4)"/>
+
+      <rect class="fill liv" x="544" y="46" width="196" height="48" rx="7"/><text class="ts livT" x="642" y="68" text-anchor="middle">first: the run resumes</text><text class="ts" x="642" y="84" text-anchor="middle">exactly once</text>
+      <rect class="fill ln" x="544" y="110" width="196" height="48" rx="7"/><text class="ts" x="642" y="132" text-anchor="middle">second: “already answered”</text><text class="ts" x="642" y="148" text-anchor="middle">same reply, nothing happens</text>
+
+      <text class="ts soft" x="20" y="200">the second caller is not an error. it gets a normal, cheerful answer — it just does not cause anything.</text>
+    </svg>
+  </div><figcaption>The same principle covers a run being asked to start twice: the request carries
+  an identity, and the second one joins the first rather than racing it.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The states</p>
+  <h2>Where a run can be, and who moves it</h2>
+  <div class="tw"><table>
+    <thead><tr><th>State</th><th>Means</th><th>What moves it on</th><th>Survives a crash?</th></tr></thead>
+    <tbody>
+      <tr><td>Queued</td><td>Asked for, not started</td><td>A worker picks it up</td><td>Yes — it is a row</td></tr>
+      <tr><td>Running</td><td>A worker is driving it</td><td>The loop, or a heartbeat going stale</td><td>Yes — the sweep finds it</td></tr>
+      <tr><td>Suspended</td><td>Waiting for a human</td><td>An answer to the card</td><td>Yes — that is the point</td></tr>
+      <tr><td>Finished</td><td>The model had nothing more</td><td>Nothing</td><td>—</td></tr>
+      <tr><td>Failed</td><td>Something unrecoverable</td><td>Nothing; a person or a monitor may start a new run</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <p><strong>Notice what is not in the list.</strong> There is no “cancelled by disconnect”. A
+    window closing is not a state change, because the window was never driving the run — it was
+    watching it.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What a run never does</h2>
+  <ul class="never">
+    <li>Keep its position in memory. The position is a row or it does not exist.</li>
+    <li>Call before it journals. Not once, not for a “cheap” call.</li>
+    <li>Fail because a person walked away. Waiting is a state, not an error.</li>
+    <li>End because a window closed, a process restarted, or a replica died.</li>
+    <li>Get driven by two workers at once. The claim is atomic or it is broken.</li>
+    <li>Apply the same answer twice.</li>
+    <li>Turn a refusal into a crash. Refusals are results.</li>
+    <li>Hold a connection open while a human thinks.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    Write down what you are about to do before you do it, and a crash stops being an emergency —
+    it becomes a row somebody picks up later.</p>
+</footer>
+
+</div>

@@ -1,0 +1,258 @@
+<title>Nobody Typed This</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 7</p>
+  <h1>Nobody Typed This</h1>
+  <p class="lede">A coworker that only answers when spoken to is a chatbot. Three mechanisms let a
+  run start with no person present — and one shared trick stops all three from firing twice or
+  chasing their own tails.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The three</p>
+  <h2>The clock, the ear, and the megaphone</h2>
+  <p>They differ only in what wakes them. All three end the same way: by <em>asking</em> for a run,
+  exactly as a person would. None of them runs a turn itself.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Scheduler wakes on time, monitor wakes on an event from the spine, dispatch wakes on one instruction to many coworkers. All three produce a run request which the Agents floor picks up.">
+      <defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="fill ln" x="20" y="40" width="220" height="118" rx="8"/>
+      <text class="tcap accT" x="36" y="64">THE CLOCK · scheduler</text>
+      <text class="tb" x="36" y="90">“every weekday at 8”</text>
+      <text class="ts" x="36" y="112">a recurring time. the run</text>
+      <text class="ts" x="36" y="128">happens whether or not</text>
+      <text class="ts" x="36" y="144">anyone is awake</text>
+
+      <rect class="raise acc" x="264" y="40" width="220" height="118" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="280" y="64">THE EAR · monitor</text>
+      <text class="tb accT" x="280" y="90">“when X happens”</text>
+      <text class="ts" x="280" y="112">a matcher over the spine.</text>
+      <text class="ts" x="280" y="128">any floor’s event can start</text>
+      <text class="ts" x="280" y="144">a run — that is the power</text>
+
+      <rect class="fill ln" x="508" y="40" width="232" height="118" rx="8"/>
+      <text class="tcap accT" x="524" y="64">THE MEGAPHONE · dispatch</text>
+      <text class="tb" x="524" y="90">“tell everyone”</text>
+      <text class="ts" x="524" y="112">one instruction, written</text>
+      <text class="ts" x="524" y="128">once to a ledger, fanned</text>
+      <text class="ts" x="524" y="144">out to many coworkers</text>
+
+      <line class="ln" x1="130" y1="158" x2="330" y2="212" marker-end="url(#a1)"/>
+      <line class="ln acc" x1="374" y1="158" x2="374" y2="212" marker-end="url(#a1)"/>
+      <line class="ln" x1="624" y1="158" x2="420" y2="212" marker-end="url(#a1)"/>
+
+      <rect class="fill liv" x="230" y="218" width="290" height="56" rx="8"/>
+      <text class="tb livT" x="375" y="242" text-anchor="middle">“please run this coworker”</text>
+      <text class="ts" x="375" y="260" text-anchor="middle">a request, identical to the one a person makes</text>
+
+      <text class="ts soft" x="20" y="294">because the request is identical, an autonomous run gets the same policy, the same cards, the same budget and the same record.</text>
+    </svg>
+  </div><figcaption>This is the whole design: autonomy adds ways to <em>ask</em>, and adds nothing
+  to what happens after the asking.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The shared trick</p>
+  <h2>Two servers, one due schedule, one run</h2>
+  <p>The building runs on more than one machine. All of them see the same clock and the same
+  events. Without care, a schedule due at 08:00 fires once per machine — and the coworker sends
+  three copies of the same email.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="Three replicas all notice a schedule is due. Each tries to claim the row atomically and advance its next-due time. Exactly one wins; the other two find nothing to claim and move on.">
+      <defs><marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="40" width="130" height="44" rx="6"/><text class="ts" x="85" y="66" text-anchor="middle">replica A</text>
+      <rect class="fill ln" x="20" y="100" width="130" height="44" rx="6"/><text class="ts" x="85" y="126" text-anchor="middle">replica B</text>
+      <rect class="fill ln" x="20" y="160" width="130" height="44" rx="6"/><text class="ts" x="85" y="186" text-anchor="middle">replica C</text>
+
+      <line class="ln" x1="150" y1="62" x2="252" y2="106" marker-end="url(#a2)"/>
+      <line class="ln" x1="150" y1="122" x2="252" y2="122" marker-end="url(#a2)"/>
+      <line class="ln" x1="150" y1="182" x2="252" y2="138" marker-end="url(#a2)"/>
+      <text class="ts" x="200" y="96" text-anchor="middle">“anything due?”</text>
+
+      <rect class="raise acc" x="260" y="88" width="220" height="68" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="370" y="112" text-anchor="middle">claim the row, atomically</text>
+      <text class="ts" x="370" y="130" text-anchor="middle">and move its next-due time forward</text>
+      <text class="ts" x="370" y="146" text-anchor="middle">in the same breath</text>
+
+      <line class="ln liv" x1="480" y1="106" x2="562" y2="70" marker-end="url(#a2)"/>
+      <line class="ln soft" x1="480" y1="130" x2="562" y2="150" marker-end="url(#a2)"/>
+
+      <rect class="fill liv" x="570" y="44" width="170" height="52" rx="7"/>
+      <text class="ts livT" x="655" y="66" text-anchor="middle">one winner</text>
+      <text class="ts" x="655" y="84" text-anchor="middle">asks for the run</text>
+
+      <rect class="fill ln soft" x="570" y="126" width="170" height="52" rx="7"/>
+      <text class="ts" x="655" y="148" text-anchor="middle">two losers</text>
+      <text class="ts" x="655" y="166" text-anchor="middle">find nothing, move on</text>
+
+      <text class="ts soft" x="20" y="234">claiming and advancing must be one indivisible step. if they are two steps, a crash between them fires the schedule twice.</text>
+      <text class="ts accT" x="20" y="252">this is the same claim used to recover crashed runs. one mechanism, learned once, used everywhere.</text>
+    </svg>
+  </div><figcaption>Losing a race costs one query. That is why it is safe for every replica to
+  check — no leader election, no coordinator, nothing extra to keep alive.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The trap</p>
+  <h2>A monitor that watches its own runs will never stop</h2>
+  <p>Monitors listen to events. Runs produce events. If a monitor listens for something its own
+  run causes, it fires itself forever — quietly, expensively, at machine speed.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Left: without a guard, a monitor's run produces an event that matches the same monitor, which fires again forever. Right: with the guard, each run is stamped with the monitor that caused it, and a monitor ignores events from its own runs.">
+      <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+      <marker id="a3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--dead)"/></marker></defs>
+      <line class="thin" x1="380" y1="10" x2="380" y2="270"/>
+      <text class="tcap badT" x="20" y="26">WITHOUT THE GUARD</text>
+      <text class="tcap livT" x="400" y="26">WITH THE GUARD</text>
+
+      <rect class="fill bad" x="40" y="46" width="140" height="46" rx="7"/><text class="ts" x="110" y="74" text-anchor="middle">monitor fires</text>
+      <line class="ln bad" x1="180" y1="69" x2="216" y2="69" marker-end="url(#a3b)"/>
+      <rect class="fill bad" x="224" y="46" width="120" height="46" rx="7"/><text class="ts" x="284" y="74" text-anchor="middle">a run happens</text>
+      <path class="ln bad" d="M284 92 L284 132 L110 132 L110 96" marker-end="url(#a3b)"/>
+      <text class="ts badT" x="197" y="126" text-anchor="middle">its event matches the same monitor</text>
+      <rect class="fill bad" x="40" y="164" width="304" height="46" rx="7"/>
+      <text class="ts badT" x="192" y="186" text-anchor="middle">forever, at machine speed</text>
+      <text class="ts" x="192" y="202" text-anchor="middle">nobody notices until the bill arrives</text>
+
+      <rect class="fill ln" x="400" y="46" width="140" height="46" rx="7"/><text class="ts" x="470" y="74" text-anchor="middle">monitor fires</text>
+      <line class="ln" x1="540" y1="69" x2="576" y2="69" marker-end="url(#a3)"/>
+      <rect class="raise acc" x="584" y="46" width="156" height="46" rx="7" stroke-width="2"/><text class="ts accT" x="662" y="68" text-anchor="middle">the run is stamped</text><text class="ts" x="662" y="84" text-anchor="middle">“caused by monitor 7”</text>
+      <path class="ln" d="M662 92 L662 132 L470 132 L470 96" marker-end="url(#a3)"/>
+      <line class="ln bad" x1="558" y1="122" x2="574" y2="142"/><line class="ln bad" x1="558" y1="142" x2="574" y2="122"/>
+      <text class="ts livT" x="566" y="164" text-anchor="middle">monitor 7 ignores its own</text>
+      <rect class="fill liv" x="400" y="182" width="340" height="46" rx="7"/>
+      <text class="ts livT" x="570" y="204" text-anchor="middle">it still reacts to everyone else’s events</text>
+      <text class="ts" x="570" y="220" text-anchor="middle">the useful behaviour is completely intact</text>
+    </svg>
+  </div><figcaption>The stamp costs one column and removes an entire class of runaway. It is
+  cheaper than any rate limit and does not throw away legitimate work.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The megaphone</p>
+  <h2>“Tell everyone” is written once, then fanned out</h2>
+  <p>The tempting implementation loops over coworkers and sends to each. It half-fails: some get
+  it, some do not, and nothing knows which. Writing the instruction down first turns delivery into
+  something that can be retried.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="One instruction is written to a ledger with a row per recipient, then delivered in parallel. Each row is marked delivered independently, so a failure retries only that row.">
+      <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="90" width="150" height="56" rx="7"/>
+      <text class="t" x="34" y="114">“@all: standup”</text>
+      <text class="ts" x="34" y="132">said once</text>
+
+      <line class="ln acc" x1="170" y1="118" x2="216" y2="118" marker-end="url(#a4)"/>
+
+      <rect class="raise acc" x="224" y="60" width="200" height="116" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="240" y="84">THE LEDGER</text>
+      <text class="ts" x="240" y="106">one row per recipient</text>
+      <text class="ts" x="240" y="124">written before anything</text>
+      <text class="ts" x="240" y="142">is delivered</text>
+      <text class="ts accT" x="240" y="164">now delivery is retryable</text>
+
+      <line class="ln" x1="424" y1="90" x2="482" y2="62" marker-end="url(#a4)"/>
+      <line class="ln" x1="424" y1="118" x2="482" y2="118" marker-end="url(#a4)"/>
+      <line class="ln" x1="424" y1="146" x2="482" y2="174" marker-end="url(#a4)"/>
+
+      <rect class="fill liv" x="490" y="38" width="250" height="46" rx="7"/><text class="ts livT" x="504" y="60">coworker A — delivered</text><text class="ts" x="504" y="76">marked on its own row</text>
+      <rect class="fill liv" x="490" y="96" width="250" height="46" rx="7"/><text class="ts livT" x="504" y="118">coworker B — delivered</text><text class="ts" x="504" y="134">in parallel, not in a queue behind A</text>
+      <rect class="fill bad" x="490" y="154" width="250" height="46" rx="7"/><text class="ts badT" x="504" y="176">coworker C — failed</text><text class="ts" x="504" y="192">retried later. A and B are unaffected.</text>
+
+      <text class="ts soft" x="20" y="232">delivery is the building’s job, not the sender’s. the person who said it once does not have to watch it land.</text>
+    </svg>
+  </div><figcaption>The ledger is also the answer to “did everyone get it?” — a question that is
+  unanswerable if you looped and hoped.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Setting them up</p>
+  <h2>All three look the same from outside</h2>
+  <div class="tw"><table>
+    <thead><tr><th></th><th>Scheduler</th><th>Monitor</th><th>Dispatch</th></tr></thead>
+    <tbody>
+      <tr><td>Woken by</td><td>A time</td><td>An event on the spine</td><td>A person or another run</td></tr>
+      <tr><td>Created by</td><td>Any door: create, pause, resume, delete</td><td>Same shape as schedules</td><td>Sending to a group</td></tr>
+      <tr><td>Owned by</td><td>The coworker’s owner</td><td>The coworker’s owner</td><td>The sender</td></tr>
+      <tr><td>Runs as</td><td>Its owner’s principal</td><td>Its owner’s principal</td><td>The sender’s principal</td></tr>
+      <tr><td>Double-fire guard</td><td>Claim the row and advance next-due atomically</td><td>Stamp runs with their monitor; ignore your own</td><td>One ledger row per recipient</td></tr>
+      <tr><td>If it fails</td><td>Next occurrence still fires</td><td>Next matching event still fires</td><td>That row retries; the rest are untouched</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <p><strong>Why they run as their owner.</strong> An autonomous run with no principal would have
+    no grants, no budget and nobody to raise a card to. Running as the owner means an unattended
+    run can still suspend and wait — the owner answers whenever they next look.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What autonomy never does</h2>
+  <ul class="never">
+    <li>Run a turn itself. It asks for one, like a person would.</li>
+    <li>Bypass policy, cards, or budgets because no human is watching.</li>
+    <li>Fire twice for one occurrence, on any number of replicas.</li>
+    <li>React to an event its own run produced.</li>
+    <li>Run as nobody. Every autonomous run has an owner and a principal.</li>
+    <li>Deliver to many by looping and hoping.</li>
+    <li>Need a leader, a coordinator, or a separate scheduler service.</li>
+    <li>Keep firing after the coworker is gone.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    Three ways to ask, one way to run — so a coworker working at 3am is governed exactly like one
+    working while you watch.</p>
+</footer>
+
+</div>

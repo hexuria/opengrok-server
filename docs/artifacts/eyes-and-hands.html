@@ -1,0 +1,300 @@
+<title>Eyes and Hands</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 9</p>
+  <h1>Eyes and Hands</h1>
+  <p class="lede">Computer Use means the coworker takes a photograph of a screen and then clicks
+  on it. Which screen, whose mouse, and what happens when a password box appears — the three
+  questions everybody gets wrong.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">What it is</p>
+  <h2>Look, decide, act — and then look again</h2>
+  <p>There is no magic and no special channel. Every step is an ordinary tool call, which is why
+  everything else in the building applies to it unchanged.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="A loop: take a screenshot of the desk's screen, the model looks at the image and decides, an action is applied to that same screen, and the loop repeats. Each arrow is a full tool call.">
+      <defs><marker id="e1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="raise acc" x="30" y="50" width="160" height="66" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="110" y="76" text-anchor="middle">look</text>
+      <text class="ts" x="110" y="96" text-anchor="middle">a photo of the desk’s screen</text>
+
+      <line class="ln" x1="190" y1="83" x2="246" y2="83" marker-end="url(#e1)"/>
+
+      <rect class="fill ln" x="254" y="50" width="160" height="66" rx="8"/>
+      <text class="tb" x="334" y="76" text-anchor="middle">decide</text>
+      <text class="ts" x="334" y="96" text-anchor="middle">the model reads the image</text>
+
+      <line class="ln" x1="414" y1="83" x2="470" y2="83" marker-end="url(#e1)"/>
+
+      <rect class="raise acc" x="478" y="50" width="160" height="66" rx="8" stroke-width="2"/>
+      <text class="tb accT" x="558" y="76" text-anchor="middle">act</text>
+      <text class="ts" x="558" y="96" text-anchor="middle">click · type · key · scroll</text>
+
+      <path class="ln dash soft" d="M638 83 C 700 83 700 160 380 160 C 60 160 60 120 110 118" marker-end="url(#e1)"/>
+      <text class="ts soft" x="380" y="152" text-anchor="middle">and look again — nothing is assumed to have worked</text>
+
+      <text class="ts" x="30" y="200">every one of those arrows is a full tool call: registry, router, policy, executor, desk, record.</text>
+      <text class="ts accT" x="30" y="220">so auto-review sees every click, the transcript keeps every screenshot, and a card can stop any of them.</text>
+      <text class="ts soft" x="30" y="240">that is the payoff of refusing to give computer use a special path.</text>
+    </svg>
+  </div><figcaption>Nothing here is a stream or a session. Two hundred small requests, each
+  independently governed, is the correct shape.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Which screen</p>
+  <h2>A screen with no monitor attached to it</h2>
+  <p>The desk has a display that exists purely in memory. Nobody is looking at it. Windows open on
+  it, a browser draws into it, and screenshots are taken from it — all with no physical screen
+  anywhere in the story.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Inside the desk: a virtual display holds a window manager and a browser. A screen-sharing service reads that display and a web viewer shows it to a human. Computer use reads and writes the same display directly.">
+      <defs><marker id="e2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <rect class="raise acc" x="20" y="30" width="440" height="150" rx="10" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="54">INSIDE THE DESK</text>
+
+      <rect class="fill ln" x="40" y="66" width="180" height="96" rx="7"/>
+      <text class="tb" x="52" y="90">the virtual screen</text>
+      <text class="ts" x="52" y="110">a rectangle of pixels in</text>
+      <text class="ts" x="52" y="126">memory. 1280 × 800.</text>
+      <text class="ts" x="52" y="146">origin at the top left</text>
+
+      <rect class="fill ln" x="240" y="66" width="200" height="42" rx="6"/>
+      <text class="ts" x="252" y="84">a window manager</text>
+      <text class="ts" x="252" y="100">so windows behave like windows</text>
+
+      <rect class="fill ln" x="240" y="118" width="200" height="44" rx="6"/>
+      <text class="ts" x="252" y="138">the browser, drawing into it</text>
+      <text class="ts" x="252" y="154">with its profile on a volume</text>
+
+      <line class="ln acc" x1="460" y1="86" x2="512" y2="86" marker-end="url(#e2)"/>
+      <line class="ln" x1="460" y1="140" x2="512" y2="140" marker-end="url(#e2)"/>
+
+      <rect class="raise acc" x="520" y="60" width="220" height="52" rx="7" stroke-width="2"/>
+      <text class="t accT" x="534" y="82">computer use</text>
+      <text class="ts" x="534" y="100">reads pixels, writes clicks</text>
+
+      <rect class="fill ln" x="520" y="118" width="220" height="52" rx="7"/>
+      <text class="t" x="534" y="140">the viewer, for humans</text>
+      <text class="ts" x="534" y="158">the same screen, in a web page</text>
+
+      <text class="ts soft" x="20" y="214">the human viewer and computer use look at exactly the same pixels. that is what makes watching useful —</text>
+      <text class="ts soft" x="20" y="232">you are not seeing a reconstruction of what the coworker sees. you are seeing it.</text>
+      <text class="ts badT" x="20" y="258">the raw screen-sharing port and the browser’s debug port stay on the desk’s own loopback. only the web viewer is published, privately.</text>
+    </svg>
+  </div><figcaption>Two coworkers sharing a machine get one of these each. Shared filesystem,
+  separate screens — so they never fight over the mouse.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The confusion</p>
+  <h2>Three things people mean by “the bot used my computer”</h2>
+  <p>Only one of them is Computer Use, and it is the one that never touches your machine.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="Computer use targets the desk's virtual screen. Local exec targets the person's real files with no screen involved. Remote control of the person's screen does not exist in this architecture.">
+      <rect class="raise acc" x="20" y="40" width="230" height="160" rx="8" stroke-width="2"/>
+      <text class="tcap accT" x="36" y="64">COMPUTER USE</text>
+      <text class="ts" x="36" y="90">target: the desk’s screen</text>
+      <text class="ts" x="36" y="110">needs your machine on? no</text>
+      <text class="ts" x="36" y="130">you can watch it live</text>
+      <text class="ts livT" x="36" y="156">good for: apps and sites</text>
+      <text class="ts livT" x="36" y="172">with no API</text>
+
+      <rect class="fill ln" x="265" y="40" width="230" height="160" rx="8"/>
+      <text class="tcap accT" x="281" y="64">LOCAL EXEC</text>
+      <text class="ts" x="281" y="90">target: your real files</text>
+      <text class="ts" x="281" y="110">needs your machine on? yes</text>
+      <text class="ts" x="281" y="130">no screen involved at all</text>
+      <text class="ts livT" x="281" y="156">good for: your actual</text>
+      <text class="ts livT" x="281" y="172">projects and tools</text>
+
+      <rect class="fill bad dash" x="510" y="40" width="230" height="160" rx="8"/>
+      <text class="tcap badT" x="526" y="64">TAKING OVER YOUR SCREEN</text>
+      <text class="ts badT" x="526" y="90">target: —</text>
+      <text class="ts badT" x="526" y="110">this does not exist here</text>
+      <text class="ts" x="526" y="130">no component can do it</text>
+      <text class="ts" x="526" y="156">the mouse pointer you are</text>
+      <text class="ts" x="526" y="172">looking at is only yours</text>
+
+      <text class="ts soft" x="20" y="236">“the agent is using a computer” is true. it is just not the computer in front of you.</text>
+      <text class="ts accT" x="20" y="254">worth putting in the interface copy: say “working on its cloud computer”, never “controlling your Mac”.</text>
+    </svg>
+  </div><figcaption>The middle column is the only one that touches your machine, it has no screen,
+  and it is fenced by three gates. See the window book for those.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">Coordinates</p>
+  <h2>The picture and the click must agree</h2>
+  <p>The one genuinely fiddly part. The model sees an image and says “click at 412, 288”. If the
+  image it saw is not the same size as the screen being clicked, every click lands somewhere
+  slightly wrong — and it looks like the model is bad at clicking.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 250" role="img" aria-label="If the screenshot is resized before the model sees it, the coordinates it returns are in the resized space and land in the wrong place. Keeping one fixed size for the screen, the screenshot and the click space avoids the whole class of bug.">
+      <defs><marker id="e3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <line class="thin" x1="380" y1="10" x2="380" y2="230"/>
+      <text class="tcap badT" x="20" y="26">RESIZED SOMEWHERE IN THE MIDDLE</text>
+      <text class="tcap livT" x="400" y="26">ONE SIZE, ALL THE WAY THROUGH</text>
+
+      <rect class="fill ln" x="20" y="44" width="100" height="56" rx="6"/><text class="ts" x="70" y="70" text-anchor="middle">screen</text><text class="tm" x="70" y="86" text-anchor="middle">1280×800</text>
+      <line class="ln bad" x1="120" y1="72" x2="152" y2="72" marker-end="url(#e3)"/>
+      <rect class="fill bad" x="160" y="44" width="100" height="56" rx="6"/><text class="ts badT" x="210" y="70" text-anchor="middle">shrunk image</text><text class="tm" x="210" y="86" text-anchor="middle">640×400</text>
+      <line class="ln bad" x1="260" y1="72" x2="292" y2="72" marker-end="url(#e3)"/>
+      <rect class="fill bad" x="300" y="44" width="60" height="56" rx="6"/><text class="ts badT" x="330" y="70" text-anchor="middle">“click</text><text class="ts badT" x="330" y="86" text-anchor="middle">206,144”</text>
+      <rect class="fill bad" x="20" y="120" width="340" height="60" rx="7"/>
+      <text class="ts badT" x="34" y="142">applied to the real screen, that is the top-left quadrant.</text>
+      <text class="ts" x="34" y="160">everything is clicked at half the right distance from the corner,</text>
+      <text class="ts" x="34" y="176">and it looks like a model problem. it is not.</text>
+
+      <rect class="fill ln" x="400" y="44" width="100" height="56" rx="6"/><text class="ts" x="450" y="70" text-anchor="middle">screen</text><text class="tm" x="450" y="86" text-anchor="middle">1280×800</text>
+      <line class="ln liv" x1="500" y1="72" x2="532" y2="72" marker-end="url(#e3)"/>
+      <rect class="raise acc" x="540" y="44" width="100" height="56" rx="6" stroke-width="2"/><text class="ts accT" x="590" y="70" text-anchor="middle">image</text><text class="tm accT" x="590" y="86" text-anchor="middle">1280×800</text>
+      <line class="ln liv" x1="640" y1="72" x2="672" y2="72" marker-end="url(#e3)"/>
+      <rect class="fill liv" x="680" y="44" width="60" height="56" rx="6"/><text class="ts livT" x="710" y="70" text-anchor="middle">“click</text><text class="ts livT" x="710" y="86" text-anchor="middle">412,288”</text>
+      <rect class="fill liv" x="400" y="120" width="340" height="60" rx="7"/>
+      <text class="ts livT" x="414" y="142">lands exactly where the model meant.</text>
+      <text class="ts" x="414" y="160">one fixed size for the screen, the screenshot and the</text>
+      <text class="ts" x="414" y="176">click space. no conversion anywhere, so no drift.</text>
+
+      <text class="ts soft" x="20" y="214">a click outside the rectangle is refused rather than clamped — clamping turns a bug into a mystery.</text>
+      <text class="ts soft" x="20" y="232">if the screen size ever needs to change, it changes in one place and everything follows.</text>
+    </svg>
+  </div><figcaption>Fix the size once, at the desk, and the entire class of “it clicked slightly
+  off” disappears.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The rule</p>
+  <h2>When a password box appears, stop</h2>
+  <p>A coworker driving a browser will eventually hit a login form. Typing a password there means
+  the password went through the model, into the transcript, and possibly into a screenshot. So the
+  rule is: do not.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 230" role="img" aria-label="On reaching a password field the coworker stops and asks for a human. The person watches the desk's screen and types it themselves. Cookies stay on the desk and the coworker resumes signed in.">
+      <defs><marker id="e4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill bad" x="20" y="40" width="220" height="70" rx="8"/>
+      <text class="tx badT" x="36" y="64">THE WRONG WAY</text>
+      <text class="ts" x="36" y="84">put the password in the prompt</text>
+      <text class="ts" x="36" y="100">so the model can type it</text>
+
+      <text class="tb badT" x="262" y="80">✕</text>
+
+      <rect class="fill ln" x="290" y="40" width="450" height="70" rx="8"/>
+      <text class="ts badT" x="306" y="64">now it is in the model’s context, the transcript, the provider’s logs,</text>
+      <text class="ts badT" x="306" y="82">and quite possibly a screenshot of the filled-in form.</text>
+      <text class="ts" x="306" y="100">four copies you did not intend, none of which you can recall.</text>
+
+      <rect class="raise acc" x="20" y="132" width="220" height="76" rx="8" stroke-width="2"/>
+      <text class="tx accT" x="36" y="156">THE RIGHT WAY</text>
+      <text class="ts" x="36" y="176">the coworker stops and</text>
+      <text class="ts" x="36" y="192">asks for a human</text>
+
+      <line class="ln acc" x1="240" y1="170" x2="282" y2="170" marker-end="url(#e4)"/>
+
+      <rect class="fill liv" x="290" y="132" width="450" height="76" rx="8"/>
+      <text class="ts livT" x="306" y="156">you open the viewer and type it into that browser yourself.</text>
+      <text class="ts" x="306" y="174">a cookie lands on the desk’s volume. you end the handoff.</text>
+      <text class="ts" x="306" y="192">the coworker resumes signed in, and never saw the password.</text>
+    </svg>
+  </div><figcaption>The secrets book has the full handoff. The short version: move the human, not
+  the secret.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The judgement</p>
+  <h2>Reach for this last, not first</h2>
+  <p>Computer Use is slow, expensive and fragile compared to every alternative. It is also the
+  only thing that works when there is no alternative. Both facts matter.</p>
+  <div class="tw"><table>
+    <thead><tr><th>If the service has…</th><th>Use</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>A connector (MCP server)</td><td><b>The connector</b></td><td>Structured, fast, one call, and the result is data rather than a picture of data.</td></tr>
+      <tr><td>An API but no connector</td><td>A shell tool on the desk</td><td>Still structured. Cheaper than looking at a screen to read a number.</td></tr>
+      <tr><td>Only a website</td><td>The browser, driven by computer use</td><td>Now it is the right tool. This is what it is for.</td></tr>
+      <tr><td>A desktop app with no other surface</td><td>Computer use</td><td>Same reason.</td></tr>
+      <tr><td>A login step in any of the above</td><td>A human, once, via handoff</td><td>Then the cookie carries it.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <p><strong>The cost, concretely.</strong> One screenshot is a large image in the model’s
+    context, and a task might need dozens. A connector call that returns twenty rows of text costs
+    a fraction of one screenshot. If a coworker is reading numbers off a screen that an API would
+    hand over directly, that is a missing connector, not a clever use of computer use.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What Computer Use never does</h2>
+  <ul class="never">
+    <li>Touch the screen you are looking at. It has no route to your machine.</li>
+    <li>Get a private channel. Every action is an ordinary, governed tool call.</li>
+    <li>Skip auto-review. Every click is judged like every other tool call.</li>
+    <li>Type a password the model was given. Passwords come from a human, on the desk.</li>
+    <li>Clamp an out-of-range click. It refuses, so the mistake is visible.</li>
+    <li>Assume an action worked. It looks again.</li>
+    <li>Require a human to be watching. Watching is optional and always available.</li>
+    <li>Be the first choice when a real API exists.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    A photograph of a screen nobody is looking at, a click sent back to the same pixels — and a
+    human for the one box that should never reach a model.</p>
+</footer>
+
+</div>

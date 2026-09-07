@@ -1,0 +1,249 @@
+<title>Moving Out</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{--ground:#16130F;--surface:#1F1A14;--raise:#272016;--ink:#EDE6DA;--muted:#A79E8F;--line:#3D362C;--gold:#E5B565;--gold-soft:#2E2415;--dead:#E07B6B;--live:#93BE7E;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}}
+  :root[data-theme="light"]{--ground:#F2EFE9;--surface:#FBFAF7;--raise:#F4EFE4;--ink:#221C14;--muted:#6E675C;--line:#D8D2C6;--gold:#9C6A0B;--gold-soft:#F1E5CE;--dead:#A03A2E;--live:#3E6E36}
+  body{margin:0;background:var(--ground);color:var(--ink);font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem,58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}.plate{padding:2.8rem 0;border-top:1px solid var(--line)}.closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}.raise{fill:var(--raise)}.soft{opacity:.5}.dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}.accT{fill:var(--gold)}.bad{stroke:var(--dead)}.badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}.livT{fill:var(--live)}.goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}.ts{font-size:11px;opacity:.72}.tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}.tcap{font-size:10px;letter-spacing:.14em;font-weight:600}.tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch}.note strong{color:var(--gold)}
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  ol.steps li{counter-increment:s;position:relative;padding:.6rem .8rem .6rem 2.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+  ol.steps li::before{content:counter(s);position:absolute;left:.8rem;top:.6rem;font-family:var(--mono);font-size:.78rem;color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:1.5rem;height:1.5rem;display:grid;place-items:center}
+  ol.steps b{font-weight:600}ol.steps span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)}:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 11</p>
+  <h1>Moving Out</h1>
+  <p class="lede">A modular monolith is only modular if a floor can leave. This is what leaving
+  actually involves, what it costs, how to tell whether a seam was real — and the honest answer to
+  when you should bother.</p>
+</header>
+
+<section class="plate">
+  <p class="eyebrow">The test</p>
+  <h2>Three things change. Nothing else may.</h2>
+  <p>A floor moving out is not a rewrite. It is three specific substitutions, and if a fourth is
+  needed, the seam was never a seam.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 320" role="img" aria-label="Three substitutions: the in-process interface becomes a remote one, the in-process event bus becomes a real broker, and the shared database becomes the floor's own. The floor's own logic and every other floor stay unchanged.">
+      <defs><marker id="x1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+      <text class="tcap accT" x="20" y="24">BEFORE · inside</text>
+      <text class="tcap accT" x="420" y="24">AFTER · outside</text>
+      <line class="thin" x1="390" y1="10" x2="390" y2="300"/>
+
+      <rect class="fill ln" x="20" y="40" width="350" height="52" rx="7"/>
+      <text class="t" x="34" y="62">caller → interface → the floor</text>
+      <text class="ts" x="34" y="80">a function call in the same process</text>
+
+      <line class="ln acc" x1="370" y1="66" x2="412" y2="66" marker-end="url(#x1)"/>
+
+      <rect class="raise acc" x="420" y="40" width="320" height="52" rx="7" stroke-width="2"/>
+      <text class="t accT" x="434" y="62">caller → the SAME interface → over a wire</text>
+      <text class="ts" x="434" y="80">the caller cannot tell. that is the whole design.</text>
+
+      <rect class="fill ln" x="20" y="108" width="350" height="52" rx="7"/>
+      <text class="t" x="34" y="130">events on an in-process bus</text>
+      <text class="ts" x="34" y="148">written in the same transaction as their cause</text>
+
+      <line class="ln acc" x1="370" y1="134" x2="412" y2="134" marker-end="url(#x1)"/>
+
+      <rect class="raise acc" x="420" y="108" width="320" height="52" rx="7" stroke-width="2"/>
+      <text class="t accT" x="434" y="130">the outbox drains to a real broker</text>
+      <text class="ts" x="434" y="148">same rows, same guarantee, one more hop</text>
+
+      <rect class="fill ln" x="20" y="176" width="350" height="52" rx="7"/>
+      <text class="t" x="34" y="198">its tables in the shared database</text>
+      <text class="ts" x="34" y="216">already private to it — nobody else reads them</text>
+
+      <line class="ln acc" x1="370" y1="202" x2="412" y2="202" marker-end="url(#x1)"/>
+
+      <rect class="raise acc" x="420" y="176" width="320" height="52" rx="7" stroke-width="2"/>
+      <text class="t accT" x="434" y="198">its tables in its own database</text>
+      <text class="ts" x="434" y="216">a move, not a redesign, because nothing joined across</text>
+
+      <rect class="fill liv" x="20" y="248" width="720" height="56" rx="8"/>
+      <text class="tx livT" x="36" y="272">UNCHANGED: the floor’s own logic, the kernel it depends on, and every other floor in the building.</text>
+      <text class="ts" x="36" y="292">if any of those had to change, you did not have a module — you had a folder.</text>
+    </svg>
+  </div><figcaption>Notice that two of the three were already true on day one. Owning your tables
+  and emitting events is not extraction work; it is the price of admission.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The proof</p>
+  <h2>What a fake seam looks like when you pull on it</h2>
+  <p>You do not discover a fake seam by reading code. You discover it the moment something has to
+  become a network call, because these four things stop working and each one is a redesign.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 280" role="img" aria-label="Four symptoms of a fake seam: a query joining across two floors' tables, a shared transaction spanning two floors, one floor reaching into another's internals, and a caller that depends on being called back synchronously.">
+      <rect class="fill bad" x="20" y="40" width="350" height="98" rx="8"/>
+      <text class="tx badT" x="36" y="64">A QUERY THAT JOINS TWO FLOORS’ TABLES</text>
+      <text class="ts" x="36" y="88">“just this one report” — and now the floors cannot</text>
+      <text class="ts" x="36" y="104">be separated without rewriting the report as two</text>
+      <text class="ts" x="36" y="120">calls and a merge. cheap to prevent, expensive to undo.</text>
+
+      <rect class="fill bad" x="390" y="40" width="350" height="98" rx="8"/>
+      <text class="tx badT" x="406" y="64">ONE TRANSACTION ACROSS TWO FLOORS</text>
+      <text class="ts" x="406" y="88">“these two writes must both happen” — across a</text>
+      <text class="ts" x="406" y="104">network they cannot. this one is genuinely hard to</text>
+      <text class="ts" x="406" y="120">fix later, so decide the ownership now.</text>
+
+      <rect class="fill bad" x="20" y="154" width="350" height="98" rx="8"/>
+      <text class="tx badT" x="36" y="178">REACHING PAST THE INTERFACE</text>
+      <text class="ts" x="36" y="202">calling an inner function because it was convenient</text>
+      <text class="ts" x="36" y="218">and it was right there. the compiler will not stop</text>
+      <text class="ts" x="36" y="234">you inside one process. only the rule will.</text>
+
+      <rect class="fill bad" x="390" y="154" width="350" height="98" rx="8"/>
+      <text class="tx badT" x="406" y="178">ASSUMING IT CANNOT FAIL</text>
+      <text class="ts" x="406" y="202">an in-process call does not time out or half-succeed.</text>
+      <text class="ts" x="406" y="218">a remote one does. if the caller has no story for</text>
+      <text class="ts" x="406" y="234">“no answer”, extraction changes its behaviour.</text>
+
+      <text class="ts accT" x="20" y="274">the fourth is the quiet one: design every interface as if it could already fail, and extraction stops being frightening.</text>
+    </svg>
+  </div><figcaption>Three of the four are caught by one habit: never write a query that names two
+  floors’ tables. It is a grep you can run.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">A worked example</p>
+  <h2>Moving Inference out, step by step</h2>
+  <p>The best candidate, and a useful rehearsal: it already has a public face, it is the floor
+  most likely to need its own machines, and its interface is the narrowest in the building.</p>
+
+  <ol class="steps">
+    <li><b>Confirm the seam is real</b><span>Does anything join its metering tables to another floor’s? (Policy reads spend — check it does so through the interface or an event, not a join.) Does anything call past its interface? Fix those first. This is the actual work; the rest is mechanical.</span></li>
+    <li><b>Give the interface a remote implementation</b><span>Same shape, over a wire. Now two implementations exist: in-process and remote. Nothing else in the building knows there is a choice.</span></li>
+    <li><b>Run it out of process, but talk to it in-process</b><span>Start the floor as its own service and keep every caller on the in-process path. If it boots and passes its own tests alone, its dependencies are honest.</span></li>
+    <li><b>Switch one caller</b><span>Point the least important caller at the remote implementation. Watch latency and errors. You have now proven the wire without betting the product on it.</span></li>
+    <li><b>Switch the rest, keep the switch</b><span>Move everyone. Leave the in-process implementation in place — it is the fastest possible local development setup, and the fallback if the wire misbehaves.</span></li>
+    <li><b>Move its tables last</b><span>Only after the wire is boring. Its tables were already private, so this is a data move rather than a schema change.</span></li>
+    <li><b>Drain events through a broker</b><span>The outbox already holds the rows. Point its drain at a real broker instead of the in-process bus. Subscribers do not change.</span></li>
+  </ol>
+
+  <div class="note">
+    <p><strong>Step 3 is the honest test.</strong> A floor that cannot boot alone has a dependency
+    it never declared — usually a shared helper that quietly reads another floor’s tables. Better
+    to find that in a terminal than during an incident.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The honest part</p>
+  <h2>When to actually do this — and when not to</h2>
+  <p>Extraction is a cost you pay for a benefit you may not need. The design guarantees you
+  <em>can</em>; it does not suggest you <em>should</em>.</p>
+
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 260" role="img" aria-label="Reasons to extract: a floor needs different hardware, scales on a different curve, needs a separate blast radius, or a separate team owns it. Reasons not to: it feels tidier, or a diagram looks nicer.">
+      <rect class="fill liv" x="20" y="40" width="350" height="180" rx="8"/>
+      <text class="tcap livT" x="36" y="64">EXTRACT WHEN</text>
+      <text class="ts" x="36" y="90">it needs different hardware</text>
+      <text class="ts" x="36" y="106">(desks want machines the building does not)</text>
+      <text class="ts" x="36" y="130">it scales on a different curve</text>
+      <text class="ts" x="36" y="146">(model traffic is spiky; transcripts are not)</text>
+      <text class="ts" x="36" y="170">it needs its own blast radius</text>
+      <text class="ts" x="36" y="186">(a crash here must not take everything)</text>
+      <text class="ts" x="36" y="208">a separate team owns it and ships on its own clock</text>
+
+      <rect class="fill bad" x="390" y="40" width="350" height="180" rx="8"/>
+      <text class="tcap badT" x="406" y="64">DO NOT EXTRACT BECAUSE</text>
+      <text class="ts" x="406" y="90">the diagram looks more professional</text>
+      <text class="ts" x="406" y="114">“microservices are best practice”</text>
+      <text class="ts" x="406" y="138">the codebase feels large</text>
+      <text class="ts" x="406" y="162">(a well-partitioned monolith is easier to</text>
+      <text class="ts" x="406" y="178">navigate than nine repositories)</text>
+      <text class="ts badT" x="406" y="204">every extraction adds a network you must now operate</text>
+
+      <text class="ts soft" x="20" y="250">the modular monolith’s real gift is that this decision stays open, indefinitely, at almost no carrying cost.</text>
+    </svg>
+  </div><figcaption>The right number of extracted floors, for most of this building’s life, is
+  zero. That is a success of the design, not a failure of nerve.</figcaption></figure>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The scoreboard</p>
+  <h2>What each floor would cost to move today</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Floor</th><th>Difficulty</th><th>The reason</th></tr></thead>
+    <tbody>
+      <tr><td>Inference</td><td>Easiest</td><td>Narrow interface, already has a public face, no other floor reads its tables.</td></tr>
+      <tr><td>Computers</td><td>Easy</td><td>Already talks over a network to desks. Its interface is “ensure me a desk”.</td></tr>
+      <tr><td>Connectors &amp; Secrets</td><td>Easy</td><td>Already reaches outside. Holds tokens, so its own blast radius is an argument for moving it.</td></tr>
+      <tr><td>Autonomy</td><td>Moderate</td><td>Needs the event stream and the claim mechanism. Both travel, but the claim wants care.</td></tr>
+      <tr><td>Tools</td><td>Moderate</td><td>Chatty with Policy on every call. Extraction adds a round trip to the hottest path in the building.</td></tr>
+      <tr><td>Conversation</td><td>Harder</td><td>Everything watches it. High traffic, and the transcript is the event log.</td></tr>
+      <tr><td>Agents</td><td>Hardest</td><td>Touches almost every other floor by design. If this needs to move, the problem is probably elsewhere.</td></tr>
+      <tr><td>Identity</td><td>Do not</td><td>Every request starts here. Moving it puts a network hop in front of literally everything.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <p><strong>Read the table as a design review, not a plan.</strong> The floors that would be
+    hard to extract are hard because they are genuinely central — not because they are badly
+    built. A floor that is easy to move and also central would be the real warning sign.</p>
+  </div>
+</section>
+
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>The rules that keep the option open</h2>
+  <ul class="never">
+    <li>Never write a query that names two floors’ tables.</li>
+    <li>Never share a transaction across two floors. Decide who owns the write.</li>
+    <li>Never call past an interface, however convenient the function looks.</li>
+    <li>Never assume a call cannot fail. Design as if it were already remote.</li>
+    <li>Never let the kernel learn a floor’s name.</li>
+    <li>Never put a rule in a door.</li>
+    <li>Never let a floor poll another instead of listening for its events.</li>
+    <li>Never extract for tidiness. Extract for hardware, scale, blast radius or ownership.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    Build every floor as though it will move out tomorrow, and then enjoy never having to move
+    one.</p>
+</footer>
+
+</div>

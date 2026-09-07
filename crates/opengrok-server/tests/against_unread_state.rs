@@ -212,9 +212,16 @@ async fn the_roster_carries_real_unread_state() {
     .await;
     assert_eq!(status, 200, "{sent}");
     wait_for_an_answer(&client, &base, &agent).await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-    let answered = row(&client, &base, &agent).await;
+    // The arrival stamp lands AFTER the final entry, so wait for the condition rather than for a
+    // clock — a fixed sleep here is a bet on the machine, and that bet took `main` red once.
+    let mut answered = row(&client, &base, &agent).await;
+    for _ in 0..100 {
+        if answered["unreadCount"] == json!(0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        answered = row(&client, &base, &agent).await;
+    }
     assert_eq!(
         answered["unreadCount"],
         json!(0),
