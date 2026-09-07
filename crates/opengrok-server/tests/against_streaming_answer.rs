@@ -344,7 +344,11 @@ async fn the_roster_says_a_coworker_is_working_while_it_works() {
         };
         if row["isRunning"] == json!(true) {
             saw_running = true;
-            saw_activity |= row["currentActivity"]["kind"] == json!("thinking");
+            // ANY verb, not `thinking` specifically. This asserted the constant back when there
+            // was one, which meant it would have gone red for the RIGHT change — and did. What it
+            // means to test is that a running row carries a label at all, because that is what the
+            // header reads; which label is the subject of `against_activity_verbs`.
+            saw_activity |= row["currentActivity"]["kind"].is_string();
         }
         // Stop once the turn is over, so a pass cannot come from a later turn.
         if row["isRunning"] == json!(false) && saw_running {

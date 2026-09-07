@@ -196,7 +196,16 @@ async fn live_summary(
     row["isRunning"] = json!(running);
     row["isRunningTurn"] = json!(running);
     if running {
-        row["currentActivity"] = json!({ "kind": "thinking" });
+        // WHAT IT IS DOING, not a constant. `thinking` is the honest answer only until the first
+        // text delta; after that the label sat next to a bubble already typing the answer, which
+        // is a statement the screen contradicts. Absent entry means the turn has started and said
+        // nothing yet, which is exactly `thinking`.
+        row["currentActivity"] = state
+            .activity
+            .lock()
+            .ok()
+            .and_then(|activity| activity.get(view.id.as_str()).cloned())
+            .unwrap_or_else(|| json!({ "kind": "thinking" }));
     }
     // PER VIEWER, from the account's own viewing map — not from the one global slot.
     //
@@ -503,6 +512,29 @@ pub async fn roster_rows_for(
     Ok(rows)
 }
 
+/// Say what a running coworker is doing now, and tell the roster — but only when it CHANGED.
+///
+/// Every call here costs a roster read and a live frame per recipient, and a turn produces
+/// hundreds of deltas. Emitting per delta would put the roster under the same load the transcript
+/// throttle exists to avoid, for a label that changes perhaps three times in a turn.
+pub async fn set_activity(state: &GatewayState, coworker_id: &str, activity: Value) {
+    let changed = match state.activity.lock() {
+        Ok(mut map) => {
+            let before = map.get(coworker_id);
+            if before == Some(&activity) {
+                false
+            } else {
+                map.insert(coworker_id.to_string(), activity);
+                true
+            }
+        }
+        Err(_) => false,
+    };
+    if changed {
+        emit_agent_upserted(state, coworker_id, json!({})).await;
+    }
+}
+
 /// Flip a coworker's running state and tell the roster about it.
 pub async fn set_running(state: &GatewayState, coworker_id: &str, running: bool, patch: Value) {
     if let Ok(mut set) = state.running.lock() {
@@ -511,6 +543,12 @@ pub async fn set_running(state: &GatewayState, coworker_id: &str, running: bool,
         } else {
             set.remove(coworker_id);
         }
+    }
+    // A VERB MUST NOT OUTLIVE ITS TURN. `currentActivity` is only read while `isRunning`, so a
+    // stale entry is invisible until the NEXT turn starts — and then it would show the last thing
+    // the previous turn was doing, before this one has done anything.
+    if !running && let Ok(mut activity) = state.activity.lock() {
+        activity.remove(coworker_id);
     }
     let mut overlay = patch;
     if overlay.as_object().is_none() {

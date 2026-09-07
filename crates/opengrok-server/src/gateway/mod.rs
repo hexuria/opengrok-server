@@ -251,6 +251,18 @@ pub struct GatewayState {
     pub viewing: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     /// Coworkers with a turn in flight right now — the roster's `isRunning`.
     pub running: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// WHAT EACH RUNNING COWORKER IS ACTUALLY DOING, by coworker id.
+    ///
+    /// The roster row carried `{"kind":"thinking"}` for the whole of every turn, which put
+    /// "Thinking" on screen beside a bubble already typing the answer — the same class of untruth
+    /// as a `streaming: true` flag on a bubble nobody grew. The client has always parsed a richer
+    /// shape (`{kind, tool, detail, ...}`) and falls back to "Working" for a verb it does not know,
+    /// so what was missing was never a field: it was a value that changed.
+    ///
+    /// In memory, and cleared when the turn ends: it describes what is happening right now, and
+    /// nothing is happening through a process that is gone. A coworker with no entry while running
+    /// reads as `thinking`, which is what a turn is doing before it says anything.
+    pub activity: Arc<Mutex<std::collections::BTreeMap<String, serde_json::Value>>>,
     /// The abort handle of each in-flight turn, keyed by agent id, so `stopAgentTurn` can cancel a
     /// running turn. Inserted when a turn is spawned, removed when it ends; a bot with a phantom
     /// `running` flag simply has no entry here, and stopping it just clears the flag.
@@ -278,6 +290,7 @@ impl GatewayState {
             active_agent: Arc::new(Mutex::new(None)),
             viewing: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             running: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            activity: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
