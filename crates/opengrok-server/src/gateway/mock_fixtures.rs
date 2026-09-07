@@ -572,6 +572,55 @@ const NO_SUCH: &str = "no such attachment";
 
 /// Every fixture, grouped as the help text presents them. The single source of truth for what
 /// exists: `help_text` renders this, and `entries_for` dispatches on it.
+/// Send-level fixtures — the ones whose whole subject is the `sendPrompt` CALL failing, so they
+/// never produce a transcript entry at all.
+///
+/// DELIBERATELY NOT IN `CATALOGUE`. Every name in that list must resolve through `entries_for`
+/// and gets swept up by `all`, and a fixture that refuses the send must do neither: `all` typing
+/// itself into a refusal would be a trap rather than a fixture, and an `entries_for` arm returning
+/// nothing would quietly weaken `every_advertised_fixture_resolves` for every future fixture too.
+/// Two small lists that each keep their own invariant beat one list with an exception in it.
+const SEND_REFUSALS: &[(&str, u16, &str)] = &[(
+    "fail",
+    422,
+    "the send itself is refused — a real non-2xx, for the client's failed-send path",
+)];
+
+/// The refusal a send-level fixture asks for, or `None` for any other prompt.
+///
+/// A REAL FAILURE ENVELOPE, NOT A 200 CARRYING AN ERROR FIELD. The desktop client's failed-send
+/// path keys on the RPC itself rejecting — `gateway-client.ts` `sendPromptAttempt` does
+/// `if (!response.ok) throw new SandGatewayCommandError(...)` — so a 200 whose body happens to
+/// contain `{"error": …}` sails straight past it and reads as a successful send, which is the one
+/// outcome this fixture exists to disprove. The sentence travels in `error` because that is the
+/// only field `extractGatewayErrorMessage` reads.
+///
+/// THE CODE MUST STAY UNDER 500. On this seam the status is not decoration: the client reads
+/// `< 500` as a command error to surface to the person and never retry, and `>= 500` as "the
+/// gateway is unreachable" and retries with backoff (`client-grok-bot.md:165`,
+/// `gateway-client.ts:270-271`). A 5xx would therefore stage the wrong failure — a transport blip
+/// the client expects to recover from — when what is being staged is a send that is permanently,
+/// deliberately refused. 422 says the send was understood and will not be processed, which is
+/// exactly true here, and keeps it distinct from the 400s that mean the arguments were malformed.
+///
+/// `sendPrompt`'s own retry predicate excludes `SandGatewayCommandError` outright, so this cannot
+/// become a retry storm on that path whatever the code — but the 4xx is what keeps every OTHER
+/// path reading it correctly too, and that is not something to leave to one call site's guard.
+pub fn refusal_for(prompt: &str) -> Option<(u16, String)> {
+    let wanted = prompt.trim();
+    SEND_REFUSALS.iter().find_map(|(name, code, _)| {
+        (*name == wanted).then(|| {
+            (
+                *code,
+                format!(
+                    "the `{name}` mock fixture refused this send on purpose — nothing was \
+                     appended and no turn was started"
+                ),
+            )
+        })
+    })
+}
+
 const CATALOGUE: &[(&str, &str, &str)] = &[
     // (name, group, one-line description)
     (
@@ -809,6 +858,13 @@ pub fn help_text() -> String {
                 out.push_str(&format!("  {name} — {description}\n"));
             }
         }
+    }
+    // Listed apart from the groups above because these do not append anything: typing one gets a
+    // failed send, not a card, and a reader scanning for "why did my message vanish" needs to find
+    // that here rather than deduce it.
+    out.push_str("\nSends that fail — no entry is appended and no turn starts\n");
+    for (name, code, description) in SEND_REFUSALS {
+        out.push_str(&format!("  {name} — {description} (HTTP {code})\n"));
     }
     out.push_str(
         "\nTwo traps worth knowing: a `.zip`/`.md`/`.rs`/`.js` URL on an attachment CARD renders \
@@ -2226,6 +2282,76 @@ mod tests {
         let help = help_text();
         for (name, _, _) in CATALOGUE {
             assert!(help.contains(name), "help omits `{name}`");
+        }
+        for (name, _, _) in SEND_REFUSALS {
+            assert!(help.contains(name), "help omits the send refusal `{name}`");
+        }
+    }
+
+    /// The two lists must not share a name. A name in both would resolve as a card AND refuse the
+    /// send that asked for it — and which one won would depend on the order of two checks in a
+    /// different file.
+    #[test]
+    fn no_name_is_both_a_card_and_a_refusal() {
+        for (name, _, _) in SEND_REFUSALS {
+            assert!(
+                entries_for(name).is_none(),
+                "`{name}` refuses the send AND resolves to entries"
+            );
+            assert!(
+                !CATALOGUE.iter().any(|(other, _, _)| other == name),
+                "`{name}` is in both lists"
+            );
+        }
+    }
+
+    /// Every advertised refusal must actually refuse, with a non-2xx. A 2xx here would be the
+    /// exact bug the fixture exists to disprove: the client's failed-send path keys on the RPC
+    /// rejecting, so a 200 carrying an error field reads as a successful send.
+    #[test]
+    fn every_refusal_is_a_real_failure() {
+        for (name, code, _) in SEND_REFUSALS {
+            let refusal = refusal_for(name);
+            assert!(
+                refusal.is_some(),
+                "`{name}` is advertised as a refusal but does not refuse"
+            );
+            let (answered, message) = refusal.expect("asserted on the line above");
+            assert_eq!(answered, *code, "`{name}` answered the wrong status");
+            assert!(
+                !(200..300).contains(&answered),
+                "`{name}` answered {answered}, which the client reads as an accepted send"
+            );
+            // The half of "non-2xx" that is easy to get wrong: a 5xx is not a refusal to the
+            // client, it is a transport blip it will retry with backoff (`client-grok-bot.md:165`).
+            assert!(
+                (400..500).contains(&answered),
+                "`{name}` answered {answered}; a deliberate refusal must be 4xx, because >= 500 \
+                 tells the client to retry rather than to tell the person"
+            );
+            assert!(
+                message.contains(name),
+                "the refusal must name the fixture that caused it: {message}"
+            );
+        }
+    }
+
+    /// Surrounding whitespace is what a person actually types, and anything else is an ordinary
+    /// prompt that must reach the model untouched.
+    #[test]
+    fn only_the_exact_name_refuses() {
+        assert!(refusal_for("  fail  ").is_some());
+        for ordinary in [
+            "fail the build for me",
+            "why did that fail",
+            "failure",
+            "",
+            "text",
+        ] {
+            assert!(
+                refusal_for(ordinary).is_none(),
+                "`{ordinary}` must be an ordinary prompt"
+            );
         }
     }
 }
