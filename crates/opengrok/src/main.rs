@@ -115,11 +115,12 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(0);
-    // AND A CEILING ON WHAT THE PACING MAY ADD, milliseconds per model call. The catalogue answer
-    // is chunked word-per-delta, so 90 ms turns a 4,632-character help text into 79 seconds of
-    // typing — measured, and reported as a stuck turn because that is what it looks like. Lowering
-    // the pacing would fix that by ruining the short answers it exists for, so the pause is shared
-    // out instead: `min(delta_ms, ceiling / deltas)`.
+    // AND A CEILING ON WHAT THE PACING MAY ADD, milliseconds per model call — NOT a cap on the
+    // call, which the name is too short to say: the floor is paid on top, and a turn is several
+    // calls, so the 79 s help text measured on the dev server came down to 14.5 s rather than to
+    // 6. The catalogue answer is chunked word-per-delta, so 90 ms turns 4,632 characters into
+    // ~795 deltas. Lowering the pacing would fix that by ruining the short answers it exists for,
+    // so the pause is shared out instead: `min(delta_ms, ceiling / deltas)`.
     let ceiling = std::env::var("OG_MOCK_MAX_TURN_MS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
