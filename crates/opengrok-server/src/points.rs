@@ -403,6 +403,60 @@ pub async fn set_limit(
         month_points: cap.unwrap_or(limits.cap),
         day_points: day_cap.unwrap_or(limits.day_cap),
     };
+    // A CAP THAT CANNOT BE COUNTED HOLDS EVERY TURN, so it is refused where it is set rather than
+    // where it bites. `GuardedDoor` wraps every door — the mocks included, deliberately, so they
+    // are metered exactly like the real one (`crates/opengrok/src/main.rs`) — and the moment
+    // `is_limited()` is true a turn needs a key of the coworker's own to count against and an
+    // admin connection to read that meter with. Storing a cap without either answered 200 and
+    // then held every later turn, with a sentence naming a gateway the person may never have been
+    // using: a success that leaves the coworker unable to answer, which is exactly the empty
+    // success this repo's third header fact is about. The settings pane reported that it worked.
+    //
+    // The sentences below are the ones `spend::GuardedDoor` would have given at turn time, on
+    // purpose — the same cause should not have two vocabularies depending on when you meet it.
+    // Checked in the runtime's order for the same reason.
+    //
+    // CLEARING IS NEVER REFUSED: this only runs when a cap SURVIVES the write. That is not
+    // symmetry for its own sake, it is the way out. A coworker already held — by a cap set before
+    // this check existed, or by its payer's pool — must always be able to have the cap taken off,
+    // and a check that refused an unmeterable coworker's clear would strand it permanently.
+    if next.month_points.is_some() || next.day_points.is_some() {
+        let name = store
+            .load_coworker(coworker_id)
+            .await
+            .map(|(coworker, _)| coworker.name)
+            .unwrap_or_else(|_| "This coworker".to_string());
+        let keyed = store
+            .coworker_key(coworker_id, account_id)
+            .await
+            .map_err(|error| {
+                (
+                    503,
+                    format!("{name}'s gateway key could not be read ({error}); nothing was saved."),
+                )
+            })?;
+        if keyed.is_none() {
+            return Err((
+                409,
+                format!(
+                    "{name} has no gateway key of its own to count on, so a points limit would \
+                     hold every one of its turns. A coworker is metered when its hirer is in an \
+                     org and the deployment has a gateway admin connection and a vault; ask an \
+                     admin. Nothing was saved."
+                ),
+            ));
+        }
+        if state.auth.gateway_admin.is_none() {
+            return Err((
+                409,
+                format!(
+                    "{name} would be under a points limit, but this deployment has no gateway \
+                     admin connection to read its meter with (OG_GATEWAY_ADMIN_URL), so every \
+                     turn would be held. Nothing was saved."
+                ),
+            ));
+        }
+    }
     store
         .put_points_limit(
             PointsScope::Coworker,
