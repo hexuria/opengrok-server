@@ -507,6 +507,41 @@ pub async fn roster_rows_for(
             row["unreadCount"] = json!(unread.unread);
             row["hasUnread"] = json!(unread.unread > 0);
         }
+
+        // THE SIDEBAR PREVIEW, which was hard-coded null and so appeared only after a turn and
+        // vanished on the next boot: `conversation.rs` and `group.rs` already push these fields
+        // live, and nothing put them on the row a fresh `listAgents` returns. A preview that comes
+        // and goes with a restart reads as the server forgetting the conversation.
+        //
+        // 120 characters, because that is what the live push sends (`text.chars().take(120)`).
+        // Two different truncations would make a row change length when it was pushed rather than
+        // read, which is the kind of difference nobody thinks to look for.
+        if let Ok(preview) = state
+            .agui
+            .auth
+            .store
+            .row_preview(&view.id, &account.id)
+            .await
+        {
+            if let Some(id) = preview.newest_entry_id {
+                row["newestEntryId"] = json!(id);
+            }
+            if let Some(id) = preview.last_message_id {
+                row["lastMessageId"] = json!(id);
+            }
+            if let Some(text) = preview.last_message_text {
+                let said: String = text.chars().take(120).collect();
+                row["lastMessagePreview"] = json!(said);
+                // The STRUCTURED half, which survives the cases a bare string cannot: the client
+                // reads `lastEntry` first and falls back to the preview. Only the text shape is
+                // served — official also has `{kind:"attachment",count,kinds}` and
+                // `{kind:"link",url}`, and I have not transcribed how it counts or classifies
+                // those, so a row whose last event is an attachment keeps `lastEntry: null` and
+                // the client falls back exactly as it does today. Inventing the count would be
+                // worse than serving nothing.
+                row["lastEntry"] = json!({ "kind": "text", "text": said });
+            }
+        }
         rows.push(row);
     }
     Ok(rows)
