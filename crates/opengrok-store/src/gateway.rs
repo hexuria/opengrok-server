@@ -12,6 +12,68 @@ use sqlx::Row;
 use crate::StoreResult;
 use crate::postgres::PgStore;
 
+/// What the roster needs to preview a conversation on a sidebar row.
+#[derive(Debug, Clone, Default)]
+pub struct RowPreview {
+    /// The newest entry of ANY kind — the client's `newestEntryId`.
+    pub newest_entry_id: Option<String>,
+    /// The id of the newest entry that actually SAID something.
+    pub last_message_id: Option<String>,
+    /// Its text, untruncated; the caller cuts it to the same length the live push uses.
+    pub last_message_text: Option<String>,
+}
+
+impl PgStore {
+    /// The newest entry, and the newest one that said something, for one reader.
+    ///
+    /// TWO DIFFERENT "LAST"S, which is why this is one query and not one column. `newestEntryId`
+    /// is the newest row of any kind — a card, a notice, an attachment — while the preview must
+    /// come from something with words in it, or the sidebar would show a blank line for a row
+    /// whose last event was a permission card.
+    ///
+    /// The streaming placeholder is excluded by the same emptiness test: it is a `send-message`
+    /// with `content: ""` that exists for the length of a turn, and previewing it would blank the
+    /// row for exactly as long as the coworker is talking.
+    pub async fn row_preview(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+    ) -> StoreResult<RowPreview> {
+        let row = sqlx::query(
+            "select
+               (select entry->>'id' from gateway_entry
+                 where coworker_id = $1 and account_id = $2
+                 order by seq desc limit 1)                                   as newest_id,
+               (select entry->>'id' from gateway_entry
+                 where coworker_id = $1 and account_id = $2
+                   and ((entry->>'kind' = 'message'
+                         and coalesce(entry->>'content', '') <> '')
+                     or (entry->>'kind' = 'send-message'
+                         and entry->'message'->>'type' = 'text'
+                         and coalesce(entry->'message'->>'content', '') <> ''))
+                 order by seq desc limit 1)                                   as said_id,
+               (select coalesce(entry->>'content', entry->'message'->>'content')
+                  from gateway_entry
+                 where coworker_id = $1 and account_id = $2
+                   and ((entry->>'kind' = 'message'
+                         and coalesce(entry->>'content', '') <> '')
+                     or (entry->>'kind' = 'send-message'
+                         and entry->'message'->>'type' = 'text'
+                         and coalesce(entry->'message'->>'content', '') <> ''))
+                 order by seq desc limit 1)                                   as said_text",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .fetch_one(self.pool())
+        .await?;
+        Ok(RowPreview {
+            newest_entry_id: row.try_get("newest_id")?,
+            last_message_id: row.try_get("said_id")?,
+            last_message_text: row.try_get("said_text")?,
+        })
+    }
+}
+
 /// What the roster needs to draw an unread badge for one reader.
 ///
 /// `last_viewed_ms` is `None` when this person has never opened this coworker. The renderer reads
