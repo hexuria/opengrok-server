@@ -40,7 +40,12 @@ export OG_MOCK_DELTA_MS="${OG_MOCK_DELTA_MS:-90}"
 # first sample and the working dot never painted. A fixture turn is two visible calls, so 1.2 s
 # gives the two-to-three seconds of "thinking" that reads as reassuring rather than as slow; 0 off.
 export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-1200}"
-echo "=== mock doors paced at ${OG_MOCK_DELTA_MS}ms per delta, floored at ${OG_MOCK_MIN_TURN_MS}ms per call"
+# And a ceiling on what the pacing may ADD, per model call. The catalogue answer is chunked
+# word-per-delta, so 90 ms makes a 4,632-character help text take 79 s — measured, and reported as
+# a stuck turn, because that is what it looks like from outside. The pause is shared out rather
+# than lowered: min(90ms, ceiling/deltas), so a one-liner still types and a long answer scrolls.
+export OG_MOCK_MAX_TURN_MS="${OG_MOCK_MAX_TURN_MS:-6000}"
+echo "=== mock doors: ${OG_MOCK_DELTA_MS}ms/delta, floor ${OG_MOCK_MIN_TURN_MS}ms, ceiling ${OG_MOCK_MAX_TURN_MS}ms per call"
 
 # WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
 # Cargo.toml), but a dev server is exactly where it is wanted — and `OG_MODEL_DOOR=mock-cards`

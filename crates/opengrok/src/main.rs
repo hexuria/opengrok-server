@@ -115,6 +115,15 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(0);
+    // AND A CEILING ON WHAT THE PACING MAY ADD, milliseconds per model call. The catalogue answer
+    // is chunked word-per-delta, so 90 ms turns a 4,632-character help text into 79 seconds of
+    // typing — measured, and reported as a stuck turn because that is what it looks like. Lowering
+    // the pacing would fix that by ruining the short answers it exists for, so the pause is shared
+    // out instead: `min(delta_ms, ceiling / deltas)`.
+    let ceiling = std::env::var("OG_MOCK_MAX_TURN_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(0);
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.
@@ -122,7 +131,10 @@ async fn main() -> anyhow::Result<()> {
         Ok("mock") => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
             Arc::new(with_mock_verdict(
-                MockDoor::echoing().paced_by_ms(paced).min_turn_ms(floor),
+                MockDoor::echoing()
+                    .paced_by_ms(paced)
+                    .min_turn_ms(floor)
+                    .max_turn_ms(ceiling),
             ))
         }
         // Every renderable transcript shape on demand, so client rendering can be worked on
@@ -151,7 +163,8 @@ async fn main() -> anyhow::Result<()> {
                 Arc::new(with_mock_verdict(
                     MockDoor::serving_fixtures()
                         .paced_by_ms(paced)
-                        .min_turn_ms(floor),
+                        .min_turn_ms(floor)
+                        .max_turn_ms(ceiling),
                 ))
             }
         }
@@ -162,7 +175,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(with_mock_verdict(
                 MockDoor::asking_for_a_tool()
                     .paced_by_ms(paced)
-                    .min_turn_ms(floor),
+                    .min_turn_ms(floor)
+                    .max_turn_ms(ceiling),
             ))
         }
         door => {

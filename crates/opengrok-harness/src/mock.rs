@@ -81,6 +81,20 @@ pub struct MockDoor {
     /// state for two floors — which, for the purpose of watching a coworker think, is a feature.
     /// `None` by default and in every test; a dev server opts in through `OG_MOCK_MIN_TURN_MS`.
     turn_floor: Option<std::time::Duration>,
+    /// The most time the PACING may add to one model call, however many deltas it has.
+    ///
+    /// A FLOOR AND A CEILING ANSWER DIFFERENT QUESTIONS. The floor exists because a short answer
+    /// was over before the working state could paint. The ceiling exists because a long one is now
+    /// chunked word-per-delta, so the same 90 ms that makes a one-liner type turns a 4,632-
+    /// character help text into 800 deltas and 79 seconds of watching it arrive — measured on the
+    /// dev server, where it read as a stuck turn and was reported as one.
+    ///
+    /// Lowering the pacing instead would fix the long case by ruining the short one, which is the
+    /// case the pacing was added for. So the per-delta pause becomes
+    /// `min(per_delta_delay, ceiling / deltas)`: a one-liner is unaffected because its share of the
+    /// ceiling is larger than the pause, and a long answer scrolls in a bounded time instead of
+    /// crawling. `None` by default and in tests; a dev server opts in with `OG_MOCK_MAX_TURN_MS`.
+    turn_ceiling: Option<std::time::Duration>,
 }
 
 impl MockDoor {
@@ -103,6 +117,13 @@ impl MockDoor {
         self
     }
 
+    /// Cap what the pacing may add to one model call. See `turn_ceiling`. `0` is off.
+    #[must_use]
+    pub fn max_turn_ms(mut self, ms: u64) -> Self {
+        self.turn_ceiling = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        self
+    }
+
     /// The script as a stream, paced and — unless this is a judge request — floored. Every path
     /// in `stream` ends here, so a new answer shape cannot forget either.
     ///
@@ -122,8 +143,18 @@ impl MockDoor {
             .system
             .as_deref()
             .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER));
-        let delay = self.per_delta_delay;
         let floor = if is_judge { None } else { self.turn_floor };
+        // THE CEILING IS SHARED OUT ACROSS THE DELTAS, which is why it is computed here rather
+        // than counted down as the stream runs: the whole script is already in hand, so the pause
+        // that fits can be decided once instead of measured against a clock that a slow consumer
+        // would skew. A script of one delta gets the whole ceiling and is therefore unaffected;
+        // only a script long enough for its share to fall below the pacing is slowed less.
+        let delay = match (self.per_delta_delay, self.turn_ceiling) {
+            (Some(pace), Some(ceiling)) if !script.is_empty() => {
+                Some(pace.min(ceiling / script.len() as u32))
+            }
+            (pace, _) => pace,
+        };
         if delay.is_none() && floor.is_none() {
             return Box::pin(stream::iter(script.into_iter().map(Ok)));
         }
@@ -520,6 +551,76 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_millis(50),
             "zero is off, exactly as unset — the suite depends on it"
+        );
+    }
+
+    /// The ceiling bounds a long answer without touching a short one.
+    ///
+    /// This is the whole trade: 90 ms per delta is what makes a one-liner type, and what makes a
+    /// 4,632-character help text take 79 seconds once the catalogue answer is chunked
+    /// word-per-delta. Lowering the pacing would fix the second by ruining the first, so the pause
+    /// is shared out instead.
+    #[tokio::test]
+    async fn the_ceiling_bounds_a_long_answer_and_leaves_a_short_one_alone() {
+        // 200 deltas at 50 ms would be 10 s; the ceiling says 400 ms, so each pause becomes 2 ms.
+        let long: Vec<_> = (0..200)
+            .map(|i| ModelDelta::Text(format!("w{i} ")))
+            .collect();
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(long)
+            .paced_by_ms(50)
+            .max_turn_ms(400)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            out.len(),
+            200,
+            "the ceiling must not change what is emitted"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "200 deltas under a 400ms ceiling cannot take {elapsed:?} — unpaced they would be 10s"
+        );
+
+        // A SHORT ANSWER IS UNAFFECTED, which is the half that is easy to lose: its share of the
+        // ceiling is far larger than the pause, so `min` picks the pause and it still types.
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(vec![
+            ModelDelta::Text("one ".to_string()),
+            ModelDelta::Text("two".to_string()),
+        ])
+        .paced_by_ms(50)
+        .max_turn_ms(4_000)
+        .stream(request("hi"))
+        .await
+        .expect("stream")
+        .collect()
+        .await;
+        assert_eq!(out.len(), 2);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(100),
+            "two deltas at 50ms still pace: {:?}",
+            started.elapsed()
+        );
+
+        // Zero is off, exactly as unset — the pacing stands alone.
+        let started = std::time::Instant::now();
+        let _: Vec<_> = MockDoor::with_script(vec![ModelDelta::Text("x".to_string()); 4])
+            .paced_by_ms(40)
+            .max_turn_ms(0)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(160),
+            "with the ceiling off, four deltas at 40ms is the full 160ms: {:?}",
+            started.elapsed()
         );
     }
 
