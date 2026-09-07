@@ -1,0 +1,466 @@
+<title>The Model Only Suggests</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{
+    --ground:#16130F; --surface:#1F1A14; --raise:#272016;
+    --ink:#EDE6DA; --muted:#A79E8F; --line:#3D362C;
+    --gold:#E5B565; --gold-soft:#2E2415;
+    --dead:#E07B6B; --live:#93BE7E; --live-soft:#1E2818;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --ground:#F2EFE9; --surface:#FBFAF7; --raise:#F4EFE4;
+      --ink:#221C14; --muted:#6E675C; --line:#D8D2C6;
+      --gold:#9C6A0B; --gold-soft:#F1E5CE;
+      --dead:#A03A2E; --live:#3E6E36; --live-soft:#E2EDDC;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#F2EFE9; --surface:#FBFAF7; --raise:#F4EFE4;
+    --ink:#221C14; --muted:#6E675C; --line:#D8D2C6;
+    --gold:#9C6A0B; --gold-soft:#F1E5CE;
+    --dead:#A03A2E; --live:#3E6E36; --live-soft:#E2EDDC;
+  }
+  body{margin:0;background:var(--ground);color:var(--ink);
+    font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;
+    font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem, 58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}
+  .plate{padding:2.8rem 0;border-top:1px solid var(--line)}
+  .closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)} .raise{fill:var(--raise)} .soft{opacity:.5} .dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)} .accT{fill:var(--gold)}
+  .bad{stroke:var(--dead)} .badT{fill:var(--dead)}
+  .liv{stroke:var(--live)} .livT{fill:var(--live)}
+  .goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px} .ts{font-size:11px;opacity:.72} .tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600} .tcap{font-size:10px;letter-spacing:.14em;font-weight:600}
+  .tx{font-size:12px;font-weight:600}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch} .note strong{color:var(--gold)}
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  ol.steps li{counter-increment:s;position:relative;padding:.6rem .8rem .6rem 2.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+  ol.steps li::before{content:counter(s);position:absolute;left:.8rem;top:.6rem;font-family:var(--mono);font-size:.78rem;color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:1.5rem;height:1.5rem;display:grid;place-items:center}
+  ol.steps b{font-weight:600} ol.steps span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+  .never{list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr))}
+  .never li{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--dead);border-radius:8px;padding:.7rem .85rem;font-size:.92rem}
+  a{color:var(--gold)} :focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book · hard topic 1</p>
+  <h1>The Model Only Suggests</h1>
+  <p class="lede">A model cannot run a command, read a file or click a button. It can only say “I
+  would like to.” This is everything that happens between that sentence and something actually
+  happening — drawn against the building, floor by floor.</p>
+</header>
+
+<!-- ============ 1. THE PATH ============ -->
+<section class="plate">
+  <p class="eyebrow">The path</p>
+  <h2>One tool call, eight stations, five floors</h2>
+  <p>The model answers with a tool call. From that moment the model is out of the room. Every
+  station below is the building’s, and each one can say no.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 480" role="img" aria-label="A tool call travels: from the harness on the Agents floor, to the registry and router on the Tools floor, down to Policy, back to the executor, down to the desk, to Conversation for the record, and back up to the harness.">
+        <defs><marker id="p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <line class="thin" x1="120" y1="60" x2="740" y2="60"/>
+        <line class="thin" x1="120" y1="150" x2="740" y2="150"/>
+        <line class="thin" x1="120" y1="240" x2="740" y2="240"/>
+        <line class="thin" x1="120" y1="330" x2="740" y2="330"/>
+        <line class="thin" x1="120" y1="420" x2="740" y2="420"/>
+        <text class="tcap accT" x="16" y="56">AGENTS</text>
+        <text class="tcap accT" x="16" y="146">TOOLS</text>
+        <text class="tcap accT" x="16" y="236">POLICY</text>
+        <text class="tcap accT" x="16" y="326">DESK</text>
+        <text class="tcap accT" x="16" y="416">CONVERSATION</text>
+
+        <polyline class="ln" points="140,60 140,150 230,150" marker-end="url(#p)"/>
+        <line class="ln" x1="230" y1="150" x2="320" y2="150" marker-end="url(#p)"/>
+        <polyline class="ln" points="320,150 320,240 400,240" marker-end="url(#p)"/>
+        <polyline class="ln" points="400,240 400,150 480,150" marker-end="url(#p)"/>
+        <polyline class="ln acc" points="480,150 480,330 560,330" marker-end="url(#p)"/>
+        <polyline class="ln acc" points="560,330 560,420 640,420" marker-end="url(#p)"/>
+        <polyline class="ln" points="640,420 640,60 700,60" marker-end="url(#p)"/>
+
+        <circle class="fill ln" cx="140" cy="60" r="13"/><text class="t" x="140" y="65" text-anchor="middle">1</text>
+        <circle class="fill ln" cx="230" cy="150" r="13"/><text class="t" x="230" y="155" text-anchor="middle">2</text>
+        <circle class="fill ln" cx="320" cy="150" r="13"/><text class="t" x="320" y="155" text-anchor="middle">3</text>
+        <circle class="fill ln" cx="400" cy="240" r="13"/><text class="t" x="400" y="245" text-anchor="middle">4</text>
+        <circle class="fill ln" cx="480" cy="150" r="13"/><text class="t" x="480" y="155" text-anchor="middle">5</text>
+        <circle class="raise acc" cx="560" cy="330" r="13" stroke-width="2"/><text class="t accT" x="560" y="335" text-anchor="middle">6</text>
+        <circle class="fill ln" cx="640" cy="420" r="13"/><text class="t" x="640" y="425" text-anchor="middle">7</text>
+        <circle class="fill ln" cx="700" cy="60" r="13"/><text class="t" x="700" y="65" text-anchor="middle">8</text>
+
+        <text class="ts" x="140" y="36" text-anchor="middle">the model says</text>
+        <text class="ts" x="140" y="48" text-anchor="middle">“run npm test”</text>
+        <text class="ts" x="230" y="126" text-anchor="middle">registry:</text>
+        <text class="ts" x="230" y="138" text-anchor="middle">known? granted?</text>
+        <text class="ts" x="320" y="126" text-anchor="middle">router:</text>
+        <text class="ts" x="320" y="138" text-anchor="middle">where?</text>
+        <text class="ts" x="400" y="270" text-anchor="middle">may it?</text>
+        <text class="ts" x="400" y="282" text-anchor="middle">allow · ask · deny</text>
+        <text class="ts" x="480" y="126" text-anchor="middle">executor:</text>
+        <text class="ts" x="480" y="138" text-anchor="middle">identity overwritten</text>
+        <text class="ts accT" x="560" y="360" text-anchor="middle">runs it</text>
+        <text class="ts accT" x="560" y="372" text-anchor="middle">result is data</text>
+        <text class="ts" x="640" y="450" text-anchor="middle">entry + activity</text>
+        <text class="ts" x="640" y="462" text-anchor="middle">written down</text>
+        <text class="ts" x="700" y="36" text-anchor="middle">harness asks</text>
+        <text class="ts" x="700" y="48" text-anchor="middle">Inference: next?</text>
+      </svg>
+    </div>
+    <figcaption>Stations 2 through 5 are all on the Tools and Policy floors and never leave the
+    building. Only the gold stretch touches a desk — and it carries a bearer token the model has
+    never seen.</figcaption>
+  </figure>
+
+  <ol class="steps">
+    <li><b>The model suggests</b><span>Inference returns a tool call: a name and arguments. The harness receives it as part of the turn. Nothing has happened yet.</span></li>
+    <li><b>The registry checks it exists and is granted</b><span>Built-in, plugin skill, or connector tool — and does <em>this</em> coworker have it? An unknown or ungranted tool is answered with a refusal result, not an error.</span></li>
+    <li><b>The router picks a destination</b><span>Desk, the person’s machine, or a connector. It reads the coworker’s harness kind and the tool’s nature. This is a decision on paper; nothing is called yet.</span></li>
+    <li><b>Policy answers one question: may it?</b><span>Grants, the remote-control gate (Mac only), and auto-review — combined by intersection. Three outcomes: allow, ask (a card; the run suspends), deny (a refusal result).</span></li>
+    <li><b>The executor overwrites identity and makes sure the desk is awake</b><span>Every identity argument is replaced with the session’s. If the destination is a desk, Computers wakes it and hands over a token. Then, and only then, the call goes out.</span></li>
+    <li><b>The destination does the work and hands back data</b><span>stdout, stderr, exit code, a file, a screenshot. Bounded, with a timeout. Never a live handle into the building.</span></li>
+    <li><b>The record is written</b><span>The result becomes a transcript entry and an activity frame. A refusal is written the same way — the model will read it as a result.</span></li>
+    <li><b>The harness continues</b><span>Results go back to Inference for the next step. Loop until the model has nothing more to suggest.</span></li>
+  </ol>
+</section>
+
+<!-- ============ 2. THREE EXITS ============ -->
+<section class="plate">
+  <p class="eyebrow">The exits</p>
+  <h2>Three doors out of the router, one executor behind all of them</h2>
+  <p>The executor is the same code for all three. What changes is the transport, the secret that
+  opens the door, and who has to say yes first.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 360" role="img" aria-label="Three columns: desk, the person's machine, connector. Rows compare transport, the secret used, who consents, where data rests, and what happens when it is off.">
+        <text class="tcap accT" x="20" y="22">ROW</text>
+        <text class="tcap accT" x="150" y="22">DESK</text>
+        <text class="tcap accT" x="360" y="22">THE PERSON’S MACHINE</text>
+        <text class="tcap accT" x="570" y="22">CONNECTOR</text>
+
+        <rect class="raise acc" x="140" y="32" width="200" height="314" rx="8" stroke-width="2"/>
+        <rect class="fill ln dash" x="350" y="32" width="200" height="314" rx="8"/>
+        <rect class="fill ln" x="560" y="32" width="180" height="314" rx="8"/>
+
+        <line class="thin" x1="20" y1="92" x2="740" y2="92"/>
+        <line class="thin" x1="20" y1="152" x2="740" y2="152"/>
+        <line class="thin" x1="20" y1="212" x2="740" y2="212"/>
+        <line class="thin" x1="20" y1="272" x2="740" y2="272"/>
+
+        <text class="tx" x="20" y="66">transport</text>
+        <text class="ts" x="150" y="58">HTTP to the desk</text><text class="tm" x="150" y="74">POST /v1/exec · /v1/files · /v1/cua/*</text>
+        <text class="ts" x="360" y="58">pushed out through the</text><text class="ts" x="360" y="74">window’s own connection</text>
+        <text class="ts" x="570" y="58">a standard tool call to</text><text class="ts" x="570" y="74">someone else’s server</text>
+
+        <text class="tx" x="20" y="126">the secret</text>
+        <text class="ts" x="150" y="118">the desk’s bearer token,</text><text class="ts" x="150" y="134">minted by Computers</text>
+        <text class="ts" x="360" y="118">none — the window is</text><text class="ts" x="360" y="134">already signed in</text>
+        <text class="ts" x="570" y="118">an OAuth token from</text><text class="ts" x="570" y="134">the vault, per scope</text>
+
+        <text class="tx" x="20" y="186">who says yes</text>
+        <text class="ts" x="150" y="178">grants ∩ auto-review.</text><text class="ts" x="150" y="194">a card only if the judge asks</text>
+        <text class="ts badT" x="360" y="178">grants ∩ machine gate ∩ auto-review.</text><text class="ts badT" x="360" y="194">the switch on the machine too</text>
+        <text class="ts" x="570" y="178">grants ∩ auto-review.</text><text class="ts" x="570" y="194">whose records? overwritten</text>
+
+        <text class="tx" x="20" y="246">where data rests</text>
+        <text class="ts" x="150" y="238">the jail, the browser profile;</text><text class="ts" x="150" y="254">cookies never leave</text>
+        <text class="ts" x="360" y="238">the person’s real files.</text><text class="ts" x="360" y="254">that is the whole point, and the risk</text>
+        <text class="ts" x="570" y="238">theirs. we hold a</text><text class="ts" x="570" y="254">token, not the data</text>
+
+        <text class="tx" x="20" y="306">when it is off</text>
+        <text class="ts" x="150" y="298">Computers wakes it.</text><text class="ts" x="150" y="314">hibernated ≠ gone</text>
+        <text class="ts" x="360" y="298">the path is gone.</text><text class="ts" x="360" y="314">the run gets a refusal result</text>
+        <text class="ts" x="570" y="298">a refusal result</text><text class="ts" x="570" y="314">naming the connection</text>
+        <text class="ts soft" x="20" y="338">in every column, “no” is a result the model can read — never an exception that ends the run.</text>
+      </svg>
+    </div>
+    <figcaption>The middle column is dashed because it is the only exit that leaves the building
+    through a window rather than a wire the building owns. That is why it alone has a machine
+    switch.</figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>Prefer the right-hand door.</strong> If a real API exists, a connector beats driving
+    the website on the desk. The desk’s browser is for sites that have no door of their own.</p>
+  </div>
+</section>
+
+<!-- ============ 3. MAY IT? ============ -->
+<section class="plate">
+  <p class="eyebrow">Station 4</p>
+  <h2>“May it?” is three questions, and the answers intersect</h2>
+  <p>No single yes is enough. Each layer can only narrow; a typo in a rule can only ever
+  remove access, never add it.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 320" role="img" aria-label="A tool call passes through grants, then the machine gate (only for the person's machine), then auto-review. Each can allow, ask or deny. The outcomes combine by intersection into allow, one card, or deny.">
+        <defs><marker id="q" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <rect class="fill ln" x="20" y="60" width="200" height="90" rx="7"/>
+        <text class="tb" x="34" y="84">Grants</text>
+        <text class="ts" x="34" y="104">may this principal make this</text>
+        <text class="ts" x="34" y="120">coworker do this, on whose</text>
+        <text class="ts" x="34" y="136">records? standing rules.</text>
+
+        <line class="ln" x1="220" y1="105" x2="272" y2="105" marker-end="url(#q)"/>
+
+        <rect class="fill ln dash" x="280" y="60" width="200" height="90" rx="7"/>
+        <text class="tb" x="294" y="84">Machine gate</text>
+        <text class="ts" x="294" y="104">person’s machine only:</text>
+        <text class="ts" x="294" y="120">off / ask / always, per machine,</text>
+        <text class="ts" x="294" y="136">plus its own local switch</text>
+
+        <line class="ln" x1="480" y1="105" x2="532" y2="105" marker-end="url(#q)"/>
+
+        <rect class="fill ln" x="540" y="60" width="200" height="90" rx="7"/>
+        <text class="tb" x="554" y="84">Auto-review</text>
+        <text class="ts" x="554" y="104">a model judges the call against</text>
+        <text class="ts" x="554" y="120">org rules, then this coworker’s.</text>
+        <text class="ts" x="554" y="136">allow / block / ask</text>
+
+        <text class="tb" x="380" y="196" text-anchor="middle">∩</text>
+        <text class="ts" x="380" y="214" text-anchor="middle">intersection — the narrowest answer wins</text>
+
+        <line class="ln liv" x1="120" y1="150" x2="120" y2="240" marker-end="url(#q)"/>
+        <line class="ln acc" x1="380" y1="222" x2="380" y2="240" marker-end="url(#q)"/>
+        <line class="ln bad" x1="640" y1="150" x2="640" y2="240" marker-end="url(#q)"/>
+
+        <rect class="fill liv" x="40" y="246" width="160" height="50" rx="7"/>
+        <text class="tb livT" x="120" y="268" text-anchor="middle">allow</text>
+        <text class="ts" x="120" y="286" text-anchor="middle">executor proceeds</text>
+
+        <rect class="goldsoft acc" x="300" y="246" width="160" height="50" rx="7"/>
+        <text class="tb accT" x="380" y="268" text-anchor="middle">one card</text>
+        <text class="ts" x="380" y="286" text-anchor="middle">at most one per call · run suspends</text>
+
+        <rect class="fill bad" x="560" y="246" width="160" height="50" rx="7"/>
+        <text class="tb badT" x="640" y="268" text-anchor="middle">deny</text>
+        <text class="ts" x="640" y="286" text-anchor="middle">a refusal result, with the reason</text>
+
+        <text class="ts soft" x="20" y="316">a broken condition on a deny rule counts as a match; on an allow rule it does not. fail closed, and say why.</text>
+      </svg>
+    </div>
+    <figcaption>If the machine gate already raised a card, auto-review does not raise a second
+    one for the same call. One question per layer, one card per call.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 4. IDENTITY OVERWRITE ============ -->
+<section class="plate">
+  <p class="eyebrow">Station 5</p>
+  <h2>The model never gets a say in whose data it touches</h2>
+  <p>Validation asks “is this argument allowed?” and can be fooled. Overwriting does not ask; it
+  replaces. Before any tool runs, every identity argument is thrown away and the session’s own
+  identity is written in its place.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 190" role="img" aria-label="The model's arguments name an account; the executor's bind step replaces that field with the session principal before the call goes out.">
+        <defs><marker id="i" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+        <rect class="fill ln" x="20" y="40" width="270" height="100" rx="7"/>
+        <text class="tcap" x="34" y="62">WHAT THE MODEL SENT</text>
+        <text class="tm" x="34" y="86">tool: read_mail</text>
+        <text class="tm badT" x="34" y="104">account: "someone-else@…"</text>
+        <text class="tm" x="34" y="122">query: "invoices"</text>
+
+        <line class="ln acc" x1="290" y1="90" x2="440" y2="90" marker-end="url(#i)"/>
+        <text class="tb accT" x="365" y="78" text-anchor="middle">bind</text>
+        <text class="ts" x="365" y="112" text-anchor="middle">replace, don’t validate</text>
+
+        <rect class="raise acc" x="450" y="40" width="290" height="100" rx="7" stroke-width="2"/>
+        <text class="tcap accT" x="464" y="62">WHAT GOES OUT</text>
+        <text class="tm" x="464" y="86">tool: read_mail</text>
+        <text class="tm livT" x="464" y="104">account: &lt;the session’s principal&gt;</text>
+        <text class="tm" x="464" y="122">query: "invoices"</text>
+
+        <text class="ts soft" x="20" y="172">the same rule picks the desk: the run’s context names it, never the model’s arguments.</text>
+      </svg>
+    </div>
+    <figcaption>This is enforced at the executor for every tool, every time — the one place all
+    three exits pass through.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 5. SUSPENSION ============ -->
+<section class="plate">
+  <p class="eyebrow">When the answer is “ask”</p>
+  <h2>A card is not a failure. The run goes to sleep.</h2>
+  <p>The executor raises a card and the run suspends <em>at that station</em>. It is a state in
+  the harness graph, saved like any other. The desk stays assigned. The person answers from
+  whatever device they have in hand, and the run wakes at the same step.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 240" role="img" aria-label="State machine: running raises a card and becomes suspended; an allow answer resumes it at the same step; a deny answer writes a refusal result and resumes. The card never expires.">
+        <defs><marker id="s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <rect class="fill ln" x="20" y="80" width="170" height="60" rx="30"/>
+        <text class="tb" x="105" y="105" text-anchor="middle">running</text>
+        <text class="ts" x="105" y="124" text-anchor="middle">at station 5</text>
+
+        <line class="ln acc" x1="190" y1="100" x2="292" y2="100" marker-end="url(#s)"/>
+        <text class="ts accT" x="241" y="90" text-anchor="middle">card raised</text>
+
+        <rect class="goldsoft acc" x="300" y="80" width="170" height="60" rx="30" stroke-width="2"/>
+        <text class="tb accT" x="385" y="105" text-anchor="middle">suspended</text>
+        <text class="ts" x="385" y="124" text-anchor="middle">saved · desk kept</text>
+
+        <line class="ln liv" x1="470" y1="92" x2="572" y2="70" marker-end="url(#s)"/>
+        <text class="ts livT" x="520" y="64" text-anchor="middle">allow once / always</text>
+        <line class="ln bad" x1="470" y1="120" x2="572" y2="150" marker-end="url(#s)"/>
+        <text class="ts badT" x="520" y="164" text-anchor="middle">deny / never</text>
+
+        <rect class="fill liv" x="580" y="46" width="160" height="46" rx="23"/>
+        <text class="t livT" x="660" y="66" text-anchor="middle">resumes, same step</text>
+        <text class="ts" x="660" y="82" text-anchor="middle">the call goes out</text>
+
+        <rect class="fill bad" x="580" y="132" width="160" height="46" rx="23"/>
+        <text class="t badT" x="660" y="152" text-anchor="middle">resumes, same step</text>
+        <text class="ts" x="660" y="168" text-anchor="middle">with a refusal result</text>
+
+        <text class="ts" x="20" y="208">“always” and “never” write a standing rule on the server — the window flips nothing on the machine.</text>
+        <text class="ts" x="20" y="226">the card never expires: consent lives where every device can reach it, so there is nothing to time out.</text>
+      </svg>
+    </div>
+    <figcaption>Both answers resume the run. Deny is not the end of the turn — it is information
+    the model gets to reason about.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 6. THE DESK WAKES ============ -->
+<section class="plate">
+  <p class="eyebrow">Inside station 5</p>
+  <h2>“Make sure the desk is awake” is one call to Computers</h2>
+  <p>The executor does not know how a desk is made. It asks the Computers floor for a ready desk
+  for this run and gets back an address and a token. Everything else is that floor’s business.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 250" role="img" aria-label="The executor asks Computers to ensure a desk. Computers reads the assignment row for the scope, which names the kind and the org's desk host, wakes the desk if stopped, polls ready, and returns address plus token.">
+        <defs><marker id="w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <rect class="fill ln" x="20" y="30" width="150" height="60" rx="7"/>
+        <text class="tb" x="34" y="54">executor</text>
+        <text class="ts" x="34" y="72">“a ready desk, please”</text>
+
+        <line class="ln" x1="170" y1="60" x2="222" y2="60" marker-end="url(#w)"/>
+
+        <rect class="raise acc" x="230" y="14" width="510" height="196" rx="8" stroke-width="2"/>
+        <text class="tcap accT" x="246" y="36">COMPUTERS</text>
+
+        <rect class="fill ln" x="246" y="48" width="150" height="70" rx="6"/>
+        <text class="t" x="256" y="68">assignment</text>
+        <text class="ts" x="256" y="84">scope → which desk</text>
+        <text class="ts" x="256" y="98">kind · org’s desk host</text>
+        <text class="ts" x="256" y="112">shared or own</text>
+
+        <line class="ln" x1="396" y1="83" x2="418" y2="83" marker-end="url(#w)"/>
+
+        <rect class="fill ln" x="424" y="48" width="150" height="70" rx="6"/>
+        <text class="t" x="434" y="68">lifecycle</text>
+        <text class="ts" x="434" y="84">stopped? → wake</text>
+        <text class="ts" x="434" y="98">missing? → create</text>
+        <text class="ts" x="434" y="112">mint token if new</text>
+
+        <line class="ln" x1="574" y1="83" x2="596" y2="83" marker-end="url(#w)"/>
+
+        <rect class="fill ln" x="602" y="48" width="122" height="70" rx="6"/>
+        <text class="t" x="612" y="68">ready?</text>
+        <text class="tm" x="612" y="84">GET :1340/v1/ready</text>
+        <text class="ts" x="612" y="98">poll until 200</text>
+        <text class="ts" x="612" y="112">then hand back</text>
+
+        <text class="ts" x="246" y="150">returns to the executor: an address on a private network, and the desk’s bearer token</text>
+        <text class="ts" x="246" y="168">the executor’s call then goes to that address. it never sees a container, a host, or a volume.</text>
+        <text class="ts accT" x="246" y="196">the org’s desk host is on the assignment row: the building’s own runtime, or a machine the org points at.</text>
+      </svg>
+    </div>
+    <figcaption>This is the seam the “born and dies” book will open up. From the executor’s side
+    it is one call with one answer, and that is how it should stay.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 7. COMPUTER USE ============ -->
+<section class="plate">
+  <p class="eyebrow">Same path, many times</p>
+  <h2>Computer Use is just tool calls, quickly</h2>
+  <p>There is no special mode. A screenshot is a tool call. A click is a tool call. Each one
+  walks all eight stations. What makes it feel different is that the model asks for a hundred of
+  them in a row.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 200" role="img" aria-label="A loop: screenshot tool call, model looks, click tool call, screenshot again. Each is a full tool call through the same path, against the desk's 1280 by 800 framebuffer.">
+        <defs><marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+        <rect class="fill ln" x="20" y="50" width="150" height="56" rx="7"/><text class="t" x="95" y="74" text-anchor="middle">screenshot</text><text class="tm" x="95" y="92" text-anchor="middle">POST /v1/cua/screenshot</text>
+        <line class="ln" x1="170" y1="78" x2="212" y2="78" marker-end="url(#c)"/>
+        <rect class="fill ln" x="220" y="50" width="150" height="56" rx="7"/><text class="t" x="295" y="74" text-anchor="middle">model looks</text><text class="ts" x="295" y="92" text-anchor="middle">via Inference</text>
+        <line class="ln" x1="370" y1="78" x2="412" y2="78" marker-end="url(#c)"/>
+        <rect class="fill ln" x="420" y="50" width="150" height="56" rx="7"/><text class="t" x="495" y="74" text-anchor="middle">click 412, 288</text><text class="tm" x="495" y="92" text-anchor="middle">POST /v1/cua/click</text>
+        <line class="ln" x1="570" y1="78" x2="612" y2="78" marker-end="url(#c)"/>
+        <rect class="fill ln" x="620" y="50" width="120" height="56" rx="7"/><text class="t" x="680" y="74" text-anchor="middle">screenshot</text><text class="ts" x="680" y="92" text-anchor="middle">again…</text>
+        <path class="ln dash soft" d="M680 106 C 680 150 95 150 95 106" marker-end="url(#c)"/>
+        <text class="ts" x="20" y="176">each box is a full tool call: registry → router → policy → executor → desk → record → harness.</text>
+        <text class="ts" x="20" y="192">the screen is the desk’s framebuffer, 1280×800, origin top-left. a click outside it is refused. a password field means: hand off to a human.</text>
+      </svg>
+    </div>
+    <figcaption>Because every action is an ordinary tool call, auto-review sees every click. A
+    rule like “never submit a payment form” applies to computer use with no extra machinery.</figcaption>
+  </figure>
+</section>
+
+<!-- ============ 8. NEVER ============ -->
+<section class="plate">
+  <p class="eyebrow">The invariants</p>
+  <h2>What the model never gets to do</h2>
+  <ul class="never">
+    <li>Name the desk it runs on. The run’s context does.</li>
+    <li>Name whose records a tool touches. Bind overwrites it.</li>
+    <li>See a bearer token, an OAuth token, or a provider key.</li>
+    <li>Reach a desk, a machine, or a connector directly. Only the executor calls out.</li>
+    <li>Turn a refusal into a crash. “No” always comes back as a result.</li>
+    <li>Skip a station. Every tool, every time, all eight.</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    The model writes a wish; the registry reads it, the router addresses it, policy signs it,
+    the executor seals it, the desk opens it — and the record keeps the receipt.</p>
+</footer>
+
+</div>

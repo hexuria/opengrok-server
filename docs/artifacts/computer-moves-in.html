@@ -1,0 +1,751 @@
+<title>The Computer Moves In</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+
+  /* Same room as the rest of the OpenGrok picture books: dark, one gold lamp. */
+  :root{
+    --ground:#16130F;
+    --surface:#1F1A14;
+    --raise:#272016;
+    --ink:#EDE6DA;
+    --muted:#A79E8F;
+    --line:#3D362C;
+    --gold:#E5B565;
+    --gold-soft:#2E2415;
+    --dead:#E07B6B;
+    --live:#93BE7E;
+    --live-soft:#1E2818;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --ground:#F2EFE9;
+      --surface:#FBFAF7;
+      --raise:#F4EFE4;
+      --ink:#221C14;
+      --muted:#6E675C;
+      --line:#D8D2C6;
+      --gold:#9C6A0B;
+      --gold-soft:#F1E5CE;
+      --dead:#A03A2E;
+      --live:#3E6E36;
+      --live-soft:#E2EDDC;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#F2EFE9;
+    --surface:#FBFAF7;
+    --raise:#F4EFE4;
+    --ink:#221C14;
+    --muted:#6E675C;
+    --line:#D8D2C6;
+    --gold:#9C6A0B;
+    --gold-soft:#F1E5CE;
+    --dead:#A03A2E;
+    --live:#3E6E36;
+    --live-soft:#E2EDDC;
+  }
+
+  body{
+    margin:0;
+    background:var(--ground);
+    color:var(--ink);
+    font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;
+    font-size:17px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{width:min(100% - 2.5rem, 58rem);margin-inline:auto}
+
+  .eyebrow{
+    font-size:.68rem;font-weight:600;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--gold);margin:0 0 .8rem;
+  }
+  h1,h2,h3{
+    font-family:Fraunces,Georgia,serif;font-weight:900;
+    letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem;
+  }
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+
+  .hero{padding:4.5rem 0 3rem}
+  .plate{padding:2.8rem 0;border-top:1px solid var(--line)}
+  .closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+
+  figure{margin:0 0 1.4rem}
+  .figbox{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:1.4rem 1.2rem;
+    overflow-x:auto;
+  }
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+
+  /* SVG vocabulary, shared with the other books in this set */
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)}
+  .raise{fill:var(--raise)}
+  .soft{opacity:.5}
+  .dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)}
+  .accf{fill:var(--gold)}
+  .accT{fill:var(--gold)}
+  .bad{stroke:var(--dead)}
+  .badf{fill:var(--dead)}
+  .badT{fill:var(--dead)}
+  .liv{stroke:var(--live)}
+  .livf{fill:var(--live)}
+  .livT{fill:var(--live)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px}
+  .ts{font-size:11px;opacity:.72}
+  .tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600}
+  .tcap{font-size:10px;letter-spacing:.14em;font-weight:600}
+
+  /* parts grids */
+  .parts{display:grid;gap:.7rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));margin:1.2rem 0 0;padding:0;list-style:none}
+  .parts li{
+    background:var(--surface);border:1px solid var(--line);border-radius:8px;
+    padding:.75rem .85rem;
+  }
+  .parts .nm{font-weight:600;font-size:.95rem;display:block}
+  .parts .pt{font-family:var(--mono);font-size:.74rem;color:var(--gold);letter-spacing:.02em;display:block;margin-top:.1rem}
+  .parts .ds{color:var(--muted);font-size:.86rem;display:block;margin-top:.35rem;line-height:1.4}
+
+  .tag{
+    display:inline-block;font-family:var(--mono);font-size:.72rem;
+    padding:.14rem .45rem;border-radius:4px;border:1px solid var(--line);
+    color:var(--muted);margin-right:.35rem;
+  }
+  .tag.g{color:var(--gold);border-color:var(--gold);background:var(--gold-soft)}
+
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+
+  .note{
+    border-left:3px solid var(--gold);background:var(--gold-soft);
+    padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0;
+  }
+  .note p{margin:0;max-width:58ch}
+  .note strong{color:var(--gold)}
+
+  ol.steps{counter-reset:s;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  ol.steps li{
+    counter-increment:s;position:relative;padding:.6rem .8rem .6rem 2.9rem;
+    background:var(--surface);border:1px solid var(--line);border-radius:8px;
+  }
+  ol.steps li::before{
+    content:counter(s);position:absolute;left:.8rem;top:.6rem;
+    font-family:var(--mono);font-size:.78rem;color:var(--gold);
+    border:1px solid var(--gold);border-radius:50%;
+    width:1.5rem;height:1.5rem;display:grid;place-items:center;
+  }
+  ol.steps b{font-weight:600}
+  ol.steps span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+
+  a{color:var(--gold)}
+  :focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+  @media (prefers-reduced-motion:no-preference){}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book</p>
+  <h1>The Computer Moves In</h1>
+  <p class="lede">You have the app and you have the server. The third thing — the computer the
+  coworker actually types on — is still rented from someone else. Here is what it is, what it is
+  made of, and how to bring it home.</p>
+</header>
+
+<!-- ===================== 1. THE FOUR LAYERS ===================== -->
+<section class="plate">
+  <p class="eyebrow">The shape</p>
+  <h2>Four layers, not three</h2>
+  <p>The old drawing had three floors: <b>client</b>, <b>server</b>, <b>computer</b>. That drawing
+  is missing a door. Model calls do not belong to any of those three — they leave the building
+  through <b>open-ai-gateway</b>, which is its own layer.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 440" role="img" aria-label="Four layers: the client talks only to the server; the server talks to the box with a bearer token and to the gateway for model calls; the box never calls the gateway.">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"/>
+          </marker>
+          <marker id="a1g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="var(--gold)"/>
+          </marker>
+        </defs>
+
+        <!-- L1 -->
+        <rect class="fill ln" x="40" y="18" width="420" height="82" rx="8"/>
+        <text class="tcap accT" x="58" y="42">L1 · CLIENT</text>
+        <text class="tb" x="58" y="64">The window</text>
+        <text class="ts" x="58" y="84">Open Grok.app · chat, permission cards, screen viewer</text>
+
+        <!-- L2 -->
+        <rect class="fill ln" x="40" y="152" width="420" height="98" rx="8"/>
+        <text class="tcap accT" x="58" y="176">L2 · SERVER / CONTROL PLANE</text>
+        <text class="tb" x="58" y="198">The building</text>
+        <text class="ts" x="58" y="218">opengrok-server · auth, transcripts, tool router,</text>
+        <text class="ts" x="58" y="234">box lifecycle, guardrails</text>
+
+        <!-- L3 -->
+        <rect class="raise acc" x="40" y="302" width="420" height="98" rx="8" stroke-width="2" fill-opacity="1"/>
+        <text class="tcap accT" x="58" y="326">L3 · BOX / COMPUTER</text>
+        <text class="tb accT" x="58" y="348">The desk</text>
+        <text class="ts" x="58" y="368">hexuria/box · a Linux container with a shell,</text>
+        <text class="ts" x="58" y="384">files, a screen and a browser</text>
+
+        <!-- L4 -->
+        <rect class="fill ln" x="524" y="152" width="196" height="98" rx="8"/>
+        <text class="tcap accT" x="542" y="176">L4 · GATEWAY</text>
+        <text class="tb" x="542" y="198">The front door</text>
+        <text class="ts" x="542" y="218">open-ai-gateway</text>
+        <text class="ts" x="542" y="234">models only</text>
+
+        <!-- arrows -->
+        <line class="ln" x1="250" y1="100" x2="250" y2="146" marker-end="url(#a1)"/>
+        <text class="tm" x="264" y="120">HTTPS · x-opengrok-account</text>
+        <text class="ts" x="264" y="136">“what should the coworker do?”</text>
+
+        <line class="ln acc" x1="250" y1="250" x2="250" y2="296" marker-end="url(#a1g)"/>
+        <text class="tm accT" x="264" y="270">HTTP · Authorization: Bearer BOX_TOKEN</text>
+        <text class="ts" x="264" y="286">“run this on the desk”</text>
+
+        <line class="ln" x1="460" y1="201" x2="518" y2="201" marker-end="url(#a1)"/>
+        <text class="tm" x="466" y="190">POST /v1/messages</text>
+
+        <!-- the arrow that must NOT exist -->
+        <path class="ln bad dash" d="M460 350 C 620 350 622 268 622 258"/>
+        <line class="ln bad" x1="612" y1="286" x2="632" y2="266"/>
+        <line class="ln bad" x1="612" y1="266" x2="632" y2="286"/>
+        <text class="ts badT" x="500" y="392">the box never calls the gateway</text>
+        <text class="ts badT" x="500" y="408">and never holds a model key</text>
+      </svg>
+    </div>
+    <figcaption>Each layer talks only to its neighbour. The client never holds
+    <code>BOX_TOKEN</code>; the box never holds a model key. Every crossing is one labelled
+    arrow — if you cannot name the arrow, the layer boundary is in the wrong place.</figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>The rule of thumb.</strong> Client asks. Server decides. Box does. Gateway
+    thinks. Anything that breaks that sentence is in the wrong layer.</p>
+  </div>
+</section>
+
+<!-- ===================== 2. WHAT EACH LAYER IS MADE OF ===================== -->
+<section class="plate">
+  <p class="eyebrow">The parts</p>
+  <h2>What each layer is made of</h2>
+  <p>“Client, server, computer” is three words for about twenty parts. These are the parts, with
+  the name you should use for each one.</p>
+
+  <h3 style="margin-top:2rem"><span class="tag g">L1</span> Client — the window</h3>
+  <ul class="parts">
+    <li><span class="nm">Chat &amp; transcript</span><span class="ds">Renders the turn as it streams. Owns nothing; if you close it, the work carries on.</span></li>
+    <li><span class="nm">Permission card</span><span class="ds">Approve · deny · cancel · expire. All four outcomes must be reported to the server. A card that times out is a “no”, never a silent “yes”.</span></li>
+    <li><span class="nm">Secret request</span><span class="ds">Masked box for an API key. Goes to the server, then into the box environment for one run — never into the transcript.</span></li>
+    <li><span class="nm">Screen viewer</span><span class="ds">An iframe onto the box’s desktop over noVNC. This is how a human watches, and how a human takes over to type a password.</span></li>
+    <li><span class="nm">Local exec daemon</span><span class="ds">The <em>only</em> part that touches your Mac. Needs the app open and a permission card approved. Mac asleep = this path is gone; the box keeps working.</span></li>
+  </ul>
+
+  <h3 style="margin-top:2rem"><span class="tag g">L2</span> Server — the building</h3>
+  <ul class="parts">
+    <li><span class="nm">Auth &amp; account session</span><span class="ds">Who is asking. The identity every other decision hangs off.</span></li>
+    <li><span class="nm">Transcripts</span><span class="ds">The durable record of the conversation. The client reads it; it does not own it.</span></li>
+    <li><span class="nm">Agent records</span><span class="ds">Each coworker, and which computer it is bound to.</span></li>
+    <li><span class="nm">Tool router</span><span class="ds">Takes the model’s <code>tool_calls</code> and picks a destination: the box, the Mac, or an MCP connector. This is the piece people forget, and without it the model suggests tools and nothing happens.</span></li>
+    <li><span class="nm">Box lifecycle <em>(EnsureBox)</em></span><span class="ds">Create · wait ready · use · stop · hibernate · destroy. Mints <code>BOX_TOKEN</code>, mounts the volumes, publishes the ports.</span></li>
+    <li><span class="nm">Guardrails / auto-review</span><span class="ds">Decides whether a tool call runs, needs a human, or is refused — before it reaches the box.</span></li>
+    <li><span class="nm">Connector vault</span><span class="ds">OAuth tokens for MCP servers. Prefer a connector over driving a website whenever a real API exists.</span></li>
+  </ul>
+
+  <h3 style="margin-top:2rem"><span class="tag g">L3</span> Box — the desk</h3>
+  <ul class="parts">
+    <li><span class="nm">box-exec</span><span class="pt">:1337</span><span class="ds">Runs commands, reads and writes files, and performs computer use. <code>POST /v1/exec</code>, <code>GET|PUT /v1/files</code>, <code>POST /v1/cua/*</code>.</span></li>
+    <li><span class="nm">box-host</span><span class="pt">:1340</span><span class="ds">Says who this box is and whether it is up: <code>/v1/health</code>, <code>/v1/ready</code>, <code>/v1/info</code>. The orchestrator polls it. It runs no models.</span></li>
+    <li><span class="nm">Xvfb + openbox</span><span class="pt">display :1 · 1280×800</span><span class="ds">A screen that no monitor is attached to. Everything the agent “sees” is this framebuffer.</span></li>
+    <li><span class="nm">x11vnc + noVNC</span><span class="pt">:6080 published · 5900 local</span><span class="ds">Turns that screen into a web page so a human can watch or take over.</span></li>
+    <li><span class="nm">Chromium</span><span class="pt">CDP :9222, localhost only</span><span class="ds">The agent’s browser, with a profile on a volume so logins survive a restart. Closing it must not kill the box.</span></li>
+    <li><span class="nm">Workspace jail</span><span class="pt">/workspace</span><span class="ds">Every path resolves under this root, after symlinks. <code>/workspace-evil</code> is not inside <code>/workspace</code>.</span></li>
+  </ul>
+
+  <h3 style="margin-top:2rem"><span class="tag g">L4</span> Gateway — the front door</h3>
+  <ul class="parts">
+    <li><span class="nm">open-ai-gateway</span><span class="pt">:29080 inference</span><span class="ds">One door for every model call. Anthropic- and OpenAI-shaped. Routes the cheap majority cheaply and escalates when the work needs it.</span></li>
+    <li><span class="nm">Admin &amp; dashboard</span><span class="pt">:29081</span><span class="ds">What you spent, against what frontier-for-everything would have cost.</span></li>
+    <li><span class="nm">What it is not</span><span class="ds">It does not execute tools. It does not manage containers. It has never heard of a box.</span></li>
+  </ul>
+</section>
+
+<!-- ===================== 3. NAMING ===================== -->
+<section class="plate">
+  <p class="eyebrow">The words</p>
+  <h2>Three different things are called “gateway”</h2>
+  <p>This is the single most expensive confusion in the stack, because two of them are reachable
+  over HTTP and both answer.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 250" role="img" aria-label="Three components are called gateway or router: the inference gateway on the server, the tool router on the server, and the host gateway inside the box. They are not substitutes for one another.">
+        <rect class="fill ln" x="20" y="40" width="222" height="150" rx="8"/>
+        <text class="tcap accT" x="38" y="66">INFERENCE GATEWAY</text>
+        <text class="tb" x="38" y="90">open-ai-gateway</text>
+        <text class="ts" x="38" y="112">Lives on: your server (L4)</text>
+        <text class="ts" x="38" y="132">Talks to: models</text>
+        <text class="ts" x="38" y="152">Returns: text and tool_calls</text>
+        <text class="ts badT" x="38" y="176">Executes nothing</text>
+
+        <rect class="fill ln" x="269" y="40" width="222" height="150" rx="8"/>
+        <text class="tcap accT" x="287" y="66">TOOL ROUTER</text>
+        <text class="tb" x="287" y="90">inside opengrok-server</text>
+        <text class="ts" x="287" y="112">Lives on: your server (L2)</text>
+        <text class="ts" x="287" y="132">Takes: tool_calls</text>
+        <text class="ts" x="287" y="152">Sends them to: box | Mac | MCP</text>
+        <text class="ts badT" x="287" y="176">Calls no models</text>
+
+        <rect class="raise acc" x="518" y="40" width="222" height="150" rx="8" stroke-width="2"/>
+        <text class="tcap accT" x="536" y="66">HOST GATEWAY</text>
+        <text class="tb" x="536" y="90">box-host :1340</text>
+        <text class="ts" x="536" y="112">Lives on: inside the box (L3)</text>
+        <text class="ts" x="536" y="132">Answers: am I up? who am I?</text>
+        <text class="ts" x="536" y="152">Used by: the orchestrator</text>
+        <text class="ts badT" x="536" y="176">Not inference. At all.</text>
+
+        <text class="tb badT" x="248" y="122">≠</text>
+        <text class="tb badT" x="497" y="122">≠</text>
+
+        <text class="ts" x="20" y="222">A fresh VPS with only box-host looks healthy and cannot run a single tool.</text>
+      </svg>
+    </div>
+    <figcaption>“The gateway is up” is not a sentence. Say which one.</figcaption>
+  </figure>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Say this</th><th>Not this</th><th>Because</th></tr></thead>
+    <tbody>
+      <tr><td><b>Box</b> / computer (L3)</td><td>“the sandbox”, “the VM”</td><td>It is a container with a screen, a browser and a jail — the sandbox is one property of it, not its name.</td></tr>
+      <tr><td><b>box-exec</b> <code>:1337</code></td><td>“exec-daemon”</td><td><code>exec-daemon</code> is the vendor’s binary. Yours is your own wire; do not borrow the name.</td></tr>
+      <tr><td><b>box-host</b> <code>:1340</code></td><td>“sand-host”, “the gateway”</td><td>Same reason, plus it collides with L4.</td></tr>
+      <tr><td><b>CUA</b> = Computer Use</td><td>“computer user agent”</td><td>Screenshot, then click or type. Against the <em>box</em> screen.</td></tr>
+      <tr><td><b>EnsureBox</b></td><td>“box API”</td><td>It is the lifecycle owner on L2, not a proxy in front of the box.</td></tr>
+      <tr><td><b>Local exec</b></td><td>“box exec on the Mac”</td><td>Different path, different permissions, different machine. They are never substitutes.</td></tr>
+      <tr><td><b>Connector</b> (MCP)</td><td>“plugin”</td><td>A plugin is a capability bundle you install; a connector is an MCP server with structured tools and an OAuth token in the vault.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ===================== 4. ONE TURN ===================== -->
+<section class="plate">
+  <p class="eyebrow">The process</p>
+  <h2>One turn, all the way through</h2>
+  <p>A single message from you crosses every layer, twice. The numbers are the order.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 400" role="img" aria-label="A turn zig-zags: client to server, server to gateway for the model call, back to the server tool router, down to the box to execute, back to the server, to the gateway again to continue, and finally streamed to the client.">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- lanes -->
+        <line class="thin" x1="150" y1="52" x2="740" y2="52"/>
+        <line class="thin" x1="150" y1="146" x2="740" y2="146"/>
+        <line class="thin" x1="150" y1="238" x2="740" y2="238"/>
+        <line class="thin" x1="150" y1="330" x2="740" y2="330"/>
+        <text class="tcap accT" x="20" y="48">L1 CLIENT</text>
+        <text class="tcap accT" x="20" y="142">L2 SERVER</text>
+        <text class="tcap accT" x="20" y="234">L4 GATEWAY</text>
+        <text class="tcap accT" x="20" y="326">L3 BOX</text>
+
+        <!-- path -->
+        <polyline class="ln" points="196,52 196,146 288,146 288,238" marker-end="url(#a2)"/>
+        <polyline class="ln" points="288,238 380,238 380,146" marker-end="url(#a2)"/>
+        <polyline class="ln acc" points="380,146 472,146 472,330" marker-end="url(#a2)"/>
+        <polyline class="ln acc" points="472,330 564,330 564,146" marker-end="url(#a2)"/>
+        <polyline class="ln" points="564,146 640,146 640,238" marker-end="url(#a2)"/>
+        <polyline class="ln" points="640,238 704,238 704,52" marker-end="url(#a2)"/>
+
+        <!-- nodes -->
+        <circle class="fill ln" cx="196" cy="52" r="13"/><text class="t" x="196" y="57" text-anchor="middle">1</text>
+        <circle class="fill ln" cx="288" cy="146" r="13"/><text class="t" x="288" y="151" text-anchor="middle">2</text>
+        <circle class="fill ln" cx="288" cy="238" r="13"/><text class="t" x="288" y="243" text-anchor="middle">3</text>
+        <circle class="fill ln" cx="380" cy="146" r="13"/><text class="t" x="380" y="151" text-anchor="middle">4</text>
+        <circle class="raise acc" cx="472" cy="146" r="13" stroke-width="2"/><text class="t accT" x="472" y="151" text-anchor="middle">5</text>
+        <circle class="raise acc" cx="472" cy="330" r="13" stroke-width="2"/><text class="t accT" x="472" y="335" text-anchor="middle">6</text>
+        <circle class="fill ln" cx="564" cy="146" r="13"/><text class="t" x="564" y="151" text-anchor="middle">7</text>
+        <circle class="fill ln" cx="640" cy="238" r="13"/><text class="t" x="640" y="243" text-anchor="middle">8</text>
+        <circle class="fill ln" cx="704" cy="52" r="13"/><text class="t" x="704" y="57" text-anchor="middle">9</text>
+
+        <!-- labels -->
+        <text class="ts" x="196" y="28" text-anchor="middle">you ask</text>
+        <text class="ts" x="288" y="120" text-anchor="middle">auth + log</text>
+        <text class="ts" x="288" y="272" text-anchor="middle">model call</text>
+        <text class="ts" x="380" y="120" text-anchor="middle">tool_calls</text>
+        <text class="ts accT" x="472" y="106" text-anchor="middle">router +</text>
+        <text class="ts accT" x="472" y="120" text-anchor="middle">guardrail</text>
+        <text class="ts accT" x="472" y="366" text-anchor="middle">exec / files / CUA</text>
+        <text class="ts" x="564" y="120" text-anchor="middle">result</text>
+        <text class="ts" x="640" y="272" text-anchor="middle">continue</text>
+        <text class="ts" x="704" y="28" text-anchor="middle">stream</text>
+
+        <text class="ts soft" x="150" y="390">Steps 4→7 repeat for as many tools as the turn needs.</text>
+      </svg>
+    </div>
+    <figcaption>The gold segment is the only part that leaves your server for the box. Everything
+    else is L2 talking to itself and to the gateway.</figcaption>
+  </figure>
+
+  <ol class="steps">
+    <li><b>You send a message</b><span>From the desktop app, or a phone, or the web console. The client just posts it.</span></li>
+    <li><b>The server checks who you are and writes it down</b><span>Auth, then the message is appended to the durable transcript. Now it survives you closing the app.</span></li>
+    <li><b>The server asks the model, through the gateway</b><span>Prompt plus the list of tools this coworker is allowed to use. The gateway picks the model and bills it.</span></li>
+    <li><b>The model answers with tool calls</b><span>“Run <code>npm test</code>.” “Read this file.” “Take a screenshot.” It cannot run any of them itself.</span></li>
+    <li><b>The tool router decides where each one goes</b><span>Box, your Mac, or an MCP connector — and asks the guardrail first. A risky one raises a permission card and waits for your answer.</span></li>
+    <li><b>The box does the work</b><span><code>POST /v1/exec</code> with the bearer token. Or a file. Or a click on the box’s own screen. Results come back as data.</span></li>
+    <li><b>The server stitches the results back into the turn</b><span>And writes the activity frames the client is watching.</span></li>
+    <li><b>Back to the model to continue</b><span>Loop from step 4 until the model has a final answer.</span></li>
+    <li><b>The reply streams to the client</b><span>Which was only ever a window onto step 2’s transcript.</span></li>
+  </ol>
+</section>
+
+<!-- ===================== 5. RENTED VS OWNED ===================== -->
+<section class="plate">
+  <p class="eyebrow">The move</p>
+  <h2>Renting a desk vs. owning one</h2>
+  <p>Right now the computer layer is <code>box.ascii.dev</code> — somebody else’s API, somebody
+  else’s lifecycle, somebody else’s idea of what a box is. It works, and it costs you the two
+  things a control plane exists to own: <b>when a box exists</b> and <b>what its wire looks
+  like</b>.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 340" role="img" aria-label="Today the server calls a third-party box service over the internet, which owns the container. In the target, the server's own EnsureBox runs the container directly on a private network, and the third-party hop disappears.">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"/>
+          </marker>
+          <marker id="a3g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="var(--live)"/>
+          </marker>
+        </defs>
+
+        <text class="tcap badT" x="20" y="22">TODAY · RENTED</text>
+        <text class="tcap livT" x="410" y="22">TARGET · OWNED</text>
+        <line class="thin" x1="380" y1="10" x2="380" y2="330"/>
+
+        <!-- LEFT -->
+        <rect class="fill ln" x="20" y="40" width="330" height="52" rx="7"/>
+        <text class="tb" x="36" y="62">opengrok-server</text>
+        <text class="ts" x="36" y="80">tool router</text>
+
+        <line class="ln bad" x1="185" y1="92" x2="185" y2="130" marker-end="url(#a3)"/>
+        <text class="tm badT" x="196" y="116">the public internet</text>
+
+        <rect class="fill bad dash" x="20" y="134" width="330" height="52" rx="7"/>
+        <text class="tb badT" x="36" y="156">box.ascii.dev</text>
+        <text class="ts" x="36" y="174">their API · their tokens · their lifecycle</text>
+
+        <line class="ln bad" x1="185" y1="186" x2="185" y2="224" marker-end="url(#a3)"/>
+
+        <rect class="fill ln" x="20" y="228" width="330" height="60" rx="7"/>
+        <text class="tb" x="36" y="250">a container you cannot see inside</text>
+        <text class="ts" x="36" y="270">ports, image and volumes are theirs</text>
+
+        <text class="ts badT" x="20" y="316">Two hops. One of them is a company.</text>
+
+        <!-- RIGHT -->
+        <rect class="fill ln" x="410" y="40" width="330" height="52" rx="7"/>
+        <text class="tb" x="426" y="62">opengrok-server</text>
+        <text class="ts" x="426" y="80">tool router + EnsureBox</text>
+
+        <line class="ln liv" x1="575" y1="92" x2="575" y2="224" marker-end="url(#a3g)"/>
+        <text class="tm livT" x="586" y="132">docker run · inject BOX_TOKEN</text>
+        <text class="tm livT" x="586" y="150">poll :1340/v1/ready</text>
+        <text class="tm livT" x="586" y="168">then :1337/v1/exec</text>
+        <text class="ts livT" x="586" y="192">private network, never public</text>
+
+        <rect class="raise liv" x="410" y="228" width="330" height="60" rx="7" stroke-width="2"/>
+        <text class="tb livT" x="426" y="250">grok-box</text>
+        <text class="ts" x="426" y="270">1337 exec · 1340 host · 6080 viewer</text>
+
+        <text class="ts livT" x="410" y="316">One hop. Everything in it is yours.</text>
+      </svg>
+    </div>
+    <figcaption>The difference is one arrow. Removing it moves the lifecycle, the token, the image
+    and the port map inside your own control plane — which is where the architecture already said
+    they lived.</figcaption>
+  </figure>
+
+  <div class="tw">
+  <table>
+    <thead><tr><th>Who owns it</th><th>Rented (box.ascii.dev)</th><th>Owned (hexuria/box)</th></tr></thead>
+    <tbody>
+      <tr><td>When a box exists</td><td>Their lifecycle API</td><td>Your <code>EnsureBox</code> — create, stop, hibernate, destroy</td></tr>
+      <tr><td>The auth secret</td><td>Their account key, one for everyone</td><td><code>BOX_TOKEN</code> per box, minted on create, stored beside the box row</td></tr>
+      <tr><td>The wire</td><td>Whatever they ship</td><td><code>POST /v1/exec</code>, <code>GET|PUT /v1/files</code>, <code>POST /v1/cua/*</code></td></tr>
+      <tr><td>The image</td><td>Fixed</td><td>Your Dockerfile — add a language runtime and it is there next boot</td></tr>
+      <tr><td>Where files live</td><td>Their disk</td><td>A volume you mount at <code>/workspace</code></td></tr>
+      <tr><td>Cookies / logins</td><td>Their disk</td><td>A volume at <code>/home/box/chrome-profile</code></td></tr>
+      <tr><td>Network exposure</td><td>Public by construction</td><td>Private fabric; 5900 and 9222 never published</td></tr>
+      <tr><td>Cost per idle box</td><td>Their pricing</td><td><code>docker stop</code>, keep the volumes</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <p><strong>What you are not giving up.</strong> Nothing about the box wire is exotic. It is six
+    HTTP endpoints and a bearer token. The reason to bring it home is not features — it is that
+    “when does a computer exist, and who may touch it” is a control-plane question, and it is
+    currently being answered by a third party.</p>
+  </div>
+</section>
+
+<!-- ===================== 6. CUA ===================== -->
+<section class="plate">
+  <p class="eyebrow">The screen</p>
+  <h2>Computer Use is on the box, not on your Mac</h2>
+  <p>When the coworker “uses a computer”, it takes a screenshot of a screen that no monitor is
+  attached to, and clicks on that. Your own machine is a completely separate path with a
+  completely separate permission model.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 300" role="img" aria-label="Computer use goes from the tool router to box-exec to the box's Xvfb display. The user's Mac is reached only by the local exec daemon after an approved permission card, and never by computer use.">
+        <defs>
+          <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <rect class="fill ln" x="20" y="112" width="150" height="60" rx="7"/>
+        <text class="tb" x="34" y="138">tool router</text>
+        <text class="ts" x="34" y="156">on your server</text>
+
+        <line class="ln acc" x1="170" y1="128" x2="228" y2="128" marker-end="url(#a4)"/>
+        <line class="ln soft dash" x1="170" y1="156" x2="228" y2="156" marker-end="url(#a4)"/>
+
+        <!-- box branch -->
+        <rect class="raise acc" x="234" y="30" width="500" height="128" rx="8" stroke-width="2"/>
+        <text class="tcap accT" x="252" y="54">THE BOX · WHERE CUA HAPPENS</text>
+        <rect class="fill ln" x="252" y="66" width="130" height="46" rx="6"/>
+        <text class="t" x="262" y="86">box-exec</text>
+        <text class="tm" x="262" y="102">:1337/v1/cua/*</text>
+        <line class="ln acc" x1="382" y1="89" x2="414" y2="89" marker-end="url(#a4)"/>
+        <rect class="fill ln" x="420" y="66" width="130" height="46" rx="6"/>
+        <text class="t" x="430" y="86">Xvfb :1</text>
+        <text class="tm" x="430" y="102">1280×800</text>
+        <line class="ln acc" x1="550" y1="89" x2="582" y2="89" marker-end="url(#a4)"/>
+        <rect class="fill ln" x="588" y="66" width="130" height="46" rx="6"/>
+        <text class="t" x="598" y="86">Chromium</text>
+        <text class="tm" x="598" y="102">profile volume</text>
+        <text class="ts" x="252" y="136">screenshot · click · type · key · scroll</text>
+        <text class="ts" x="252" y="152">you can watch it live on :6080</text>
+
+        <!-- mac branch -->
+        <rect class="fill ln soft" x="234" y="182" width="500" height="76" rx="8"/>
+        <text class="tcap" x="252" y="206">YOUR MAC · A DIFFERENT PATH ENTIRELY</text>
+        <text class="ts" x="252" y="228">local exec daemon · only with an approved permission card</text>
+        <text class="ts" x="252" y="246">Mac asleep? this path is gone. The box carries on.</text>
+
+        <text class="ts badT" x="20" y="288">CUA never touches the screen you are looking at.</text>
+      </svg>
+    </div>
+    <figcaption>Two paths leave the router. Only the gold one is Computer Use, and it ends on a
+    framebuffer inside a container.</figcaption>
+  </figure>
+</section>
+
+<!-- ===================== 7. SECRETS ===================== -->
+<section class="plate">
+  <p class="eyebrow">The secrets</p>
+  <h2>Four kinds of secret, four different homes</h2>
+  <p>Getting this wrong is how a password ends up in a transcript. Each class has exactly one
+  place it is allowed to rest.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 280" role="img" aria-label="Website cookies rest on the box only; connector OAuth tokens rest in the server vault; one-off secrets pass through the client masked into the box environment; the account session lives on client and server.">
+        <line class="thin" x1="20" y1="60" x2="740" y2="60"/>
+        <text class="tcap accT" x="20" y="50">WHERE IT RESTS</text>
+
+        <rect class="fill ln" x="20" y="76" width="170" height="122" rx="8"/>
+        <text class="tb" x="34" y="100">Site cookies</text>
+        <text class="ts livT" x="34" y="124">On the box. Only.</text>
+        <text class="ts" x="34" y="146">You log in yourself,</text>
+        <text class="ts" x="34" y="162">on the box screen,</text>
+        <text class="ts" x="34" y="178">during a handoff.</text>
+        <text class="ts badT" x="20" y="222">The password never</text>
+        <text class="ts badT" x="20" y="238">reaches your server.</text>
+
+        <rect class="fill ln" x="204" y="76" width="170" height="122" rx="8"/>
+        <text class="tb" x="218" y="100">Connector OAuth</text>
+        <text class="ts livT" x="218" y="124">Server vault.</text>
+        <text class="ts" x="218" y="146">Tokens for MCP</text>
+        <text class="ts" x="218" y="162">servers. Prefer these</text>
+        <text class="ts" x="218" y="178">over browsing.</text>
+        <text class="ts badT" x="204" y="222">Never written into</text>
+        <text class="ts badT" x="204" y="238">box env files.</text>
+
+        <rect class="fill ln" x="388" y="76" width="170" height="122" rx="8"/>
+        <text class="tb" x="402" y="100">One-off API key</text>
+        <text class="ts livT" x="402" y="124">Box env, one run.</text>
+        <text class="ts" x="402" y="146">Masked box in the</text>
+        <text class="ts" x="402" y="162">client, relayed by the</text>
+        <text class="ts" x="402" y="178">server, then gone.</text>
+        <text class="ts badT" x="388" y="222">Never in plaintext</text>
+        <text class="ts badT" x="388" y="238">in the transcript.</text>
+
+        <rect class="fill ln" x="572" y="76" width="168" height="122" rx="8"/>
+        <text class="tb" x="586" y="100">BOX_TOKEN</text>
+        <text class="ts livT" x="586" y="124">Server only.</text>
+        <text class="ts" x="586" y="146">Minted per box when</text>
+        <text class="ts" x="586" y="162">EnsureBox creates it.</text>
+        <text class="ts" x="586" y="178">Stored on the box row.</text>
+        <text class="ts badT" x="572" y="222">Never sent to the</text>
+        <text class="ts badT" x="572" y="238">client. Ever.</text>
+      </svg>
+    </div>
+    <figcaption>The strongest property here is the first one: a third-party website password is
+    typed by a human, into a browser on the box, and only a cookie survives. Your control plane
+    never sees it.</figcaption>
+  </figure>
+</section>
+
+<!-- ===================== 8. THE SEAM ===================== -->
+<section class="plate">
+  <p class="eyebrow">The good news</p>
+  <h2>You already built the hole. You just need a new plug.</h2>
+  <p>The server does not call <code>box.ascii.dev</code> from all over the place. Every call goes
+  through one async trait — <code>Computer</code> — with the vendor client hidden behind it. There
+  are already two things plugged into that hole. Bringing the box home means writing a third.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 320" role="img" aria-label="The tool router calls one Computer trait. Two implementations exist today: AsciiBoxes for the vendor and DockerComputer for local development. A third implementation for grok-box plugs into the same trait.">
+        <defs>
+          <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+            <polygon points="0,0 10,5 0,10" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <rect class="fill ln" x="230" y="16" width="300" height="54" rx="7"/>
+        <text class="tb" x="248" y="40">tool router</text>
+        <text class="tm" x="248" y="58">opengrok-tools · ToolRunner::execute</text>
+
+        <line class="ln" x1="380" y1="70" x2="380" y2="104" marker-end="url(#a5)"/>
+
+        <rect class="raise acc" x="140" y="108" width="480" height="60" rx="7" stroke-width="2"/>
+        <text class="tb accT" x="158" y="132">trait Computer</text>
+        <text class="tm" x="158" y="152">create · run · read_file · write_file · stop · resume · wake · screen_url</text>
+
+        <line class="ln soft" x1="230" y1="168" x2="150" y2="212" marker-end="url(#a5)"/>
+        <line class="ln soft" x1="380" y1="168" x2="380" y2="212" marker-end="url(#a5)"/>
+        <line class="ln liv" x1="530" y1="168" x2="610" y2="212" marker-end="url(#a5)"/>
+
+        <rect class="fill ln soft" x="20" y="216" width="228" height="66" rx="7"/>
+        <text class="t" x="36" y="240">AsciiBoxes</text>
+        <text class="ts" x="36" y="258">the rented desk</text>
+        <text class="ts" x="36" y="274">ships today</text>
+
+        <rect class="fill ln soft" x="266" y="216" width="228" height="66" rx="7"/>
+        <text class="t" x="282" y="240">DockerComputer</text>
+        <text class="ts" x="282" y="258">local dev · debian-slim</text>
+        <text class="ts" x="282" y="274">no screen, no HTTP wire</text>
+
+        <rect class="raise liv" x="512" y="216" width="228" height="66" rx="7" stroke-width="2"/>
+        <text class="t livT" x="528" y="240">GrokBox — to write</text>
+        <text class="ts" x="528" y="258">docker run hexuria/box</text>
+        <text class="ts" x="528" y="274">1337 · 1340 · 6080</text>
+
+        <text class="ts soft" x="20" y="310">One new file. The router, the tools, the database and the client do not move.</text>
+      </svg>
+    </div>
+    <figcaption>The seam is already correct — <code>crates/opengrok-box/src/lib.rs</code> defines
+    the trait, and <code>ascii/</code> is the only place that speaks the vendor’s HTTP. This is
+    why the move is an addition, not a rewrite.</figcaption>
+  </figure>
+
+  <h3 style="margin-top:2rem">What is genuinely missing</h3>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Piece</th><th>Where it belongs</th><th>State today</th></tr></thead>
+    <tbody>
+      <tr><td>A <code>Computer</code> impl for grok-box</td><td><code>crates/opengrok-box/src/</code></td><td>Not present</td></tr>
+      <tr><td>Mint and inject <code>BOX_TOKEN</code></td><td>Same impl, at container create</td><td>The string does not appear anywhere in the server</td></tr>
+      <tr><td>Publish 1337 / 1340 / 6080</td><td>Same impl</td><td><code>docker.rs</code> publishes 3000, 5173, 8000, 8080 — the wrong ports, because it was never meant to speak this wire</td></tr>
+      <tr><td>Poll <code>GET /v1/ready</code> before use</td><td><code>Computer::wake</code></td><td>Polls the vendor’s state field; there is no readiness probe</td></tr>
+      <tr><td>Talk HTTP to the container</td><td>Same impl</td><td><code>docker.rs</code> pipes through <code>docker exec</code>. Keep its container handling, swap the transport.</td></tr>
+      <tr><td>Computer Use on the trait</td><td><code>trait Computer</code></td><td><b>No screenshot, click or type anywhere.</b> The only computer-use-shaped thing is <code>screen_url</code> — a link a human looks at.</td></tr>
+      <tr><td>Computer Use as tools</td><td><code>crates/opengrok-tools/src/lib.rs</code></td><td>Tool list is <code>shell</code>, <code>read_file</code>, <code>write_file</code>, <code>user_machine_shell</code>, plus MCP passthrough</td></tr>
+      <tr><td>A real VNC URL for the client</td><td><code>crates/opengrok-server/src/grpc.rs</code></td><td><code>ensure_sand_box</code> returns an <em>empty</em> <code>vnc_url</code> — which is why the client’s whole noVNC stack is dead code</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="note">
+    <p><strong>The quiet coincidence.</strong> The desktop client already contains a full noVNC
+    viewer aimed at <code>host:1337</code> and a noVNC port — the shape
+    <code>http://{host}:{port}/vnc.html</code>. It has never worked against your server because
+    the server hands back an empty URL. <code>grok-box</code> publishes exactly those ports. Fill
+    in one field and existing client code lights up.</p>
+  </div>
+</section>
+
+<!-- ===================== 9. BUILD ORDER ===================== -->
+<section class="plate" id="build">
+  <p class="eyebrow">The order</p>
+  <h2>What to build, in the order that keeps working</h2>
+  <p>Every step ends with something you can prove with <code>curl</code> before the next one
+  starts. Nothing here breaks the rented path — it stays plugged into the same trait until you
+  choose to unplug it.</p>
+
+  <ol class="steps">
+    <li><b>Run the box on its own, with no OpenGrok anywhere</b><span><code>docker compose up --build</code> in <code>hexuria/box</code>, then <code>curl :1340/v1/ready</code>, <code>POST :1337/v1/exec</code>, and open <code>:6080/vnc.html</code>. If this does not work, nothing downstream can. It has a smoke script for exactly this.</span></li>
+    <li><b>Write the third <code>Computer</code> impl</b><span>A new module next to <code>ascii/</code> and <code>docker.rs</code>. <code>create</code> = <code>docker run</code> the image with a freshly generated <code>BOX_TOKEN</code>, volumes at <code>/workspace</code> and the Chrome profile, ports 1337/1340/6080 published on loopback. <code>wake</code> = start, then poll <code>/v1/ready</code> until 200. <code>run</code> → <code>POST /v1/exec</code>. <code>read_file</code>/<code>write_file</code> → <code>GET</code>/<code>PUT /v1/files</code>. <code>screen_url</code> → the published viewer URL. <code>stop</code>/<code>destroy</code> → stop the container, keep or drop the volumes.</span></li>
+    <li><b>Let an org choose it</b><span>The provisioning code already decides which computer kind a scope gets, and the database column already stores the kind per scope. Add the new variant; existing rows keep pointing at the rented boxes.</span></li>
+    <li><b>Prove it with the tools you already have</b><span><code>shell</code>, <code>read_file</code> and <code>write_file</code> should work against the new box with no change to the tool router, because they only ever call the trait. If they don’t, the impl is wrong — not the router.</span></li>
+    <li><b>Give the trait eyes and hands</b><span>Add <code>screenshot</code>, <code>click</code>, <code>type_text</code>, <code>key</code>, <code>scroll</code> to <code>Computer</code>, each defaulting to “unsupported” so the other two impls keep compiling untouched. Implement them on the new impl against <code>POST /v1/cua/*</code>. Coordinates are 1280×800, origin top-left.</span></li>
+    <li><b>Expose Computer Use as real tools</b><span>Add the specs to the tool list and dispatch them beside <code>shell</code>. Keep the existing rule absolutely: the box id comes from the turn’s context, never from the model’s arguments. A model that can name the box it runs on can name someone else’s.</span></li>
+    <li><b>Turn the screen back on</b><span>Return a real viewer URL where the server currently returns an empty string. The client’s existing noVNC machinery is built for this exact URL shape and is only dark because the field is blank.</span></li>
+    <li><b>Pick one exec daemon</b><span>The desktop repo ships a TypeScript exec daemon meant to run inside a box, on port 1337. <code>grok-box</code> ships a Rust one, on port 1337. Two implementations of one wire is one too many — keep the Rust one in the image and retire the other, or the reverse, but write down which.</span></li>
+    <li><b>Retire the rented path when you want to, not before</b><span>Both impls can be live at once, chosen per org. That is the whole point of having had the seam.</span></li>
+  </ol>
+
+  <div class="note">
+    <p><strong>One thing to fix while you are in there.</strong> The server sends model calls to
+    the gateway as <code>POST /v1/chat/completions</code>, but the gateway’s own canonical shape is
+    Anthropic Messages — every other dialect is converted to it and back. You are paying for a
+    round trip through a translator on every single turn. Moving that call to
+    <code>/v1/messages</code> removes two conversions per request and nothing else.</p>
+  </div>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:36ch">
+    The client asks, the server decides, the box does the work, and the gateway is only ever asked
+    what to say next.</p>
+</footer>
+
+</div>

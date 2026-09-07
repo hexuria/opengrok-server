@@ -67,6 +67,20 @@ pub struct MockDoor {
     /// `echo_script` already emits one delta per word, so the same knob buys word-by-word
     /// arrival for free.
     per_delta_delay: Option<std::time::Duration>,
+    /// Hold each model call open for at least this long before its first delta.
+    ///
+    /// PER-DELTA PACING CANNOT MAKE A SHORT ANSWER VISIBLE. A fixture turn is a tool call and a
+    /// one-line acknowledgement — nine deltas, under a second at 90 ms each — and a one-line
+    /// fixture is a single delta, so `isRunning` is true for less than one roster round-trip and
+    /// the client's green "working" dot never paints. Measured on the packaged app: the row was
+    /// complete before the first 330 ms sample. Only a long fixture's FIRST send in a chat ever
+    /// held the state long enough to see, which nobody hits twice.
+    ///
+    /// So the floor is per model call, not per delta: however few deltas a branch emits, the turn
+    /// is observably in flight. A tool round counts as a call too, so a fixture turn holds the
+    /// state for two floors — which, for the purpose of watching a coworker think, is a feature.
+    /// `None` by default and in every test; a dev server opts in through `OG_MOCK_MIN_TURN_MS`.
+    turn_floor: Option<std::time::Duration>,
 }
 
 impl MockDoor {
@@ -81,16 +95,54 @@ impl MockDoor {
         self
     }
 
-    /// The script as a stream, paced if this door is paced. Every path in `stream` ends here, so
-    /// a new answer shape cannot forget to be paced.
-    fn emit(&self, script: Vec<ModelDelta>) -> DeltaStream {
-        let Some(delay) = self.per_delta_delay else {
+    /// Hold every model call open for at least `ms` before its first delta. See `turn_floor`.
+    /// `0` is off, identical to unset, for the same reason as `paced_by_ms`.
+    #[must_use]
+    pub fn min_turn_ms(mut self, ms: u64) -> Self {
+        self.turn_floor = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        self
+    }
+
+    /// The script as a stream, paced and — unless this is a judge request — floored. Every path
+    /// in `stream` ends here, so a new answer shape cannot forget either.
+    ///
+    /// THE FLOOR IS FOR CALLS A PERSON IS WATCHING. The auto-review judge is a second model call
+    /// per tool call, invisible in the transcript, and flooring it multiplies the wait by
+    /// something nobody can see: a fixture turn is ask-the-tool, judge, say-it-back, so a 2.5 s
+    /// floor became 7.5 s of "Working" for one reply. Excluding the judge makes the visible wait
+    /// the number the operator actually set.
+    ///
+    /// KEYED ON THE REQUEST, NOT ON THE CONFIGURATION. The first version exempted only the
+    /// canned-verdict branch, so with no `OG_AUTO_REVIEW_MOCK_VERDICT` — the dev server's actual
+    /// state — a judge request fell through to the echo/catalogue branch and paid the floor
+    /// after all: the exemption was dead on the one server it was measured on. A judge request is
+    /// recognisable by its system prompt whatever branch answers it, so that is what decides.
+    fn emit(&self, request: &ModelRequest, script: Vec<ModelDelta>) -> DeltaStream {
+        let is_judge = request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER));
+        let delay = self.per_delta_delay;
+        let floor = if is_judge { None } else { self.turn_floor };
+        if delay.is_none() && floor.is_none() {
             return Box::pin(stream::iter(script.into_iter().map(Ok)));
-        };
-        Box::pin(stream::iter(script).then(move |delta| async move {
-            tokio::time::sleep(delay).await;
-            Ok(delta)
-        }))
+        }
+        Box::pin(
+            stream::iter(script)
+                .enumerate()
+                .then(move |(index, delta)| async move {
+                    // The floor is paid once, before the first delta; the pacing before each.
+                    if index == 0
+                        && let Some(floor) = floor
+                    {
+                        tokio::time::sleep(floor).await;
+                    }
+                    if let Some(delay) = delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    Ok(delta)
+                }),
+        )
     }
 
     /// Answer judge requests with this word ("allow" | "block" | "ask"); anything else parses to
@@ -274,7 +326,7 @@ impl ModelDoor for MockDoor {
                 .is_some_and(|system| system.starts_with(crate::review::JUDGE_MARKER))
         {
             let word = word.clone();
-            return Ok(self.emit(vec![ModelDelta::Text(word)]));
+            return Ok(self.emit(&request, vec![ModelDelta::Text(word)]));
         }
         // Has this conversation already seen its tool result? The harness appends one as a user
         // message, so the conversation itself is the state.
@@ -285,7 +337,7 @@ impl ModelDoor for MockDoor {
 
         if self.echo_system {
             let said = request.system.clone().unwrap_or_default();
-            return Ok(self.emit(vec![ModelDelta::Text(said)]));
+            return Ok(self.emit(&request, vec![ModelDelta::Text(said)]));
         }
 
         // The catalogue door: ask the fixture tool for whatever the person typed, then speak its
@@ -324,7 +376,7 @@ impl ModelDoor for MockDoor {
                     ]
                 }
             };
-            return Ok(self.emit(script));
+            return Ok(self.emit(&request, script));
         }
         let script = if self.room_speaker
             && let Some(name) = Self::room_member_name(&request)
@@ -364,7 +416,7 @@ impl ModelDoor for MockDoor {
         } else {
             self.script.clone()
         };
-        Ok(self.emit(script))
+        Ok(self.emit(&request, script))
     }
 }
 
@@ -433,6 +485,105 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_millis(50),
             "an unpaced door must stay instant — the whole suite depends on it"
+        );
+    }
+
+    /// The floor holds a one-delta answer open — which per-delta pacing never could.
+    #[tokio::test]
+    async fn a_floored_door_holds_even_a_one_delta_answer_open() {
+        let one = vec![ModelDelta::Text("done".to_string())];
+
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(one.clone())
+            .min_turn_ms(80)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert_eq!(out.len(), 1, "the floor must not change what is emitted");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(80),
+            "a single delta cannot arrive before the floor: {:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        let out: Vec<_> = MockDoor::with_script(one)
+            .min_turn_ms(0)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect()
+            .await;
+        assert_eq!(out.len(), 1);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "zero is off, exactly as unset — the suite depends on it"
+        );
+    }
+
+    /// The judge is never floored, however high the floor is set.
+    ///
+    /// It is a second model call per tool call and it is invisible in the transcript, so flooring
+    /// it multiplies a person's wait by something they cannot see. Without this exclusion a
+    /// fixture turn — ask the tool, judge, say it back — pays the floor three times.
+    #[tokio::test]
+    async fn the_auto_review_judge_is_never_floored() {
+        let door = MockDoor::echoing()
+            .with_judge_verdict("allow")
+            .min_turn_ms(3_000);
+
+        let mut judged = request("anything");
+        judged.system = Some(format!(
+            "{}\nrest of the prompt",
+            crate::review::JUDGE_MARKER
+        ));
+
+        let started = std::time::Instant::now();
+        let out: Vec<_> = door.stream(judged).await.expect("stream").collect().await;
+        assert_eq!(out.len(), 1, "the judge answers in one word");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the judge must not pay the floor: took {:?}",
+            started.elapsed()
+        );
+
+        // And an ordinary call on the same door still does.
+        let started = std::time::Instant::now();
+        let _ = MockDoor::with_script(vec![ModelDelta::Text("hi".to_string())])
+            .min_turn_ms(120)
+            .stream(request("hi"))
+            .await
+            .expect("stream")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(120),
+            "a visible call still pays it"
+        );
+    }
+
+    /// A judge request is exempt from the floor WHETHER OR NOT a verdict is canned.
+    ///
+    /// The first version keyed the exemption on the `judge_verdict` branch — so with no
+    /// `OG_AUTO_REVIEW_MOCK_VERDICT` (the dev server's actual state) a judge request fell through
+    /// to the echo/catalogue branch and paid the floor after all. The exemption was dead on the
+    /// one server it was measured on, and the shorter "Working" window seen there came from the
+    /// lowered default alone. The exemption has to read the REQUEST, not the configuration.
+    #[tokio::test]
+    async fn a_judge_request_is_never_floored_even_without_a_canned_verdict() {
+        let door = MockDoor::echoing().min_turn_ms(3_000); // no with_judge_verdict on purpose
+        let mut judged = request("anything");
+        judged.system = Some(format!("{}\nrest", crate::review::JUDGE_MARKER));
+
+        let started = std::time::Instant::now();
+        let out: Vec<_> = door.stream(judged).await.expect("stream").collect().await;
+        assert!(!out.is_empty(), "the echo branch still answers");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "a judge request must not pay the floor, canned verdict or not: took {:?}",
+            started.elapsed()
         );
     }
 
