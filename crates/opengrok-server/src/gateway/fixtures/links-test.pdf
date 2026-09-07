@@ -1,0 +1,65 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R /PageMode /UseOutlines >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 8 0 R >> >> /Annots [6 0 R 7 0 R] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 10 0 R /Resources << /Font << /F1 8 0 R >> >> >>
+endobj
+5 0 obj
+<< /Length 145 >>
+stream
+BT /F1 18 Tf 72 720 Td (Page one: links test) Tj ET
+BT /F1 12 Tf 72 680 Td (Go to page two) Tj ET
+BT /F1 12 Tf 72 640 Td (Open example.com) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Annot /Subtype /Link /Rect [70 672 200 696] /Border [0 0 0] /A << /S /GoTo /D [4 0 R /XYZ 0 792 null] >> >>
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Link /Rect [70 632 200 656] /Border [0 0 0] /A << /S /URI /URI (https://example.com/) >> >>
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+9 0 obj
+<< /Type /Outlines /First 11 0 R /Last 12 0 R /Count 2 >>
+endobj
+10 0 obj
+<< /Length 52 >>
+stream
+BT /F1 18 Tf 72 720 Td (Page two: destination) Tj ET
+endstream
+endobj
+11 0 obj
+<< /Title (First page) /Parent 9 0 R /Next 12 0 R /Dest [3 0 R /Fit] >>
+endobj
+12 0 obj
+<< /Title (Second page) /Parent 9 0 R /Prev 11 0 R /Dest [4 0 R /XYZ 0 792 null] >>
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000009 00000 n 
+0000000097 00000 n 
+0000000160 00000 n 
+0000000308 00000 n 
+0000000435 00000 n 
+0000000631 00000 n 
+0000000764 00000 n 
+0000000897 00000 n 
+0000000967 00000 n 
+0000001040 00000 n 
+0000001143 00000 n 
+0000001231 00000 n 
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+1331
+%%EOF

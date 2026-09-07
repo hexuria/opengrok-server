@@ -432,6 +432,126 @@ pub fn read_fixture(path: &str) -> Result<Vec<u8>, String> {
 /// `OG_MODEL_DOOR` from a test is not available to us: `set_var` is unsafe in edition 2024 and
 /// `unsafe_code` is forbidden workspace-wide, and a security check that cannot be exercised
 /// because of a test-harness detail is one that silently stops being exercised.
+/// The largest file a dropped attachment may be, after decoding.
+///
+/// 25 MiB, matching the desktop's own preview cap — a file it will not render is a file there is
+/// no point storing. It is also the backstop on memory: the bytes arrive base64 in a JSON body and
+/// are decoded whole, so this bounds what one request can allocate.
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// Where dropped files land, under the fixture root so `read_contained` serves them back unchanged.
+const UPLOAD_SUBDIR: &str = "uploads";
+
+/// Accept a file the person dropped into the desktop, under a mock door only.
+///
+/// WHY THIS IS SAFE TO ADD AND WHY IT IS STILL THE RISKY PART OF THIS FILE. Everything else here
+/// serves bytes the repository shipped; this writes bytes a caller supplied, under a name a caller
+/// chose. So the name is not used — only its LEAF is, and only after it survives a whitelist:
+/// no separators, no `..`, no absolute path, no empty string, no control characters, and a length
+/// cap. A traversal in the name is therefore impossible before containment is even consulted.
+///
+/// The stored name is `<uuid>-<leaf>` rather than the leaf alone, so two drops of `report.pdf` do
+/// not overwrite each other and a caller cannot aim at an existing fixture by name — the fixtures
+/// this catalogue ships are exactly the files a dropped one must never be able to replace.
+///
+/// It lands under the fixture root, which means the read side needs NO new code and no new hole:
+/// `read_fixture` still canonicalises and still refuses anything that resolves outside the root,
+/// and the root is still refused when it is a symlink or writable by other users.
+///
+/// Refuses when a mock door is not selected, so a production binary — which does not even compile
+/// this module — is not the only thing standing in the way.
+pub fn write_upload(file_name: &str, bytes: &[u8]) -> Result<String, String> {
+    if !enabled() {
+        return Err(
+            "attachments are not stored by this server yet (artifacts is a planned slice)"
+                .to_string(),
+        );
+    }
+    if bytes.is_empty() {
+        return Err("that file is empty".to_string());
+    }
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "that file is {} MiB; the mock door stores at most {} MiB",
+            bytes.len() / (1024 * 1024),
+            MAX_UPLOAD_BYTES / (1024 * 1024)
+        ));
+    }
+    let leaf = safe_leaf(file_name)?;
+
+    let dir = format!("{FIXTURE_DIR}/{UPLOAD_SUBDIR}");
+    #[cfg(unix)]
+    let made = {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+    };
+    #[cfg(not(unix))]
+    let made = std::fs::create_dir_all(&dir);
+    if let Err(error) = made {
+        tracing::warn!(%error, dir, "could not create the upload directory");
+        return Err("could not store that file".to_string());
+    }
+    // The same root check every read makes: a planted or loosened root is refused here too, so a
+    // write cannot be the way in that a read is not.
+    fixture_root()?;
+
+    let path = format!("{dir}/{}-{leaf}", uuid::Uuid::new_v4());
+    // A fresh uuid cannot collide with an existing entry, so nothing should be here — and if
+    // something is, `fs::write` would follow it. Refuse rather than write through it.
+    if std::fs::symlink_metadata(&path).is_ok() {
+        tracing::error!(
+            path,
+            "an upload path already exists; refusing to write through it"
+        );
+        return Err("could not store that file".to_string());
+    }
+    std::fs::write(&path, bytes).map_err(|error| {
+        tracing::warn!(%error, path, "could not write an uploaded file");
+        "could not store that file".to_string()
+    })?;
+    tracing::info!(path, bytes = bytes.len(), "stored a dropped attachment");
+    Ok(path)
+}
+
+/// The caller's filename reduced to a leaf we are willing to create, or a refusal saying why.
+///
+/// A WHITELIST, NOT A BLACKLIST. `..` and `/` are the traversals everyone thinks of; the ones that
+/// bite are the ones nobody enumerates — a backslash on a filesystem that honours it, a NUL that
+/// truncates the name at the syscall boundary, a leading dash that a later shell reads as a flag.
+/// Permitting a known-good set is the only version of this that stays correct as the set of bad
+/// inputs grows.
+fn safe_leaf(file_name: &str) -> Result<String, String> {
+    const MAX_NAME: usize = 120;
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() {
+        return Err("that file has no name".to_string());
+    }
+    if trimmed.len() > MAX_NAME {
+        return Err(format!(
+            "that file name is longer than {MAX_NAME} characters"
+        ));
+    }
+    // Reject before inspecting characters, so a name that is ONLY dots cannot slip through the
+    // per-character rule below.
+    if trimmed == "." || trimmed == ".." || trimmed.starts_with('.') {
+        return Err("that file name is not allowed".to_string());
+    }
+    let ok = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')' | '+'));
+    if !ok {
+        return Err(
+            "that file name has characters the mock door will not store; letters, digits, spaces \
+             and . - _ ( ) + only"
+                .to_string(),
+        );
+    }
+    Ok(trimmed.to_string())
+}
+
 fn read_contained(path: &str) -> Result<Vec<u8>, String> {
     let root = fixture_root()?;
     // ONE refusal string for both "not there" and "not yours to read", byte for byte. The first
@@ -612,6 +732,11 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
         "pdf",
         "files",
         "user-attachment, .pdf — three real pages, proves the page indicator",
+    ),
+    (
+        "pdf-links",
+        "files",
+        "user-attachment, .pdf — a /GoTo link, a /URI link and an outline, which `pdf` has not",
     ),
     (
         "csv",
@@ -836,6 +961,17 @@ fn fixture_file(name: &str, body: &[u8]) -> String {
 /// A `user-attachment` entry. `file_path`/`file_name` really are snake_case on this kind while its
 /// neighbours are camelCase — that is what the client writes, and normalising it breaks the chip.
 /// Optional numerics are omitted rather than guessed: present-but-negative rejects the whole entry.
+/// A PDF WITH LINKS AND AN OUTLINE, which `mock-report.pdf` deliberately has not got.
+///
+/// Hand-written and uncompressed so the structure is readable in the file itself: two pages, a
+/// `/GoTo` annotation from page 1 to page 2, a `/URI` annotation to https://example.com/, and a
+/// two-item `/Outlines` tree. Verified with pdf.js before it was embedded: 2 annotations (one
+/// explicit-dest Link, one url Link) and an outline of ["First page", "Second page"].
+///
+/// It exists because the reader's link layer and outline panel cannot be exercised by a PDF that
+/// has neither — the existing report fixture proves rendering and says nothing about navigation.
+const LINKS_PDF: &[u8] = include_bytes!("fixtures/links-test.pdf");
+
 fn user_attachment(name: &str, file_name: &str, body: &[u8]) -> Value {
     let path = fixture_file(file_name, body);
     json!({
@@ -1253,6 +1389,7 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
         // audio fine — it is the card side that cannot ask for it — so this is an attachment kind.
         "audio" => vec![user_attachment("audio", "mock-audio.mp3", AUDIO_BYTES)],
         "pdf" => vec![user_attachment("pdf", "mock-report.pdf", PDF_BYTES)],
+        "pdf-links" => vec![user_attachment("pdf-links", "links-test.pdf", LINKS_PDF)],
         "csv" => vec![user_attachment("csv", "mock-table.csv", CSV_BYTES)],
         "json" => vec![user_attachment("json", "mock-data.json", JSON_BYTES)],
         // WHAT THIS FIXTURE CANNOT PROVE, so nobody chases it. Walked run-by-run against mammoth
@@ -1604,6 +1741,65 @@ mod tests {
         assert!(
             leaf[0]["message"]["title"].is_null(),
             "a top-level title is dropped"
+        );
+    }
+
+    /// The filename whitelist, which is the whole security surface of the upload verb.
+    ///
+    /// Everything else in this file serves bytes the repository shipped. This is the one place a
+    /// caller chooses a name, so it is a whitelist rather than a blacklist: `..` and `/` are the
+    /// traversals everyone lists, and the ones that bite are the ones nobody does.
+    #[test]
+    fn a_dropped_file_name_must_survive_a_whitelist() {
+        for good in [
+            "report.pdf",
+            "ai-infrastructure-design.pdf",
+            "Quarterly Results (final) v2.xlsx",
+            "a_b-c+d.txt",
+        ] {
+            assert_eq!(safe_leaf(good).as_deref(), Ok(good), "{good} is ordinary");
+        }
+
+        for bad in [
+            "../../etc/passwd", // the obvious one
+            "/etc/passwd",      // absolute
+            "a/b.pdf",          // any separator at all
+            "a\\b.pdf",         // the one people forget on unix
+            "..",               // the whole name
+            ".",                //
+            ".env",             // a dotfile is never a dropped attachment
+            ".ssh",             //
+            "",                 // empty
+            "   ",              // empty after trimming
+            "nul\u{0}.pdf",     // truncates at the syscall boundary
+            "bell\u{7}.pdf",    // control characters
+            "café.pdf",         // non-ascii: refused rather than guessed at
+        ] {
+            assert!(
+                safe_leaf(bad).is_err(),
+                "{bad:?} must be refused, not sanitised"
+            );
+        }
+
+        // Length is bounded: a name is not a place to put a megabyte.
+        assert!(safe_leaf(&"a".repeat(500)).is_err());
+    }
+
+    /// An upload is refused outright unless a mock door is selected.
+    ///
+    /// `enabled()` is the same gate the read verbs use, so a build that is not mocking answers a
+    /// dropped file exactly as it did before this existed — and a hosted one (`OG_HOSTED=1`)
+    /// refuses even under a mock door.
+    #[test]
+    fn an_upload_is_refused_when_no_mock_door_is_selected() {
+        if enabled() {
+            eprintln!("skipping: a mock door IS selected, which is the other half of this gate");
+            return;
+        }
+        let refused = write_upload("report.pdf", b"x").expect_err("must refuse");
+        assert!(
+            refused.contains("artifacts"),
+            "the refusal must stay the artifacts-slice sentence: {refused}"
         );
     }
 
