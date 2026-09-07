@@ -87,6 +87,50 @@ async fn api(client: &reqwest::Client, base: &str, method: &str, body: Value) ->
     )
 }
 
+/// Wait for an answer that is NOT a row this test planted.
+///
+/// `wait_for_an_answer` asks "is there a finished `send-message` with content", which a planted row
+/// satisfies on the first poll — so it returns before the turn begins and every later bound
+/// silently has to cover the whole turn instead of the thing it names. That is how this file took
+/// `main` red twice: once through a fixed sleep, and once through a poll whose budget was spent on
+/// the turn rather than on the stamp.
+///
+/// Watching `isRunning` instead does not work either, and the attempt is worth recording: on an
+/// unpaced mock door a turn begins and ends inside a millisecond, so a 50 ms sampler essentially
+/// never catches the flag true and the wait times out having observed nothing. The observable fact
+/// is the ANSWER, so this excludes the planted id and waits for a different one.
+async fn wait_for_an_answer_other_than(
+    client: &reqwest::Client,
+    base: &str,
+    agent: &str,
+    planted: &str,
+) {
+    for _ in 0..600 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (_, tail) = api(
+            client,
+            base,
+            "getAgentTranscriptTail",
+            json!({ "id": agent, "limit": 50 }),
+        )
+        .await;
+        let done = tail["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry["kind"] == json!("send-message")
+                    && entry["id"] != json!(planted)
+                    && entry["streaming"] != json!(true)
+                    && entry["message"]["content"]
+                        .as_str()
+                        .is_some_and(|said| !said.is_empty())
+            })
+        });
+        if done {
+            return;
+        }
+    }
+    panic!("the turn never produced an answer of its own within 30s");
+}
+
 /// Wait until the arrival stamp has landed, rather than sleeping a guess.
 ///
 /// THE TURN'S LAST ACT IS NOT THE ANSWER. `note_arrival` runs AFTER the final entry is written, so
@@ -100,7 +144,9 @@ async fn wait_until_read(
     account: &AccountId,
 ) -> i64 {
     let mut unread = -1;
-    for _ in 0..100 {
+    // 30s, not 5s. A bound exists to stop a hang, not to express an expectation about speed — and
+    // a bound tuned on this desk is a bound that fails on a loaded runner.
+    for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Ok(state) = store.unread_state(coworker, account).await {
             unread = state.unread;
@@ -115,7 +161,7 @@ async fn wait_until_read(
 /// The same, for the roster row the client actually reads.
 async fn wait_until_row_read(client: &reqwest::Client, base: &str, agent: &str) -> Value {
     let mut last = Value::Null;
-    for _ in 0..100 {
+    for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         last = row(client, base, agent).await;
         if last["unreadCount"] == json!(0) {
@@ -159,14 +205,24 @@ async fn wait_for_an_answer(client: &reqwest::Client, base: &str, agent: &str) {
     panic!("the turn never produced an answer");
 }
 
+/// `serve`, with a paced door so a turn is observably in flight — long enough that a test can
+/// append a row into the middle of it, which is what a fixture drain does for real.
+async fn serve_paced(store: PgStore, email: &str) -> String {
+    serve_with(store, email, MockDoor::echoing().paced_by_ms(60)).await
+}
+
 async fn serve(store: PgStore, email: &str) -> String {
+    serve_with(store, email, MockDoor::echoing()).await
+}
+
+async fn serve_with(store: PgStore, email: &str, door: MockDoor) -> String {
     let agui = AgUiState {
         auth: AuthState::new(
             store,
             Arc::new(TokenMinter::new(b"arrival-secret")),
             email.to_string(),
         ),
-        door: Arc::new(MockDoor::echoing()),
+        door: Arc::new(door),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
         computer: None,
@@ -367,14 +423,18 @@ async fn watching_your_own_chat_does_not_read_somebody_elses() {
     );
 }
 
-/// An utterance appended DURING a turn, while the person watches, is marked read by the arrival
-/// rule.
+/// An utterance appended DURING a turn, while the person watches, is marked read.
 ///
-/// This is the case the arrival rule is actually for, and it is not the coworker's own answer:
-/// that answer updates the placeholder in place and `update_gateway_entry` does not touch `at_ms`,
-/// so it can never be newer than the view recorded when the prompt was sent. Entries appended
-/// FRESH during a turn can be — the fixture drain does exactly that, and so does any card — and
-/// those are what light a badge on a chat being read.
+/// THE TIMING IS THE TEST. The view recorded when the prompt is sent covers everything already in
+/// the transcript, so a row planted BEFORE the send proves nothing — it is covered whether the
+/// arrival rule exists or not. (Checked: with the row planted first, disabling the rule leaves all
+/// four tests green.) A row planted before the send with a future timestamp does exercise it, but
+/// only by dating a row ahead of a clock that Mark as Read clamps to now, which is a fixture
+/// arranging its own conclusion.
+///
+/// So the row is planted while the turn is RUNNING, which is what a fixture drain and a card
+/// actually do: appended fresh, after the send view, before the turn ends. The door is paced so
+/// there is a window to plant into at all — on an unpaced door the turn is over in a millisecond.
 #[tokio::test]
 async fn an_entry_appended_while_watching_is_marked_read() {
     let Ok(database_url) = std::env::var("OG_DATABASE_URL") else {
@@ -393,7 +453,7 @@ async fn an_entry_appended_while_watching_is_marked_read() {
     let stamp = now_ms();
     let email = format!("arrival-during-{stamp}@og.local");
     let account = seed_account(&store, &email).await;
-    let base = serve(store.clone(), &email).await;
+    let base = serve_paced(store.clone(), &email).await;
     let client = reqwest::Client::new();
 
     let (_, created) = api(
@@ -406,37 +466,8 @@ async fn an_entry_appended_while_watching_is_marked_read() {
     let agent = created["agent"]["id"].as_str().expect("id").to_string();
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
 
-    // The person is watching this chat.
+    // The person is watching this chat, and sends a prompt.
     api(&client, &base, "openAgent", json!({ "id": agent })).await;
-
-    // Something the coworker says lands as a NEW row while the turn runs — a fixture drain or a
-    // card, stamped now, after the view.
-    store
-        .append_gateway_entry(
-            &coworker,
-            &account,
-            &json!({
-                "kind": "send-message",
-                "id": format!("arrived-{stamp}"),
-                "message": { "type": "text", "content": "landed mid-turn" },
-                "timestampMs": now_ms() + 50,
-            }),
-            now_ms() + 50,
-        )
-        .await
-        .expect("append");
-
-    // Unread until the turn ends, because nothing has told the roster it was seen.
-    let before = store
-        .unread_state(&coworker, &account)
-        .await
-        .expect("before");
-    assert_eq!(
-        before.unread, 1,
-        "the fresh entry must start unread, or this test proves nothing"
-    );
-
-    // A turn runs and finishes; its arrival rule marks what landed while the person watched.
     let (status, _) = api(
         &client,
         &base,
@@ -445,7 +476,36 @@ async fn an_entry_appended_while_watching_is_marked_read() {
     )
     .await;
     assert_eq!(status, 200);
-    wait_for_an_answer(&client, &base, &agent).await;
+
+    // WHILE IT RUNS, something the coworker says lands as a new row — stamped now, which is after
+    // the view the send recorded. This is the shape of a fixture drain or a card.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let planted_id = format!("arrived-{stamp}");
+    store
+        .append_gateway_entry(
+            &coworker,
+            &account,
+            &json!({
+                "kind": "send-message",
+                "id": planted_id.clone(),
+                "message": { "type": "text", "content": "landed mid-turn" },
+                "timestampMs": now_ms(),
+            }),
+            now_ms(),
+        )
+        .await
+        .expect("append");
+    assert_eq!(
+        store
+            .unread_state(&coworker, &account)
+            .await
+            .expect("mid-turn")
+            .unread,
+        1,
+        "the fresh entry must start unread, or this test proves nothing"
+    );
+
+    wait_for_an_answer_other_than(&client, &base, &agent, &planted_id).await;
     let after_unread = wait_until_read(&store, &coworker, &account).await;
     assert_eq!(
         after_unread, 0,
