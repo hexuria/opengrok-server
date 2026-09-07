@@ -35,7 +35,12 @@ PORT="${PORT:-1447}"
 # the smokes drive these same doors hundreds of times and pacing them would buy no assertion.
 # Set OG_MOCK_DELTA_MS=0 to turn it off for a run that wants the old instant behaviour.
 export OG_MOCK_DELTA_MS="${OG_MOCK_DELTA_MS:-90}"
-echo "=== mock doors paced at ${OG_MOCK_DELTA_MS}ms per delta (OG_MOCK_DELTA_MS)"
+# And a floor under every mock model call: per-delta pacing cannot make a one-line fixture answer
+# visible, because it is one delta. Measured on the packaged app — the row was complete before the
+# first sample and the working dot never painted. A fixture turn is two visible calls, so 1.2 s
+# gives the two-to-three seconds of "thinking" that reads as reassuring rather than as slow; 0 off.
+export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-1200}"
+echo "=== mock doors paced at ${OG_MOCK_DELTA_MS}ms per delta, floored at ${OG_MOCK_MIN_TURN_MS}ms per call"
 
 # WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
 # Cargo.toml), but a dev server is exactly where it is wanted — and `OG_MODEL_DOOR=mock-cards`

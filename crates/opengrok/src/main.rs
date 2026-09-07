@@ -107,13 +107,23 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(0);
+    // THE FLOOR UNDER A MOCK TURN, milliseconds per model call. Pacing per delta cannot make a
+    // one-line answer visible: a fixture turn is nine deltas and a tool fixture is one, so the
+    // running state lasts less than a roster round-trip and the working dot never paints. This
+    // holds every mock call open for at least this long. Same opt-in rule as the pacing above.
+    let floor = std::env::var("OG_MOCK_MIN_TURN_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(0);
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.
     let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
         Ok("mock") => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
-            Arc::new(with_mock_verdict(MockDoor::echoing().paced_by_ms(paced)))
+            Arc::new(with_mock_verdict(
+                MockDoor::echoing().paced_by_ms(paced).min_turn_ms(floor),
+            ))
         }
         // Every renderable transcript shape on demand, so client rendering can be worked on
         // without a provider. `gateway::mock_fixtures` owns the catalogue; the door only forwards.
@@ -139,7 +149,9 @@ async fn main() -> anyhow::Result<()> {
                     "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
                 );
                 Arc::new(with_mock_verdict(
-                    MockDoor::serving_fixtures().paced_by_ms(paced),
+                    MockDoor::serving_fixtures()
+                        .paced_by_ms(paced)
+                        .min_turn_ms(floor),
                 ))
             }
         }
@@ -148,7 +160,9 @@ async fn main() -> anyhow::Result<()> {
         Ok("mock-tools") => {
             tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
             Arc::new(with_mock_verdict(
-                MockDoor::asking_for_a_tool().paced_by_ms(paced),
+                MockDoor::asking_for_a_tool()
+                    .paced_by_ms(paced)
+                    .min_turn_ms(floor),
             ))
         }
         door => {

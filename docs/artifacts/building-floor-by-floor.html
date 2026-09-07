@@ -1,0 +1,574 @@
+<title>The Building, Floor by Floor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,900&family=Public+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+  *,*::before,*::after{box-sizing:border-box}
+  :root{
+    --ground:#16130F; --surface:#1F1A14; --raise:#272016;
+    --ink:#EDE6DA; --muted:#A79E8F; --line:#3D362C;
+    --gold:#E5B565; --gold-soft:#2E2415;
+    --dead:#E07B6B; --live:#93BE7E; --live-soft:#1E2818;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --ground:#F2EFE9; --surface:#FBFAF7; --raise:#F4EFE4;
+      --ink:#221C14; --muted:#6E675C; --line:#D8D2C6;
+      --gold:#9C6A0B; --gold-soft:#F1E5CE;
+      --dead:#A03A2E; --live:#3E6E36; --live-soft:#E2EDDC;
+    }
+  }
+  :root[data-theme="light"]{
+    --ground:#F2EFE9; --surface:#FBFAF7; --raise:#F4EFE4;
+    --ink:#221C14; --muted:#6E675C; --line:#D8D2C6;
+    --gold:#9C6A0B; --gold-soft:#F1E5CE;
+    --dead:#A03A2E; --live:#3E6E36; --live-soft:#E2EDDC;
+  }
+  body{margin:0;background:var(--ground);color:var(--ink);
+    font-family:"Public Sans",-apple-system,"Segoe UI",Helvetica,sans-serif;
+    font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{width:min(100% - 2.5rem, 58rem);margin-inline:auto}
+  .eyebrow{font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--gold);margin:0 0 .8rem}
+  h1,h2,h3{font-family:Fraunces,Georgia,serif;font-weight:900;letter-spacing:-.01em;text-wrap:balance;margin:0 0 .4rem}
+  h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.04}
+  h2{font-size:clamp(1.5rem,3.6vw,2.1rem);line-height:1.12}
+  h3{font-size:1.12rem;font-weight:600;line-height:1.25;margin:0 0 .3rem}
+  p{margin:0 0 1rem;max-width:60ch}
+  .lede{color:var(--muted);margin:0 0 1.6rem;font-size:1.05rem;max-width:46ch}
+  .hero{padding:4.5rem 0 3rem}
+  .plate{padding:2.8rem 0;border-top:1px solid var(--line)}
+  .floor{padding:2.2rem 0;border-top:1px dashed var(--line)}
+  .closer{padding:3rem 0 4.5rem;border-top:1px solid var(--line)}
+  figure{margin:0 0 1.4rem}
+  .figbox{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:1.4rem 1.2rem;overflow-x:auto}
+  .figbox svg{display:block;max-width:100%;height:auto;margin-inline:auto;color:var(--ink)}
+  figcaption{color:var(--muted);font-size:.95rem;margin-top:.7rem;max-width:56ch}
+  .ln{stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+  .thin{stroke:currentColor;stroke-width:1;fill:none;opacity:.5}
+  .fill{fill:var(--surface)} .raise{fill:var(--raise)} .soft{opacity:.5} .dash{stroke-dasharray:5 5}
+  .acc{stroke:var(--gold)} .accf{fill:var(--gold)} .accT{fill:var(--gold)}
+  .bad{stroke:var(--dead)} .badT{fill:var(--dead)}
+  .liv{stroke:var(--live)} .livT{fill:var(--live)}
+  .goldsoft{fill:var(--gold-soft)}
+  text{font-family:"Public Sans",sans-serif;fill:currentColor}
+  .t{font-size:13px} .ts{font-size:11px;opacity:.72} .tm{font-size:11px;font-family:var(--mono);opacity:.85}
+  .tb{font-size:14px;font-weight:600} .tcap{font-size:10px;letter-spacing:.14em;font-weight:600}
+  .tx{font-size:12px;font-weight:600}
+  .parts{display:grid;gap:.7rem;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));margin:1.2rem 0 0;padding:0;list-style:none}
+  .parts li{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:.75rem .85rem}
+  .parts .nm{font-weight:600;font-size:.95rem;display:block}
+  .parts .ds{color:var(--muted);font-size:.86rem;display:block;margin-top:.35rem;line-height:1.4}
+  .tag{display:inline-block;font-family:var(--mono);font-size:.72rem;padding:.14rem .45rem;border-radius:4px;border:1px solid var(--line);color:var(--muted);margin-right:.35rem}
+  .tag.g{color:var(--gold);border-color:var(--gold);background:var(--gold-soft)}
+  table{width:100%;border-collapse:collapse;margin:1.2rem 0 0;font-size:.92rem}
+  th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold);font-weight:600}
+  td code,p code,li code{font-family:var(--mono);font-size:.82rem;color:var(--ink)}
+  .tw{overflow-x:auto}
+  .note{border-left:3px solid var(--gold);background:var(--gold-soft);padding:.9rem 1.1rem;border-radius:0 8px 8px 0;margin:1.4rem 0 0}
+  .note p{margin:0;max-width:58ch} .note strong{color:var(--gold)}
+  .rules{counter-reset:r;list-style:none;padding:0;margin:1.2rem 0 0;display:grid;gap:.55rem}
+  .rules li{counter-increment:r;position:relative;padding:.6rem .8rem .6rem 2.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+  .rules li::before{content:counter(r);position:absolute;left:.8rem;top:.6rem;font-family:var(--mono);font-size:.78rem;color:var(--gold);border:1px solid var(--gold);border-radius:50%;width:1.5rem;height:1.5rem;display:grid;place-items:center}
+  .rules b{font-weight:600} .rules span{color:var(--muted);display:block;font-size:.88rem;margin-top:.15rem}
+  .floorhead{display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap}
+  .floorhead .no{font-family:var(--mono);font-size:.8rem;color:var(--gold);letter-spacing:.1em}
+  .queue{display:grid;gap:.6rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));margin:1.2rem 0 0;padding:0;list-style:none}
+  .queue li{background:var(--surface);border:1px dashed var(--line);border-radius:8px;padding:.7rem .85rem;color:var(--muted);font-size:.9rem}
+  .queue li b{color:var(--ink);display:block;font-weight:600}
+  a{color:var(--gold)} :focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <p class="eyebrow">OpenGrok · picture book</p>
+  <h1>The Building, Floor by Floor</h1>
+  <p class="lede">If we built the whole thing again from a blank page: four things that run, one
+  of them a building with ten floors, and the rules that let any floor move out without the rest
+  noticing.</p>
+</header>
+
+<!-- ============ 0. THE WHOLE ============ -->
+<section class="plate">
+  <p class="eyebrow">The whole thing</p>
+  <h2>Four things run. One of them is the product.</h2>
+  <p>A <b>window</b> for people, a <b>building</b> where the coworkers live, a row of <b>desks</b>
+  they type on, and — by your decision — a separate path to the <b>person’s own machine</b>. Models
+  and other people’s services stay outside. Everything that matters is inside the building.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 660" role="img" aria-label="Windows on top-left, the person's machine on top-right, the building in the middle with ten floors and a spine, desks bottom-left, and the outside world bottom-right. Windows call the building; the building drives desks with a bearer token, reaches the outside with the org's own credentials, and reaches the person's machine only through the window after a permission card.">
+        <defs>
+          <marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker>
+          <marker id="hg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="var(--gold)"/></marker>
+        </defs>
+
+        <!-- WINDOWS -->
+        <rect class="fill ln" x="20" y="16" width="250" height="96" rx="8"/>
+        <text class="tcap accT" x="36" y="38">WINDOWS · people look in</text>
+        <text class="ts" x="36" y="58">desktop app · web console · any AG-UI client</text>
+        <text class="ts" x="36" y="74">other agents (through the MCP door)</text>
+        <text class="ts" x="36" y="94">hold no state · if it closes, nothing is lost</text>
+
+        <!-- USER MACHINE -->
+        <rect class="fill ln" x="490" y="16" width="250" height="96" rx="8"/>
+        <text class="tcap accT" x="506" y="38">THE PERSON’S MACHINE · separate path</text>
+        <text class="ts" x="506" y="58">local-exec daemon, inside the desktop app</text>
+        <text class="ts" x="506" y="74">its own switch · reached only via the window</text>
+        <text class="ts" x="506" y="94">card first, every time · off = path gone</text>
+
+        <!-- BUILDING -->
+        <rect class="raise acc" x="20" y="152" width="720" height="342" rx="10" stroke-width="2"/>
+        <text class="tcap accT" x="40" y="176">THE BUILDING · one deployable, ten floors, one spine</text>
+
+        <!-- floors -->
+        <rect class="fill ln" x="40" y="190" width="620" height="36" rx="5"/>
+        <text class="tx" x="52" y="206">DOORS</text>
+        <text class="ts" x="112" y="206">desktop · AG-UI · MCP · model · console — thin, translate only</text>
+
+        <rect class="fill ln" x="40" y="236" width="302" height="36" rx="5"/>
+        <text class="tx" x="52" y="252">IDENTITY</text>
+        <text class="ts" x="128" y="252">accounts · orgs · keys</text>
+        <rect class="fill ln" x="358" y="236" width="302" height="36" rx="5"/>
+        <text class="tx" x="370" y="252">POLICY</text>
+        <text class="ts" x="430" y="252">grants · consent · auto-review · spend</text>
+
+        <rect class="fill ln" x="40" y="282" width="302" height="36" rx="5"/>
+        <text class="tx" x="52" y="298">CONVERSATION</text>
+        <text class="ts" x="164" y="298">transcripts · activity · rooms</text>
+        <rect class="fill ln" x="358" y="282" width="302" height="36" rx="5"/>
+        <text class="tx" x="370" y="298">AGENTS</text>
+        <text class="ts" x="432" y="298">coworkers · harness · memory</text>
+
+        <rect class="fill ln" x="40" y="328" width="302" height="36" rx="5"/>
+        <text class="tx" x="52" y="344">TOOLS</text>
+        <text class="ts" x="104" y="344">registry · router · executor</text>
+        <rect class="fill ln" x="358" y="328" width="302" height="36" rx="5"/>
+        <text class="tx" x="370" y="344">COMPUTERS</text>
+        <text class="ts" x="460" y="344">lifecycle · kinds · assignment · screen</text>
+
+        <rect class="fill ln" x="40" y="374" width="302" height="36" rx="5"/>
+        <text class="tx" x="52" y="390">CONNECTORS &amp; SECRETS</text>
+        <text class="ts" x="230" y="390">sessions · vault · relay</text>
+        <rect class="fill ln" x="358" y="374" width="302" height="36" rx="5"/>
+        <text class="tx" x="370" y="390">AUTONOMY</text>
+        <text class="ts" x="456" y="390">scheduler · monitor · dispatch</text>
+
+        <rect class="fill ln" x="40" y="420" width="620" height="36" rx="5"/>
+        <text class="tx" x="52" y="436">INFERENCE</text>
+        <text class="ts" x="142" y="436">routing · credential pool · translation · metering — the gateway, moved inside</text>
+
+        <!-- spine -->
+        <rect class="goldsoft acc" x="676" y="190" width="44" height="266" rx="5"/>
+        <text class="tcap accT" transform="translate(704 323) rotate(-90)" text-anchor="middle">SPINE · kernel · events · store</text>
+
+        <text class="ts soft" x="40" y="478">a floor owns its tables · talks through its interface · reacts to events · can move out</text>
+
+        <!-- DESKS -->
+        <rect class="fill ln" x="20" y="546" width="340" height="96" rx="8"/>
+        <text class="tcap accT" x="36" y="568">DESKS · one per coworker (or shared)</text>
+        <text class="ts" x="36" y="588">grok-box image, many copies</text>
+        <text class="tm" x="36" y="606">exec :1337 · host :1340 · screen :6080</text>
+        <text class="ts" x="36" y="626">shell · files · browser · computer use · jail</text>
+
+        <!-- OUTSIDE -->
+        <rect class="fill ln dash" x="400" y="546" width="340" height="96" rx="8"/>
+        <text class="tcap" x="416" y="568">OUTSIDE · not ours</text>
+        <text class="ts" x="416" y="588">model providers (Anthropic, OpenAI, xAI…)</text>
+        <text class="ts" x="416" y="606">MCP connector servers (Gmail, GitHub, Drive…)</text>
+        <text class="ts" x="416" y="626">email, identity providers</text>
+
+        <!-- arrows -->
+        <line class="ln" x1="145" y1="112" x2="145" y2="146" marker-end="url(#h)"/>
+        <text class="ts" x="156" y="134">asks · watches</text>
+
+        <path class="ln dash" d="M615 152 L615 112" marker-end="url(#h)"/>
+        <text class="ts" x="500" y="136" text-anchor="end">pushes a request out through the window</text>
+
+        <line class="ln acc" x1="190" y1="494" x2="190" y2="540" marker-end="url(#hg)"/>
+        <text class="tm accT" x="202" y="520">Bearer BOX_TOKEN · owns their lifecycle</text>
+
+        <line class="ln" x1="570" y1="494" x2="570" y2="540" marker-end="url(#h)"/>
+        <text class="ts" x="582" y="520">the org’s own credentials</text>
+      </svg>
+    </div>
+    <figcaption>Ten floors instead of four layers, because you asked for more seams — and every
+    seam is a real one: a different question, a different owner, a different set of tables. The
+    spine is not a floor; it is what the floors stand on.</figcaption>
+  </figure>
+
+  <div class="note">
+    <p><strong>What changed from the last book.</strong> The gateway is no longer a neighbour
+    across the street; it is the ground floor. And “control plane” stopped being one word — it
+    is nine floors with names.</p>
+  </div>
+</section>
+
+<!-- ============ 1. MODULAR MONOLITH ============ -->
+<section class="plate">
+  <p class="eyebrow">The rules of the building</p>
+  <h2>Modular monolith: one building, but every floor could be its own house</h2>
+  <p>Not microservices — one process, one deploy, one database. Not a big ball either — every
+  floor is a self-contained module with a front desk, its own filing cabinets, and a notice
+  board. The test of whether you did it right is on the right-hand side of the picture.</p>
+
+  <figure>
+    <div class="figbox">
+      <svg viewBox="0 0 760 300" role="img" aria-label="Left: the anatomy of one module — an interface at the front, logic inside, its own tables underneath, events posted to the spine. Right: the extraction test — the same module moved to its own process with the interface swapped for a network call, and nothing else in the building changed.">
+        <defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+
+        <text class="tcap accT" x="20" y="22">ONE FLOOR, DISSECTED</text>
+        <rect class="raise acc" x="20" y="36" width="330" height="200" rx="8" stroke-width="2"/>
+        <rect class="fill ln" x="40" y="52" width="290" height="34" rx="5"/>
+        <text class="tx" x="52" y="73">INTERFACE — the only way in</text>
+        <rect class="fill ln" x="40" y="96" width="290" height="44" rx="5"/>
+        <text class="t" x="52" y="114">logic</text>
+        <text class="ts" x="52" y="130">the rules this floor is responsible for</text>
+        <rect class="fill ln" x="40" y="150" width="290" height="34" rx="5"/>
+        <text class="t" x="52" y="171">own tables — nobody else reads them</text>
+        <rect class="goldsoft acc" x="40" y="194" width="290" height="30" rx="5"/>
+        <text class="tx accT" x="52" y="213">EVENTS OUT → the spine</text>
+
+        <line class="ln" x1="185" y1="10" x2="185" y2="46" marker-end="url(#m)"/>
+        <text class="ts" x="20" y="260">callers see the interface. Not the logic, not the tables.</text>
+        <text class="ts" x="20" y="276">other floors learn what happened from events, never by peeking.</text>
+
+        <!-- extraction -->
+        <text class="tcap accT" x="400" y="22">THE EXTRACTION TEST</text>
+        <rect class="fill ln" x="400" y="36" width="150" height="200" rx="8"/>
+        <text class="ts" x="412" y="56">the building</text>
+        <rect class="fill ln soft" x="412" y="70" width="126" height="26" rx="4"/><text class="ts" x="420" y="87">floor A</text>
+        <rect class="fill ln soft" x="412" y="102" width="126" height="26" rx="4"/><text class="ts" x="420" y="119">floor B</text>
+        <rect class="fill acc dash" x="412" y="134" width="126" height="26" rx="4"/><text class="ts accT" x="420" y="151">stub of floor C</text>
+        <rect class="fill ln soft" x="412" y="166" width="126" height="26" rx="4"/><text class="ts" x="420" y="183">floor D</text>
+
+        <line class="ln acc" x1="538" y1="147" x2="600" y2="147" marker-end="url(#m)"/>
+        <text class="tm accT" x="546" y="140">RPC</text>
+
+        <rect class="raise acc" x="606" y="112" width="134" height="70" rx="8" stroke-width="2"/>
+        <text class="tx accT" x="618" y="136">floor C</text>
+        <text class="ts" x="618" y="154">its own process,</text>
+        <text class="ts" x="618" y="170">same interface</text>
+
+        <text class="ts" x="400" y="260">A, B and D did not change one line.</text>
+        <text class="ts" x="400" y="276">If they had to, C was never a module.</text>
+      </svg>
+    </div>
+    <figcaption>The interface you call in-process today is the exact interface you put a network
+    behind tomorrow. That single sentence is the whole of “modular monolith”.</figcaption>
+  </figure>
+
+  <ol class="rules">
+    <li><b>One deployable, one database, one deploy.</b><span>Start it with one command. There is no “which service is down”.</span></li>
+    <li><b>A floor owns its tables.</b><span>No floor reads another floor’s tables. Not for a report, not for a quick fix. It asks the interface or it listens for an event.</span></li>
+    <li><b>Floors talk through interfaces, never through each other’s insides.</b><span>An in-process call today; the same call over the network tomorrow, and the caller cannot tell.</span></li>
+    <li><b>What happened is an event on the spine, written in the same transaction as its cause.</b><span>A transcript is already an event log. A run finishing, a computer stopping, a card being answered — all events. Floors subscribe; they do not poll each other.</span></li>
+    <li><b>Doors are thin.</b><span>A door turns a protocol into a command and a result back into that protocol. It holds no rule. If a rule is in a door, it is enforced for one client and not the others.</span></li>
+    <li><b>The kernel depends on nothing.</b><span>Ids, errors, the shapes of events. Every floor depends on it; it depends on no floor and does no I/O. That is why the rules can be tested with no database.</span></li>
+    <li><b>The extraction test is the definition.</b><span>Any floor can move to its own process by swapping its interface for a remote one. If anything else has to change, the seam was fake.</span></li>
+  </ol>
+</section>
+
+<!-- ============ THE FLOORS ============ -->
+<section class="plate">
+  <p class="eyebrow">Floor by floor</p>
+  <h2>Each floor: what it owns, who asks it, what it announces</h2>
+  <p>Every floor below is drawn the same way on purpose. Its rooms across the middle; who is
+  allowed to knock, on the left; what it posts to the spine, on the right. If a floor’s picture
+  needs a different shape, that floor is doing two jobs.</p>
+</section>
+
+<!-- DOORS -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 01</span><h3>Doors — every protocol, translated to one language</h3></div>
+  <p>People and programs arrive speaking five different dialects. A door speaks one of them on
+  the outside and the building’s own commands on the inside. That is all it does.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Five doors: desktop, AG-UI, MCP, model, console and CLI. Each turns its protocol into a command and hands it to Identity first. Doors emit no events.">
+      <defs><marker id="f1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="40" width="134" height="96" rx="6"/><text class="tb" x="30" y="62">Desktop</text><text class="ts" x="30" y="80">the reconstructed</text><text class="ts" x="30" y="94">app’s contract:</text><text class="ts" x="30" y="108">commands, SSE,</text><text class="ts" x="30" y="122">identity seam</text>
+      <rect class="fill ln" x="166" y="40" width="134" height="96" rx="6"/><text class="tb" x="176" y="62">AG-UI</text><text class="ts" x="176" y="80">any client that</text><text class="ts" x="176" y="94">speaks the open</text><text class="ts" x="176" y="108">agent protocol</text>
+      <rect class="fill ln" x="312" y="40" width="134" height="96" rx="6"/><text class="tb" x="322" y="62">MCP</text><text class="ts" x="322" y="80">other agents use</text><text class="ts" x="322" y="94">our coworkers as</text><text class="ts" x="322" y="108">tools · OAuth 2.1</text>
+      <rect class="fill ln" x="458" y="40" width="134" height="96" rx="6"/><text class="tb" x="468" y="62">Model</text><text class="ts" x="468" y="80">Anthropic- and</text><text class="ts" x="468" y="94">OpenAI-shaped;</text><text class="ts" x="468" y="108">outside callers</text><text class="ts" x="468" y="122">reach Inference</text>
+      <rect class="fill ln" x="604" y="40" width="136" height="96" rx="6"/><text class="tb" x="614" y="62">Console · CLI</text><text class="ts" x="614" y="80">dashboards, admin</text><text class="ts" x="614" y="94">bootstrap, the</text><text class="ts" x="614" y="108">key mint</text>
+      <text class="ts" x="20" y="170">← knocked on by: everything outside</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: nothing. A door never emits an event. →</text>
+      <text class="ts accT" x="20" y="194">first call from every door: Identity. No exceptions, no shortcuts.</text>
+    </svg>
+  </div><figcaption>The model door is what today’s gateway exposes to the public. It stays a door; the machinery behind it moves to Floor 10.</figcaption></figure>
+</section>
+
+<!-- IDENTITY -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 02</span><h3>Identity — who is asking, and on whose behalf</h3></div>
+  <p>One identity for every door. The person who signs into the desktop app, the bot key a
+  script uses, the org key that Claude Code carries — all the same floor, all one answer.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Three rooms: accounts and sessions, orgs and tenancy, keys. Asked by every door first. Announces principal created, revoked, joined an org.">
+      <rect class="fill ln" x="20" y="40" width="232" height="96" rx="6"/><text class="tb" x="30" y="62">Accounts &amp; sessions</text><text class="ts" x="30" y="80">sign-in, refresh, revoke, verify</text><text class="ts" x="30" y="94">a budget on every door that</text><text class="ts" x="30" y="108">takes no credential</text>
+      <rect class="fill ln" x="264" y="40" width="232" height="96" rx="6"/><text class="tb" x="274" y="62">Orgs &amp; tenancy</text><text class="ts" x="274" y="80">org, domains, invites, roles</text><text class="ts" x="274" y="94">one org = one wall around</text><text class="ts" x="274" y="108">coworkers, computers, spend</text>
+      <rect class="fill ln" x="508" y="40" width="232" height="96" rx="6"/><text class="tb" x="518" y="62">Keys</text><text class="ts" x="518" y="80">bot keys, org keys, API keys</text><text class="ts" x="518" y="94">a key names a principal;</text><text class="ts" x="518" y="108">minted and revoked here only</text>
+      <text class="ts" x="20" y="170">← asked by: every door, before anything else</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: principal created · revoked · joined org →</text>
+      <text class="ts accT" x="20" y="194">the org↔gateway principal mapping you maintain today disappears: it was two identities for one building.</text>
+    </svg>
+  </div><figcaption>A principal is a person, a bot key, or an org key. Every floor below receives a principal, never a token.</figcaption></figure>
+</section>
+
+<!-- CONVERSATION -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 03</span><h3>Conversation — the record, and the rooms it happens in</h3></div>
+  <p>The transcript is the thing the window is a window onto. It is append-only, it is the
+  event log, and an entry kind nobody recognises is kept and re-emitted rather than dropped.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Three rooms: transcripts, activity, rooms and groups. Asked by doors to read and watch and by Agents to append. Announces entry appended, room changed.">
+      <rect class="fill ln" x="20" y="40" width="232" height="96" rx="6"/><text class="tb" x="30" y="62">Transcripts</text><text class="ts" x="30" y="80">append-only, watchable</text><text class="ts" x="30" y="94">unknown entry kinds pass</text><text class="ts" x="30" y="108">through untouched</text>
+      <rect class="fill ln" x="264" y="40" width="232" height="96" rx="6"/><text class="tb" x="274" y="62">Activity</text><text class="ts" x="274" y="80">live frames: what a coworker</text><text class="ts" x="274" y="94">is doing right now, for the</text><text class="ts" x="274" y="108">window to show</text>
+      <rect class="fill ln" x="508" y="40" width="232" height="96" rx="6"/><text class="tb" x="518" y="62">Rooms &amp; groups</text><text class="ts" x="518" y="80">a group is a coworker whose</text><text class="ts" x="518" y="94">members are coworkers;</text><text class="ts" x="518" y="108">shared rooms across people later</text>
+      <text class="ts" x="20" y="170">← asked by: doors (read, watch) · Agents (append)</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: entry appended · room changed →</text>
+      <text class="ts accT" x="20" y="194">“entry appended” is the event that wakes Agents. Nobody calls Agents to say “new message”; it hears it.</text>
+    </svg>
+  </div><figcaption>Rooms live here, not in Agents, because a room is a place messages go — the orchestration of who speaks next is a harness concern one floor down.</figcaption></figure>
+</section>
+
+<!-- AGENTS -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 04</span><h3>Agents — the coworkers, and the loop that makes them think</h3></div>
+  <p>A coworker is a record. The harness is the durable loop: assemble the prompt, ask
+  Inference, get tool calls, hand them to Tools, take the results, go again — and if it has to
+  wait for a human, it <em>suspends</em>. Suspension is a state, not a failure.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Three rooms: coworkers, harness, memory. Asked by Conversation when an entry is appended and by Autonomy when something fires. Announces run started, suspended, resumed, finished, tool requested.">
+      <rect class="fill ln" x="20" y="40" width="232" height="96" rx="6"/><text class="tb" x="30" y="62">Coworkers</text><text class="ts" x="30" y="80">profile, owner, model pin</text><text class="ts" x="30" y="94">(a route name, never a key),</text><text class="ts" x="30" y="108">which computer scope it uses</text>
+      <rect class="raise acc" x="264" y="40" width="232" height="96" rx="6" stroke-width="2"/><text class="tb accT" x="274" y="62">Harness</text><text class="ts" x="274" y="80">a graph of steps, journaled</text><text class="ts" x="274" y="94">before every model call;</text><text class="ts" x="274" y="108">resume, branch, inspect</text>
+      <rect class="fill ln" x="508" y="40" width="232" height="96" rx="6"/><text class="tb" x="518" y="62">Memory</text><text class="ts" x="518" y="80">what a coworker keeps</text><text class="ts" x="518" y="94">between runs; per coworker,</text><text class="ts" x="518" y="108">per computer where it must</text>
+      <text class="ts" x="20" y="170">← asked by: Conversation (entry appended) · Autonomy (fired)</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: run started · suspended · resumed · finished →</text>
+      <text class="ts accT" x="20" y="194">the harness calls exactly two floors: Inference (“what next?”) and Tools (“do this”). It never touches a computer itself.</text>
+    </svg>
+  </div><figcaption>“Harness kind” — whether a coworker is bound to a desk or runs as a pure server workflow — is a field on the coworker, read by the router one floor down.</figcaption></figure>
+</section>
+
+<!-- TOOLS -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 05</span><h3>Tools — what a coworker may do, and where each thing gets done</h3></div>
+  <p>Three rooms that today are one function. The registry knows what exists. The router
+  decides <em>where</em> — desk, the person’s machine, or a connector. The executor asks Policy,
+  overwrites identity, runs it, and turns a refusal into a result the model can read.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 240" role="img" aria-label="Three rooms: registry, router, executor. The router has three exits: desk, person's machine, connector. Asked by the harness. Announces tool ran, refused, or suspended.">
+      <defs><marker id="f5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><polygon points="0,0 10,5 0,10" fill="currentColor"/></marker></defs>
+      <rect class="fill ln" x="20" y="40" width="232" height="96" rx="6"/><text class="tb" x="30" y="62">Registry</text><text class="ts" x="30" y="80">built-in (shell, files,</text><text class="ts" x="30" y="94">computer use), plugin skills,</text><text class="ts" x="30" y="108">connector tools · per-coworker grants</text>
+      <rect class="raise acc" x="264" y="40" width="232" height="96" rx="6" stroke-width="2"/><text class="tb accT" x="274" y="62">Router</text><text class="ts" x="274" y="80">for each call, one destination.</text><text class="ts" x="274" y="94">a decision, not a call.</text><text class="ts" x="274" y="108">reads the coworker’s harness kind</text>
+      <rect class="fill ln" x="508" y="40" width="232" height="96" rx="6"/><text class="tb" x="518" y="62">Executor</text><text class="ts" x="518" y="80">ask Policy → overwrite identity</text><text class="ts" x="518" y="94">→ run → ingest. A refusal is a</text><text class="ts" x="518" y="108">result, never an exception</text>
+      <line class="ln acc" x1="330" y1="136" x2="330" y2="166" marker-end="url(#f5)"/><text class="ts accT" x="300" y="184">desk</text>
+      <line class="ln dash" x1="380" y1="136" x2="380" y2="166" marker-end="url(#f5)"/><text class="ts" x="352" y="184">person’s Mac</text>
+      <line class="ln" x1="440" y1="136" x2="440" y2="166" marker-end="url(#f5)"/><text class="ts" x="420" y="184">connector</text>
+      <text class="ts" x="20" y="214">← asked by: the harness, with a principal and a run id</text>
+      <text class="ts" x="740" y="214" text-anchor="end">announces: tool ran · refused · suspended for consent →</text>
+      <text class="ts badT" x="20" y="234">the computer a tool runs on comes from the run’s context. A model that can name its computer can name someone else’s.</text>
+    </svg>
+  </div><figcaption>The router is gold because it is the piece the old drawings forgot, and the piece that turns “the model suggested a tool” into “something happened”.</figcaption></figure>
+</section>
+
+<!-- POLICY -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 06</span><h3>Policy — one question per room, answered every time</h3></div>
+  <p>The window configures; the building decides. Policy is not checked once at sign-in; it is
+  asked on every action. Four rooms, four different questions, and they combine by
+  intersection — never union.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Four rooms: grants, consent, auto-review, spend. Asked by the tool executor and by doors. Announces decision made, card raised, card answered, budget exceeded.">
+      <rect class="fill ln" x="20" y="40" width="171" height="96" rx="6"/><text class="tb" x="30" y="62">Grants</text><text class="ts" x="30" y="80">may this principal drive</text><text class="ts" x="30" y="94">this coworker, to do</text><text class="ts" x="30" y="108">this, on whose records?</text>
+      <rect class="fill ln" x="203" y="40" width="171" height="96" rx="6"/><text class="tb" x="213" y="62">Consent</text><text class="ts" x="213" y="80">the one card: once /</text><text class="ts" x="213" y="94">always / deny / never.</text><text class="ts" x="213" y="108">remote-control gate per machine</text>
+      <rect class="fill ln" x="386" y="40" width="171" height="96" rx="6"/><text class="tb" x="396" y="62">Auto-review</text><text class="ts" x="396" y="80">a model judges the call</text><text class="ts" x="396" y="94">against org → coworker</text><text class="ts" x="396" y="108">rules. one card per call, max</text>
+      <rect class="fill ln" x="569" y="40" width="171" height="96" rx="6"/><text class="tb" x="579" y="62">Spend</text><text class="ts" x="579" y="80">points: pool per member,</text><text class="ts" x="579" y="94">cap per coworker, brake</text><text class="ts" x="579" y="108">per day. reads Metering</text>
+      <text class="ts" x="20" y="170">← asked by: the executor (every tool) · doors (every command)</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: decided · card raised · card answered · over budget →</text>
+      <text class="ts accT" x="20" y="194">a card can be answered from any device, because it lives here and not on the machine that asked.</text>
+    </svg>
+  </div><figcaption>Spend belongs on this floor, not in Inference: Inference measures, Policy decides. Today those are two services reconciling; here they are one building and one event.</figcaption></figure>
+</section>
+
+<!-- COMPUTERS -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 07</span><h3>Computers — when a desk exists, and who may sit at it</h3></div>
+  <p>Everything about a coworker’s computer that is not <em>using</em> it. Birth, readiness,
+  sleep, death. Which kind. Whose. And the URL a human looks at to watch or take over.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 230" role="img" aria-label="Four rooms: lifecycle, kinds, assignment, screen and handoff. Asked by the tool router and executor and by Agents on first turn. Announces computer ready, stopped, destroyed, handoff started or ended.">
+      <rect class="raise acc" x="20" y="40" width="171" height="110" rx="6" stroke-width="2"/><text class="tb accT" x="30" y="62">Lifecycle</text><text class="ts" x="30" y="80">create → ready → use →</text><text class="ts" x="30" y="94">stop → hibernate → destroy</text><text class="ts" x="30" y="108">mints the box token,</text><text class="ts" x="30" y="122">mounts the volumes,</text><text class="ts" x="30" y="136">publishes the ports</text>
+      <rect class="fill ln" x="203" y="40" width="171" height="110" rx="6"/><text class="tb" x="213" y="62">Kinds</text><text class="ts" x="213" y="80">one interface: run, files,</text><text class="ts" x="213" y="94">see, act, screen URL.</text><text class="ts" x="213" y="108">grok-box (default),</text><text class="ts" x="213" y="122">rented, local for dev</text>
+      <rect class="fill ln" x="386" y="40" width="171" height="110" rx="6"/><text class="tb" x="396" y="62">Assignment</text><text class="ts" x="396" y="80">scope: org / person /</text><text class="ts" x="396" y="94">coworker. sharing policy.</text><text class="ts" x="396" y="108">idle stop. desk host per org:</text><text class="ts" x="396" y="122">a local pool or its own machine</text>
+      <rect class="fill ln" x="569" y="40" width="171" height="110" rx="6"/><text class="tb" x="579" y="62">Screen &amp; handoff</text><text class="ts" x="579" y="80">the viewer URL the window</text><text class="ts" x="579" y="94">embeds. handoff start /</text><text class="ts" x="579" y="108">end so a human can type a</text><text class="ts" x="579" y="122">password the model never sees</text>
+      <text class="ts" x="20" y="184">← asked by: Tools (run, files, act) · Agents (first turn: ensure a desk)</text>
+      <text class="ts" x="740" y="184" text-anchor="end">announces: ready · stopped · destroyed · handoff started/ended →</text>
+      <text class="ts accT" x="20" y="208">“see” and “act” are on the interface from day one. A kind that cannot do them says so; it does not pretend.</text>
+    </svg>
+  </div><figcaption>Where a desk physically runs is an org’s choice, recorded on the assignment: the building’s own container runtime by default, or a desk host the org points at over a private network. The wire to the desk is identical either way. The person’s own machine is <em>not</em> a kind on this floor — by your decision it stays a separate path out of the router, with its own switch and its own card.</figcaption></figure>
+</section>
+
+<!-- CONNECTORS -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 08</span><h3>Connectors &amp; secrets — other people’s services, and the keys to them</h3></div>
+  <p>A connector is a server someone else runs, reached through a standard protocol. We do not
+  write them; we connect to them. The tokens that let us in, and the one-off secrets a person
+  hands over for a single run, live here and nowhere else.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Four rooms: connector sessions, vault, secret relay, plugin catalogue. Asked by the tool router for connector tools and by doors for OAuth. Announces connection made, revoked, secret delivered.">
+      <rect class="fill ln" x="20" y="40" width="171" height="96" rx="6"/><text class="tb" x="30" y="62">Sessions</text><text class="ts" x="30" y="80">a live client to each</text><text class="ts" x="30" y="94">external MCP server;</text><text class="ts" x="30" y="108">tools listed, called</text>
+      <rect class="fill ln" x="203" y="40" width="171" height="96" rx="6"/><text class="tb" x="213" y="62">Vault</text><text class="ts" x="213" y="80">OAuth tokens per</text><text class="ts" x="213" y="94">connection scope; lending</text><text class="ts" x="213" y="108">between coworkers by rule</text>
+      <rect class="fill ln" x="386" y="40" width="171" height="96" rx="6"/><text class="tb" x="396" y="62">Secret relay</text><text class="ts" x="396" y="80">masked in the window →</text><text class="ts" x="396" y="94">one run’s environment →</text><text class="ts" x="396" y="108">gone. never a transcript</text>
+      <rect class="fill ln" x="569" y="40" width="171" height="96" rx="6"/><text class="tb" x="579" y="62">Plugin catalogue</text><text class="ts" x="579" y="80">installable bundles:</text><text class="ts" x="579" y="94">skills + connector config,</text><text class="ts" x="579" y="108">in a published format</text>
+      <text class="ts" x="20" y="170">← asked by: the router (connector tools) · doors (connect, OAuth)</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: connected · revoked · secret delivered →</text>
+      <text class="ts accT" x="20" y="194">website cookies are not here. They live on the desk, in the browser profile, and never reach the building.</text>
+    </svg>
+  </div><figcaption>Prefer a connector over driving a website with computer use whenever a real API exists. The browser is for sites that have none.</figcaption></figure>
+</section>
+
+<!-- AUTONOMY -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 09</span><h3>Autonomy — runs that nobody typed</h3></div>
+  <p>The reason the building exists: a coworker keeps working when the lid is closed. Three
+  ways a run starts without a person: the clock, an event, or a message to everyone.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 210" role="img" aria-label="Three rooms: scheduler, monitor, dispatch. Asked by doors to create schedules and by the clock and the spine. Announces run requested.">
+      <rect class="fill ln" x="20" y="40" width="232" height="96" rx="6"/><text class="tb" x="30" y="62">Scheduler</text><text class="ts" x="30" y="80">cron → a run. claimed as a row,</text><text class="ts" x="30" y="94">so two replicas never fire the</text><text class="ts" x="30" y="108">same minute twice</text>
+      <rect class="fill ln" x="264" y="40" width="232" height="96" rx="6"/><text class="tb" x="274" y="62">Monitor</text><text class="ts" x="274" y="80">an event matcher over the spine</text><text class="ts" x="274" y="94">→ a run. loop guard: a run a</text><text class="ts" x="274" y="108">monitor fired never re-fires it</text>
+      <rect class="fill ln" x="508" y="40" width="232" height="96" rx="6"/><text class="tb" x="518" y="62">Dispatch</text><text class="ts" x="518" y="80">“tell everyone”: written once</text><text class="ts" x="518" y="94">to a ledger, fanned out in</text><text class="ts" x="518" y="108">parallel. delivery is our job</text>
+      <text class="ts" x="20" y="170">← asked by: doors (create, pause) · the clock · the spine</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: run requested (Agents picks it up) →</text>
+      <text class="ts accT" x="20" y="194">Autonomy never runs a turn itself. It asks for one, exactly like a person would, and Agents does the rest.</text>
+    </svg>
+  </div><figcaption>Because Monitor listens to the spine, any floor’s event can start a run — a computer stopping, a card being denied, a budget crossing a line.</figcaption></figure>
+</section>
+
+<!-- INFERENCE -->
+<section class="floor">
+  <div class="floorhead"><span class="no">FLOOR 10</span><h3>Inference — the gateway, moved inside</h3></div>
+  <p>Every model call in the building leaves through here. It picks the model, picks which of
+  the org’s credentials to spend, translates to the provider’s dialect, streams the answer back,
+  and writes down what it cost — real and counterfactual.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 230" role="img" aria-label="Four rooms: routing, credential pool, translation, metering. Asked by the harness in-process and by the model door for outside callers. Announces usage recorded, credential cooled down.">
+      <rect class="fill ln" x="20" y="40" width="171" height="96" rx="6"/><text class="tb" x="30" y="62">Routing</text><text class="ts" x="30" y="80">auto / cheap / frontier;</text><text class="ts" x="30" y="94">a named model is honoured.</text><text class="ts" x="30" y="108">a pin is a route, not a key</text>
+      <rect class="fill ln" x="203" y="40" width="171" height="96" rx="6"/><text class="tb" x="213" y="62">Credential pool</text><text class="ts" x="213" y="80">the org’s own keys and seats.</text><text class="ts" x="213" y="94">a credential problem → fail</text><text class="ts" x="213" y="108">over; a capability one → escalate</text>
+      <rect class="fill ln" x="386" y="40" width="171" height="96" rx="6"/><text class="tb" x="396" y="62">Translation</text><text class="ts" x="396" y="80">one canonical shape inside;</text><text class="ts" x="396" y="94">every dialect converts to it</text><text class="ts" x="396" y="108">and back at the edge</text>
+      <rect class="fill ln" x="569" y="40" width="171" height="96" rx="6"/><text class="tb" x="579" y="62">Metering</text><text class="ts" x="579" y="80">every call: tokens, real cost,</text><text class="ts" x="579" y="94">list price. Policy.Spend turns</text><text class="ts" x="579" y="108">this into points</text>
+      <text class="ts" x="20" y="170">← asked by: the harness (in-process) · the model door (outside callers)</text>
+      <text class="ts" x="740" y="170" text-anchor="end">announces: usage recorded · credential cooled down →</text>
+      <text class="ts accT" x="20" y="194">the harness speaks the canonical shape directly. No dialect, no translator, no round trip — that is the first thing you win by moving in.</text>
+      <text class="ts badT" x="20" y="216">provider credentials never touch a coworker’s row, a window, or a log. The pool is the only room that holds them.</text>
+    </svg>
+  </div><figcaption>This is the floor that passes the extraction test most obviously: its public face is already a door, and its interface is already a wire. Moving it in changes the address, not the contract.</figcaption></figure>
+</section>
+
+<!-- SPINE -->
+<section class="floor">
+  <div class="floorhead"><span class="no">SPINE</span><h3>The spine — what every floor stands on</h3></div>
+  <p>Not a floor. The shared kernel and the plumbing. Every floor depends on it; it depends on
+  nothing and knows no floor by name.</p>
+  <figure><div class="figbox">
+    <svg viewBox="0 0 760 180" role="img" aria-label="Four parts: kernel, event store, outbox and bus, wire contracts. Depends on nothing; every floor depends on it.">
+      <rect class="goldsoft acc" x="20" y="40" width="171" height="96" rx="6"/><text class="tb accT" x="30" y="62">Kernel</text><text class="ts" x="30" y="80">ids, errors, the shapes of</text><text class="ts" x="30" y="94">events and commands.</text><text class="ts" x="30" y="108">pure. no I/O. no floor names</text>
+      <rect class="goldsoft acc" x="203" y="40" width="171" height="96" rx="6"/><text class="tb accT" x="213" y="62">Event store</text><text class="ts" x="213" y="80">append-only. the transcript</text><text class="ts" x="213" y="94">is one stream in it.</text><text class="ts" x="213" y="108">projections for every read</text>
+      <rect class="goldsoft acc" x="386" y="40" width="171" height="96" rx="6"/><text class="tb accT" x="396" y="62">Outbox &amp; bus</text><text class="ts" x="396" y="80">an event is written in the</text><text class="ts" x="396" y="94">same transaction as its cause.</text><text class="ts" x="396" y="108">floors subscribe, never poll</text>
+      <rect class="goldsoft acc" x="569" y="40" width="171" height="96" rx="6"/><text class="tb accT" x="579" y="62">Wire contracts</text><text class="ts" x="579" y="80">one per door, transcribed</text><text class="ts" x="579" y="94">with provenance. unknown</text><text class="ts" x="579" y="108">shapes round-trip untouched</text>
+      <text class="ts" x="20" y="166">the reason a floor can be tested with no database: its rules live on the kernel, and the kernel has no database.</text>
+    </svg>
+  </div><figcaption>When a floor moves out, the spine is what goes with it: the kernel as a shared library, the bus as a real broker. Nothing else has to be invented.</figcaption></figure>
+</section>
+
+<!-- ============ THE OTHER THREE THINGS THAT RUN ============ -->
+<section class="plate">
+  <p class="eyebrow">The other three that run</p>
+  <h2>Windows, desks, and the person’s machine</h2>
+  <p>These are separate processes because physics says so, not because of a design preference: a
+  window runs where the person is, a desk runs in a container, and the person’s machine is the
+  person’s machine.</p>
+
+  <h3 style="margin-top:1.6rem"><span class="tag g">WINDOW</span> Client — holds nothing, shows everything</h3>
+  <ul class="parts">
+    <li><span class="nm">Transcript view</span><span class="ds">Renders the record and the live activity. Owns neither.</span></li>
+    <li><span class="nm">Cards</span><span class="ds">Shows a consent card; sends the answer to Policy. Does not decide, does not flip switches on the person’s behalf.</span></li>
+    <li><span class="nm">Secret entry</span><span class="ds">Masked field → Secret relay. The value never lands in client storage.</span></li>
+    <li><span class="nm">Screen viewer</span><span class="ds">Embeds the URL that Computers.Screen hands it. One viewer, one source.</span></li>
+    <li><span class="nm">Settings</span><span class="ds">Configures. The building decides.</span></li>
+    <li><span class="nm">Not here any more</span><span class="ds">The in-box exec daemon whose source lives in the client repo today belongs with the desks. Consent logic belongs on Floor 06.</span></li>
+  </ul>
+
+  <h3 style="margin-top:2rem"><span class="tag g">DESK</span> Computer — a Linux box with a screen and a jail</h3>
+  <ul class="parts">
+    <li><span class="nm">exec service <span class="tag">:1337</span></span><span class="ds">Run, files, computer use. Bearer token minted by Floor 07.</span></li>
+    <li><span class="nm">host service <span class="tag">:1340</span></span><span class="ds">Am I up, who am I, what can I do. Polled by Lifecycle. Runs no model.</span></li>
+    <li><span class="nm">Virtual display</span><span class="ds">A framebuffer with no monitor. Everything the coworker “sees” is this.</span></li>
+    <li><span class="nm">Viewer <span class="tag">:6080</span></span><span class="ds">The display as a web page, for a human to watch or take over.</span></li>
+    <li><span class="nm">Browser + profile volume</span><span class="ds">Logins survive a restart. Cookies stay here. Closing the browser must not kill the desk.</span></li>
+    <li><span class="nm">Workspace jail</span><span class="ds">Every path resolves under one root, after symlinks. Survives hibernation on a volume.</span></li>
+  </ul>
+
+  <h3 style="margin-top:2rem"><span class="tag g">MACHINE</span> The person’s own computer — a separate path, by decision</h3>
+  <ul class="parts">
+    <li><span class="nm">Local-exec daemon</span><span class="ds">Inside the desktop app. Runs a command on the person’s real machine.</span></li>
+    <li><span class="nm">The switch</span><span class="ds">On or off, enforced by the daemon alone. The building cannot flip it. This is the local brake.</span></li>
+    <li><span class="nm">How it is reached</span><span class="ds">The router pushes a request out through the window’s connection. Card first, every time, answered on any device.</span></li>
+    <li><span class="nm">What it is not</span><span class="ds">Not computer use. Not a desk. Not available when the machine is off — and the desk carries on regardless.</span></li>
+  </ul>
+</section>
+
+<!-- ============ WHAT MOVES ============ -->
+<section class="plate">
+  <p class="eyebrow">The corrections</p>
+  <h2>What is misplaced today, and where it goes</h2>
+  <p>Most of what you have already sits on the right floor. These are the pieces that do not.</p>
+  <div class="tw">
+  <table>
+    <thead><tr><th>Today</th><th>From scratch</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr><td>The gateway is a separate service with its own identity, its own principals and a mapping between the two</td><td>Floor 10, one identity from Floor 02; the public API stays as the model door</td><td>Two identities for one building is a reconciliation job that never ends</td></tr>
+      <tr><td>Computer lifecycle is spread over provisioning, wake, and an idle sweep in the store</td><td>Computers.Lifecycle</td><td>“When does a desk exist” has one owner</td></tr>
+      <tr><td>Tool routing is a single execute function</td><td>Registry · Router · Executor</td><td>Adding a destination should not mean editing the executor</td></tr>
+      <tr><td>Consent logic partly lives in client extensions</td><td>Policy.Consent; the window only renders the card</td><td>A rule in a client is enforced for one client</td></tr>
+      <tr><td>The in-box exec daemon’s source lives in the client repo</td><td>The desk image</td><td>Two implementations of one wire, in two languages, in two repos</td></tr>
+      <tr><td>Two screen-viewer paths in the client, one dead</td><td>One viewer, fed by Computers.Screen</td><td>One URL, one source of truth</td></tr>
+      <tr><td>No computer use anywhere on the server</td><td>Kinds interface: see + act; Registry: the tools</td><td>The vendor was hiding this gap</td></tr>
+      <tr><td>Spend is computed across two services</td><td>Policy.Spend reads Inference.Metering events</td><td>One building, one transaction, no drift</td></tr>
+      <tr><td>Local Docker is the default kind; rented is the “forever” kind</td><td>grok-box is the default; rented is optional</td><td>The default should be the one you own</td></tr>
+      <tr><td>Rooms are a client-side orchestrator</td><td>Conversation.Rooms + Agents.Harness</td><td>Nothing that matters lives in a client</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<!-- ============ NEXT BOOKS ============ -->
+<section class="plate">
+  <p class="eyebrow">Next</p>
+  <h2>The hard topics, one book each</h2>
+  <p>Once these floors are agreed, each of the following gets its own picture book, drawn
+  against <em>this</em> building — not the generic version.</p>
+  <ul class="queue">
+    <li><b>How a tool gets executed</b>registry → router → policy → executor → desk, and what comes back</li>
+    <li><b>How consent works</b>the one card, the machine switch, the judge, and why a card never expires</li>
+    <li><b>How a desk is born and dies</b>create, ready, hibernate, destroy — and what the volumes keep</li>
+    <li><b>How a run survives a crash</b>journal-before-call, suspension as a state, resume from the graph</li>
+    <li><b>Where every secret lives</b>cookies, OAuth, one-off keys, box tokens, provider credentials</li>
+    <li><b>How a model call is routed and metered</b>tiers, failover vs escalation, points</li>
+    <li><b>How runs start on their own</b>scheduler, monitor, dispatch, and the loop guard</li>
+    <li><b>How rooms work</b>a group as a coworker, who speaks next, and shared rooms later</li>
+    <li><b>How a floor moves out</b>the extraction, step by step, on a real floor</li>
+  </ul>
+</section>
+
+<footer class="closer">
+  <p class="eyebrow">One sentence</p>
+  <p style="font-family:Fraunces,Georgia,serif;font-size:1.35rem;line-height:1.35;font-weight:600;max-width:38ch">
+    One building, ten floors, one spine — and any floor can move out tomorrow without the others
+    noticing it left.</p>
+</footer>
+
+</div>
