@@ -19,6 +19,20 @@ use serde::Deserialize;
 
 use crate::model::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 
+/// How much of a refused key reaches the log: `oag_live_` plus seven characters, which is exactly
+/// what the gateway stores as `api_key.key_prefix` and therefore exactly what identifies the row.
+/// Shorter would not name a key; longer would start handing out the secret for no extra answer.
+const KEY_PREFIX_LEN: usize = 16;
+
+/// The part of a credential that may be written down. Pure, so the rule is tested without a
+/// socket — the same reason `parse_line` below is pure.
+///
+/// `chars()` rather than a byte slice: a key is opaque to us, and a byte index that lands inside a
+/// multi-byte character panics. Losing a turn to a logging call would be an unusually poor trade.
+fn logged_prefix(key: &str) -> String {
+    key.chars().take(KEY_PREFIX_LEN).collect()
+}
+
 pub struct GatewayDoor {
     base_url: String,
     key: String,
@@ -272,6 +286,26 @@ impl ModelDoor for GatewayDoor {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
+            // WHICH KEY WAS REFUSED, because nobody else can say. The gateway records nothing at
+            // all for a rejected key — it proved that by presenting junk and watching its own log
+            // stay flat — so this line is the only place in either system that can name the
+            // credential a 401 was about. Without it every 401 reads identically whether the key
+            // was the deployment's, a coworker's own, or one the gateway lost in a wipe, and on
+            // 8 Sep 2026 that ambiguity cost an hour of four-way guessing between three sessions.
+            //
+            // THE PREFIX, NEVER THE KEY. `oag_live_f69df82` is exactly what names the row in the
+            // gateway's `api_key` table, which is the whole question being asked, and is useless
+            // to anyone who later reads the log.
+            //
+            // `owned` is the other half: a coworker's own key and the deployment's fail with the
+            // same status and the same sentence, and which one it was decides where to look next.
+            if status.as_u16() == 401 {
+                tracing::error!(
+                    key_prefix = %logged_prefix(key),
+                    owned = request.gateway_key.is_some(),
+                    "the gateway refused this key"
+                );
+            }
             if status.as_u16() == 402 {
                 return Err(ModelError::SpendCap(spend_cap_sentence(&body)));
             }
@@ -308,6 +342,51 @@ impl ModelDoor for GatewayDoor {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// WHAT MAY BE WRITTEN DOWN ABOUT A REFUSED KEY. The gateway records nothing at all for a
+    /// key it rejects, so our log is the only place that can ever name the credential a 401 was
+    /// about — but a log that carried the whole key would trade one problem for a worse one.
+    #[test]
+    fn a_logged_key_names_its_row_and_nothing_else() {
+        // A real key: `oag_live_` plus seven characters is exactly `api_key.key_prefix` on the
+        // gateway, which is the whole question a 401 is asking.
+        let key = "oag_live_f69df82cafe1234567890abcdef";
+        assert_eq!(logged_prefix(key), "oag_live_f69df82");
+
+        // THE HALF THAT MATTERS: the secret does not travel. Asserted as "the tail is absent"
+        // rather than "the head is right", because a prefix that silently grew to swallow the
+        // whole key would still satisfy the equality above if that were the only check.
+        assert!(
+            !logged_prefix(key).contains("cafe1234567890abcdef"),
+            "the secret tail reached the log: {}",
+            logged_prefix(key)
+        );
+    }
+
+    /// A key is opaque to us: we neither mint it nor validate its shape. A byte-index slice would
+    /// panic on a multi-byte character, and losing a turn to a logging call is an absurd way to
+    /// fail — so the rule is defined on characters and every odd input has to survive it.
+    #[test]
+    fn logging_a_strange_key_cannot_panic() {
+        for odd in [
+            "",
+            "short",
+            "oag_live_",
+            "ключ-которого-не-бывает",
+            "🔑🔑🔑",
+        ] {
+            let logged = logged_prefix(odd);
+            assert!(
+                logged.chars().count() <= KEY_PREFIX_LEN,
+                "{odd:?} logged {} characters",
+                logged.chars().count()
+            );
+            assert!(
+                odd.starts_with(&logged),
+                "{odd:?} -> {logged:?} is not a prefix"
+            );
+        }
+    }
 
     #[test]
     fn a_tool_call_frame_becomes_start_args_end() {

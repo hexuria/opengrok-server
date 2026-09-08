@@ -60,6 +60,25 @@ it cannot count rather than storing one that holds every turn. `ensure_key_for` 
 is the failure mode of CLAUDE.md's third header fact, and this is the third instance of it found
 in one night. It looks like success at every layer until dispatch.
 
+**PARTLY MITIGATED 9 Sep 2026, and deliberately not closed.** `GuardedDoor` now retries an
+UNCAPPED coworker's turn on the deployment's key when the gateway refuses the credential
+(`against_a_dead_coworker_key.rs`). That removes the user-visible half — a dead key no longer
+costs the conversation — but it does not stop the unusable key being minted, and a CAPPED
+coworker still fails closed, correctly.
+
+Two reasons the refusal above is still wanted rather than superseded:
+
+- The mitigation is a retry, not a prevention. The bad key still exists, still meters nothing,
+  and still makes the usage panel under-report every turn it touches.
+- **The obvious implementation of the refusal does not work.** `GET /admin/api/routes` returns a
+  `credentials` count that looks exactly right and is not: the gateway's own query is
+  `COUNT(ar.account_id)` on a plain join, with no principal parameter and no `owner_principal_id`
+  filter, and blind to `schedulable`, `cooldown_until`, `rate_limited_until` and the reserve. On
+  8 Sep it would have read `2` while the org principal could reach zero — the guard would have
+  passed its own test and failed in the one case it exists for. The ownership-aware view is
+  `repo::candidates` on the gateway's request path, which no admin endpoint exposes. So this
+  needs either a principal-aware route probe from the gateway, or a different question entirely.
+
 ---
 
 ## 3. Nothing can tell a live gateway key from a dead one
@@ -74,9 +93,19 @@ with no way to see why from our logs.
 
 **Two cheap improvements, either of which would have collapsed an hour into a minute:**
 
-- **Log the presented key prefix on a 401.** The gateway records *nothing* for a rejected key —
-  it proved this by sending junk and watching its log stay flat — so ours is the only place that
-  can say which credential was sent. Never the value; the prefix is enough to identify a row.
+- ~~**Log the presented key prefix on a 401.**~~ **DONE 9 Sep 2026** (`gateway.rs`,
+  `logged_prefix`). The gateway records *nothing* for a rejected key — it proved this by sending
+  junk and watching its log stay flat — so ours is the only place that can say which credential
+  was sent. Sixteen characters, which is exactly `api_key.key_prefix` on the gateway and so
+  exactly what names the row; never the value. It also logs `owned`, because a coworker's own key
+  and the deployment's fail with the same status and the same sentence, and which one it was
+  decides where to look next.
+
+  Coverage, stated rather than assumed: the PREFIX RULE is behaviour-tested and revert-checked
+  three ways (logging the whole key, a longer prefix, and a byte slice — the last passes the
+  prefix test and fails the panic test, which is why both exist). That the line is *emitted on a
+  401* is not covered by a test: the harness crate keeps its tests socket-free on purpose, and a
+  subscriber-capture test would have cost a dev-dependency for one assertion.
 - **Validate a stored prefix against the gateway** when a row is first used after a restart, or
   on the mint path, so a dead row is diagnosable rather than silent.
 
