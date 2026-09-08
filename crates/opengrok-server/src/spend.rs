@@ -831,6 +831,33 @@ fn over_points(name: &str, limits: &crate::points::Effective, counted: &Counted)
     None
 }
 
+/// Did the gateway refuse the CREDENTIAL, rather than the request?
+///
+/// Two shapes, both met on 8 Sep 2026 and both meaning "this key cannot serve here":
+///
+/// - **401** — the gateway does not know the key at all. Ours named `api_key` rows that a wipe of
+///   its tmpfs database had destroyed, so a syntactically perfect credential authenticated against
+///   nothing.
+/// - **503 whose body names a credential** — the key authenticates, but the route it lands on
+///   reaches no provider credential ("no credential available for provider openai on this route",
+///   "no subscription credential for xai"). That is what re-minted keys hit on an org principal
+///   whose seats were owned elsewhere.
+///
+/// MATCHING A 503 ON ITS BODY IS NOT LOVELY, and it is the honest signal available: the status
+/// alone cannot separate "this route has no credential" from an upstream outage, and treating
+/// every 503 as a credential problem would retry real outages on a second key to no purpose.
+/// Deliberately narrow — anything not clearly about a credential is left to fail, because the
+/// caller of this function is deciding whether to spend a second request.
+fn is_credential_refusal(error: &ModelError) -> bool {
+    match error {
+        ModelError::Refused { status: 401, .. } => true,
+        ModelError::Refused { status: 503, body } => {
+            body.to_ascii_lowercase().contains("credential")
+        }
+        _ => false,
+    }
+}
+
 #[async_trait::async_trait]
 impl ModelDoor for GuardedDoor {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
@@ -862,7 +889,41 @@ impl ModelDoor for GuardedDoor {
                 ))
             })?;
         if !limits.is_limited() {
-            return self.inner.stream(request).await;
+            // AN UNCAPPED COWORKER'S KEY BUYS METERING, NOT ENFORCEMENT — so a dead one must not
+            // cost the conversation. Nothing above this line reads the key: an uncapped coworker
+            // returns here before any meter is consulted, yet `key_for` attached its key to the
+            // request anyway, back in `conversation.rs`. On 8 Sep 2026 that arrangement took every
+            // real chat down twice — first when a wipe destroyed the gateway keys our rows still
+            // named (401), then when re-minted keys landed on an org principal whose route reached
+            // no seats (503). In both cases the credential's only job was to count.
+            //
+            // So: try the coworker's key, and if the gateway refuses the CREDENTIAL rather than
+            // the request, run the turn once more on the deployment's key.
+            //
+            // WHY THIS IS NOT A HOLE IN THE CAP. The whole branch is unreachable when
+            // `is_limited()`, and a capped coworker still fails closed below with its own
+            // sentence, exactly as before — falling back there would step around the cap the key
+            // exists to enforce, which `gateway.rs` refuses to do and is right to.
+            //
+            // WHAT IT COSTS, stated rather than hidden: that turn is metered against the
+            // deployment's key instead of the coworker's, so the usage panel under-reports it and
+            // this log line is the only record. An under-reported turn beats a dead conversation.
+            let attempt = self.inner.stream(request.clone()).await;
+            let Err(error) = attempt else {
+                return attempt;
+            };
+            if request.gateway_key.is_none() || !is_credential_refusal(&error) {
+                return Err(error);
+            }
+            tracing::warn!(
+                coworker = %coworker.as_str(),
+                %error,
+                "points guard: this coworker's own key cannot serve; retrying on the deployment's \
+                 key. The turn is unmetered and will not appear in its usage."
+            );
+            let mut fallback = request;
+            fallback.gateway_key = None;
+            return self.inner.stream(fallback).await;
         }
         let name = self
             .store
