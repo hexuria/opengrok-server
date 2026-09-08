@@ -11,7 +11,7 @@ curl -fsS http://127.0.0.1:1447/health   # {"ok":true,…}
 server, and starts the new binary. It refuses to run when `OG_DATABASE_URL` points at the
 gate's database (`…/opengrok_gate`) — a dev server there would race the smoke suite's sweeps.
 
-## Restarting by hand — the three gotchas, learned the hard way
+## Restarting by hand — the four gotchas, learned the hard way
 
 If you manage the process yourself instead of using `serve.sh`:
 
@@ -21,7 +21,13 @@ If you manage the process yourself instead of using `serve.sh`:
 2. **SIGTERM drops the listener but the process can outlive it** — graceful shutdown holds open
    SSE connections (a connected daemon or client keeps it draining). Wait a moment, then
    `kill -9` what `pgrep -x opengrok` still shows.
-3. **The port outlives the kill by a moment.** Poll `/health` until it stops answering before
+3. **Never find it by port.** `lsof -ti:1447 | xargs kill -9` is the reflex and it is wrong here:
+   with TLS in front, **Caddy holds `*:1447` on IPv6 while the server holds `127.0.0.1:1447` on
+   IPv4**, so a port-based kill takes out Caddy and cuts the client's route while leaving the
+   server running. `gate.sh` used the port form and killed Caddy six times in a week. It also
+   means a port check tells you nothing about *which* server is behind it — read
+   `/health`'s `pid`, or `ps eww` the pid `pgrep -x` gives you, to know what is actually running.
+4. **The port outlives the kill by a moment.** Poll `/health` until it stops answering before
    starting the next binary, or the new process fails to bind while the old one drains.
 
 ## Deterministic windows — driving consent cards with no spend
