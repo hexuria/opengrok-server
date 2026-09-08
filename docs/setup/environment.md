@@ -9,7 +9,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 | Variable | What it is |
 |---|---|
 | `OG_DATABASE_URL` | Postgres — see [`postgres.md`](postgres.md) |
-| `OG_TOKEN_SECRET` | signs our access tokens. No default, so two deployments can never share a key by accident. `openssl rand -hex 32` |
+| `OG_TOKEN_SECRET` | signs our access tokens. No default, so two deployments can never share a key by accident. `openssl rand -hex 32`. **Changing it signs out every desktop at once**, and the recovery is a sign-in window that dies 180 s after it opens, with the person at the keyboard — so when editing `.env` for any other reason, fingerprint this value before and after (`grep -m1 '^OG_TOKEN_SECRET=' .env \| cut -d= -f2- \| shasum -a 256 \| cut -c1-12`) and change lines in place rather than rewriting the file |
 | `OG_CREDENTIAL_KEK` | encrypts connector credentials at rest. Deliberately no default. `openssl rand -base64 32` |
 
 ## The listeners
@@ -26,14 +26,27 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_MODEL_DOOR` | gateway | `mock` scripts a stream (CI, no spend); `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); anything else exits through open-ai-gateway |
+| `OG_MODEL_DOOR` | gateway | **which door every model call leaves by — see the table below.** `mock` scripts a stream (CI, no spend); `mock-cards` serves the fixture catalogue; `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); `rig` goes through rig-core; anything else — including unset — is the direct `GatewayDoor` |
 | `OG_GATEWAY_URL` | `http://127.0.0.1:29080` | open-ai-gateway's inference listener |
 | `OG_GATEWAY_TOKEN` | — | an `oag_live_…` key. **Never a provider key** — a pin is a route, not a credential (CLAUDE.md #4) |
-| `OG_MODEL` | `gpt-5.6-luna` | the route a NEW coworker is hired on when none is named. Each coworker then keeps its own pin (changeable in the console at `/console/coworkers`), so changing this retargets nothing existing. Dialect: `provider/model` (`openai/gpt-5.5`), `@api`/`@sub`, or a ladder id (`oag/auto`); a bare name works on a passthrough route. **An advertised id is not necessarily servable** — `oag/auto` is refused on a route with no credential for the rung it picks; `POST /models/probe` proves a pin before it is saved |
+| `OG_MODEL` | `gpt-5.6-luna` | the route a NEW coworker is hired on when none is named. Each coworker then keeps its own pin (changeable in the console at `/console/coworkers`), so changing this retargets nothing existing. Dialect: `provider/model` (`openai/gpt-5.5`), `@api`/`@sub`, or a ladder id (`oag/auto`); a bare name works on a passthrough route. **Servable and advertised are independent, in both directions.** An advertised id is not necessarily servable — `oag/auto` is refused on a route with no credential for the rung it picks; `POST /models/probe` proves a pin before it is saved. And the reverse: a **servable id need not be advertised** — `/v1/models` is built from each provider's own model listing, and xAI's returns quota with no model list, so `xai/grok-4.6` serves perfectly while never appearing in the picker. Do not "fix" a working default because the picker does not list it |
 | `OG_AUTO_REVIEW_MODEL` | `OG_MODEL` | the auto-review judge's route — deliberately not the coworker's own route (the reviewer must not be the reviewed) |
 | `OG_AUTO_REVIEW_MOCK_VERDICT` | unset | on the mock doors only: the judge's canned one-word verdict (`allow`/`ask`/`block`), for driving consent cards with no spend |
 | `OG_GATEWAY_ADMIN_URL` | unset | open-ai-gateway's **admin** listener (`:29081`), for minting org members' keys from the console |
-| `OG_GATEWAY_ADMIN_TOKEN` | unset | an **admin** key (`oag admin key create --email <you> --admin`) — NOT the inference key above. Unset ⇒ the console's "Gateway access" card is off |
+| `OG_GATEWAY_ADMIN_TOKEN` | unset | an **admin** key (`oag admin key create --email <you> --admin`) — NOT the inference key above. Unset ⇒ the console's "Gateway access" card is off, and `mint_late` cannot give a coworker a key of its own. **Crossing this with `OG_GATEWAY_TOKEN` fails in a way that reads like a broken deployment**: admin calls keep working while every inference call answers `401 authentication failed`, because an admin key is not valid on the inference route. `spend.rs:226` records the inversion from 2 Sep. Both values arrive in a mode-600 file and are never pasted into a terminal or a transcript; check them by prefix, never by value |
+
+### Which door to use when
+
+| `OG_MODEL_DOOR` | Real models? | Use it for |
+|---|---|---|
+| unset / `gateway` | yes | **the default, and the one to use.** Speaks the gateway's OpenAI-compatible route directly and sends `"model": request.model`, so a coworker's pin is honoured and the gateway logs `reason=Passthrough` |
+| `rig` | yes | **avoid.** Goes through rig-core and does NOT transmit the model, so the gateway sees a modelless request, classifies it by policy, and answers on whatever rung the classifier picks. Every pin is silently ignored. It cost a night on 8 Sep 2026: turns "worked" while a coworker pinned to xAI was being answered by whatever tier the prompt happened to classify into |
+| `mock-cards` | no | UI and card-rendering work. Serves the fixture catalogue (`help` lists it). Needs the `mock-fixtures` feature or it refuses to boot |
+| `mock` / `mock-tools` | no | CI, and the consent-card path with no spend |
+
+**The one-line check that tells you which you are on:** ask the gateway what it logged. A real
+turn should say `reason=Passthrough` with your coworker's own pin. `reason=Classified` means the
+model never arrived and the gateway is guessing — which is a door problem, not a routing one.
 
 ## Computers
 
