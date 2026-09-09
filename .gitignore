@@ -15,3 +15,12 @@ web/.env*.local
 # Playwright/Chrome MCP servers while driving the desktop client. Evidence worth keeping is
 # copied into docs/verification/ deliberately; this directory is the raw spill.
 .playwright-mcp/
+
+# A session's own handoff notes: the queue, what is half-done, and decisions that live in no
+# commit. IGNORED RATHER THAN COMMITTED, on purpose — it is a scratchpad, and a committed one
+# becomes paperwork that outlives its accuracy. It carries only what git cannot already tell you,
+# so it is rebuildable from `git log` and `docs/` in ten minutes if it is ever lost.
+#
+# The rule is committed; the contents are not. This repo is public: the ignore is what stops a
+# careless `git add -A` putting internal session state in front of everybody.
+.handoff/
