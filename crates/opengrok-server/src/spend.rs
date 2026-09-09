@@ -113,7 +113,16 @@ pub async fn ensure_key_for(
     name: &str,
 ) -> KeyOutcome {
     let store = &state.auth.store;
-    match store.coworker_key(coworker_id, account_id).await {
+    // A REVOKED KEY IS NOT A KEY. `coworker_key` returns the row whatever its state — deliberately,
+    // because the row must outlive revocation for pool accounting — so every caller that means
+    // "does this coworker have a USABLE credential" has to say so. Without the filter, retiring a
+    // coworker (which revokes its keys) leaves this reporting `Minted` with a prefix the gateway
+    // has already been told to reject.
+    match store
+        .coworker_key(coworker_id, account_id)
+        .await
+        .map(|row| row.filter(|row| row.revoked_at_ms.is_none()))
+    {
         Ok(Some(existing)) => {
             return KeyOutcome::Minted {
                 key_prefix: existing.key_prefix,
@@ -269,13 +278,32 @@ pub async fn key_for(
     coworker_id: &CoworkerId,
     actor: &AccountId,
 ) -> Option<GatewayKey> {
-    let row = match state.auth.store.coworker_key(coworker_id, actor).await {
+    // BOTH LOOKUPS FILTER, and this is the one that matters most: it is what dispatch
+    // authenticates with. A revoked row reaching here presents a credential the gateway has been
+    // told to reject, which is a 401 with no explanation at the far end. Treating it as absent
+    // instead lets `mint_late` do its job and, failing that, falls back to the deployment's key.
+    let live = |row: Option<opengrok_store::CoworkerKeyView>| {
+        row.filter(|row| row.revoked_at_ms.is_none())
+    };
+    let row = match state
+        .auth
+        .store
+        .coworker_key(coworker_id, actor)
+        .await
+        .map(live)
+    {
         Ok(Some(row)) => row,
         Ok(None) => {
             if !mint_late(state, coworker_id, actor).await {
                 return None;
             }
-            match state.auth.store.coworker_key(coworker_id, actor).await {
+            match state
+                .auth
+                .store
+                .coworker_key(coworker_id, actor)
+                .await
+                .map(live)
+            {
                 Ok(Some(row)) => row,
                 _ => return None,
             }
@@ -933,7 +961,15 @@ impl ModelDoor for GuardedDoor {
             .unwrap_or_else(|_| "This coworker".to_string());
         // A limit — its own, or its owner's pool — cannot be honoured without a key of its own
         // to count on: held, and the sentence says what would make it countable.
-        let key = match self.store.coworker_key(&coworker, &payer).await {
+        // Revoked filtered out here too: metering a capped turn against a credential the gateway
+        // rejects would hold the turn on a reading that could never arrive, and the sentence below
+        // is the honest one for both cases.
+        let key = match self
+            .store
+            .coworker_key(&coworker, &payer)
+            .await
+            .map(|row| row.filter(|row| row.revoked_at_ms.is_none()))
+        {
             Ok(Some(key)) => key,
             Ok(None) => {
                 return Err(ModelError::SpendCap(format!(

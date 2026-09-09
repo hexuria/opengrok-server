@@ -426,9 +426,14 @@ pub async fn set_limit(
             .await
             .map(|(coworker, _)| coworker.name)
             .unwrap_or_else(|_| "This coworker".to_string());
+        // FILTERED, because this check's whole subject is whether the coworker can be METERED.
+        // Shipped without the filter in #76, which made the guard against an uncountable cap
+        // itself accept one: a retired coworker's revoked row read as "has a key", the cap was
+        // stored, and every later turn was held with the sentence this branch exists to avoid.
         let keyed = store
             .coworker_key(coworker_id, account_id)
             .await
+            .map(|row| row.filter(|row| row.revoked_at_ms.is_none()))
             .map_err(|error| {
                 (
                     503,
