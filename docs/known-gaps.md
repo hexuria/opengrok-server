@@ -8,11 +8,21 @@ Nothing here is speculative; every one has an observation behind it.
 
 ---
 
-## 1. A revoked coworker key is still treated as usable
+## 1. A revoked coworker key is still treated as usable — FIXED 9 Sep 2026
 
-**Where:** `crates/opengrok-server/src/spend.rs` — `ensure_key_for`'s early return (~:116),
-`GuardedDoor::stream`'s lookup (~:875), and **`key_for`**, which is the one that matters most
-because it is what dispatch authenticates with.
+**Where it was:** five call sites, not the three this entry originally claimed. `ensure_key_for`'s
+early return, **both** of `key_for`'s lookups (the one dispatch authenticates with),
+`GuardedDoor::stream`'s meter lookup, and `set_limit`'s feasibility check — which was introduced
+by #76 *without* the filter, so the guard written to refuse an uncountable cap was itself accepting
+one from a revoked row. Miscounting this entry is how that happened; the count is now checked
+rather than remembered.
+
+**Coverage, stated rather than assumed** (`against_a_revoked_key.rs`): `set_limit`, the mint check
+and dispatch are each independently revert-checked and go red alone. The meter lookup is NOT
+discriminated by a test — with no vault it holds the turn either way and only the sentence differs
+— so that one site is verified by reading, not by behaviour.
+
+The original entry follows, kept because the constraint in it still governs any future change.
 
 `PgStore::coworker_key` returns a row without checking `revoked_at_ms`, deliberately: the row
 must survive revocation so a member's month still counts toward their pool, and
