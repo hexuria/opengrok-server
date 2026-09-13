@@ -36,6 +36,7 @@ opengrok-harness = { path = "../opengrok-harness" }
 rmcp.workspace = true
 opengrok-store = { path = "../opengrok-store" }
 opengrok-policy = { path = "../opengrok-policy" }
+tmp2-core = { git = "https://github.com/hexuria/tmp2", rev = "711c6dfd5b8ed56a28960ad295f1b3fbc9656b3b" }
 jsonwebtoken.workspace = true
 sha2.workspace = true
 base64.workspace = true

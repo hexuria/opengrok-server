@@ -24,8 +24,10 @@
 //! of a plugin meant for somebody else.
 
 pub mod catalogue;
+pub mod tmp;
 
 pub use catalogue::{Admission, Catalogue, Entry, InstallError, Policy, Trust};
+pub use tmp::{TMP_EXTENSION_NAMESPACE, TmpToken, tmp_tokens_from_extensions};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -228,6 +230,15 @@ impl Plugin {
             .filter(|(_, server)| server.is_local_process())
             .map(|(name, _)| name)
             .collect()
+    }
+
+    /// Grounded chat tokens this plugin asks the host to resolve before any model call.
+    ///
+    /// Empty when the plugin has no `app.opengrok.tmp` extension. MCP servers on the plugin
+    /// are unrelated: they are tools, not this snapshot.
+    #[must_use]
+    pub fn tmp_tokens(&self) -> Vec<crate::TmpToken> {
+        crate::tmp_tokens_from_extensions(self.manifest.extensions.as_ref())
     }
 }
 
@@ -498,11 +509,41 @@ mod tests {
     fn client_extensions_are_carried_not_dropped() {
         let dir = a_plugin();
         let plugin = Plugin::load(dir.path()).unwrap();
-        let extensions = plugin.manifest.extensions.expect("extensions kept");
+        let extensions = plugin
+            .manifest
+            .extensions
+            .as_ref()
+            .expect("extensions kept");
         assert!(
             extensions.get("com.example.client").is_some(),
             "{extensions:?}"
         );
+        assert!(
+            plugin.tmp_tokens().is_empty(),
+            "a mail plugin does not enable TMP tokens"
+        );
+    }
+
+    #[test]
+    fn a_tmp_users_plugin_declares_tokens_without_mcp_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "plugin.json",
+            include_str!("../../../plugins/org-users/plugin.json"),
+        );
+        let plugin = Plugin::load(dir.path()).unwrap();
+        let tokens = plugin.tmp_tokens();
+        assert_eq!(tokens.len(), 4, "{tokens:?}");
+        assert_eq!(tokens[0].name, "user");
+        assert_eq!(tokens[0].resolver, "org-accounts");
+        assert_eq!(tokens[0].ui, "list");
+        assert!(tokens[0].required);
+        assert!(
+            plugin.mcp.servers.is_empty(),
+            "users plugin is not a lookup tool"
+        );
+        assert!(plugin.skills.is_empty());
     }
 
     /// Both halves are optional, because plugins exist that are only one of them.
