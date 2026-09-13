@@ -10,7 +10,7 @@ is reference. Rewritten 2 Sep 2026 — previous versions:
 ## Where this stands, in one paragraph
 
 The server is **real and serving**. Slices 1–18 are done (12.later included): auth and our own OAuth, the AG-UI
-endpoint, the durable harness, computers (local Docker + box.ascii.dev), connectors with a
+endpoint, the durable harness, computers (local Docker + box.ascii.dev + grok-box), connectors with a
 credential vault, the scheduler/monitor autonomy pair, the gateway port that boots the packaged
 desktop client (P2–P10 breadth), seam B transcribed, bot-keys, orgs/invites/credential accounts,
 the web console at `/console`, the consent model (per-machine policy, never-expiring cards,
@@ -163,7 +163,7 @@ The rights review is **overdue** (repo public 1 Sep 2026 with it still outstandi
 | [`setup/`](setup/README.md) | standing the server up, end to end |
 | [`AUTO-REVIEW.md`](AUTO-REVIEW.md) | the consent model and the judge |
 | [`LEGAL.md`](LEGAL.md) | the line, before touching the client contract |
-| [`research/`](research/README.md) | the client, the gateway, the sandbox, connectors, the prior product |
+| [`research/`](research/README.md) | the client, the gateway, the sandbox (ascii + grok-box), connectors, the prior product |
 | [`box/`](box/README.md) | local copy of box.ascii.dev Public API v1 (vendor pages; live site wins) |
 | [`verification/`](verification/) | the evidence behind the ticked boxes |
 

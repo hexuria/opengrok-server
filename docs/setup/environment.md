@@ -52,12 +52,14 @@ model never arrived and the gateway is guessing — which is a door problem, not
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise. `none` means none: a new coworker is hired computerless (and so is every hire in an integration test, which brings no provider). The ASCII adapter is `opengrok_box::ascii::Client` (shapes from `docs/box/`); `AsciiBoxes` is the `Computer` trait on top of it |
-| `OG_BOX_RUN_TAG` | unset | a second label on every Docker box this process creates (`dev.opengrok.run=<tag>`). `scripts/gate.sh` sets one per run and removes every box carrying it on exit — the smokes used to leave a container per hire behind |
+| `OG_COMPUTER` | auto | `docker` \| `ascii` \| `grok-box` \| `none`; unset picks box.ascii.dev when `OG_BOX_API_KEY` is set, local Docker otherwise. `none` means none: a new coworker is hired computerless (and so is every hire in an integration test, which brings no provider). `grok-box` docker-runs the hexuria/box guest and speaks its HTTP wire — [`grok-box.md`](grok-box.md). The ASCII adapter is `opengrok_box::ascii::Client` (shapes from `docs/box/`); `AsciiBoxes` is the `Computer` trait on top of it |
+| `OG_BOX_RUN_TAG` | unset | a second label on every Docker / grok-box this process creates (`dev.opengrok.run=<tag>`), including grok-box named volumes. `scripts/gate.sh` sets one per run and removes every container **and** volume carrying it on exit — the smokes used to leave a container per hire behind |
 | `OG_BOX_API_KEY` | unset | box.ascii.dev (`box_…`), for computers that outlive this machine. A running box's desktop URL (`getForeverBoxStatus.vncUrl`) comes from `POST /boxes/{id}/desktop?vnc=1` — do not log it |
 | `OG_BOX_IDLE_STOP_SECONDS` | `0` (off) | stop an idle box after this many seconds |
-| `OG_DOCKER_IMAGE` | `debian:stable-slim` | the image a Docker computer is built from; any image with a shell |
-| `OG_HOSTED` | unset | `1` = hosted/multi-tenant: local Docker is never advertised or used (untrusted bot containers must not run on the API host) |
+| `OG_DOCKER_IMAGE` | `debian:stable-slim` | the image a Docker computer is built from; any image with a shell. Not the grok-box guest — that is `OG_GROK_BOX_IMAGE` |
+| `OG_GROK_BOX_IMAGE` | `grok-box:local` | guest image for `GrokBoxComputer` when the org has not saved one on `/console`. Build it with `docker compose build` in hexuria/box |
+| `OG_GROK_BOX_SCREEN_HOST` | `127.0.0.1` | host written into grok-box `screen_url` / `getForeverBoxStatus.vncUrl`. Ports stay published on loopback; this does not bind 6080 on a public NIC |
+| `OG_HOSTED` | unset | `1` = hosted/multi-tenant: local Docker **and** grok-box are never advertised or used (untrusted bot containers must not run on the API host) |
 
 ## Identity, email, console
 

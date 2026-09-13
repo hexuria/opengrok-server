@@ -87,6 +87,19 @@ export function testBoxConnection(): Promise<{ ok: boolean; detail: string }> {
   return postJson<{ ok: boolean; detail: string }>("/admin/computers/ascii/test");
 }
 
+export function setGrokBox(image: string): Promise<void> {
+  return postJson<void>("/admin/computers/grok-box", { image });
+}
+
+export async function clearGrokBox(): Promise<void> {
+  const res = await request("/admin/computers/grok-box", { method: "DELETE" });
+  if (!res.ok) throw new ApiError(res.status, "could not disable grok-box");
+}
+
+export function testGrokBoxConnection(): Promise<{ ok: boolean; detail: string }> {
+  return postJson<{ ok: boolean; detail: string }>("/admin/computers/grok-box/test");
+}
+
 // ---- Computer sharing mode (admin) ----
 
 export type SharingMode = "per-org" | "per-account" | "per-bot";

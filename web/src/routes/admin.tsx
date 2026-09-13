@@ -19,6 +19,8 @@ import {
   revokeGatewayKey,
   setAccountMode,
   setBoxKey,
+  setGrokBox,
+  clearGrokBox,
   setGatewayBudget,
   getPointsOverview,
   setPointsReference,
@@ -32,6 +34,7 @@ import {
   setGatewayKeyQuota,
   setOrgMode,
   testBoxConnection,
+  testGrokBoxConnection,
   verifyDomain,
   withdrawDomain,
   type GatewayKey,
@@ -351,7 +354,9 @@ function ComputersCard() {
   const queryClient = useQueryClient();
   const computers = useQuery({ queryKey: ["admin", "computers"], queryFn: listOrgComputers, retry: false });
   const [key, setKey] = useState("");
+  const [image, setImage] = useState("");
   const [testResult, setTestResult] = useState<{ ok: boolean; detail: string } | null>(null);
+  const [grokTest, setGrokTest] = useState<{ ok: boolean; detail: string } | null>(null);
 
   const save = useMutation({
     mutationFn: () => setBoxKey(key),
@@ -368,11 +373,28 @@ function ComputersCard() {
     },
   });
   const test = useMutation({ mutationFn: testBoxConnection, onSuccess: setTestResult });
+  const enableGrok = useMutation({
+    mutationFn: () => setGrokBox(image.trim()),
+    onSuccess: async () => {
+      setImage("");
+      await queryClient.invalidateQueries({ queryKey: ["admin", "computers"] });
+    },
+  });
+  const disableGrok = useMutation({
+    mutationFn: clearGrokBox,
+    onSuccess: async () => {
+      setGrokTest(null);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "computers"] });
+    },
+  });
+  const testGrok = useMutation({ mutationFn: testGrokBoxConnection, onSuccess: setGrokTest });
 
   if (computers.error instanceof ApiError && computers.error.status === 403) return null;
 
   const box = computers.data?.computers.find((c) => c.kind === "ascii");
   const boxConfigured = box?.configured ?? false;
+  const grok = computers.data?.computers.find((c) => c.kind === "grok-box");
+  const grokConfigured = grok?.configured ?? false;
 
   const orgMode = useQuery({ queryKey: ["admin", "orgmode"], queryFn: getOrgMode, retry: false });
   const setMode = useMutation({
@@ -396,12 +418,15 @@ function ComputersCard() {
           <option value="per-bot">A dedicated computer per bot (most isolated)</option>
         </select>
         <p className="muted" style={{ fontSize: "0.8rem", margin: "0.3rem 0 0" }}>
-          How members’ bots share computers. Override per member in the Users list above.
+          How members’ bots share computers. Override per member in the Users list above. Applies
+          to grok-box the same way as box.ascii.dev: per-org shares one guest (one <code>/workspace</code>),
+          per-account one guest per person, per-bot one guest per bot.
         </p>
       </div>
       <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
-        Where your organization’s bots run. Set a provider key and every member’s computer is
-        provisioned from it — the key is sealed on the server and never leaves it.
+        Where your organization’s bots run. Set a provider and every member’s computer is
+        provisioned from it — secrets stay on the server and never leave it. A grok-box
+        <code> BOX_TOKEN</code> is minted per guest and is never shown here.
       </p>
 
       <div style={{ marginTop: "1rem" }}>
@@ -439,6 +464,46 @@ function ComputersCard() {
           <p className="err">{save.error instanceof ApiError ? save.error.message : "Could not save."}</p>
         ) : null}
         {testResult ? <p className={testResult.ok ? "note" : "err"}>{testResult.detail}</p> : null}
+      </div>
+
+      <div style={{ marginTop: "1.5rem" }}>
+        <div className="spread">
+          <strong>grok-box (self-hosted)</strong>
+          <span className={`pill ${grokConfigured ? "on" : "off"}`}>
+            {grokConfigured ? "configured" : "not configured"}
+          </span>
+        </div>
+        <p className="muted" style={{ fontSize: "0.82rem", margin: "0.3rem 0 0" }}>
+          Docker-runs the grok-box guest on this machine (ports 1337 / 1340 / 6080 on loopback).
+          Enable it to prefer grok-box over box.ascii.dev for new computers. Build the image
+          from <code>hexuria/box</code> first.
+        </p>
+        <label htmlFor="grokimage">Guest image{grokConfigured ? " (saved — paste a new one to replace)" : ""}</label>
+        <input
+          id="grokimage"
+          type="text"
+          autoComplete="off"
+          placeholder="grok-box:local"
+          value={image}
+          onChange={(e) => setImage(e.target.value)}
+        />
+        <div className="row" style={{ marginTop: "0.8rem" }}>
+          <button onClick={() => enableGrok.mutate()} disabled={enableGrok.isPending}>
+            {enableGrok.isPending ? "Saving…" : grokConfigured ? "Update image" : "Enable"}
+          </button>
+          <button className="ghost" onClick={() => testGrok.mutate()} disabled={testGrok.isPending}>
+            {testGrok.isPending ? "Testing…" : "Test connection"}
+          </button>
+          {grokConfigured ? (
+            <button className="danger" onClick={() => disableGrok.mutate()} disabled={disableGrok.isPending}>
+              Remove
+            </button>
+          ) : null}
+        </div>
+        {enableGrok.isError ? (
+          <p className="err">{enableGrok.error instanceof ApiError ? enableGrok.error.message : "Could not save."}</p>
+        ) : null}
+        {grokTest ? <p className={grokTest.ok ? "note" : "err"}>{grokTest.detail}</p> : null}
       </div>
 
       <div style={{ marginTop: "1.5rem", opacity: 0.55 }}>

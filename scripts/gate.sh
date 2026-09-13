@@ -92,6 +92,15 @@ cleanup_boxes() {
       # shellcheck disable=SC2086
       docker rm -f $ids >/dev/null 2>&1 || true
     fi
+    # grok-box keeps named volumes across `docker stop`; destroy removes them. A gate that only
+    # `rm -f`s containers would leave `{id}-workspace` / `{id}-chrome` behind the same way the
+    # debian boxes used to linger. Volumes are labelled with the same run tag at create.
+    vols=$(docker volume ls -q --filter "label=dev.opengrok.run=$OG_BOX_RUN_TAG" 2>/dev/null || true)
+    if [ -n "$vols" ]; then
+      echo "=== removing $(echo "$vols" | wc -l | tr -d ' ') grok-box volume(s) this gate created"
+      # shellcheck disable=SC2086
+      docker volume rm $vols >/dev/null 2>&1 || true
+    fi
   fi
 }
 

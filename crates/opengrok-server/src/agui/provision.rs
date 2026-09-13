@@ -61,13 +61,13 @@ pub async fn lookup_provider(
     org_id: Option<&str>,
     kind: &str,
 ) -> ProviderLookup {
-    // The deployment's own local-docker provider (OG_COMPUTER at boot; a stand-in in tests)
-    // serves that kind directly: a Docker provider carries no per-org state, so this is the same
-    // computer the arm below would build, and a test can hand the run path one that records what
-    // ran. NEVER for "ascii": that provider is built from the ORG's sealed key, and the boot-time
-    // one (from OG_BOX_API_KEY) would silently run one org's boxes on another's account.
+    // The deployment's own host-container provider (OG_COMPUTER at boot; a stand-in in tests)
+    // serves that kind directly: a Docker / grok-box provider carries no per-org secret, so this
+    // is the same computer the arm below would build, and a test can hand the run path one that
+    // records what ran. NEVER for "ascii": that provider is built from the ORG's sealed key, and
+    // the boot-time one (from OG_BOX_API_KEY) would silently run one org's boxes on another's account.
     if let Some(computer) = state.computer.as_ref()
-        && kind == "local-docker"
+        && (kind == "local-docker" || kind == "grok-box")
         && computer.kind() == kind
     {
         return ProviderLookup {
@@ -77,6 +77,7 @@ pub async fn lookup_provider(
     }
     match kind {
         "ascii" => lookup_ascii(state, org_id).await,
+        "grok-box" => lookup_grok_box(state, org_id).await,
         "local-docker" => ProviderLookup {
             computer: Some(Arc::new(opengrok_box::DockerComputer::new())),
             error: None,
@@ -89,6 +90,65 @@ pub async fn lookup_provider(
             )),
         },
     }
+}
+
+async fn lookup_grok_box(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup {
+    // Same host-safety rule as local-docker: untrusted guest containers must not run on a hosted
+    // API host (`OG_HOSTED=1`). Existing mappings still ask for this kind; refuse rather than
+    // fall through to debian-via-docker-exec, which is a different computer.
+    if !local_docker_allowed() {
+        return ProviderLookup {
+            computer: None,
+            error: Some((
+                "not_supported".into(),
+                "grok-box is a self-hosted computer; this hosted deployment does not run guest containers on the API host".into(),
+            )),
+        };
+    }
+    let image = grok_box_image(state, org_id).await;
+    ProviderLookup {
+        computer: Some(Arc::new(
+            opengrok_box::GrokBoxComputer::new().with_image(image),
+        )),
+        error: None,
+    }
+}
+
+/// The grok-box image this org asked for (sealed on the dashboard), else the deployment default.
+async fn grok_box_image(state: &AgUiState, org_id: Option<&str>) -> String {
+    if let (Some(vault), Some(org)) = (state.vault.as_ref(), org_id)
+        && let Ok(Some(image)) = state
+            .auth
+            .store
+            .org_computer_secret(vault, org, "grok-box")
+            .await
+    {
+        let image = image.trim();
+        if !image.is_empty() && image != "enabled" {
+            return image.to_string();
+        }
+    }
+    std::env::var("OG_GROK_BOX_IMAGE")
+        .ok()
+        .filter(|image| !image.is_empty())
+        .unwrap_or_else(|| opengrok_box::grok_box::DEFAULT_IMAGE.to_string())
+}
+
+async fn grok_box_configured(state: &AgUiState, org_id: Option<&str>) -> bool {
+    let Some(org) = org_id else {
+        return false;
+    };
+    let Some(vault) = state.vault.as_ref() else {
+        return false;
+    };
+    state
+        .auth
+        .store
+        .org_computer_secret(vault, org, "grok-box")
+        .await
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup {
@@ -125,9 +185,10 @@ async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup
 }
 
 /// The provider for a computer of `kind` in this org: an AsciiBoxes built from the org's sealed
-/// box.ascii.dev key for `"ascii"`, or a fresh server-host Docker for `"local-docker"`. `None`
-/// when the kind cannot be served (e.g. `"ascii"` but the org has no key or the vault is absent).
-/// The SAME provider must create and run a box, so both paths call this.
+/// box.ascii.dev key for `"ascii"`, a grok-box guest for `"grok-box"`, or a fresh server-host
+/// Docker for `"local-docker"`. `None` when the kind cannot be served (e.g. `"ascii"` but the org
+/// has no key or the vault is absent). The SAME provider must create and run a box, so both
+/// paths call this.
 pub async fn provider_for(
     state: &AgUiState,
     org_id: Option<&str>,
@@ -147,18 +208,35 @@ pub async fn provider_for_account(
     provider_for(state, org_id.as_deref(), kind).await
 }
 
-/// Local VM (server-host Docker) is a SELF-HOST / dev convenience only. A hosted, multi-tenant
-/// deployment (`OG_HOSTED=1`) must never run untrusted bot containers on the API host — a container
-/// escape lands on the machine holding the token secret and the org vault — so it is neither
-/// advertised nor used there; production computers are box.ascii.dev / Windows 365 / (later) cloud.
+/// Local VM (server-host Docker) and grok-box guests are SELF-HOST / dev convenience only. A hosted,
+/// multi-tenant deployment (`OG_HOSTED=1`) must never run untrusted bot containers on the API host —
+/// a container escape lands on the machine holding the token secret and the org vault — so they
+/// are neither advertised nor used there; production computers are box.ascii.dev / Windows 365 /
+/// (later) cloud.
 pub fn local_docker_allowed() -> bool {
     std::env::var("OG_HOSTED").as_deref() != Ok("1")
 }
 
-/// The kind a NEW account computer should be, from the org's CURRENT config: a box.ascii.dev box
-/// when the org has configured a key; else a Local VM on the server host when allowed (dev /
-/// self-host); else `"none"` — no provider, and the hire says so readably.
+/// The kind a NEW account computer should be, from the org's CURRENT config: a grok-box guest
+/// when the admin enabled it (or the deployment booted with `OG_COMPUTER=grok-box`); else a
+/// box.ascii.dev box when the org has configured a key; else a Local VM on the server host when
+/// allowed (dev / self-host); else `"none"` — no provider, and the hire says so readably.
+///
+/// grok-box wins over ascii when both are configured: enabling it on the dashboard is the explicit
+/// self-host choice, not a fallback that ascii would silently steal back.
 pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static str {
+    if local_docker_allowed() {
+        if grok_box_configured(state, org_id).await {
+            return "grok-box";
+        }
+        if state
+            .computer
+            .as_ref()
+            .is_some_and(|computer| computer.kind() == "grok-box")
+        {
+            return "grok-box";
+        }
+    }
     if let (Some(vault), Some(org)) = (state.vault.as_ref(), org_id)
         && state
             .auth
@@ -315,7 +393,7 @@ pub async fn ensure_computer_for(
                     state,
                     account_id,
                     code,
-                    "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard",
+                    "no computer is configured for your organization — an admin must set up grok-box or box.ascii.dev on the dashboard",
                     at_ms,
                 )
                 .await;
@@ -431,7 +509,7 @@ pub async fn ensure_scope_box(
         };
         return Err((
             code.to_string(),
-            "no computer is configured for your organization — set up box.ascii.dev first"
+            "no computer is configured for your organization — set up grok-box or box.ascii.dev first"
                 .to_string(),
         ));
     };

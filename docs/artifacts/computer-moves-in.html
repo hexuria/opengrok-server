@@ -642,7 +642,7 @@
 
   <figure>
     <div class="figbox">
-      <svg viewBox="0 0 760 320" role="img" aria-label="The tool router calls one Computer trait. Two implementations exist today: AsciiBoxes for the vendor and DockerComputer for local development. A third implementation for grok-box plugs into the same trait.">
+      <svg viewBox="0 0 760 320" role="img" aria-label="The tool router calls one Computer trait. Three implementations: AsciiBoxes for the vendor, DockerComputer for headless local development, and GrokBoxComputer for the self-hosted grok-box guest.">
         <defs>
           <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
             <polygon points="0,0 10,5 0,10" fill="currentColor"/>
@@ -674,7 +674,7 @@
         <text class="ts" x="282" y="274">no screen, no HTTP wire</text>
 
         <rect class="raise liv" x="512" y="216" width="228" height="66" rx="7" stroke-width="2"/>
-        <text class="t livT" x="528" y="240">GrokBox — to write</text>
+        <text class="t livT" x="528" y="240">GrokBox — present</text>
         <text class="ts" x="528" y="258">docker run hexuria/box</text>
         <text class="ts" x="528" y="274">1337 · 1340 · 6080</text>
 
@@ -682,8 +682,8 @@
       </svg>
     </div>
     <figcaption>The seam is already correct — <code>crates/opengrok-box/src/lib.rs</code> defines
-    the trait, and <code>ascii/</code> is the only place that speaks the vendor’s HTTP. This is
-    why the move is an addition, not a rewrite.</figcaption>
+    the trait, <code>ascii/</code> speaks the vendor’s HTTP, and <code>grok_box/</code> speaks the
+    guest wire. This is why the move is an addition, not a rewrite.</figcaption>
   </figure>
 
   <h3 style="margin-top:2rem">What is genuinely missing</h3>
@@ -691,24 +691,24 @@
   <table>
     <thead><tr><th>Piece</th><th>Where it belongs</th><th>State today</th></tr></thead>
     <tbody>
-      <tr><td>A <code>Computer</code> impl for grok-box</td><td><code>crates/opengrok-box/src/</code></td><td>Not present</td></tr>
-      <tr><td>Mint and inject <code>BOX_TOKEN</code></td><td>Same impl, at container create</td><td>The string does not appear anywhere in the server</td></tr>
-      <tr><td>Publish 1337 / 1340 / 6080</td><td>Same impl</td><td><code>docker.rs</code> publishes 3000, 5173, 8000, 8080 — the wrong ports, because it was never meant to speak this wire</td></tr>
-      <tr><td>Poll <code>GET /v1/ready</code> before use</td><td><code>Computer::wake</code></td><td>Polls the vendor’s state field; there is no readiness probe</td></tr>
-      <tr><td>Talk HTTP to the container</td><td>Same impl</td><td><code>docker.rs</code> pipes through <code>docker exec</code>. Keep its container handling, swap the transport.</td></tr>
-      <tr><td>Computer Use on the trait</td><td><code>trait Computer</code></td><td><b>No screenshot, click or type anywhere.</b> The only computer-use-shaped thing is <code>screen_url</code> — a link a human looks at.</td></tr>
-      <tr><td>Computer Use as tools</td><td><code>crates/opengrok-tools/src/lib.rs</code></td><td>Tool list is <code>shell</code>, <code>read_file</code>, <code>write_file</code>, <code>user_machine_shell</code>, plus MCP passthrough</td></tr>
-      <tr><td>A real VNC URL for the client</td><td><code>crates/opengrok-server/src/grpc.rs</code></td><td><code>ensure_sand_box</code> returns an <em>empty</em> <code>vnc_url</code> — which is why the client’s whole noVNC stack is dead code</td></tr>
+      <tr><td>A <code>Computer</code> impl for grok-box</td><td><code>crates/opengrok-box/src/grok_box/</code></td><td>Present — <code>GrokBoxComputer</code></td></tr>
+      <tr><td>Mint and inject <code>BOX_TOKEN</code></td><td>Same impl, at container create</td><td>Minted into container env; recovered via <code>docker inspect</code>; never Postgres or the browser</td></tr>
+      <tr><td>Publish 1337 / 1340 / 6080</td><td>Same impl</td><td>Loopback, random host ports. <code>docker.rs</code> still publishes 3000, 5173, 8000, 8080 for the headless path</td></tr>
+      <tr><td>Poll <code>GET /v1/ready</code> before use</td><td><code>Computer::wake</code> via <code>state</code> returning <code>provisioning</code></td><td>Guest-ready is <code>running</code>; 401/403 is <code>error</code></td></tr>
+      <tr><td>Talk HTTP to the container</td><td><code>grok_box/guest.rs</code></td><td>Exec, files, ready. <code>docker.rs</code> still pipes through <code>docker exec</code></td></tr>
+      <tr><td>Computer Use on the trait</td><td><code>trait Computer</code></td><td><b>Still no screenshot, click or type.</b> Follow-up. The only computer-use-shaped thing on the trait is <code>screen_url</code></td></tr>
+      <tr><td>Computer Use as tools</td><td><code>crates/opengrok-tools/src/lib.rs</code></td><td>Tool list is still <code>shell</code>, <code>read_file</code>, <code>write_file</code>, <code>user_machine_shell</code>, plus MCP passthrough</td></tr>
+      <tr><td>A real VNC URL for the client</td><td><code>getForeverBoxStatus</code> / <code>Computer::screen_url</code></td><td>grok-box fills <code>vncUrl</code> on the gateway verb. Seam-B <code>ensure_sand_box</code> still returns an <em>empty</em> <code>vnc_url</code> — known gap, not this PR</td></tr>
     </tbody>
   </table>
   </div>
 
   <div class="note">
     <p><strong>The quiet coincidence.</strong> The desktop client already contains a full noVNC
-    viewer aimed at <code>host:1337</code> and a noVNC port — the shape
-    <code>http://{host}:{port}/vnc.html</code>. It has never worked against your server because
-    the server hands back an empty URL. <code>grok-box</code> publishes exactly those ports. Fill
-    in one field and existing client code lights up.</p>
+    viewer aimed at a noVNC URL of the shape <code>http://{host}:{port}/vnc.html</code>. grok-box
+    now fills <code>getForeverBoxStatus.vncUrl</code> with exactly that. Seam-B
+    <code>EnsureSandBox.vnc_url</code> is still empty — a known gap, not required for the first
+    local verify.</p>
   </div>
 </section>
 

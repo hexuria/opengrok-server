@@ -12,9 +12,10 @@ a bug in the docs — fix the doc in the same commit as whatever you learned.
 | 4 | [`gate.md`](gate.md) | `scripts/gate.sh --smoke` passes end to end |
 | 5 | [`desktop-client.md`](desktop-client.md) | the packaged app boots against your server in OpenGrok server mode |
 | 6 | [`tls.md`](tls.md) | `curl https://<lan>:1447/health` answers through Caddy with a trusted certificate, with the server itself on loopback |
+| — | [`grok-box.md`](grok-box.md) | (optional) a self-hosted grok-box guest provisions; `/console` can Enable it; sharing modes are exercisable locally |
 
 Prerequisites, once per machine: a Rust toolchain (edition 2024), Docker Desktop (for the dev
-Postgres and local-Docker computers), `psql`, `jq`, and — only for desktop-client work — the
+Postgres and local-Docker / grok-box computers), `psql`, `jq`, and — only for desktop-client work — the
 packaged client from `/Volumes/goldcoders/OSS/opengrok`.
 
 The web console needs no separate build step for development: build it once

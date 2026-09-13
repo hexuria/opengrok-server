@@ -100,10 +100,10 @@ Why the three-layer drawing (client / server / computer) is missing a layer — 
 through the gateway, which is L4 and has never heard of a box — and what each layer is made of,
 part by part. Names the three things called "gateway" (inference gateway, tool router, host
 gateway) and why "the gateway is up" is not a sentence. Rented desk (box.ascii.dev) vs owned desk
-(`hexuria/box`): the difference is one arrow. Shows that the `Computer` trait is already the right
-seam — two implementations behind it today, the self-hosted box is a third — and that the real gap
-the vendor was hiding is Computer Use, not the box. Ends with a build order in which every step is
-provable with curl.
+(`hexuria/box`): the difference is one arrow. The `Computer` trait is the seam — AsciiBoxes and
+DockerComputer shipped first; `GrokBoxComputer` is the third plug (`crates/opengrok-box/src/grok_box/`).
+Computer Use on the trait is still the real gap the vendor was hiding. Ends with a build order in
+which every step is provable with curl.
 
 ---
 

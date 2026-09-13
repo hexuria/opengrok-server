@@ -384,10 +384,12 @@ pub async fn stop_agent_turn(state: &GatewayState, args: &Value, _caller: &str) 
 /// word (`exited`/`stopped`/…), so a box that died says it died instead of pretending to boot.
 ///
 /// `vncUrl` is the noVNC desktop URL when the box is running and the provider has a screen
-/// (`Computer::screen_url` → ASCII `POST /boxes/{id}/desktop?vnc=1`); otherwise null. A first
-/// poll after ensure can be `running` with `vncUrl: null` while the desktop is still
-/// provisioning — a later poll carries the link. We never invent a URL. Do not log it: it
-/// carries a password / `_token`.
+/// (`Computer::screen_url` — ascii: `POST /boxes/{id}/desktop?vnc=1`; grok-box: the published
+/// `:6080/vnc.html` plus the independent VNC password). Otherwise null. A first poll after
+/// ensure can be `running` with `vncUrl: null` while the desktop is still provisioning — a later
+/// poll carries the link. We never invent a URL. Do not log it: it carries a password / `_token`.
+/// `BOX_TOKEN` never appears here. Seam-B `EnsureSandBox.vnc_url` is still empty — the live
+/// screen for the packaged app is this gateway verb, not the grpc mint.
 pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
     use crate::agui::provision;
 

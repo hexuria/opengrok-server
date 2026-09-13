@@ -603,6 +603,31 @@ async fn grok_bot(
                 },
                 Err(_) => false,
             };
+            let grok_box_ready = crate::agui::provision::local_docker_allowed()
+                && match store.load_account(&account_id).await {
+                    Ok((account, _)) => {
+                        let org_enabled =
+                            match (account.org_id.as_deref(), state.agui.vault.as_ref()) {
+                                (Some(org), Some(vault)) => store
+                                    .org_computer_kinds_openable(vault, org)
+                                    .await
+                                    .map(|kinds| kinds.iter().any(|kind| kind == "grok-box"))
+                                    .unwrap_or(false),
+                                _ => false,
+                            };
+                        org_enabled
+                            || state
+                                .agui
+                                .computer
+                                .as_ref()
+                                .is_some_and(|computer| computer.kind() == "grok-box")
+                    }
+                    Err(_) => state
+                        .agui
+                        .computer
+                        .as_ref()
+                        .is_some_and(|computer| computer.kind() == "grok-box"),
+                };
             // WHICH kind this account is actually ON right now — the advertised list is options, but
             // the client also needs to say "this is your computer". Resolve the account's effective
             // scope and read the kind of the box mapped there; null when it has no box yet (or, in
@@ -634,6 +659,14 @@ async fn grok_bot(
                     "state": "available",
                     "configured": true,
                     "active": is_active("local-docker"),
+                }));
+                computers.push(json!({
+                    "id": "grok-box",
+                    "label": "grok-box (self-hosted)",
+                    "kind": "grok-box",
+                    "state": if grok_box_ready { "available" } else { "not-configured" },
+                    "configured": grok_box_ready,
+                    "active": is_active("grok-box"),
                 }));
             }
             computers.push(json!({

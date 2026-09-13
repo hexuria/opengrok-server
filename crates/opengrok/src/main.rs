@@ -209,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
     // Where a coworker's computer comes from. box.ascii.dev when a key is present, otherwise local
     // Docker — so a coworker gets a computer on a laptop with no account anywhere, and the hosted
     // one is an upgrade rather than a prerequisite. `OG_COMPUTER=none` turns computers off.
+    // `grok-box` docker-runs the hexuria/box guest and speaks its HTTP wire (not docker exec).
     let computer: Option<Arc<dyn opengrok_box::Computer>> = match std::env::var("OG_COMPUTER")
         .as_deref()
     {
@@ -217,6 +218,10 @@ async fn main() -> anyhow::Result<()> {
             None
         }
         Ok("docker") => Some(Arc::new(opengrok_box::DockerComputer::new())),
+        Ok("grok-box") => {
+            tracing::info!("OG_COMPUTER=grok-box — coworkers get a self-hosted grok-box guest");
+            Some(Arc::new(opengrok_box::GrokBoxComputer::new()))
+        }
         Ok("ascii") | Ok("box") => Some(Arc::new(opengrok_box::AsciiBoxes::new(
             std::env::var("OG_BOX_API_KEY").context("OG_COMPUTER=ascii needs OG_BOX_API_KEY")?,
         ))),

@@ -5,8 +5,9 @@ header) against a real box. Typed client 1–2 Sep 2026 from the vendor pages in
 [`docs/box/`](../box/README.md) (fetched 1 Sep 2026). Live site wins if the local copy drifts.
 
 **Role in OpenGrok:** the first implementation of the `Computer` trait in `crates/opengrok-box`.
-A coworker's computer is a *seam*, not a vendor — local Docker is the other adapter, and the
-default when no `OG_BOX_API_KEY` is set.
+A coworker's computer is a *seam*, not a vendor — local Docker is the headless adapter, grok-box
+(`hexuria/box`) is the self-hosted guest with a screen, and this one is the rented VM. Local Docker
+is still the default when no `OG_BOX_API_KEY` is set and grok-box is not enabled.
 
 ---
 

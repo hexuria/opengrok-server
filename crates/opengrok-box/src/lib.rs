@@ -1,9 +1,11 @@
 //! The coworker's computer.
 //!
 //! ONE TRAIT, SEVERAL COMPUTERS. A coworker's computer is a seam, not a vendor: the harness asks
-//! for a shell, a file, a port; something behind this trait provides them. The first
-//! implementation drives box.ascii.dev through a typed v1 client (`ascii::Client`, shapes from
-//! `docs/box/`); a local Docker one for tests and self-hosting comes next.
+//! for a shell, a file, a port; something behind this trait provides them. Three implementations:
+//! box.ascii.dev through a typed v1 client (`ascii::Client`, shapes from `docs/box/`); a local
+//! Docker one (`DockerComputer`) that `docker exec`s a headless debian image; and `GrokBoxComputer`,
+//! which docker-runs the grok-box guest (`hexuria/box`) and speaks its HTTP wire on :1337/:1340/:6080.
+//! Guest HTTP stays in this crate — the harness and tools never call the box themselves.
 //! The client already models its own computer this way (`BoxEndpoint { host, port, authToken }`),
 //! so keeping the seam here is what lets the same coworker run on either.
 //!
@@ -18,9 +20,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod ascii;
 pub mod docker;
+pub mod grok_box;
 
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
 pub use docker::DockerComputer;
+pub use grok_box::GrokBoxComputer;
 
 /// What a command did. `truncated` is carried rather than dropped: a tail is not the output, and a
 /// coworker reasoning over a silently clipped log reaches confident wrong conclusions.
@@ -196,8 +200,9 @@ pub trait Computer: Send + Sync {
     }
 
     /// Which kind of computer this is, for advertising the options to a client:
-    /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
-    /// local-docker; the ascii provider overrides it.
+    /// `"local-docker"` (a headless VM on the server host), `"ascii"` (a box.ascii.dev box), or
+    /// `"grok-box"` (a self-hosted grok-box guest with a screen). Defaults to local-docker; each
+    /// other provider overrides it.
     fn kind(&self) -> &'static str {
         "local-docker"
     }

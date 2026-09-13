@@ -72,7 +72,7 @@ crates/
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
   opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
   opengrok-harness  the agent loop (Rig): turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
-  opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
+  opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker + grok-box (hexuria/box guest over HTTP)
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows

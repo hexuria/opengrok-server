@@ -618,6 +618,13 @@ every record that sharing would otherwise break carry whose it is.
   ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) — add when a
   coworker path needs them, not as a completeness exercise. Vendor pages already live in
   `docs/box/`.
+- [ ] Computer Use on `Computer` (screenshot / click / type / key / scroll), defaulting to
+  unsupported so AsciiBoxes and DockerComputer stay compiling; implement on grok-box against
+  `POST /v1/cua/*` (1280×800, origin top-left). Shell, files, and `screen_url` shipped with
+  the grok-box provider; CUA is the next plug, not a missing create/ready path.
+- [ ] Seam-B `EnsureSandBox.vnc_url` still mints empty. The packaged app's live screen is
+  `getForeverBoxStatus.vncUrl` (`Computer::screen_url`); filling the grpc field is a separate
+  client-contract job, not required for local grok-box verify.
 
 ## Blocked on the operator, not on code
 
