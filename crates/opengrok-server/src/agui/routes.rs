@@ -442,7 +442,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/models/probe", post(probe_model))
         .route(
             "/coworkers/{coworker_id}",
-            axum::routing::patch(repin_coworker),
+            axum::routing::patch(repin_coworker).delete(delete_coworker),
         )
         .route("/coworkers/{coworker_id}/approvals", post(set_approvals))
         // Spend limits: the coworker's three meters, read-only here; limits are written by the
@@ -628,9 +628,16 @@ pub async fn repin_coworker(
         }
         Some(_) => return refuse("visibility: expected \"private\" or \"org\"".to_string()),
     };
-    if model.is_none() && role.is_none() && visibility.is_none() {
+    let hidden = match body.get("hiddenFromSidebar") {
+        None => None,
+        Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(hidden)) => Some(*hidden),
+        Some(_) => return refuse("hiddenFromSidebar: expected a boolean".to_string()),
+    };
+    if model.is_none() && role.is_none() && visibility.is_none() && hidden.is_none() {
         return refuse(
-            "nothing to change: name a model, a role, a visibility, or several".to_string(),
+            "nothing to change: name a model, a role, a visibility, hiddenFromSidebar, or several"
+                .to_string(),
         );
     }
 
@@ -674,6 +681,89 @@ pub async fn repin_coworker(
         role: after.role.clone(),
         visibility: after.visibility,
     };
+    if !events.is_empty()
+        && state
+            .auth
+            .store
+            .append_coworker(&coworker_id, &account_id, seq, &events, &view)
+            .await
+            .is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+    }
+    let hidden_from_sidebar = if let Some(hidden) = hidden {
+        if state
+            .auth
+            .store
+            .set_coworker_hidden(&account_id, &coworker_id, hidden, at_ms)
+            .await
+            .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+        }
+        hidden
+    } else {
+        state
+            .auth
+            .store
+            .hidden_coworker_ids(&account_id)
+            .await
+            .ok()
+            .is_some_and(|ids| ids.contains(coworker_id.as_str()))
+    };
+    Json(serde_json::json!({
+        "id": coworker_id.as_str(),
+        "model": after.model,
+        "role": after.role,
+        "visibility": after.visibility.as_str(),
+        "hiddenFromSidebar": hidden_from_sidebar,
+    }))
+    .into_response()
+}
+
+/// `DELETE /coworkers/{id}` — retire this coworker. Same ownership 404 as every other
+/// per-coworker route: an id that is not yours is indistinguishable from one that does not exist.
+pub async fn delete_coworker(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(coworker_id): axum::extract::Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(&account_id)
+        .await
+        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
+        .unwrap_or(false);
+    if !owns {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    }
+    let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    };
+    let at_ms = now_ms();
+    let mut after = loaded;
+    let Ok(events) = after.decide(CoworkerCommand::Retire { at_ms }) else {
+        return (StatusCode::CONFLICT, "that coworker has retired").into_response();
+    };
+    for event in &events {
+        after.apply(event);
+    }
+    let view = CoworkerView {
+        id: coworker_id.clone(),
+        name: after.name.clone(),
+        model: after.model.clone(),
+        box_id: after.box_id.clone(),
+        retired: after.retired,
+        members: after.members.clone(),
+        updated_at_ms: at_ms,
+        role: after.role.clone(),
+        visibility: after.visibility,
+    };
     if state
         .auth
         .store
@@ -683,13 +773,14 @@ pub async fn repin_coworker(
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
     }
-    Json(serde_json::json!({
-        "id": coworker_id.as_str(),
-        "model": after.model,
-        "role": after.role,
-        "visibility": after.visibility.as_str(),
-    }))
-    .into_response()
+    let _ = state
+        .auth
+        .store
+        .set_coworker_hidden(&account_id, &coworker_id, false, at_ms)
+        .await;
+    crate::agui::provision::teardown_computer_for(&state, &account_id, &coworker_id).await;
+    crate::spend::revoke_for(&state, &coworker_id).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -962,12 +1053,30 @@ pub async fn list_coworkers(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    match state.auth.store.coworkers_for(&account_id).await {
-        // An ARRAY, always. An empty roster is a valid answer and must not become null or an
-        // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
-        Ok(coworkers) => Json(coworkers).into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    }
+    let coworkers = match state.auth.store.coworkers_for(&account_id).await {
+        Ok(coworkers) => coworkers,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    let hidden = match state.auth.store.hidden_coworker_ids(&account_id).await {
+        Ok(ids) => ids,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    // An ARRAY, always. An empty roster is a valid answer and must not become null or an
+    // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
+    let rows: Vec<serde_json::Value> = coworkers
+        .into_iter()
+        .map(|coworker| {
+            let mut row = serde_json::to_value(&coworker).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(object) = row.as_object_mut() {
+                object.insert(
+                    "hiddenFromSidebar".to_string(),
+                    serde_json::json!(hidden.contains(coworker.id.as_str())),
+                );
+            }
+            row
+        })
+        .collect();
+    Json(rows).into_response()
 }
 
 /// Whose account this is, from the bearer token. Never from the body.

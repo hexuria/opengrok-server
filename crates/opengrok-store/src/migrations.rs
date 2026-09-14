@@ -57,6 +57,14 @@ create table if not exists coworker_view (
 alter table coworker_view add column if not exists role text;
 -- Who may see and talk to a coworker: 'private' (the default, and the safe one) or 'org'.
 alter table coworker_view add column if not exists visibility text not null default 'private';
+-- A viewer's hide-from-sidebar preference. Not a coworker event: hiding is the reader's
+-- decoration, not a fact about the coworker, so another org member still sees it.
+create table if not exists coworker_hidden (
+    account_id    text   not null,
+    coworker_id   text   not null,
+    hidden_at_ms  bigint not null,
+    primary key (account_id, coworker_id)
+);
 
 -- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
 -- on the account's first agent, torn down when its last agent is deleted. A single row per account.
