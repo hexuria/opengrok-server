@@ -5,6 +5,7 @@ import { changePassword, updateProfile, type Account, type ProfileUpdate } from 
 import { ApiError } from "../api/client";
 import { checkAvatar, fileToDataUrl } from "../lib/avatar";
 import { AuthedFrame } from "../components/authed-frame";
+import { PageHead } from "../components/shell";
 
 function errorText(error: unknown, fallback: string): string {
   if (error instanceof ApiError) return error.message;
@@ -100,9 +101,6 @@ function ProfileCard({ account }: { account: Account }) {
         <input id="last" value={lastName} onChange={(e) => setLastName(e.target.value)} />
         <label htmlFor="email">Email</label>
         <input id="email" value={account.email} readOnly title="Your email cannot be changed." />
-        <p className="muted" style={{ fontSize: "0.8rem", marginTop: "0.3rem" }}>
-          Email is fixed — it is the identity your organization and invite were bound to.
-        </p>
         {save.isError ? <p className="err">{errorText(save.error, "Could not save.")}</p> : null}
         {save.isSuccess && !save.isPending ? <p className="note">Saved.</p> : null}
         <button className="wide" type="submit" disabled={save.isPending}>
@@ -167,10 +165,18 @@ export function AccountPage() {
   return (
     <AuthedFrame>
       {(account) => (
-        <div className="stack">
-          <ProfileCard account={account} />
-          <PasswordCard />
-        </div>
+        <>
+          <PageHead title="Account">
+            Your name, your picture, and the password you sign in with. Your email is fixed — it is
+            the identity your organization and invite were bound to.
+          </PageHead>
+          {/* Two short forms, side by side on a wide screen: stacking them made the password form
+              a scroll away from a page that otherwise fits. */}
+          <div className="cols">
+            <ProfileCard account={account} />
+            <PasswordCard />
+          </div>
+        </>
       )}
     </AuthedFrame>
   );
