@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -47,6 +47,7 @@ function errorText(error: unknown, fallback: string): string {
 }
 import type { Account } from "../api/account";
 import { AuthedFrame } from "../components/authed-frame";
+import { PageHead } from "../components/shell";
 
 function UserRow({ user }: { user: Account }) {
   const queryClient = useQueryClient();
@@ -83,7 +84,7 @@ function UserRow({ user }: { user: Account }) {
         </select>
       </td>
       <td style={{ textAlign: "right" }}>
-        <button className="ghost" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
+        <button className="ghost sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
           {user.enabled ? "Disable" : "Enable"}
         </button>
       </td>
@@ -97,36 +98,36 @@ function UsersCard() {
   if (users.error instanceof ApiError && users.error.status === 403) {
     return (
       <section className="card">
-        <h2>Users</h2>
-        <p className="muted">Admins only — you do not manage this organization.</p>
+        <p className="empty">Admins only — you do not manage this organization.</p>
       </section>
     );
   }
 
   return (
     <section className="card">
-      <h2>Users</h2>
       {users.isLoading ? (
-        <p className="muted">Loading…</p>
+        <p className="empty">Loading…</p>
       ) : users.data && users.data.users.length > 0 ? (
-        <table>
-          <thead>
-            <tr>
-              <th>Email</th>
-              <th>Name</th>
-              <th>State</th>
-              <th>Computer</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {users.data.users.map((user) => (
-              <UserRow key={user.id} user={user} />
-            ))}
-          </tbody>
-        </table>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Name</th>
+                <th>State</th>
+                <th>Computer</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {users.data.users.map((user) => (
+                <UserRow key={user.id} user={user} />
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
-        <p className="muted">No members yet.</p>
+        <p className="empty">No members yet.</p>
       )}
     </section>
   );
@@ -148,7 +149,11 @@ function InvitesCard() {
   });
 
   if (invites.error instanceof ApiError && invites.error.status === 403) {
-    return null; // The Users card already explains the admin gate.
+    return (
+      <section className="card">
+        <p className="empty">Admins only — you do not manage this organization.</p>
+      </section>
+    );
   }
 
   async function copy(link: string) {
@@ -162,8 +167,7 @@ function InvitesCard() {
 
   return (
     <section className="card">
-      <div className="spread">
-        <h2 style={{ margin: 0 }}>Invites</h2>
+      <div className="row">
         <button onClick={() => issue.mutate()} disabled={issue.isPending}>
           {issue.isPending ? "Issuing…" : "Issue invite"}
         </button>
@@ -184,30 +188,32 @@ function InvitesCard() {
         </div>
       ) : null}
 
-      <div style={{ marginTop: "1.25rem" }}>
+      <div style={{ marginTop: "1rem" }}>
         {invites.isLoading ? (
-          <p className="muted">Loading…</p>
+          <p className="empty">Loading…</p>
         ) : invites.data && invites.data.invites.length > 0 ? (
-          <table>
-            <thead>
-              <tr>
-                <th>Code</th>
-                <th>State</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invites.data.invites.map((invite) => (
-                <tr key={invite.code}>
-                  <td className="mono">{invite.code}</td>
-                  <td>
-                    <span className={`pill ${invite.state === "open" ? "on" : "off"}`}>{invite.state}</span>
-                  </td>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>State</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {invites.data.invites.map((invite) => (
+                  <tr key={invite.code}>
+                    <td className="mono">{invite.code}</td>
+                    <td>
+                      <span className={`pill ${invite.state === "open" ? "on" : "off"}`}>{invite.state}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
-          <p className="muted">No invites yet. Issue one to add a teammate.</p>
+          <p className="empty">No invites yet. Issue one to add a teammate.</p>
         )}
       </div>
     </section>
@@ -298,21 +304,19 @@ function DomainsCard() {
   });
 
   if (domains.error instanceof ApiError && domains.error.status === 403) {
-    return null; // The Users card already explains the admin gate.
+    return (
+      <section className="card">
+        <p className="empty">Admins only — you do not manage this organization.</p>
+      </section>
+    );
   }
   const claimError =
     claim.error instanceof ApiError ? claim.error.message : claim.error ? "Could not claim that domain." : null;
 
   return (
     <section className="card">
-      <h2 style={{ margin: 0 }}>Domains</h2>
-      <p className="muted" style={{ margin: "0.4rem 0 0", fontSize: "0.88rem" }}>
-        People can sign up with an invite only from a verified domain. Claim one, publish the TXT
-        record we give you, then verify it.
-      </p>
       <form
         className="row"
-        style={{ marginTop: "1rem" }}
         onSubmit={(e) => {
           e.preventDefault();
           if (draft.trim()) claim.mutate();
@@ -332,7 +336,7 @@ function DomainsCard() {
       {claimError ? <p className="err">{claimError}</p> : null}
       <div style={{ marginTop: "1rem" }}>
         {domains.isLoading ? (
-          <p className="muted">Loading…</p>
+          <p className="empty">Loading…</p>
         ) : domains.data && domains.data.domains.length > 0 ? (
           <ul style={{ margin: 0, padding: 0 }}>
             {domains.data.domains.map((entry) => (
@@ -340,7 +344,7 @@ function DomainsCard() {
             ))}
           </ul>
         ) : (
-          <p className="muted">No domains yet.</p>
+          <p className="empty">No domains yet.</p>
         )}
       </div>
     </section>
@@ -369,7 +373,13 @@ function ComputersCard() {
   });
   const test = useMutation({ mutationFn: testBoxConnection, onSuccess: setTestResult });
 
-  if (computers.error instanceof ApiError && computers.error.status === 403) return null;
+  if (computers.error instanceof ApiError && computers.error.status === 403) {
+    return (
+      <section className="card">
+        <p className="empty">Admins only — you do not manage this organization.</p>
+      </section>
+    );
+  }
 
   const box = computers.data?.computers.find((c) => c.kind === "ascii");
   const boxConfigured = box?.configured ?? false;
@@ -382,7 +392,6 @@ function ComputersCard() {
 
   return (
     <section className="card">
-      <h2>Computers</h2>
       <div style={{ marginBottom: "1.25rem" }}>
         <label htmlFor="orgmode">Default sharing mode</label>
         <select
@@ -396,13 +405,9 @@ function ComputersCard() {
           <option value="per-bot">A dedicated computer per bot (most isolated)</option>
         </select>
         <p className="muted" style={{ fontSize: "0.8rem", margin: "0.3rem 0 0" }}>
-          How members’ bots share computers. Override per member in the Users list above.
+          How members’ bots share computers. Override per member under People → Users.
         </p>
       </div>
-      <p className="muted" style={{ marginTop: 0, fontSize: "0.88rem" }}>
-        Where your organization’s bots run. Set a provider key and every member’s computer is
-        provisioned from it — the key is sealed on the server and never leaves it.
-      </p>
 
       <div style={{ marginTop: "1rem" }}>
         <div className="spread">
@@ -476,9 +481,11 @@ function GatewayKeyRow({
     <tr>
       <td>{email}</td>
       <td>
-        <code>{gkey.keyPrefix}…</code>
+        <span className="chip">{gkey.keyPrefix}…</span>
       </td>
-      <td>{gkey.revoked ? "Revoked" : "Active"}</td>
+      <td>
+        <span className={`pill ${gkey.revoked ? "off" : "on"}`}>{gkey.revoked ? "revoked" : "active"}</span>
+      </td>
       <td>
         {gkey.revoked ? (
           <span className="muted">—</span>
@@ -493,7 +500,7 @@ function GatewayKeyRow({
               aria-label={`Monthly cap for ${email}`}
               size={8}
             />
-            <button onClick={() => saveCap.mutate()} disabled={saveCap.isPending}>
+            <button className="sm" onClick={() => saveCap.mutate()} disabled={saveCap.isPending}>
               Set cap
             </button>
           </span>
@@ -501,7 +508,7 @@ function GatewayKeyRow({
       </td>
       <td>
         {gkey.revoked ? null : (
-          <button onClick={() => revoke.mutate()} disabled={revoke.isPending}>
+          <button className="danger sm" onClick={() => revoke.mutate()} disabled={revoke.isPending}>
             Revoke
           </button>
         )}
@@ -562,8 +569,7 @@ function GatewayAccessCard() {
   if (notAdmin) {
     return (
       <section className="card">
-        <h2>Gateway access</h2>
-        <p className="muted">Admins only — you do not manage this organization.</p>
+        <p className="empty">Admins only — you do not manage this organization.</p>
       </section>
     );
   }
@@ -579,8 +585,7 @@ function GatewayAccessCard() {
   if (unwired) {
     return (
       <section className="card">
-        <h2>Gateway access</h2>
-        <p className="muted">{unwired}</p>
+          <p className="muted">{unwired}</p>
       </section>
     );
   }
@@ -590,12 +595,6 @@ function GatewayAccessCard() {
 
   return (
     <section className="card">
-      <h2>Gateway access</h2>
-      <p className="muted">
-        A key here opens the model door for one member: they set it as their client's API token.
-        Spending counts against this organization.
-      </p>
-
       {usage.data ? (
         <p>
           <strong>{usage.data.monthToDateUsd}</strong> spent this month
@@ -666,30 +665,32 @@ function GatewayAccessCard() {
       ) : null}
 
       {keys.isLoading ? (
-        <p className="muted">Loading…</p>
+        <p className="empty">Loading…</p>
       ) : keys.data && keys.data.keys.length > 0 ? (
-        <table>
-          <thead>
-            <tr>
-              <th>Member</th>
-              <th>Key</th>
-              <th>State</th>
-              <th>Cap</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {keys.data.keys.map((k) => (
-              <GatewayKeyRow
-                key={k.id}
-                gkey={k}
-                email={k.memberId ? emailFor(k.memberId) : `unattributed (${k.label || "no name"})`}
-              />
-            ))}
-          </tbody>
-        </table>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Member</th>
+                <th>Key</th>
+                <th>State</th>
+                <th>Cap</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {keys.data.keys.map((k) => (
+                <GatewayKeyRow
+                  key={k.id}
+                  gkey={k}
+                  email={k.memberId ? emailFor(k.memberId) : `unattributed (${k.label || "no name"})`}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : (
-        <p className="muted">No keys yet.</p>
+        <p className="empty">No keys yet.</p>
       )}
     </section>
   );
@@ -775,8 +776,7 @@ function PointsCard() {
   if (overview.error instanceof ApiError && overview.error.status === 403) {
     return (
       <section className="card">
-        <h2>Points</h2>
-        <p className="muted">Admins only — you do not manage this organization.</p>
+        <p className="empty">Admins only — you do not manage this organization.</p>
       </section>
     );
   }
@@ -784,15 +784,8 @@ function PointsCard() {
   const shownReference = reference ?? usdPerMtok ?? "";
   return (
     <section className="card">
-      <h2>Points</h2>
-      <p className="muted">
-        One point is one token at the reference price below (USD per million tokens); a model's
-        multiplier is its list price over it, so a subscription seat counts the same as an API key.
-        Set each member's monthly pool; members cap their own coworkers at most the pool. At a limit
-        a turn is refused with a sentence that names the numbers and when it frees up.
-      </p>
       {overview.isLoading ? (
-        <p className="muted">Loading…</p>
+        <p className="empty">Loading…</p>
       ) : overview.error ? (
         <p className="error">{errorText(overview.error, "could not load points")}</p>
       ) : overview.data ? (
@@ -821,63 +814,67 @@ function PointsCard() {
           </div>
           <div>
             <h3>Members</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Member</th>
-                  <th>Used this month</th>
-                  <th>Monthly pool</th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.data.members.map((m) => (
-                  <tr key={m.id}>
-                    <td>{m.email}</td>
-                    <td>
-                      {commas(m.usedPoints)}
-                      <span className="muted"> {dollarsOf(m.usedPoints, usdPerMtok) ?? ""}</span>
-                    </td>
-                    <td>
-                      <PoolEditor member={m} usdPerMtok={usdPerMtok} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div>
-            <h3>Coworkers</h3>
-            {overview.data.coworkers.length === 0 ? (
-              <p className="muted">No coworkers hired yet.</p>
-            ) : (
+            <div className="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Coworker</th>
-                    <th>Hired by</th>
+                    <th>Member</th>
                     <th>Used this month</th>
-                    <th>Cap / day</th>
+                    <th>Monthly pool</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {overview.data.coworkers.map((c) => (
-                    <tr key={c.id}>
-                      <td>{c.name}</td>
-                      <td>{c.ownerEmail}</td>
-                      <td>{commas(c.usedPoints)}</td>
+                  {overview.data.members.map((m) => (
+                    <tr key={m.id}>
+                      <td>{m.email}</td>
                       <td>
-                        {c.cap == null && c.dayCap == null ? (
-                          <span className="muted">none — draws on the pool</span>
-                        ) : (
-                          <>
-                            {c.cap == null ? "no cap" : commas(c.cap)} / {c.dayCap == null ? "no brake" : commas(c.dayCap)}
-                          </>
-                        )}
+                        {commas(m.usedPoints)}
+                        <span className="muted"> {dollarsOf(m.usedPoints, usdPerMtok) ?? ""}</span>
+                      </td>
+                      <td>
+                        <PoolEditor member={m} usdPerMtok={usdPerMtok} />
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+          <div>
+            <h3>Coworkers</h3>
+            {overview.data.coworkers.length === 0 ? (
+              <p className="empty">No coworkers hired yet.</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Coworker</th>
+                      <th>Hired by</th>
+                      <th>Used this month</th>
+                      <th>Cap / day</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overview.data.coworkers.map((c) => (
+                      <tr key={c.id}>
+                        <td>{c.name}</td>
+                        <td>{c.ownerEmail}</td>
+                        <td>{commas(c.usedPoints)}</td>
+                        <td>
+                          {c.cap == null && c.dayCap == null ? (
+                            <span className="muted">none — draws on the pool</span>
+                          ) : (
+                            <>
+                              {c.cap == null ? "no cap" : commas(c.cap)} / {c.dayCap == null ? "no brake" : commas(c.dayCap)}
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         </div>
@@ -947,7 +944,7 @@ function TemplateEditor({
       />
       <span className="row">
         {tools.map((tool) => (
-          <label key={tool}>
+          <label className="check" key={tool}>
             <input
               type="checkbox"
               checked={draft.tools.includes(tool)}
@@ -958,18 +955,19 @@ function TemplateEditor({
                   needsApproval: draft.needsApproval.filter((t) => t !== tool || !draft.tools.includes(tool)),
                 })
               }
-            />{" "}
+            />
             {tool}
+            {/* "Ask first" only means something for a tool this template grants, so it appears
+                inside that tool's own control rather than as a parallel list of orphan boxes. */}
             {draft.tools.includes(tool) ? (
-              <label className="muted">
-                {" "}
+              <span className="sub-check">
                 <input
                   type="checkbox"
                   checked={draft.needsApproval.includes(tool)}
                   onChange={() => setDraft({ ...draft, needsApproval: toggle(draft.needsApproval, tool) })}
-                />{" "}
+                />
                 ask first
-              </label>
+              </span>
             ) : null}
           </label>
         ))}
@@ -1088,44 +1086,40 @@ function TemplatesCard() {
   if (templates.error instanceof ApiError && templates.error.status === 403) {
     return (
       <section className="card">
-        <h2>Coworker templates</h2>
-        <p className="muted">Admins only — you do not manage this organization.</p>
+        <p className="empty">Admins only — you do not manage this organization.</p>
       </section>
     );
   }
   const tools = templates.data?.tools ?? EMPTY_TEMPLATE.tools;
   return (
     <section className="card">
-      <h2>Coworker templates</h2>
-      <p className="muted">
-        A coworker type: route, tools, what needs a human yes, spend limits. Members pick one
-        when they hire; what it says is copied to the coworker then and there.
-      </p>
       {templates.isLoading ? (
-        <p className="muted">Loading…</p>
+        <p className="empty">Loading…</p>
       ) : templates.error ? (
         <p className="error">{errorText(templates.error, "could not load templates")}</p>
       ) : (
         <div className="stack">
           {templates.data && templates.data.templates.length > 0 ? (
-            <table>
-              <thead>
-                <tr>
-                  <th>Template</th>
-                  <th>Route</th>
-                  <th>Tools</th>
-                  <th>Limits</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {templates.data.templates.map((t) => (
-                  <TemplateRow key={t.id} template={t} tools={tools} />
-                ))}
-              </tbody>
-            </table>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Template</th>
+                    <th>Route</th>
+                    <th>Tools</th>
+                    <th>Limits</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {templates.data.templates.map((t) => (
+                    <TemplateRow key={t.id} template={t} tools={tools} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           ) : (
-            <p className="muted">No templates yet.</p>
+            <p className="empty">No templates yet.</p>
           )}
           <h3>New template</h3>
           <TemplateEditor tools={tools} initial={EMPTY_TEMPLATE} onSave={createTemplate} saveLabel="Create" />
@@ -1135,20 +1129,101 @@ function TemplatesCard() {
   );
 }
 
-export function AdminPage() {
+/**
+ * One admin section, one route.
+ *
+ * These were seven cards stacked in a single `/admin`: 4,085px tall, every section reached by
+ * scrolling past the ones before it, and no way to tell from the screen which of the seven you
+ * were looking at. Each is now addressable — a link to Domains opens Domains — and `requireAdmin`
+ * still guards every one of them, exactly as it guarded the stack. The server enforces admin on
+ * the API regardless; this only decides what is worth drawing.
+ */
+function AdminSection({ title, blurb, children }: { title: string; blurb: string; children: ReactNode }) {
   return (
     <AuthedFrame requireAdmin>
       {() => (
-        <div className="stack">
-          <UsersCard />
-          <GatewayAccessCard />
-          <PointsCard />
-          <TemplatesCard />
-          <ComputersCard />
-          <DomainsCard />
-          <InvitesCard />
-        </div>
+        <>
+          <PageHead title={title}>{blurb}</PageHead>
+          {children}
+        </>
       )}
     </AuthedFrame>
+  );
+}
+
+export function AdminUsersPage() {
+  return (
+    <AdminSection
+      title="Users"
+      blurb="Everyone in this organization, whether they may sign in, and which computer their bots run on."
+    >
+      <UsersCard />
+    </AdminSection>
+  );
+}
+
+export function AdminInvitesPage() {
+  return (
+    <AdminSection
+      title="Invites"
+      blurb="Issue a code a teammate redeems to join. An invite only works from a verified domain."
+    >
+      <InvitesCard />
+    </AdminSection>
+  );
+}
+
+export function AdminDomainsPage() {
+  return (
+    <AdminSection
+      title="Domains"
+      blurb="People can sign up with an invite only from a verified domain. Claim one, publish the TXT record we give you, then verify it."
+    >
+      <DomainsCard />
+    </AdminSection>
+  );
+}
+
+export function AdminGatewayPage() {
+  return (
+    <AdminSection
+      title="Gateway access"
+      blurb="A key here opens the model door for one member: they set it as their client's API token. Spending counts against this organization."
+    >
+      <GatewayAccessCard />
+    </AdminSection>
+  );
+}
+
+export function AdminPointsPage() {
+  return (
+    <AdminSection
+      title="Points"
+      blurb="One point is one token at the reference price (USD per million tokens); a model's multiplier is its list price over it, so a subscription seat counts the same as an API key. Set each member's monthly pool; members cap their own coworkers at most the pool. At a limit a turn is refused with a sentence that names the numbers and when it frees up."
+    >
+      <PointsCard />
+    </AdminSection>
+  );
+}
+
+export function AdminTemplatesPage() {
+  return (
+    <AdminSection
+      title="Coworker templates"
+      blurb="A coworker type: route, tools, what needs a human yes, spend limits. Members pick one when they hire; what it says is copied to the coworker then and there."
+    >
+      <TemplatesCard />
+    </AdminSection>
+  );
+}
+
+export function AdminComputersPage() {
+  return (
+    <AdminSection
+      title="Computers"
+      blurb="Where your organization’s bots run. Set a provider key and every member’s computer is provisioned from it — the key is sealed on the server and never leaves it."
+    >
+      <ComputersCard />
+    </AdminSection>
   );
 }

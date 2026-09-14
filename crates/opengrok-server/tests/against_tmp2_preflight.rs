@@ -497,10 +497,10 @@ fn tool_call_names(tail: &Value) -> Vec<String> {
     fn walk(value: &Value, out: &mut Vec<String>) {
         match value {
             Value::Object(map) => {
-                if map.get("kind").and_then(Value::as_str) == Some("tool-call") {
-                    if let Some(name) = map.get("name").and_then(Value::as_str) {
-                        out.push(name.to_string());
-                    }
+                if map.get("kind").and_then(Value::as_str) == Some("tool-call")
+                    && let Some(name) = map.get("name").and_then(Value::as_str)
+                {
+                    out.push(name.to_string());
                 }
                 for child in map.values() {
                     walk(child, out);

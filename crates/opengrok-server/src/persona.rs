@@ -100,6 +100,68 @@ impl Persona {
     }
 }
 
+/// The system prompt that keeps a coworker honest about WHOSE computer it is using. A bot has its
+/// OWN box (sandboxed, on the server); the user has their own machine; these are different, and a
+/// bot must never present work done on its box as done on the user's computer. When it has no
+/// computer, it should say so rather than pretend. Written for the day a reverse channel makes "my
+/// computer" name two real machines — the distinction has to be in the model's head before then.
+///
+/// Lives here, next to `system_message`, so every run path (desktop, AG-UI, autonomy) can pass the
+/// same tail rather than each inventing one. The two halves MUST track the tool list: a prompt
+/// that contradicts the offering silently disables the tool.
+#[must_use]
+pub fn computer_system_prompt(
+    has_computer: bool,
+    reaches_user_machine: bool,
+    user_machine_label: Option<&str>,
+) -> String {
+    if has_computer {
+        // NO OS OR HARDWARE NAMES HERE. The box's runtime varies (Linux today; other kinds later)
+        // and the user's machine is whatever they enrolled — naming either ("Linux box", "their
+        // Mac") turns the prompt into a lie the day the fleet changes. The distinction that must
+        // survive is WHOSE machine, not what it runs.
+        let mut prompt = "You have your OWN computer: a sandboxed box running on the server. It is a DIFFERENT \
+         machine from the user's own computer. Your shell, read_file and \
+         write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
+         run a command or create, read or change a file, it happens on YOUR box, and you must say so \
+         plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
+         Never describe work done on your box as done on the user's computer."
+            .to_string();
+        if reaches_user_machine {
+            // The enrolled label (e.g. "Uriah's-MacBook-Pro.local") is the one name for the
+            // user's machine that stays TRUE whatever it runs — the daemon reported it at
+            // enrolment. Guessing an OS instead ("their Mac") becomes a lie the day a Windows
+            // or second machine enrolls. No label ⇒ stay generic, never invent one.
+            let machine = match user_machine_label {
+                Some(label) => format!("the computer they enrolled, \"{label}\""),
+                None => "the real computer they enrolled".to_string(),
+            };
+            prompt.push_str(&format!(
+                " You ALSO have the `user_machine_shell` tool, which runs a command on the USER'S \
+                 OWN machine — {machine} — with their consent: a command may \
+                 run, be refused, or wait for the user to approve it, and waiting is normal — the \
+                 user may answer minutes or hours later, so never retry or give up on a waiting \
+                 command. When the user asks you to do something on THEIR computer, use \
+                 `user_machine_shell` rather than telling them to do it themselves, and refer to \
+                 their machine by that name."
+            ));
+        } else {
+            prompt.push_str(
+                " If the user asks you to do something on THEIR computer, tell them you can only \
+                 use your own box and cannot reach their machine, and offer to do it on your box \
+                 instead.",
+            );
+        }
+        prompt
+    } else {
+        "You do NOT currently have a computer, so you cannot run shell commands or read or write \
+         files anywhere. Do not claim to run commands or access any machine. If the user needs \
+         something run, explain that your computer is not available yet and, where useful, give them \
+         the exact command to run themselves."
+            .to_string()
+    }
+}
+
 /// The one system message a run carries: identity, then the standing role, then whatever else
 /// the run needs the model to know — today the machine discipline. Blocks are separated by a
 /// blank line so the model reads them as distinct claims rather than one run-on instruction.
@@ -281,6 +343,43 @@ mod tests {
             system_message("Ada", &persona(None, None), Some("   ")),
             "You are Ada.",
             "an empty tail adds no blank block"
+        );
+    }
+
+    #[test]
+    fn the_computer_prompt_tracks_whether_the_tools_exist() {
+        let box_only = computer_system_prompt(true, false, None);
+        assert!(
+            box_only.contains("You have your OWN computer"),
+            "{box_only}"
+        );
+        assert!(
+            box_only.contains("cannot reach their machine"),
+            "no reverse channel ⇒ say so: {box_only}"
+        );
+        assert!(
+            !box_only.contains("user_machine_shell"),
+            "must not name a tool that is not offered: {box_only}"
+        );
+
+        let with_user = computer_system_prompt(true, true, Some("office.local"));
+        assert!(
+            with_user.contains("`user_machine_shell`"),
+            "the offered tool must be named: {with_user}"
+        );
+        assert!(
+            with_user.contains("office.local"),
+            "the enrolled label is the true name: {with_user}"
+        );
+
+        let none = computer_system_prompt(false, true, Some("ignored"));
+        assert!(
+            none.contains("You do NOT currently have a computer"),
+            "{none}"
+        );
+        assert!(
+            !none.contains("user_machine_shell"),
+            "no box ⇒ the reverse channel is not offered either: {none}"
         );
     }
 
