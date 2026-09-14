@@ -16,7 +16,6 @@
 //! guess — the model is told plainly that the call's outcome is unknown, and it decides. A resumed
 //! run that silently re-ran a `rm` would be worse than one that stopped.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use opengrok_core::id::RunId;
@@ -298,11 +297,18 @@ pub fn hold(state: AgUiState, run_id: RunId) -> tokio::task::JoinHandle<()> {
 }
 
 /// Dropping this releases the run: the renewal stops and the lease simply expires.
-pub struct Lease(Arc<tokio::task::JoinHandle<()>>);
+///
+/// `AbortHandle` rather than `JoinHandle`: `JoinHandle` is `!Sync`, so wrapping it
+/// would make `Lease` `!Send`. AG-UI returns the SSE body before the turn finishes
+/// and holds the lease on that spawned task, which has to be `Send`.
+pub struct Lease(tokio::task::AbortHandle);
 
 impl Lease {
     pub fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self(Arc::new(handle))
+        let abort = handle.abort_handle();
+        // Dropping a JoinHandle detaches the hold loop; aborting happens when Lease drops.
+        drop(handle);
+        Self(abort)
     }
 }
 

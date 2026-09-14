@@ -311,6 +311,16 @@ pub async fn resume_conversation(
     all
 }
 
+/// Hand this batch to the live reader, if any. Empty batches are a no-op so callers
+/// can pass `projection.fail` after a run that already finished.
+async fn emit_now(sink: Option<&dyn EventSink>, events: &[Event]) {
+    if let Some(sink) = sink
+        && !events.is_empty()
+    {
+        sink.emit(events).await;
+    }
+}
+
 /// The loop both entry points share.
 #[allow(clippy::too_many_arguments)]
 async fn converse(
@@ -336,10 +346,14 @@ async fn converse(
         // A run we cannot record must not proceed: it would produce work that a reconnect can
         // never reproduce, which is the failure this design exists to prevent.
         let mut failed = projection.fail(format!("the run could not be recorded: {error}"));
+        emit_now(sink, &opening).await;
+        emit_now(sink, &failed).await;
         all.append(&mut opening);
         all.append(&mut failed);
         return all;
     }
+    // The person watching the bubble sees RUN_STARTED before the model is even called.
+    emit_now(sink, &opening).await;
     all.append(&mut opening);
 
     for round in 0..MAX_ROUNDS {
@@ -348,7 +362,9 @@ async fn converse(
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
-                round_events.extend(projection.fail(error.to_string()));
+                let failed = projection.fail(error.to_string());
+                emit_now(sink, &failed).await;
+                round_events.extend(failed);
                 None
             }
         };
@@ -365,15 +381,13 @@ async fn converse(
                         let produced = projection.push(delta);
                         // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
                         // adds a second reader that does not have to wait for the run to end.
-                        if let Some(sink) = sink
-                            && !produced.is_empty()
-                        {
-                            sink.emit(&produced).await;
-                        }
+                        emit_now(sink, &produced).await;
                         round_events.extend(produced);
                     }
                     Err(error) => {
-                        round_events.extend(projection.fail(error.to_string()));
+                        let failed = projection.fail(error.to_string());
+                        emit_now(sink, &failed).await;
+                        round_events.extend(failed);
                         broke = true;
                         break;
                     }
@@ -386,7 +400,9 @@ async fn converse(
                     let results = runner.run_all(&calls).await;
 
                     for result in &results {
-                        round_events.extend(projection.push_tool_result(result));
+                        let produced = projection.push_tool_result(result);
+                        emit_now(sink, &produced).await;
+                        round_events.extend(produced);
                         // The model needs to see what its tool said, in its own transcript.
                         request.messages.push(ChatMessage {
                             role: "user".to_string(),
@@ -413,6 +429,7 @@ async fn converse(
                             projection.awaiting_approval(waiting, reason, awaiting_why(&why));
                         let _ = journal.record(run_id, &round_events).await;
                         let _ = journal.record(run_id, &waiting_events).await;
+                        emit_now(sink, &waiting_events).await;
                         all.append(&mut round_events);
                         all.append(&mut waiting_events);
                         return all;
@@ -427,9 +444,10 @@ async fn converse(
                     // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
                     // dependency chain, so a crash after this point can be picked up.
                     if let Err(error) = journal.record(run_id, &round_events).await {
-                        round_events.extend(
-                            projection.fail(format!("the run could not be recorded: {error}")),
-                        );
+                        let failed =
+                            projection.fail(format!("the run could not be recorded: {error}"));
+                        emit_now(sink, &failed).await;
+                        round_events.extend(failed);
                         all.append(&mut round_events);
                         return all;
                     }
@@ -441,6 +459,7 @@ async fn converse(
                             "this run reached its limit of {MAX_ROUNDS} model calls"
                         ));
                         let _ = journal.record(run_id, &ending).await;
+                        emit_now(sink, &ending).await;
                         all.append(&mut ending);
                         return all;
                     }
@@ -451,6 +470,7 @@ async fn converse(
 
         // No tools were asked for, or the run failed: this is the last round either way.
         let mut ending = projection.finish();
+        emit_now(sink, &ending).await;
         round_events.append(&mut ending);
         let _ = journal.record(run_id, &round_events).await;
         all.append(&mut round_events);
@@ -886,5 +906,45 @@ mod tests {
                 .count();
             assert_eq!(endings, 1, "{:?}", events.last());
         }
+    }
+
+    /// The live reader sees the opening, the words, and the ending — not an empty
+    /// channel that only fills when `run_conversation_streaming` returns.
+    #[tokio::test]
+    async fn a_streaming_sink_sees_the_run_as_it_happens() {
+        struct Recording(std::sync::Mutex<Vec<EventType>>);
+        #[async_trait::async_trait]
+        impl EventSink for Recording {
+            async fn emit(&self, events: &[Event]) {
+                if let Ok(mut seen) = self.0.lock() {
+                    seen.extend(events.iter().map(|event| event.event_type));
+                }
+            }
+        }
+        let sink = Recording(std::sync::Mutex::new(Vec::new()));
+        let _events = run_conversation_streaming(
+            &MockDoor::echoing(),
+            None,
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+            &sink,
+        )
+        .await;
+        let seen = sink.0.lock().unwrap().clone();
+        assert!(
+            seen.contains(&EventType::RunStarted),
+            "missing RUN_STARTED: {seen:?}"
+        );
+        assert!(
+            seen.contains(&EventType::TextMessageContent),
+            "missing TEXT_MESSAGE_CONTENT: {seen:?}"
+        );
+        assert!(
+            seen.contains(&EventType::RunFinished),
+            "missing RUN_FINISHED: {seen:?}"
+        );
     }
 }

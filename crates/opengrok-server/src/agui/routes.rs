@@ -15,7 +15,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::{self, Stream};
+use futures::stream::Stream;
 use opengrok_wire::agui::{Event, RunAgentInput};
 
 use super::provision;
@@ -23,7 +23,9 @@ use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
-use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
+use opengrok_harness::{
+    ChatMessage, EventSink, ModelDoor, ModelRequest, ToolRunner, run_conversation_streaming,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1520,20 +1522,59 @@ pub async fn run(
         RunId::from_stored(input.run_id.clone()),
     ));
 
-    let events = run_conversation(
-        state.door.as_ref(),
-        tools.as_ref(),
-        &journal,
-        request,
-        &input.thread_id,
-        &input.run_id,
-        now_ms(),
-    )
-    .await;
+    // Stream events as the model produces them. Collecting first then
+    // `stream::iter` delivers the whole run at once — which looks like the
+    // server never streamed (NativeChat's 20s dump). Desktop `sendPrompt`
+    // already uses `run_conversation_streaming`; AG-UI is the same person
+    // watching a bubble fill.
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::io::Error>>(64);
+    let sink = LiveSse { tx: tx.clone() };
+    let thread_id = input.thread_id.clone();
+    let run_id = input.run_id.clone();
+    let at_ms = now_ms();
+    // The handler returns the SSE body NOW. Awaiting the turn here is what made
+    // NativeChat paint the whole reply at once: the HTTP response did not start
+    // until `run_conversation` had collected every event.
+    let _run = tokio::spawn(async move {
+        let _lease = _lease;
+        let _events = run_conversation_streaming(
+            state.door.as_ref(),
+            tools.as_ref(),
+            &journal,
+            request,
+            &thread_id,
+            &run_id,
+            at_ms,
+            &sink,
+        )
+        .await;
+        drop(tx);
+    });
+    sse(live_sse_stream(rx))
+}
 
-    sse(stream::iter(
-        events.into_iter().map(Ok::<_, std::io::Error>),
-    ))
+/// Pushes AG-UI events onto the HTTP stream as `converse` produces them.
+struct LiveSse {
+    tx: tokio::sync::mpsc::Sender<Result<Event, std::io::Error>>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for LiveSse {
+    async fn emit(&self, events: &[Event]) {
+        for event in events {
+            if self.tx.send(Ok(event.clone())).await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+fn live_sse_stream(
+    rx: tokio::sync::mpsc::Receiver<Result<Event, std::io::Error>>,
+) -> impl Stream<Item = Result<Event, std::io::Error>> {
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
 }
 
 /// The event store, as the harness's journal.
@@ -2142,6 +2183,7 @@ where
             // exactly like a server that never streamed.
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONNECTION, "keep-alive"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         axum::body::Body::from_stream(body),
     )
