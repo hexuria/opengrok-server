@@ -16,7 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::{self, Stream};
-use opengrok_wire::agui::{Event, RunAgentInput};
+use opengrok_wire::agui::{Event, EventType, RunAgentInput};
+use serde_json::Value;
 
 use super::provision;
 use crate::auth::AuthState;
@@ -1420,6 +1421,39 @@ pub async fn run(
         }
     }
 
+    // THE MENTION IS RESOLVED BEFORE ANY PER-TURN WORK. A mention that needs a pick returns
+    // immediately, so loading this coworker's tools and composing its persona first would be
+    // work thrown away on exactly the path that exits earliest. `messages` is therefore built
+    // here, once, and the persona block below only edits it.
+    let implicit = input
+        .forwarded_props
+        .get("tmpMode")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let mut messages = to_chat_messages(&input);
+    if let Some(account_id) = &account_id
+        && let Ok(Some(account)) = state.auth.store.account_by_id(account_id).await
+    {
+        let text = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .unwrap_or("");
+        if !text.is_empty() {
+            let candidates = crate::tmp::candidates_for(&state.auth.store, &account).await;
+            let outcome = crate::tmp::preflight(text, implicit, &candidates);
+            match &outcome {
+                tmp2_core::Outcome::NeedsPick { .. } | tmp2_core::Outcome::Unresolved { .. } => {
+                    return tmp_pick_sse(&input.thread_id, &input.run_id, &outcome);
+                }
+                tmp2_core::Outcome::Ready(grounding) => {
+                    crate::tmp::rewrite_last_user(&mut messages, grounding);
+                }
+            }
+        }
+    }
+
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
             Some(coworker_id) => {
@@ -1476,7 +1510,6 @@ pub async fn run(
         _ => None,
     };
 
-    let mut messages = to_chat_messages(&input);
     // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
     // about the same coworker; drop it when we composed one.
     if system.is_some() {
@@ -2112,6 +2145,28 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
             })
         })
         .collect()
+}
+
+/// A pick-list run: the door is never opened.
+fn tmp_pick_sse(thread_id: &str, run_id: &str, outcome: &tmp2_core::Outcome) -> Response {
+    let at = now_ms();
+    let pick = crate::tmp::pick_entry(outcome);
+    let events = vec![
+        Event::new(EventType::RunStarted, at)
+            .with("threadId", thread_id)
+            .with("runId", run_id),
+        Event::new(EventType::Custom, at)
+            .with("name", "tmp-pick")
+            .with("threadId", thread_id)
+            .with("runId", run_id)
+            .with("pick", pick),
+        Event::new(EventType::RunFinished, at)
+            .with("threadId", thread_id)
+            .with("runId", run_id),
+    ];
+    sse(stream::iter(
+        events.into_iter().map(Ok::<_, std::io::Error>),
+    ))
 }
 
 /// Wrap an event stream in the SSE response openbot expects.

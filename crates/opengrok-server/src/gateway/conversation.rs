@@ -72,6 +72,11 @@ pub fn input_digest(args: &Value, agent_id: &str) -> String {
             .unwrap_or_default(),
     );
     take(
+        args.get("tmpWire")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    take(
         args.get("replyToId")
             .and_then(Value::as_str)
             .unwrap_or_default(),
@@ -236,6 +241,71 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
         return (200, json!({ "accepted": true }));
     }
 
+    let implicit = args.get("tmpMode").and_then(Value::as_bool) == Some(true);
+    let bind_text = args
+        .get("tmpWire")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| prompt.clone());
+    let candidates = crate::tmp::candidates_for(&state.agui.auth.store, &account).await;
+    let outcome = crate::tmp::preflight(&bind_text, implicit, &candidates);
+    let grounding = match &outcome {
+        tmp2_core::Outcome::Ready(grounding) => Some(grounding.clone()),
+        tmp2_core::Outcome::NeedsPick { .. } | tmp2_core::Outcome::Unresolved { .. } => {
+            let mut pick = crate::tmp::pick_entry(&outcome);
+            pick["id"] = json!(entry_id());
+            pick["timestampMs"] = json!(now_ms());
+            if let Err(error) = state
+                .agui
+                .auth
+                .store
+                .append_gateway_entry(&coworker_id, &account.id, &pick, now_ms())
+                .await
+            {
+                tracing::error!(%error, "could not append the tmp pick entry");
+                return (500, json!({ "error": "transcript unavailable" }));
+            }
+            live::emit_transcript(state, &agent_id, &account.id, "appended", pick);
+            return (200, json!({ "accepted": true, "tmp": "pick" }));
+        }
+    };
+
+    if let Some(grounding) = grounding.as_ref()
+        && !grounding.bindings.is_empty()
+    {
+        for binding in &grounding.bindings {
+            let call = crate::tmp::resolve_tool_call(binding, entry_id(), now_ms());
+            if let Err(error) = state
+                .agui
+                .auth
+                .store
+                .append_gateway_entry(&coworker_id, &account.id, &call, now_ms())
+                .await
+            {
+                tracing::error!(%error, "could not append the tmp resolve tool-call");
+                return (500, json!({ "error": "transcript unavailable" }));
+            }
+            live::emit_transcript(state, &agent_id, &account.id, "appended", call);
+        }
+        if crate::tmp::leftover_wants_mail(&prompt) {
+            let mail = crate::tmp::send_email_unavailable(grounding, entry_id(), now_ms());
+            if let Err(error) = state
+                .agui
+                .auth
+                .store
+                .append_gateway_entry(&coworker_id, &account.id, &mail, now_ms())
+                .await
+            {
+                tracing::error!(%error, "could not append the tmp mail tool-call");
+                return (500, json!({ "error": "transcript unavailable" }));
+            }
+            live::emit_transcript(state, &agent_id, &account.id, "appended", mail);
+            return (200, json!({ "accepted": true, "tmp": "tool" }));
+        }
+    }
+
     // The streaming placeholder the answer will grow into.
     let answer_id = entry_id();
     let mut placeholder = json!({
@@ -275,7 +345,10 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     // The turn, off this request's clock. `accepted` means accepted, not answered. Keep the task's
     // abort handle so stopAgentTurn can cancel it; run_turn removes itself when it ends.
     let task_state = state.clone();
-    let history = history_for(state, &coworker_id, &account.id).await;
+    let mut history = history_for(state, &coworker_id, &account.id).await;
+    if let Some(grounding) = grounding.as_ref() {
+        crate::tmp::rewrite_last_user(&mut history, grounding);
+    }
     let handle = tokio::spawn(run_turn(
         task_state,
         account.id,

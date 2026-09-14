@@ -230,6 +230,36 @@ impl PgStore {
         .transpose()
     }
 
+    /// The same projection, keyed by id — tmp2 preflight has an `AccountId` from the bearer.
+    pub async fn account_by_id(&self, id: &AccountId) -> StoreResult<Option<AccountView>> {
+        let row = sqlx::query(
+            "select id, email, plan, trial, updated_at_ms, password_hash, first_name, last_name,
+                    org_id, verified, enabled, avatar_url
+             from account_view where id = $1",
+        )
+        .bind(id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(AccountView {
+                id: AccountId::from_stored(row.try_get::<String, _>("id")?),
+                email: row.try_get("email")?,
+                plan: Plan::from_wire(&row.try_get::<String, _>("plan")?),
+                trial: row.try_get("trial")?,
+                updated_at_ms: row.try_get("updated_at_ms")?,
+                password_hash: row.try_get("password_hash")?,
+                first_name: row.try_get("first_name")?,
+                last_name: row.try_get("last_name")?,
+                org_id: row.try_get("org_id")?,
+                verified: row.try_get("verified")?,
+                enabled: row.try_get("enabled")?,
+                avatar_url: row.try_get("avatar_url")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Every account belonging to an org — the admin's user list. Reads the projection, so it
     /// captures CLI-created accounts, signups and the admin alike, not only those who redeemed an
     /// invite. Ordered by email for a stable display.

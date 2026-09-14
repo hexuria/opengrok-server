@@ -28,6 +28,7 @@ pub fn router(state: GatewayState) -> Router {
         .route("/events", get(events))
         .route("/api/{method}", post(command))
         .route("/avatars/{id}", get(avatar_bytes))
+        .route("/tmp/complete", get(tmp_complete))
         .with_state(state)
 }
 
@@ -64,6 +65,38 @@ async fn avatar_bytes(
         Ok(bytes) => (StatusCode::OK, [(header::CONTENT_TYPE, "image/png")], bytes).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "no avatar").into_response(),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TmpCompleteQuery {
+    token: Option<String>,
+    q: Option<String>,
+}
+
+/// `GET /tmp/complete` — composer autocomplete. Hits the store, never `ModelDoor`.
+async fn tmp_complete(
+    State(state): State<GatewayState>,
+    Query(query): Query<TmpCompleteQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some((code, message)) = refuse(&state, &headers) {
+        return refusal(code, message);
+    }
+    let resolved = super::caller_of(&state, &headers).await;
+    if let Some(code) = resolved.refusal_code() {
+        return identity_refusal(code);
+    }
+    let Some(caller) = resolved.email().map(str::to_string) else {
+        return identity_refusal("account_identity_required");
+    };
+    let Ok(Some(account)) = state.agui.auth.store.account_by_email(&caller).await else {
+        return refusal(500, "account unavailable");
+    };
+    let token = query.token.as_deref().unwrap_or("user");
+    let prefix = query.q.as_deref().unwrap_or("");
+    let body =
+        crate::tmp::complete_for_account(&state.agui.auth.store, &account, token, prefix).await;
+    reply(StatusCode::OK, body)
 }
 
 /// The host's own words when sharing is off for the account (`cross-user-sharing/
@@ -652,6 +685,16 @@ async fn command(
         ),
 
         // ---- P4: one conversation (slice 8) ----
+        "tmpComplete" => {
+            let Ok(Some(account)) = state.agui.auth.store.account_by_email(&caller).await else {
+                return refusal(500, "account unavailable");
+            };
+            let token = args.get("token").and_then(Value::as_str).unwrap_or("user");
+            let q = args.get("q").and_then(Value::as_str).unwrap_or("");
+            let body =
+                crate::tmp::complete_for_account(&state.agui.auth.store, &account, token, q).await;
+            reply(StatusCode::OK, body)
+        }
         "sendPrompt" => {
             let (code, body) = super::conversation::send_prompt(&state, &args, &caller).await;
             reply(

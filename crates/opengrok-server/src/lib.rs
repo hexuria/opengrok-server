@@ -26,6 +26,7 @@ pub mod seamb;
 pub mod seamb_send;
 pub mod spend;
 pub mod templates;
+pub mod tmp;
 
 pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
