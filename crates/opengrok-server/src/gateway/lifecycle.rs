@@ -10,8 +10,8 @@
 
 use serde_json::{Value, json};
 
-use opengrok_core::id::{CoworkerId, RunId, ScheduleId};
-use opengrok_core::schedule::{Schedule, ScheduleCommand};
+use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
+use opengrok_core::schedule::{FireCause, Schedule, ScheduleCommand, Wake, WakeKind};
 
 use super::{GatewayState, live};
 
@@ -803,15 +803,17 @@ pub async fn delete_entries(state: &GatewayState, args: &Value, caller: &str) ->
 // `trigger`, boolean `isEnabled` and an array `runs` whose items parse. The host's record
 // (`source/host/automations/automation.ts:84-89`) adds `schedule`, `nextRunAt`, `createdAt`,
 // `lastRunAt`, `raisedNotices`, `filePath`, and runs as `{id, trigger, startedAt, finishedAt,
-// status, detail?}` with status `running | ok | error` and trigger `schedule | manual`.
+// status, detail?}` with status `running | ok | error` and trigger `schedule | manual | webhook`.
 //
 // The pre-pane body (`{agentId, cron, instruction}`) and its keys (`cron`, `instruction`,
 // `enabled`, `nextDueMs`) are still accepted and still answered, as a superset — the smokes speak
 // it and the pane ignores keys it does not know.
 //
-// ONLY SCHEDULES. The pane's trigger picker also offers slack, git, teams, linear, sentry and
-// pagerduty; the server has no such wake sources, so a non-cron trigger is refused with a 400 the
-// pane shows, rather than accepted and silently never firing.
+// SCHEDULES AND WEBHOOKS. The pane's trigger picker also offers slack, git, teams, linear, sentry
+// and pagerduty; the server has no such wake sources, so those are refused with a 400 the pane
+// shows, rather than accepted and silently never firing. `trigger.type = "webhook"` is the other
+// accepted kind: create mints a hook id and bearer, and `POST /hooks/{id}` fires the same path
+// Test run uses.
 
 /// The desktop's Routines pane refreshes from an `agents-automation` frame carrying
 /// `{agentId, automations}` (`gateway-event-families.ts:10` → the controller's `ingest`), so a
@@ -899,14 +901,21 @@ async fn automation_json(
     view: &opengrok_core::schedule::ScheduleView,
 ) -> Value {
     let schedule_id = ScheduleId::from_stored(view.id.clone());
-    // Which runs a person started: the aggregate knows; the projection does not.
-    let manual = state
+    let loaded = state
         .agui
         .auth
         .store
         .load_schedule(&schedule_id)
         .await
-        .map(|(schedule, _)| schedule.manual_runs)
+        .map(|(schedule, _)| schedule)
+        .ok();
+    let manual = loaded
+        .as_ref()
+        .map(|schedule| schedule.manual_runs.clone())
+        .unwrap_or_default();
+    let webhook_runs = loaded
+        .as_ref()
+        .map(|schedule| schedule.webhook_runs.clone())
         .unwrap_or_default();
     let runs: Vec<Value> = state
         .agui
@@ -924,9 +933,16 @@ async fn automation_json(
                 // "running" is the one that keeps it from reading as done.
                 _ => ("running", None),
             };
+            let trigger = if webhook_runs.contains(run.id.as_str()) {
+                "webhook"
+            } else if manual.contains(run.id.as_str()) {
+                "manual"
+            } else {
+                "schedule"
+            };
             let mut entry = json!({
                 "id": run.id.as_str(),
-                "trigger": if manual.contains(run.id.as_str()) { "manual" } else { "schedule" },
+                "trigger": trigger,
                 "startedAt": run.started_at_ms,
                 "finishedAt": finished_at,
                 "status": status,
@@ -937,6 +953,42 @@ async fn automation_json(
             entry
         })
         .collect();
+    let webhook = view.kind == WakeKind::Webhook
+        || loaded
+            .as_ref()
+            .is_some_and(|schedule| schedule.kind == WakeKind::Webhook);
+    if webhook {
+        let hook_id = loaded
+            .as_ref()
+            .map(|schedule| schedule.hook_id.as_str())
+            .filter(|id| !id.is_empty())
+            .unwrap_or(view.hook_id.as_str());
+        let key = loaded
+            .as_ref()
+            .map(|schedule| schedule.webhook_key.as_str())
+            .unwrap_or("");
+        let trigger = super::hooks::webhook_trigger_json(state, hook_id, key);
+        return json!({
+            "id": view.id,
+            "name": view.name,
+            "prompt": view.prompt,
+            "trigger": trigger,
+            "isEnabled": view.active,
+            "createdAt": view.created_at_ms,
+            "lastRunAt": view.last_fired_ms,
+            "raisedNotices": [],
+            "schedule": "",
+            "triggerDescription": "When a webhook fires",
+            "nextRunAt": Value::Null,
+            "runs": runs,
+            "filePath": "",
+            "agentId": view.coworker_id.as_str(),
+            "cron": "",
+            "instruction": view.prompt,
+            "enabled": view.active,
+            "nextDueMs": Value::Null,
+        });
+    }
     let schedule = opengrok_core::schedule::display_cron(&view.cron);
     json!({
         "id": view.id,
@@ -1004,9 +1056,14 @@ pub async fn get_automations(state: &GatewayState, args: &Value, caller: &str) -
 /// What both body shapes boil down to. `None` is a refusal already shaped for the wire.
 struct RoutineSpec {
     name: String,
-    cron: String,
     prompt: String,
     enabled: bool,
+    wake: ParsedWake,
+}
+
+enum ParsedWake {
+    Cron { cron: String },
+    Webhook { rotate_key: bool },
 }
 
 fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
@@ -1014,34 +1071,73 @@ fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
         // The pane's shape.
         let trigger = spec.get("trigger").unwrap_or(&Value::Null);
         let kind = trigger.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind != "cron" {
-            return Err((
-                400,
-                json!({ "error": "only schedules are supported on this server" }),
-            ));
-        }
-        let Some(cron) = trigger.get("schedule").and_then(Value::as_str) else {
-            return Err((400, json!({ "error": "trigger.schedule is required" })));
+        let name = spec
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Routine")
+            .to_string();
+        let prompt = spec
+            .get("prompt")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let enabled = spec
+            .get("isEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let wake = match kind {
+            "cron" => {
+                let Some(cron) = trigger.get("schedule").and_then(Value::as_str) else {
+                    return Err((400, json!({ "error": "trigger.schedule is required" })));
+                };
+                ParsedWake::Cron {
+                    cron: cron.to_string(),
+                }
+            }
+            "webhook" => ParsedWake::Webhook {
+                rotate_key: trigger
+                    .get("rotateKey")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            },
+            _ => {
+                return Err((
+                    400,
+                    json!({ "error": "only schedules are supported on this server" }),
+                ));
+            }
         };
         return Ok(RoutineSpec {
-            name: spec
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("Routine")
-                .to_string(),
-            cron: cron.to_string(),
-            prompt: spec
-                .get("prompt")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            enabled: spec
-                .get("isEnabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
+            name,
+            prompt,
+            enabled,
+            wake,
         });
     }
     // The pre-pane shape.
+    //
+    // A caller that sent a `trigger` reached here because it was NOT nested under `spec`, which is
+    // the only place this function looks for one. Answering such a call "cron is required" names a
+    // field the caller did not ask about and never mentions the one they did — it reads as "this
+    // server has no webhooks" even when the trigger is a perfectly good webhook. Say what is
+    // actually wrong instead; the shape is easy to get wrong and the old reply sent readers looking
+    // in the wrong place entirely.
+    if let Some(trigger) = args.get("trigger") {
+        let kind = trigger.get("type").and_then(Value::as_str).unwrap_or("");
+        let named = if kind.is_empty() {
+            String::from("a trigger")
+        } else {
+            format!("a \"{kind}\" trigger")
+        };
+        return Err((
+            400,
+            json!({
+                "error": format!(
+                    "{named} must be sent inside `spec` — {{\"spec\": {{\"trigger\": …}}}}, not beside it"
+                )
+            }),
+        ));
+    }
     let Some(cron) = args.get("cron").and_then(Value::as_str) else {
         return Err((400, json!({ "error": "cron is required" })));
     };
@@ -1051,7 +1147,6 @@ fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
             .and_then(Value::as_str)
             .unwrap_or("Routine")
             .to_string(),
-        cron: cron.to_string(),
         prompt: args
             .get("instruction")
             .or_else(|| args.get("prompt"))
@@ -1059,7 +1154,51 @@ fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
             .unwrap_or_default()
             .to_string(),
         enabled: args.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        wake: ParsedWake::Cron {
+            cron: cron.to_string(),
+        },
     })
+}
+
+fn wake_for_create(spec: &RoutineSpec) -> Wake {
+    match &spec.wake {
+        ParsedWake::Cron { cron } => Wake::Cron { cron: cron.clone() },
+        ParsedWake::Webhook { .. } => {
+            let key = super::hooks::mint_webhook_key();
+            Wake::Webhook {
+                hook_id: super::hooks::mint_hook_id(),
+                secret_hash: super::hooks::hash_webhook_key(&key),
+                webhook_key: key,
+            }
+        }
+    }
+}
+
+fn wake_for_update(spec: &RoutineSpec, loaded: &Schedule) -> Wake {
+    match &spec.wake {
+        ParsedWake::Cron { cron } => Wake::Cron { cron: cron.clone() },
+        ParsedWake::Webhook { rotate_key } => {
+            if loaded.kind == WakeKind::Webhook && !loaded.hook_id.is_empty() && !*rotate_key {
+                Wake::Webhook {
+                    hook_id: loaded.hook_id.clone(),
+                    secret_hash: loaded.secret_hash.clone(),
+                    webhook_key: loaded.webhook_key.clone(),
+                }
+            } else {
+                let hook_id = if loaded.kind == WakeKind::Webhook && !loaded.hook_id.is_empty() {
+                    loaded.hook_id.clone()
+                } else {
+                    super::hooks::mint_hook_id()
+                };
+                let key = super::hooks::mint_webhook_key();
+                Wake::Webhook {
+                    hook_id,
+                    secret_hash: super::hooks::hash_webhook_key(&key),
+                    webhook_key: key,
+                }
+            }
+        }
+    }
 }
 
 /// The agent a routine call is about: the pane's `id`, or the pre-pane `agentId`.
@@ -1093,20 +1232,20 @@ pub async fn create_automation(state: &GatewayState, args: &Value, caller: &str)
         );
     };
     let at_ms = now_ms();
+    let enabled = spec.enabled;
+    let wake = wake_for_create(&spec);
     let mut events = match Schedule::default().decide(ScheduleCommand::Create {
         coworker_id: CoworkerId::from_stored(agent.to_string()),
-        cron: spec.cron,
         prompt: spec.prompt,
         name: spec.name,
+        wake,
         at_ms,
     }) {
         Ok(events) => events,
         Err(reason) => return (400, json!({ "error": reason.to_string() })),
     };
     let mut after = Schedule::replay(&events);
-    if !spec.enabled
-        && let Ok(paused) = after.decide(ScheduleCommand::Pause { at_ms })
-    {
+    if !enabled && let Ok(paused) = after.decide(ScheduleCommand::Pause { at_ms }) {
         for event in &paused {
             after.apply(event);
         }
@@ -1139,9 +1278,9 @@ pub async fn create_automation(state: &GatewayState, args: &Value, caller: &str)
 ///
 /// `decide` sees the fresh aggregate and returns the events to append, or a refusal already
 /// shaped for the wire. Returns the aggregate after the append and the seq it landed at.
-async fn mutate_schedule<F>(
+pub(crate) async fn mutate_schedule<F>(
     state: &GatewayState,
-    account: &opengrok_core::account::AccountView,
+    account_id: &AccountId,
     schedule_id: &ScheduleId,
     at_ms: i64,
     mut decide: F,
@@ -1162,7 +1301,7 @@ where
             .agui
             .auth
             .store
-            .append_schedule(schedule_id, &account.id, seq, &events, &after, at_ms)
+            .append_schedule(schedule_id, account_id, seq, &events, &after, at_ms)
             .await
         {
             Ok(_) => return Ok(after),
@@ -1220,12 +1359,12 @@ pub async fn update_automation(state: &GatewayState, args: &Value, caller: &str)
         Err(refusal) => return refusal,
     };
     let at_ms = now_ms();
-    let after = match mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+    let after = match mutate_schedule(state, &account.id, &schedule_id, at_ms, |loaded| {
         let mut events = loaded
             .decide(ScheduleCommand::Update {
                 name: spec.name.clone(),
-                cron: spec.cron.clone(),
                 prompt: spec.prompt.clone(),
+                wake: wake_for_update(&spec, loaded),
                 at_ms,
             })
             .map_err(|reason| (400, json!({ "error": reason.to_string() })))?;
@@ -1285,7 +1424,7 @@ pub async fn change_automation(
         Err(refusal) => return refusal,
     };
     let at_ms = now_ms();
-    let result = mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+    let result = mutate_schedule(state, &account.id, &schedule_id, at_ms, |loaded| {
         let command = match action {
             "enable" => ScheduleCommand::Resume { at_ms },
             "disable" => ScheduleCommand::Pause { at_ms },
@@ -1319,11 +1458,11 @@ pub async fn run_automation_now(state: &GatewayState, args: &Value, caller: &str
     };
     let run_id = RunId::new();
     let at_ms = now_ms();
-    let after = match mutate_schedule(state, &account, &schedule_id, at_ms, |loaded| {
+    let after = match mutate_schedule(state, &account.id, &schedule_id, at_ms, |loaded| {
         loaded
             .decide(ScheduleCommand::Fire {
                 run_id: run_id.clone(),
-                manual: true,
+                cause: FireCause::Manual,
                 at_ms,
             })
             .map_err(|reason| (409, json!({ "error": reason.to_string() })))
@@ -1582,8 +1721,47 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::describe_cron;
+    use super::{describe_cron, parse_spec};
+    use serde_json::json;
+
+    /// A trigger sent beside `spec` instead of inside it must say so.
+    ///
+    /// It used to fall through to the pre-pane branch and answer "cron is required" — naming a
+    /// field the caller never mentioned, and never naming the one they did. Someone reading that
+    /// reply concludes the server has no webhooks at all, which is exactly the wrong place to go
+    /// looking.
+    #[test]
+    fn a_trigger_outside_spec_names_the_real_mistake() {
+        let Err((status, body)) = parse_spec(&json!({
+            "agentId": "cw_1",
+            "trigger": { "type": "webhook" }
+        })) else {
+            panic!("a trigger beside spec must be refused, not accepted");
+        };
+        let message = body["error"].as_str().unwrap_or_default().to_string();
+        assert_eq!(status, 400);
+        assert!(
+            message.contains("spec") && message.contains("webhook"),
+            "the reply must name the nesting and the trigger the caller sent: {message}"
+        );
+        assert!(
+            !message.contains("cron is required"),
+            "cron is not what went wrong: {message}"
+        );
+
+        // Nested correctly, the same trigger is accepted.
+        parse_spec(&json!({
+            "agentId": "cw_1",
+            "spec": { "name": "n", "prompt": "p", "trigger": { "type": "webhook" } }
+        }))
+        .expect("a webhook inside spec is valid");
+
+        // And the pre-pane body, which carries no trigger at all, still works untouched.
+        parse_spec(&json!({ "agentId": "cw_1", "cron": "0 9 * * 1", "instruction": "go" }))
+            .expect("the pre-pane shape is still accepted");
+    }
 
     #[test]
     fn the_when_column_reads_as_a_sentence() {

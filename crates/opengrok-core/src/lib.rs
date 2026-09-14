@@ -22,15 +22,15 @@ pub use coworker::{
     BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,
 };
 pub use id::{
-    AccountId, BoxId, CoworkerId, MonitorId, OrgId, PrincipalId, RunId, ScheduleId, SessionId,
-    TranscriptEntryId,
+    AccountId, BoxId, CoworkerId, HookId, MonitorId, OrgId, PrincipalId, RunId, ScheduleId,
+    SessionId, TranscriptEntryId,
 };
 pub use monitor::{Monitor, MonitorCommand, MonitorError, MonitorEvent, MonitorView};
 pub use org::{Org, OrgCommand, OrgError, OrgEvent, OrgView, email_domain, normalize_domain};
 pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};
 pub use schedule::{
-    Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView, next_fire_ms,
-    normalized_cron,
+    FireCause, Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView, Wake,
+    WakeKind, next_fire_ms, normalized_cron,
 };
 
 /// What went wrong, in the vocabulary of the domain rather than of a transport.

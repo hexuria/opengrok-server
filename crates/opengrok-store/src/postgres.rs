@@ -9,6 +9,8 @@
 //! "signed in" and then read a projection that has never heard of them. They commit together or
 //! neither commits.
 
+use std::collections::HashSet;
+
 use crate::vault::{Sealed, Vault};
 use opengrok_core::account::{Account, AccountEvent, AccountView, Plan};
 use opengrok_core::connection::{Connection, ConnectionEvent, ConnectionView, Owner};
@@ -675,6 +677,51 @@ impl PgStore {
         .await?;
 
         rows.iter().map(coworker_view_row).collect()
+    }
+
+    /// Which of this account's coworkers they have hidden from their own sidebar.
+    pub async fn hidden_coworker_ids(
+        &self,
+        account_id: &AccountId,
+    ) -> StoreResult<HashSet<String>> {
+        let rows = sqlx::query("select coworker_id from coworker_hidden where account_id = $1")
+            .bind(account_id.as_str())
+            .fetch_all(&self.pool)
+            .await?;
+        let mut ids = HashSet::new();
+        for row in rows {
+            ids.insert(row.try_get::<String, _>("coworker_id")?);
+        }
+        Ok(ids)
+    }
+
+    /// Hide or unhide a coworker on this account's sidebar. Idempotent.
+    pub async fn set_coworker_hidden(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &CoworkerId,
+        hidden: bool,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        if hidden {
+            sqlx::query(
+                "insert into coworker_hidden (account_id, coworker_id, hidden_at_ms)
+                 values ($1, $2, $3)
+                 on conflict (account_id, coworker_id) do nothing",
+            )
+            .bind(account_id.as_str())
+            .bind(coworker_id.as_str())
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query("delete from coworker_hidden where account_id = $1 and coworker_id = $2")
+                .bind(account_id.as_str())
+                .bind(coworker_id.as_str())
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
     }
 }
 

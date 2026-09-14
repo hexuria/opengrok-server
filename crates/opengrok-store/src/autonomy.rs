@@ -11,7 +11,7 @@
 
 use opengrok_core::id::{AccountId, CoworkerId, MonitorId, RunId, ScheduleId};
 use opengrok_core::monitor::{Monitor, MonitorEvent, MonitorView};
-use opengrok_core::schedule::{Schedule, ScheduleEvent, ScheduleView, next_fire_ms};
+use opengrok_core::schedule::{Schedule, ScheduleEvent, ScheduleView, WakeKind, next_fire_ms};
 use sqlx::Row;
 
 use crate::postgres::PgStore;
@@ -94,7 +94,8 @@ impl PgStore {
             let active = state.created && !state.paused;
             // Recomputed from *now* on every append. Resuming therefore skips everything missed
             // while paused rather than backfilling it — pause means "do not act", not "act later".
-            let next_due_ms = if active {
+            // A webhook has no clock: next_due stays NULL so the sweep never claims it.
+            let next_due_ms = if active && state.kind == WakeKind::Cron {
                 next_fire_ms(&state.cron, at_ms)
             } else {
                 None
@@ -109,11 +110,16 @@ impl PgStore {
                 ScheduleEvent::Fired { at_ms, .. } => Some(*at_ms),
                 _ => None,
             });
+            let hook_id = if state.hook_id.is_empty() {
+                None
+            } else {
+                Some(state.hook_id.as_str())
+            };
             sqlx::query(
                 "insert into schedule_view
                    (id, account_id, coworker_id, cron, prompt, name, active, next_due_ms,
-                    updated_at_ms, created_at_ms, last_fired_ms)
-                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
+                    updated_at_ms, created_at_ms, last_fired_ms, kind, hook_id)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12)
                  on conflict (id) do update set
                    cron = excluded.cron,
                    prompt = excluded.prompt,
@@ -122,7 +128,9 @@ impl PgStore {
                    next_due_ms = excluded.next_due_ms,
                    updated_at_ms = excluded.updated_at_ms,
                    created_at_ms = coalesce(schedule_view.created_at_ms, excluded.created_at_ms),
-                   last_fired_ms = coalesce(excluded.last_fired_ms, schedule_view.last_fired_ms)",
+                   last_fired_ms = coalesce(excluded.last_fired_ms, schedule_view.last_fired_ms),
+                   kind = excluded.kind,
+                   hook_id = excluded.hook_id",
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
@@ -134,6 +142,8 @@ impl PgStore {
             .bind(next_due_ms)
             .bind(at_ms)
             .bind(fired_at)
+            .bind(state.kind.as_str())
+            .bind(hook_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -145,7 +155,7 @@ impl PgStore {
     pub async fn schedules_for(&self, account_id: &AccountId) -> StoreResult<Vec<ScheduleView>> {
         let rows = sqlx::query(
             "select id, coworker_id, cron, prompt, name, active, next_due_ms, updated_at_ms,
-                    created_at_ms, last_fired_ms
+                    created_at_ms, last_fired_ms, kind, hook_id
              from schedule_view where account_id = $1 order by updated_at_ms desc",
         )
         .bind(account_id.as_str())
@@ -169,6 +179,13 @@ impl PgStore {
                         .try_get::<Option<i64>, _>("created_at_ms")?
                         .unwrap_or(updated_at_ms),
                     last_fired_ms: row.try_get("last_fired_ms")?,
+                    kind: WakeKind::from_stored(
+                        &row.try_get::<Option<String>, _>("kind")?
+                            .unwrap_or_default(),
+                    ),
+                    hook_id: row
+                        .try_get::<Option<String>, _>("hook_id")?
+                        .unwrap_or_default(),
                 })
             })
             .collect()
@@ -184,6 +201,31 @@ impl PgStore {
             .map(|row| row.try_get::<String, _>("account_id"))
             .transpose()?
             .map(AccountId::from_stored))
+    }
+
+    /// The schedule that owns this inbound hook id, if any. Used by `POST /hooks/{id}` — the
+    /// view is the index; the aggregate still has the last word on pause, kind and the secret.
+    pub async fn schedule_for_hook(
+        &self,
+        hook_id: &str,
+    ) -> StoreResult<Option<(ScheduleId, AccountId)>> {
+        if hook_id.is_empty() {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "select id, account_id from schedule_view
+             where hook_id = $1 and kind = 'webhook'",
+        )
+        .bind(hook_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        Ok(Some((
+            ScheduleId::from_stored(row.try_get::<String, _>("id")?),
+            AccountId::from_stored(row.try_get::<String, _>("account_id")?),
+        )))
     }
 
     /// Claim every schedule that is due, advancing each one's clock in the same transaction.

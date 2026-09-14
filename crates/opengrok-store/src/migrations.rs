@@ -57,6 +57,14 @@ create table if not exists coworker_view (
 alter table coworker_view add column if not exists role text;
 -- Who may see and talk to a coworker: 'private' (the default, and the safe one) or 'org'.
 alter table coworker_view add column if not exists visibility text not null default 'private';
+-- A viewer's hide-from-sidebar preference. Not a coworker event: hiding is the reader's
+-- decoration, not a fact about the coworker, so another org member still sees it.
+create table if not exists coworker_hidden (
+    account_id    text   not null,
+    coworker_id   text   not null,
+    hidden_at_ms  bigint not null,
+    primary key (account_id, coworker_id)
+);
 
 -- The account's ONE computer, shared by all its agents (1 account = 1 computer). Auto-provisioned
 -- on the account's first agent, torn down when its last agent is deleted. A single row per account.
@@ -244,6 +252,13 @@ create index if not exists schedule_account_idx on schedule_view (account_id);
 alter table schedule_view add column if not exists name text not null default '';
 alter table schedule_view add column if not exists created_at_ms bigint;
 alter table schedule_view add column if not exists last_fired_ms bigint;
+-- Inbound webhook wakes (routines). Cron rows keep kind='cron' and a NULL hook_id; the unique
+-- index is partial so those NULLs do not collide. The sweep still claims by next_due_ms, which
+-- stays NULL for webhooks, so they never fire on the clock.
+alter table schedule_view add column if not exists kind text not null default 'cron';
+alter table schedule_view add column if not exists hook_id text;
+create unique index if not exists schedule_hook_idx
+    on schedule_view (hook_id) where hook_id is not null;
 
 create table if not exists monitor_view (
     id            text        primary key,

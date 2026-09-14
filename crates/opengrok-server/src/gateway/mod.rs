@@ -18,6 +18,7 @@
 pub mod cards;
 pub mod conversation;
 pub mod group;
+pub mod hooks;
 pub mod lifecycle;
 pub mod live;
 // THE MOCK CATALOGUE IS A BUILD-TIME CHOICE, not just a runtime one. `mock_fixtures` carries

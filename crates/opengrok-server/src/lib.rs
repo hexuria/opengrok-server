@@ -38,6 +38,7 @@ pub use auth::{AuthState, TokenMinter};
 pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
+        .merge(gateway::hooks::router(gateway.clone()))
         .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))

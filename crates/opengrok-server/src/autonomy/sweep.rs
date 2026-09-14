@@ -65,7 +65,7 @@ pub async fn schedule_tick(
         let (loaded, seq) = state.auth.store.load_schedule(&schedule.id).await?;
         let events = match loaded.decide(ScheduleCommand::Fire {
             run_id: run_id.clone(),
-            manual: false,
+            cause: opengrok_core::schedule::FireCause::Clock,
             at_ms: now_ms(),
         }) {
             Ok(events) => events,

@@ -54,6 +54,11 @@ id!(
     "A standing instruction: this coworker acts on this cron, with this prompt."
 );
 id!(
+    HookId,
+    "hook",
+    "The public id of a routine's inbound webhook — the path segment of POST /hooks/{id}."
+);
+id!(
     MonitorId,
     "mon",
     "A standing question against the event log: when this happens, this coworker looks."

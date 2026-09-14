@@ -8,7 +8,9 @@
 //! routed update to create (every edit made a second schedule). Each of those is pinned here:
 //! create → list in the pane's shape → update changes the prompt without adding a row → enable
 //! off/on → run now → the run appears as `manual` and the coworker's chat gets the result →
-//! delete. A slack trigger is refused with the 400 the pane shows; the pre-pane body still works.
+//! delete. A slack trigger is refused with the 400 the pane shows; a webhook trigger is accepted,
+//! mints a POST URL and bearer, and `POST /hooks/{id}` starts a run labelled `webhook`. The
+//! pre-pane body still works.
 //!
 //! Needs Postgres (the state carries the store), so it skips — loudly — when OG_DATABASE_URL is
 //! absent, the same bargain the other integration tests make.
@@ -206,6 +208,22 @@ async fn the_routines_pane_creates_edits_runs_and_deletes_one_schedule() {
         json!({ "id": agent, "spec": {
             "name": "On slack", "prompt": "reply", "isEnabled": true,
             "trigger": { "type": "slack", "channel": "#ops" } } }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        refused["error"],
+        "only schedules are supported on this server"
+    );
+
+    // Other picker sources stay refused; webhook is the other accepted kind (next test).
+    let (status, refused) = api(
+        &client,
+        &base,
+        "createAgentAutomation",
+        json!({ "id": agent, "spec": {
+            "name": "On git", "prompt": "review", "isEnabled": true,
+            "trigger": { "type": "git", "repo": "hexuria/opengrok" } } }),
     )
     .await;
     assert_eq!(status, 400);
@@ -539,5 +557,202 @@ async fn an_autosave_and_a_test_run_on_one_routine_both_land() {
             .as_array()
             .is_some_and(|runs| runs.len() >= 8),
         "{list}"
+    );
+}
+
+/// `trigger.type = "webhook"` mints a POST URL and bearer; inbound POST with that bearer starts
+/// a run labelled `webhook`; a wrong key, an unknown hook, and a paused routine refuse without
+/// firing. Rotating the key invalidates the old Authorization header. Cron create is unchanged
+/// (the test above); this one is the webhook contract in #82.
+#[tokio::test]
+async fn a_webhook_routine_mints_a_hook_and_fires_on_post() {
+    let database_url = database_or_skip!();
+    let email = format!("routines-hook-{}@og.local", uuid::Uuid::now_v7().simple());
+    let (router, _gateway) = app(&database_url, &email).await;
+    let base = spawn(router).await;
+    let client = reqwest::Client::new();
+
+    let (_, created) = api(
+        &client,
+        &base,
+        "createAgent",
+        json!({ "name": "Doer", "description": "handles pings" }),
+    )
+    .await;
+    let agent = created["agent"]["id"]
+        .as_str()
+        .expect("agent id")
+        .to_string();
+
+    let (status, list) = api(
+        &client,
+        &base,
+        "createAgentAutomation",
+        json!({ "id": agent, "spec": {
+            "name": "Todo ping", "prompt": "act on the todo", "isEnabled": true,
+            "trigger": { "type": "webhook" } } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{list}");
+    let record = list.as_array().expect("array")[0].clone();
+    assert_pane_shape(&record);
+    assert_eq!(record["name"], "Todo ping");
+    assert_eq!(record["triggerDescription"], "When a webhook fires");
+    assert_eq!(record["nextRunAt"], Value::Null);
+    assert_eq!(record["runs"], json!([]));
+    let trigger = &record["trigger"];
+    assert_eq!(trigger["type"], "webhook");
+    let url = trigger["url"].as_str().expect("url").to_string();
+    assert!(
+        url.starts_with("http://opengrok.lan:1447/hooks/hook_"),
+        "{url}"
+    );
+    let key = trigger["key"].as_str().expect("key").to_string();
+    assert!(key.starts_with("og_"), "{key}");
+    assert_eq!(trigger["header"], format!("Authorization: Bearer {key}"));
+    let hook_id = url.rsplit('/').next().expect("hook id").to_string();
+    let automation = record["id"].as_str().expect("id").to_string();
+
+    // Unknown hook, then a known hook with the wrong (or missing) key.
+    let unknown = client
+        .post(format!("{base}/hooks/hook_does-not-exist"))
+        .header("authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .expect("unknown hook");
+    assert_eq!(unknown.status().as_u16(), 404);
+    let missing = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .send()
+        .await
+        .expect("missing bearer");
+    assert_eq!(missing.status().as_u16(), 401);
+    let wrong = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .header("authorization", "Bearer og_not-the-key")
+        .send()
+        .await
+        .expect("wrong bearer");
+    assert_eq!(wrong.status().as_u16(), 401);
+
+    // A JSON body is accepted and the run is labelled webhook; 2xx comes back before the turn ends.
+    let posted = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .body(r#"{"item":"milk"}"#)
+        .send()
+        .await
+        .expect("webhook post");
+    let post_status = posted.status().as_u16();
+    assert!(
+        (200..300).contains(&post_status),
+        "inbound POST must return 2xx quickly: {}",
+        posted.status()
+    );
+    let mut finished = None;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (_, list) = api(
+            &client,
+            &base,
+            "getAgentAutomations",
+            json!({ "id": agent }),
+        )
+        .await;
+        let runs = list[0]["runs"].as_array().cloned().unwrap_or_default();
+        if let Some(run) = runs.iter().find(|run| run["trigger"] == "webhook") {
+            if run["status"] == "ok" {
+                finished = Some(run.clone());
+                break;
+            }
+            finished = Some(run.clone());
+        }
+    }
+    let run = finished.expect("a webhook run appeared");
+    assert_eq!(run["trigger"], "webhook");
+    assert_eq!(run["status"], "ok", "{run}");
+
+    // Paused: 4xx and no additional run.
+    let (_, list) = api(
+        &client,
+        &base,
+        "setAgentAutomationEnabled",
+        json!({ "id": agent, "automationId": automation, "isEnabled": false }),
+    )
+    .await;
+    assert_eq!(list[0]["isEnabled"], false, "{list}");
+    let before = list[0]["runs"].as_array().map(Vec::len).unwrap_or(0);
+    let paused = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .header("authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .expect("paused post");
+    let paused_status = paused.status().as_u16();
+    assert!(
+        (400..500).contains(&paused_status),
+        "paused must be 4xx, not a run: {}",
+        paused.status()
+    );
+    let (_, list) = api(
+        &client,
+        &base,
+        "getAgentAutomations",
+        json!({ "id": agent }),
+    )
+    .await;
+    let after = list[0]["runs"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(
+        after, before,
+        "a paused webhook must not start a run: {list}"
+    );
+
+    // Resume, then rotate: the old bearer 401s, the new one fires.
+    let (_, list) = api(
+        &client,
+        &base,
+        "setAgentAutomationEnabled",
+        json!({ "id": agent, "automationId": automation, "isEnabled": true }),
+    )
+    .await;
+    assert_eq!(list[0]["isEnabled"], true, "{list}");
+    let (status, list) = api(
+        &client,
+        &base,
+        "updateAgentAutomation",
+        json!({ "id": agent, "automationId": automation, "spec": {
+            "name": "Todo ping", "prompt": "act on the todo", "isEnabled": true,
+            "trigger": { "type": "webhook", "rotateKey": true } } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{list}");
+    let new_key = list[0]["trigger"]["key"]
+        .as_str()
+        .expect("new key")
+        .to_string();
+    assert_ne!(new_key, key, "rotate must mint a different bearer");
+    assert_eq!(
+        list[0]["trigger"]["url"].as_str().expect("url"),
+        url,
+        "rotate keeps the POST URL"
+    );
+    let stale = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .header("authorization", format!("Bearer {key}"))
+        .send()
+        .await
+        .expect("stale bearer");
+    assert_eq!(stale.status().as_u16(), 401);
+    let rotated = client
+        .post(format!("{base}/hooks/{hook_id}"))
+        .header("authorization", format!("Bearer {new_key}"))
+        .send()
+        .await
+        .expect("rotated post");
+    assert!(
+        (200..300).contains(&rotated.status().as_u16()),
+        "the new bearer must fire: {}",
+        rotated.status()
     );
 }
