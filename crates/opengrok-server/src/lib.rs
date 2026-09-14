@@ -159,8 +159,17 @@ async fn trace_request(
 /// server that has not built the SPA (the smokes and tests run this way) rather than a boot error.
 ///
 /// The fallback to `index.html` is what makes client-side routes deep-linkable: a GET for
-/// `/console/account` finds no such file, so `ServeDir` hands off to the SPA's entry document and
+/// `/console/account` finds no such file, so the handler hands off to the SPA's entry document and
 /// the router inside the page takes over.
+///
+/// THE ENTRY DOCUMENT IS READ PER REQUEST, NOT SNAPSHOTTED AT BOOT. It used to be loaded into an
+/// `Arc<String>` here while the hashed bundles beside it were read from disk on every request —
+/// so a console rebuilt against a running server left the two halves disagreeing forever: the new
+/// bundles were on disk and served, and the boot-time index still named the deleted old ones.
+/// Every reload painted a white page, and neither the server log nor the browser console said why,
+/// because the missing bundle was answered with the index at 200. One small file re-read per
+/// request costs nothing next to the filesystem work this handler already does, and it means
+/// `bun run build` lands without a restart.
 fn mount_web_console(app: Router) -> Router {
     use axum::extract::Path;
     use axum::routing::get;
@@ -178,20 +187,17 @@ fn mount_web_console(app: Router) -> Router {
         tracing::warn!(dir = %dir.display(), "OG_WEB_CONSOLE_DIR does not exist — /console is off");
         return app;
     };
-    let index = match std::fs::read_to_string(root.join("index.html")) {
-        Ok(html) => std::sync::Arc::new(html),
-        Err(error) => {
-            tracing::warn!(%error, "OG_WEB_CONSOLE_DIR has no readable index.html — /console is off");
-            return app;
-        }
-    };
+    // Read once here only to refuse the route when the build is absent — the value is not kept.
+    if let Err(error) = std::fs::read_to_string(root.join("index.html")) {
+        tracing::warn!(%error, "OG_WEB_CONSOLE_DIR has no readable index.html — /console is off");
+        return app;
+    }
 
     let serve = move |rel: Option<Path<String>>| {
         let root = root.clone();
-        let index = index.clone();
         async move {
             let rel = rel.map(|p| p.0).unwrap_or_default();
-            serve_console_path(&root, &index, &rel)
+            serve_console_path(&root, &rel)
         }
     };
 
@@ -204,26 +210,107 @@ fn mount_web_console(app: Router) -> Router {
 }
 
 /// Resolve one `/console` sub-path: a real regular file under `root` is served with a guessed
-/// content type; anything else (including a client route) is the SPA `index`, 200.
-fn serve_console_path(root: &std::path::Path, index: &str, rel: &str) -> axum::response::Response {
-    use axum::http::header::CONTENT_TYPE;
-    use axum::response::{Html, IntoResponse};
+/// content type; a client route is the SPA `index`, 200; a missing *asset* is a 404.
+///
+/// Two rules here are the difference between a console deploy that lands and one that paints a
+/// white page for everyone who had the old one open.
+///
+/// 1. THE ENTRY DOCUMENT MUST NOT BE CACHED. Vite names every bundle by its content hash, so
+///    `index.html` is the only file that says which hashes are current. Served with no directive
+///    a browser caches it heuristically, and after the next build that stale copy asks for a
+///    bundle that no longer exists on disk. The assets are the mirror image: their name *is* their
+///    version, so they can be cached forever and never revalidated.
+/// 2. A MISSING ASSET MUST 404, NOT FALL THROUGH TO THE SPA. The fallback used to answer every
+///    unresolved path with `index.html` at 200 — including `/console/assets/index-OLDHASH.js`.
+///    The browser then parsed an HTML document as a module, and what reached the console was a
+///    syntax error about an unexpected `<`, with nothing naming the real cause. Only paths that
+///    could be client routes fall through; anything under the build's asset directory, or carrying
+///    a file extension, answers for itself.
+fn serve_console_path(root: &std::path::Path, rel: &str) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+    use axum::response::IntoResponse;
 
-    let spa = || Html(index.to_string()).into_response();
+    // The entry document is read only when it is about to be served — an asset request never
+    // touches it. It is a blocking read on a runtime thread, the same as the asset read below; on
+    // the file sizes a Vite build emits that is well under the noise floor, but it is not free,
+    // so it is not paid for a request that does not need it.
+    //
+    // Losing the document after boot — a `dist` wiped mid-rebuild, a mount that went away — means
+    // the console is gone, not that a blank client route should render. An empty 200 is the worst
+    // of the three answers: it looks like the page loaded and simply had nothing to say.
+    //
+    // `no-store`, not `no-cache`: the latter still lets a browser hold the copy and revalidate,
+    // and a 304 on a document naming dead hashes is exactly the failure being closed.
+    let spa = || match std::fs::read_to_string(root.join("index.html")) {
+        Ok(index) => (
+            [
+                (CONTENT_TYPE, "text/html; charset=utf-8"),
+                (CACHE_CONTROL, "no-store"),
+            ],
+            index,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the web console is not built",
+        )
+            .into_response(),
+    };
     let rel = rel.trim_start_matches('/');
-    if rel.is_empty() {
+    // The entry document BY ITS OWN NAME is still the entry document. Without this it carried an
+    // extension, took the file branch, and left with a five-minute `max-age` — a five-minute
+    // window in which the one URL a bookmark would use hands back a page naming hashes the next
+    // build deletes, which is the exact hole the `no-store` above exists to close.
+    if rel.is_empty() || rel == "index.html" {
         return spa();
     }
-    // Resolve and confine to `root`; a path that escapes or is not a file falls through to the SPA.
+    // A request that names a file is a request for that file. Answering it with the SPA turns a
+    // missing asset into an unreadable parse error three layers away from the cause. A path
+    // carrying a `..` segment is in the same class: whatever it is, it is not a client route, and
+    // the confinement check below already refuses to serve through it — so say 404 rather than
+    // hand a probe a 200 and let it wonder.
+    //
+    // THE EXTENSION TEST IS A CONSTRAINT ON THE ROUTER. A client route containing a `.` in any
+    // segment would be taken for a file and answered 404 instead of deep-linking. None does today;
+    // the day one is added, this heuristic has to learn about it first.
+    let names_a_file = rel.starts_with("assets/")
+        || std::path::Path::new(rel).extension().is_some()
+        || rel.split('/').any(|segment| segment == "..");
+    let missing = || {
+        if names_a_file {
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        } else {
+            spa()
+        }
+    };
+
+    // Resolve and confine to `root`; a path that escapes or is not a file cannot be served.
     let Ok(candidate) = root.join(rel).canonicalize() else {
-        return spa();
+        return missing();
     };
     if !candidate.starts_with(root) || !candidate.is_file() {
-        return spa();
+        return missing();
     }
     match std::fs::read(&candidate) {
-        Ok(bytes) => ([(CONTENT_TYPE, console_content_type(&candidate))], bytes).into_response(),
-        Err(_) => spa(),
+        // A content-hashed bundle never changes under its own name, so it is safe to pin. Anything
+        // else the build emits keeps a short life instead of an indefinite one.
+        Ok(bytes) => {
+            let cache = if rel.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=300"
+            };
+            (
+                [
+                    (CONTENT_TYPE, console_content_type(&candidate)),
+                    (CACHE_CONTROL, cache),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(_) => missing(),
     }
 }
 
@@ -250,3 +337,208 @@ fn console_content_type(path: &std::path::Path) -> &'static str {
 pub(crate) use auth::password::hash_password as password_hash;
 /// Re-exports so `account_api` can call the password helpers by a stable path.
 pub(crate) use auth::password::verify_password as password_verify;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod console_tests {
+    use super::serve_console_path;
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+
+    /// A throwaway `dist/` laid out the way Vite emits one: an entry document naming a
+    /// content-hashed bundle, and that bundle beside it under `assets/`.
+    struct Dist {
+        root: std::path::PathBuf,
+    }
+
+    impl Dist {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "og-console-{}-{}",
+                tag,
+                uuid::Uuid::now_v7().simple()
+            ));
+            std::fs::create_dir_all(root.join("assets")).expect("make dist");
+            let dist = Self {
+                root: root.canonicalize().expect("canonicalize dist"),
+            };
+            dist.build("AAA");
+            dist
+        }
+
+        /// Write an entry document naming `hash`, and the bundle it names. Any previous bundle is
+        /// removed, exactly as a real rebuild removes the file it replaces.
+        fn build(&self, hash: &str) {
+            let assets = self.root.join("assets");
+            for entry in std::fs::read_dir(&assets).expect("read assets").flatten() {
+                std::fs::remove_file(entry.path()).expect("remove old bundle");
+            }
+            std::fs::write(
+                assets.join(format!("index-{hash}.js")),
+                b"export const x = 1;",
+            )
+            .expect("write bundle");
+            std::fs::write(
+                self.root.join("index.html"),
+                format!(
+                    r#"<!doctype html><script src="/console/assets/index-{hash}.js"></script>"#
+                ),
+            )
+            .expect("write index");
+        }
+
+        fn get(&self, rel: &str) -> axum::response::Response {
+            serve_console_path(&self.root, rel)
+        }
+    }
+
+    impl Drop for Dist {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn header(res: &axum::response::Response, name: axum::http::HeaderName) -> String {
+        res.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The entry document must never be cached and the hashed bundles must never be revalidated.
+    ///
+    /// Only `index.html` says which hashes are current, so a browser holding a stale copy asks for
+    /// a bundle that the next build deleted. The bundles are the opposite case: their name is their
+    /// version, so they can be pinned forever.
+    #[test]
+    fn the_entry_document_is_never_cached_and_the_bundles_always_are() {
+        let dist = Dist::new("cache");
+
+        let index = dist.get("");
+        assert_eq!(index.status(), 200);
+        assert_eq!(header(&index, CONTENT_TYPE), "text/html; charset=utf-8");
+        assert!(
+            header(&index, CACHE_CONTROL).contains("no-store"),
+            "the entry document must carry no-store, got {:?}",
+            header(&index, CACHE_CONTROL)
+        );
+
+        let bundle = dist.get("assets/index-AAA.js");
+        assert_eq!(bundle.status(), 200);
+        assert_eq!(
+            header(&bundle, CONTENT_TYPE),
+            "text/javascript; charset=utf-8"
+        );
+        assert!(
+            header(&bundle, CACHE_CONTROL).contains("immutable"),
+            "a content-hashed bundle must be immutable, got {:?}",
+            header(&bundle, CACHE_CONTROL)
+        );
+    }
+
+    /// A missing asset is a 404, and a client route is still the SPA.
+    ///
+    /// The fallback used to answer EVERY unresolved path with `index.html` at 200 — including a
+    /// bundle a previous build had deleted. The browser then parsed an HTML document as a module
+    /// and reported a syntax error about an unexpected `<`, naming nothing that led back here.
+    #[test]
+    fn a_missing_asset_is_not_answered_with_the_page() {
+        let dist = Dist::new("missing");
+
+        let gone = dist.get("assets/index-DELETED.js");
+        assert_eq!(
+            gone.status(),
+            404,
+            "a missing bundle must 404, not serve HTML as JavaScript"
+        );
+
+        // Anything carrying an extension names a file, not a route.
+        assert_eq!(dist.get("favicon.ico").status(), 404);
+
+        // A client route has no extension and is the SPA, so deep links and hard refreshes work.
+        for route in ["account", "coworkers", "admin/domains"] {
+            let res = dist.get(route);
+            assert_eq!(res.status(), 200, "{route} should deep-link");
+            assert_eq!(header(&res, CONTENT_TYPE), "text/html; charset=utf-8");
+        }
+    }
+
+    /// A rebuild lands without restarting the server.
+    ///
+    /// The entry document used to be read into an `Arc<String>` at boot while the bundles beside it
+    /// were read per request. A console rebuilt against a running server therefore served new
+    /// bundles behind an index still naming the deleted old ones — a white page on every reload,
+    /// with nothing in the server log or the browser console saying why.
+    #[tokio::test]
+    async fn a_rebuilt_console_is_served_without_a_restart() {
+        let dist = Dist::new("rebuild");
+
+        let before = dist.get("");
+        let before = axum::body::to_bytes(before.into_body(), 64 * 1024)
+            .await
+            .expect("read index");
+        let before = String::from_utf8_lossy(&before).to_string();
+        assert!(before.contains("index-AAA.js"), "sanity: {before}");
+
+        dist.build("BBB");
+
+        let after = dist.get("");
+        let after = axum::body::to_bytes(after.into_body(), 64 * 1024)
+            .await
+            .expect("read index");
+        let after = String::from_utf8_lossy(&after).to_string();
+        assert!(
+            after.contains("index-BBB.js"),
+            "the rebuilt entry document must be served, got {after}"
+        );
+        assert_eq!(dist.get("assets/index-BBB.js").status(), 200);
+        assert_eq!(
+            dist.get("assets/index-AAA.js").status(),
+            404,
+            "the replaced bundle is gone, and says so"
+        );
+    }
+
+    /// The entry document asked for by name is the entry document, cache rule included.
+    ///
+    /// `index.html` carries an extension, so it used to take the file branch and leave with
+    /// `max-age=300` — a five-minute window in which the one URL a bookmark would use served a
+    /// page naming hashes the next build deletes. The exact hole `no-store` exists to close.
+    #[test]
+    fn the_entry_document_by_name_is_still_never_cached() {
+        let dist = Dist::new("byname");
+        let res = dist.get("index.html");
+        assert_eq!(res.status(), 200);
+        assert_eq!(header(&res, CONTENT_TYPE), "text/html; charset=utf-8");
+        assert_eq!(
+            header(&res, CACHE_CONTROL),
+            "no-store",
+            "index.html by name must carry the same no-store as the bare route"
+        );
+    }
+
+    /// A `dist` that disappears after boot says so, rather than serving a blank page — and an
+    /// asset that is still on disk is still served, because its request never reads the index.
+    #[test]
+    fn a_console_that_vanished_is_not_a_blank_page() {
+        let dist = Dist::new("vanished");
+        std::fs::remove_file(dist.root.join("index.html")).expect("remove index");
+        assert_eq!(dist.get("").status(), 503);
+        assert_eq!(dist.get("index.html").status(), 503);
+        assert_eq!(dist.get("account").status(), 503);
+        assert_eq!(
+            dist.get("assets/index-AAA.js").status(),
+            200,
+            "an asset request does not depend on the entry document"
+        );
+    }
+
+    /// A path cannot climb out of the console directory.
+    #[test]
+    fn a_request_cannot_escape_the_console_directory() {
+        let dist = Dist::new("escape");
+        for climb in ["../../etc/passwd", "assets/../../../etc/passwd"] {
+            assert_eq!(dist.get(climb).status(), 404, "{climb} must not be served");
+        }
+    }
+}
