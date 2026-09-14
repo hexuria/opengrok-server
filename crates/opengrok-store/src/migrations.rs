@@ -244,6 +244,13 @@ create index if not exists schedule_account_idx on schedule_view (account_id);
 alter table schedule_view add column if not exists name text not null default '';
 alter table schedule_view add column if not exists created_at_ms bigint;
 alter table schedule_view add column if not exists last_fired_ms bigint;
+-- Inbound webhook wakes (routines). Cron rows keep kind='cron' and a NULL hook_id; the unique
+-- index is partial so those NULLs do not collide. The sweep still claims by next_due_ms, which
+-- stays NULL for webhooks, so they never fire on the clock.
+alter table schedule_view add column if not exists kind text not null default 'cron';
+alter table schedule_view add column if not exists hook_id text;
+create unique index if not exists schedule_hook_idx
+    on schedule_view (hook_id) where hook_id is not null;
 
 create table if not exists monitor_view (
     id            text        primary key,

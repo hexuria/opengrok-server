@@ -6,18 +6,72 @@
 //!
 //! THE CRON EXPRESSION IS VALIDATED IN `decide`, NOT AT THE EDGE. A schedule whose expression
 //! cannot be parsed would sit in the log as a row that never fires and never explains itself; the
-//! aggregate refusing it makes "it was accepted" and "it will fire" the same claim.
+//! aggregate refusing it makes "it was accepted" and "it will fire" the same claim. A webhook
+//! wake is the other accepted kind: it has no expression, so `decide` does not ask the clock,
+//! and the sweep never claims it (`next_due_ms` stays NULL).
 //!
 //! FIRING IS AN EVENT because it is provenance: a run that no client started must say what started
 //! it, and `Fired { run_id }` is that answer, in the same log as everything else. Pausing exists
 //! (rather than delete-and-recreate) because "stop for the weekend" should not cost the schedule
-//! its history.
+//! its history. A webhook POST is not the person's "run now": a paused webhook refuses, the same
+//! as the clock.
 
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
 use crate::id::{CoworkerId, RunId};
+
+/// How a schedule wakes. Cron is the original and the default for events written before webhooks
+/// existed — a missing `kind` must replay as a clock, never as a hook that has no secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WakeKind {
+    #[default]
+    Cron,
+    Webhook,
+}
+
+impl WakeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cron => "cron",
+            Self::Webhook => "webhook",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Self {
+        match value {
+            "webhook" => Self::Webhook,
+            _ => Self::Cron,
+        }
+    }
+}
+
+/// What `Create` / `Update` install as the wake. Cron still has to parse; a webhook carries the
+/// public hook id and the bearer the owner will paste into an external app. The hash is what
+/// `POST /hooks/{id}` compares; the key is stored so a later list can show it without minting
+/// again. Rotating writes `SecretRotated`, which replaces both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wake {
+    Cron {
+        cron: String,
+    },
+    Webhook {
+        hook_id: String,
+        secret_hash: String,
+        webhook_key: String,
+    },
+}
+
+/// Who asked this firing to exist. The event still stores two bools (`manual`, `webhook`) so
+/// rows written before webhooks deserialize; this enum is the command's vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FireCause {
+    Clock,
+    Manual,
+    Webhook,
+}
 
 /// A cron expression the way people write them (5 fields), silently promoted to the 6-field form
 /// the parser wants (seconds first) so `0 9 * * 1` means "09:00 every Monday" and not a parse
@@ -61,7 +115,8 @@ pub fn next_fire_ms(expression: &str, after_ms: i64) -> Option<i64> {
 pub enum ScheduleEvent {
     Created {
         coworker_id: CoworkerId,
-        /// Already normalized; what `next_fire_ms` will be asked about ever after.
+        /// Already normalized; what `next_fire_ms` will be asked about ever after. Empty on a
+        /// webhook wake, which has no clock.
         cron: String,
         /// The user message every firing opens its run with.
         prompt: String,
@@ -69,16 +124,40 @@ pub enum ScheduleEvent {
         /// written before names existed, which replay as unnamed rather than as corrupt.
         #[serde(default)]
         name: String,
+        /// Absent on rows written before webhooks existed; those replay as cron.
+        #[serde(default)]
+        kind: WakeKind,
+        /// Public id in `POST /hooks/{id}`. Empty on a cron wake.
+        #[serde(default)]
+        hook_id: String,
+        /// SHA-256 hex of the bearer. Empty on a cron wake. POST compares against this, not the
+        /// plaintext, so a leaked listing of hashes is not a working Authorization header.
+        #[serde(default)]
+        secret_hash: String,
+        /// The bearer the owner pastes into an external app. Stored so create/update/list can
+        /// show it; rotating replaces it. Absent on cron wakes and on rows from before webhooks.
+        #[serde(default)]
+        webhook_key: String,
         at_ms: i64,
     },
     /// The person edited the routine in place. An edit is not delete-and-create: the schedule
     /// keeps its id, its history and its runs.
     Updated {
         name: String,
-        /// Already normalized, re-validated in `decide`.
+        /// Already normalized, re-validated in `decide`. Empty when the wake is a webhook.
         cron: String,
         prompt: String,
         at_ms: i64,
+        /// `None` on rows written before webhooks: apply leaves the existing kind/hook/secret
+        /// alone, so an old prompt-only edit cannot turn a webhook into a clock.
+        #[serde(default)]
+        kind: Option<WakeKind>,
+        #[serde(default)]
+        hook_id: Option<String>,
+        #[serde(default)]
+        secret_hash: Option<String>,
+        #[serde(default)]
+        webhook_key: Option<String>,
     },
     Paused {
         at_ms: i64,
@@ -89,6 +168,12 @@ pub enum ScheduleEvent {
     Deleted {
         at_ms: i64,
     },
+    /// Replace the inbound bearer. The hook id (and so the POST URL) stays; the old key 401s.
+    SecretRotated {
+        secret_hash: String,
+        webhook_key: String,
+        at_ms: i64,
+    },
     /// A run this schedule started. The run's own log holds what happened; this holds *why it
     /// exists*.
     Fired {
@@ -97,6 +182,10 @@ pub enum ScheduleEvent {
         /// pane shows the two differently; absent on rows written before the distinction existed.
         #[serde(default)]
         manual: bool,
+        /// `true` when `POST /hooks/{id}` started it. Absent on rows written before webhooks;
+        /// those replay as a clock firing unless `manual` is set.
+        #[serde(default)]
+        webhook: bool,
         at_ms: i64,
     },
 }
@@ -109,6 +198,7 @@ impl ScheduleEvent {
             Self::Paused { .. } => "schedule-paused",
             Self::Resumed { .. } => "schedule-resumed",
             Self::Deleted { .. } => "schedule-deleted",
+            Self::SecretRotated { .. } => "schedule-secret-rotated",
             Self::Fired { .. } => "schedule-fired",
         }
     }
@@ -123,8 +213,15 @@ pub struct Schedule {
     pub cron: String,
     pub prompt: String,
     pub name: String,
+    pub kind: WakeKind,
+    pub hook_id: String,
+    pub secret_hash: String,
+    /// Plaintext bearer for the owner to copy. Empty on a cron wake.
+    pub webhook_key: String,
     /// Runs a person started with "run now", by id — so a listing can label them `manual`.
     pub manual_runs: std::collections::BTreeSet<String>,
+    /// Runs an inbound POST started, by id — so a listing can label them `webhook`.
+    pub webhook_runs: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -143,21 +240,25 @@ pub enum ScheduleError {
     BadCron(String),
     #[error("a schedule needs something to say")]
     EmptyPrompt,
+    #[error("a webhook needs a hook id and a signing secret")]
+    BadWebhook,
+    #[error("that schedule is not a webhook")]
+    NotWebhook,
 }
 
 #[derive(Debug, Clone)]
 pub enum ScheduleCommand {
     Create {
         coworker_id: CoworkerId,
-        cron: String,
         prompt: String,
         name: String,
+        wake: Wake,
         at_ms: i64,
     },
     Update {
         name: String,
-        cron: String,
         prompt: String,
+        wake: Wake,
         at_ms: i64,
     },
     Pause {
@@ -169,9 +270,14 @@ pub enum ScheduleCommand {
     Delete {
         at_ms: i64,
     },
+    RotateWebhookSecret {
+        secret_hash: String,
+        webhook_key: String,
+        at_ms: i64,
+    },
     Fire {
         run_id: RunId,
-        manual: bool,
+        cause: FireCause,
         at_ms: i64,
     },
 }
@@ -192,6 +298,10 @@ impl Schedule {
                 cron,
                 prompt,
                 name,
+                kind,
+                hook_id,
+                secret_hash,
+                webhook_key,
                 ..
             } => {
                 self.created = true;
@@ -199,19 +309,57 @@ impl Schedule {
                 self.cron = cron.clone();
                 self.prompt = prompt.clone();
                 self.name = name.clone();
+                self.kind = *kind;
+                self.hook_id = hook_id.clone();
+                self.secret_hash = secret_hash.clone();
+                self.webhook_key = webhook_key.clone();
             }
             ScheduleEvent::Updated {
-                name, cron, prompt, ..
+                name,
+                cron,
+                prompt,
+                kind,
+                hook_id,
+                secret_hash,
+                webhook_key,
+                ..
             } => {
                 self.name = name.clone();
                 self.cron = cron.clone();
                 self.prompt = prompt.clone();
+                if let Some(kind) = kind {
+                    self.kind = *kind;
+                }
+                if let Some(hook_id) = hook_id {
+                    self.hook_id = hook_id.clone();
+                }
+                if let Some(secret_hash) = secret_hash {
+                    self.secret_hash = secret_hash.clone();
+                }
+                if let Some(webhook_key) = webhook_key {
+                    self.webhook_key = webhook_key.clone();
+                }
             }
             ScheduleEvent::Paused { .. } => self.paused = true,
             ScheduleEvent::Resumed { .. } => self.paused = false,
             ScheduleEvent::Deleted { .. } => self.deleted = true,
-            ScheduleEvent::Fired { run_id, manual, .. } => {
-                if *manual {
+            ScheduleEvent::SecretRotated {
+                secret_hash,
+                webhook_key,
+                ..
+            } => {
+                self.secret_hash = secret_hash.clone();
+                self.webhook_key = webhook_key.clone();
+            }
+            ScheduleEvent::Fired {
+                run_id,
+                manual,
+                webhook,
+                ..
+            } => {
+                if *webhook {
+                    self.webhook_runs.insert(run_id.as_str().to_string());
+                } else if *manual {
                     self.manual_runs.insert(run_id.as_str().to_string());
                 }
             }
@@ -228,53 +376,139 @@ impl Schedule {
         Ok(())
     }
 
-    pub fn decide(&self, command: ScheduleCommand) -> Result<Vec<ScheduleEvent>, ScheduleError> {
-        match command {
-            ScheduleCommand::Create {
-                coworker_id,
-                cron,
-                prompt,
-                name,
-                at_ms,
-            } => {
+    fn created_from_wake(
+        coworker_id: CoworkerId,
+        prompt: String,
+        name: String,
+        wake: Wake,
+        at_ms: i64,
+    ) -> Result<ScheduleEvent, ScheduleError> {
+        if prompt.trim().is_empty() {
+            return Err(ScheduleError::EmptyPrompt);
+        }
+        let name = name.trim().to_string();
+        match wake {
+            Wake::Cron { cron } => {
                 let cron = normalized_cron(&cron);
                 // Accepted must mean "will fire": an unparseable expression, or one with no
                 // future occurrence at all, is refused here rather than stored as a dead row.
                 if next_fire_ms(&cron, at_ms).is_none() {
                     return Err(ScheduleError::BadCron(cron));
                 }
-                if prompt.trim().is_empty() {
-                    return Err(ScheduleError::EmptyPrompt);
-                }
-                Ok(vec![ScheduleEvent::Created {
+                Ok(ScheduleEvent::Created {
                     coworker_id,
                     cron,
                     prompt,
-                    name: name.trim().to_string(),
+                    name,
+                    kind: WakeKind::Cron,
+                    hook_id: String::new(),
+                    secret_hash: String::new(),
+                    webhook_key: String::new(),
                     at_ms,
-                }])
+                })
             }
-
-            ScheduleCommand::Update {
-                name,
-                cron,
-                prompt,
-                at_ms,
+            Wake::Webhook {
+                hook_id,
+                secret_hash,
+                webhook_key,
             } => {
-                self.alive()?;
+                if hook_id.trim().is_empty()
+                    || secret_hash.trim().is_empty()
+                    || webhook_key.trim().is_empty()
+                {
+                    return Err(ScheduleError::BadWebhook);
+                }
+                Ok(ScheduleEvent::Created {
+                    coworker_id,
+                    cron: String::new(),
+                    prompt,
+                    name,
+                    kind: WakeKind::Webhook,
+                    hook_id: hook_id.trim().to_string(),
+                    secret_hash: secret_hash.trim().to_string(),
+                    webhook_key,
+                    at_ms,
+                })
+            }
+        }
+    }
+
+    fn updated_from_wake(
+        name: String,
+        prompt: String,
+        wake: Wake,
+        at_ms: i64,
+    ) -> Result<ScheduleEvent, ScheduleError> {
+        if prompt.trim().is_empty() {
+            return Err(ScheduleError::EmptyPrompt);
+        }
+        let name = name.trim().to_string();
+        match wake {
+            Wake::Cron { cron } => {
                 let cron = normalized_cron(&cron);
                 if next_fire_ms(&cron, at_ms).is_none() {
                     return Err(ScheduleError::BadCron(cron));
                 }
-                if prompt.trim().is_empty() {
-                    return Err(ScheduleError::EmptyPrompt);
-                }
-                Ok(vec![ScheduleEvent::Updated {
-                    name: name.trim().to_string(),
+                Ok(ScheduleEvent::Updated {
+                    name,
                     cron,
                     prompt,
                     at_ms,
-                }])
+                    kind: Some(WakeKind::Cron),
+                    hook_id: Some(String::new()),
+                    secret_hash: Some(String::new()),
+                    webhook_key: Some(String::new()),
+                })
+            }
+            Wake::Webhook {
+                hook_id,
+                secret_hash,
+                webhook_key,
+            } => {
+                if hook_id.trim().is_empty()
+                    || secret_hash.trim().is_empty()
+                    || webhook_key.trim().is_empty()
+                {
+                    return Err(ScheduleError::BadWebhook);
+                }
+                Ok(ScheduleEvent::Updated {
+                    name,
+                    cron: String::new(),
+                    prompt,
+                    at_ms,
+                    kind: Some(WakeKind::Webhook),
+                    hook_id: Some(hook_id.trim().to_string()),
+                    secret_hash: Some(secret_hash.trim().to_string()),
+                    webhook_key: Some(webhook_key),
+                })
+            }
+        }
+    }
+
+    pub fn decide(&self, command: ScheduleCommand) -> Result<Vec<ScheduleEvent>, ScheduleError> {
+        match command {
+            ScheduleCommand::Create {
+                coworker_id,
+                prompt,
+                name,
+                wake,
+                at_ms,
+            } => Ok(vec![Self::created_from_wake(
+                coworker_id,
+                prompt,
+                name,
+                wake,
+                at_ms,
+            )?]),
+
+            ScheduleCommand::Update {
+                name,
+                prompt,
+                wake,
+                at_ms,
+            } => {
+                self.alive()?;
+                Ok(vec![Self::updated_from_wake(name, prompt, wake, at_ms)?])
             }
 
             ScheduleCommand::Pause { at_ms } => {
@@ -298,22 +532,49 @@ impl Schedule {
                 Ok(vec![ScheduleEvent::Deleted { at_ms }])
             }
 
-            ScheduleCommand::Fire {
-                run_id,
-                manual,
+            ScheduleCommand::RotateWebhookSecret {
+                secret_hash,
+                webhook_key,
                 at_ms,
             } => {
                 self.alive()?;
+                if self.kind != WakeKind::Webhook {
+                    return Err(ScheduleError::NotWebhook);
+                }
+                if secret_hash.trim().is_empty() || webhook_key.trim().is_empty() {
+                    return Err(ScheduleError::BadWebhook);
+                }
+                Ok(vec![ScheduleEvent::SecretRotated {
+                    secret_hash: secret_hash.trim().to_string(),
+                    webhook_key,
+                    at_ms,
+                }])
+            }
+
+            ScheduleCommand::Fire {
+                run_id,
+                cause,
+                at_ms,
+            } => {
+                self.alive()?;
+                let (manual, webhook) = match cause {
+                    FireCause::Clock => (false, false),
+                    FireCause::Manual => (true, false),
+                    FireCause::Webhook => (false, true),
+                };
                 // A paused schedule refusing to fire is the whole point of pause. The sweep should
                 // never ask (paused rows are not claimed), so this firing twice as a guard is
                 // deliberate: the projection being wrong must not be enough to fire a run. A
-                // person's "run now" is the one exception: they asked, paused or not.
+                // person's "run now" is the one exception: they asked, paused or not. An inbound
+                // webhook is not that exception — a paused routine must not run because a todo
+                // app POSTed.
                 if self.paused && !manual {
                     return Err(ScheduleError::Paused);
                 }
                 Ok(vec![ScheduleEvent::Fired {
                     run_id,
                     manual,
+                    webhook,
                     at_ms,
                 }])
             }
@@ -332,8 +593,14 @@ pub struct ScheduleView {
     pub active: bool,
     pub next_due_ms: Option<i64>,
     pub created_at_ms: i64,
-    /// When it last fired (clock or "run now"); `None` until it has.
+    /// When it last fired (clock, "run now", or webhook); `None` until it has.
     pub last_fired_ms: Option<i64>,
+    /// Cron or webhook. Rows from before the column existed read as cron.
+    #[serde(default)]
+    pub kind: WakeKind,
+    /// Public hook id when `kind` is webhook; empty otherwise.
+    #[serde(default)]
+    pub hook_id: String,
 }
 
 #[cfg(test)]
@@ -348,8 +615,32 @@ mod tests {
             cron: "0 */5 * * * *".to_string(),
             prompt: "check the queue".to_string(),
             name: "queue check".to_string(),
+            kind: WakeKind::Cron,
+            hook_id: String::new(),
+            secret_hash: String::new(),
+            webhook_key: String::new(),
             at_ms: 1_000,
         }])
+    }
+
+    fn webhook() -> Schedule {
+        Schedule::replay(&[ScheduleEvent::Created {
+            coworker_id: CoworkerId::from_stored("cw_1"),
+            cron: String::new(),
+            prompt: "handle the ping".to_string(),
+            name: "todo ping".to_string(),
+            kind: WakeKind::Webhook,
+            hook_id: "hook_abc".to_string(),
+            secret_hash: "hash".to_string(),
+            webhook_key: "og_secret".to_string(),
+            at_ms: 1_000,
+        }])
+    }
+
+    fn cron_wake(cron: &str) -> Wake {
+        Wake::Cron {
+            cron: cron.to_string(),
+        }
     }
 
     #[test]
@@ -364,8 +655,8 @@ mod tests {
         assert!(matches!(
             schedule.decide(ScheduleCommand::Update {
                 name: "x".to_string(),
-                cron: "not cron".to_string(),
                 prompt: "y".to_string(),
+                wake: cron_wake("not cron"),
                 at_ms: 2,
             }),
             Err(ScheduleError::BadCron(_))
@@ -373,8 +664,8 @@ mod tests {
         let events = schedule
             .decide(ScheduleCommand::Update {
                 name: "Monday report".to_string(),
-                cron: "0 9 * * 1".to_string(),
                 prompt: "write the weekly report".to_string(),
+                wake: cron_wake("0 9 * * 1"),
                 at_ms: 2,
             })
             .expect("update");
@@ -403,9 +694,9 @@ mod tests {
         let error = Schedule::default()
             .decide(ScheduleCommand::Create {
                 coworker_id: CoworkerId::from_stored("cw_1"),
-                cron: "every tuesday probably".to_string(),
                 prompt: "hi".to_string(),
                 name: String::new(),
+                wake: cron_wake("every tuesday probably"),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -417,9 +708,9 @@ mod tests {
         let error = Schedule::default()
             .decide(ScheduleCommand::Create {
                 coworker_id: CoworkerId::from_stored("cw_1"),
-                cron: "*/2 * * * * *".to_string(),
                 prompt: "   ".to_string(),
                 name: String::new(),
+                wake: cron_wake("*/2 * * * * *"),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -433,7 +724,7 @@ mod tests {
         let error = schedule
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
-                manual: false,
+                cause: FireCause::Clock,
                 at_ms: 3_000,
             })
             .expect_err("paused must not fire");
@@ -441,7 +732,7 @@ mod tests {
         let events = schedule
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_manual"),
-                manual: true,
+                cause: FireCause::Manual,
                 at_ms: 3_000,
             })
             .expect("a manual fire on a paused schedule");
@@ -465,7 +756,7 @@ mod tests {
         schedule
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
-                manual: false,
+                cause: FireCause::Clock,
                 at_ms: 4,
             })
             .expect("a resumed schedule fires");
@@ -478,7 +769,7 @@ mod tests {
         assert!(matches!(
             schedule.decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
-                manual: false,
+                cause: FireCause::Clock,
                 at_ms: 3,
             }),
             Err(ScheduleError::Deleted)
@@ -487,5 +778,127 @@ mod tests {
             schedule.decide(ScheduleCommand::Pause { at_ms: 3 }),
             Err(ScheduleError::Deleted)
         ));
+    }
+
+    #[test]
+    fn a_webhook_create_skips_the_clock_and_keeps_the_secret() {
+        let events = Schedule::default()
+            .decide(ScheduleCommand::Create {
+                coworker_id: CoworkerId::from_stored("cw_1"),
+                prompt: "handle the ping".to_string(),
+                name: "todo ping".to_string(),
+                wake: Wake::Webhook {
+                    hook_id: "hook_abc".to_string(),
+                    secret_hash: "hash".to_string(),
+                    webhook_key: "og_secret".to_string(),
+                },
+                at_ms: 1,
+            })
+            .expect("webhook create");
+        let schedule = Schedule::replay(&events);
+        assert_eq!(schedule.kind, WakeKind::Webhook);
+        assert!(schedule.cron.is_empty());
+        assert_eq!(schedule.hook_id, "hook_abc");
+        assert_eq!(schedule.webhook_key, "og_secret");
+        assert_eq!(schedule.secret_hash, "hash");
+    }
+
+    #[test]
+    fn a_webhook_without_a_secret_is_refused() {
+        let error = Schedule::default()
+            .decide(ScheduleCommand::Create {
+                coworker_id: CoworkerId::from_stored("cw_1"),
+                prompt: "handle the ping".to_string(),
+                name: "todo ping".to_string(),
+                wake: Wake::Webhook {
+                    hook_id: "hook_abc".to_string(),
+                    secret_hash: String::new(),
+                    webhook_key: "og_secret".to_string(),
+                },
+                at_ms: 1,
+            })
+            .expect_err("empty hash");
+        assert!(matches!(error, ScheduleError::BadWebhook));
+    }
+
+    #[test]
+    fn a_paused_webhook_refuses_an_inbound_fire_but_not_run_now() {
+        let mut schedule = webhook();
+        schedule.apply(&ScheduleEvent::Paused { at_ms: 2 });
+        assert!(matches!(
+            schedule.decide(ScheduleCommand::Fire {
+                run_id: RunId::from_stored("run_hook"),
+                cause: FireCause::Webhook,
+                at_ms: 3,
+            }),
+            Err(ScheduleError::Paused)
+        ));
+        let events = schedule
+            .decide(ScheduleCommand::Fire {
+                run_id: RunId::from_stored("run_manual"),
+                cause: FireCause::Manual,
+                at_ms: 3,
+            })
+            .expect("run now on a paused webhook");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert!(schedule.manual_runs.contains("run_manual"));
+        assert!(schedule.webhook_runs.is_empty());
+    }
+
+    #[test]
+    fn rotating_the_secret_replaces_the_key_and_keeps_the_hook_id() {
+        let mut schedule = webhook();
+        let events = schedule
+            .decide(ScheduleCommand::RotateWebhookSecret {
+                secret_hash: "hash2".to_string(),
+                webhook_key: "og_new".to_string(),
+                at_ms: 2,
+            })
+            .expect("rotate");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert_eq!(schedule.hook_id, "hook_abc");
+        assert_eq!(schedule.secret_hash, "hash2");
+        assert_eq!(schedule.webhook_key, "og_new");
+        assert!(matches!(
+            created().decide(ScheduleCommand::RotateWebhookSecret {
+                secret_hash: "x".to_string(),
+                webhook_key: "og_y".to_string(),
+                at_ms: 2,
+            }),
+            Err(ScheduleError::NotWebhook)
+        ));
+    }
+
+    #[test]
+    fn a_webhook_fire_is_labelled_webhook_not_manual() {
+        let mut schedule = webhook();
+        let events = schedule
+            .decide(ScheduleCommand::Fire {
+                run_id: RunId::from_stored("run_hook"),
+                cause: FireCause::Webhook,
+                at_ms: 2,
+            })
+            .expect("webhook fire");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert!(schedule.webhook_runs.contains("run_hook"));
+        assert!(!schedule.manual_runs.contains("run_hook"));
+    }
+
+    #[test]
+    fn old_created_events_replay_as_cron() {
+        let event: ScheduleEvent = serde_json::from_str(
+            r#"{"type":"created","coworker_id":"cw_1","cron":"0 */5 * * * *","prompt":"x","name":"n","at_ms":1}"#,
+        )
+        .expect("old created");
+        let schedule = Schedule::replay(&[event]);
+        assert_eq!(schedule.kind, WakeKind::Cron);
+        assert!(schedule.hook_id.is_empty());
+        assert!(schedule.webhook_key.is_empty());
     }
 }

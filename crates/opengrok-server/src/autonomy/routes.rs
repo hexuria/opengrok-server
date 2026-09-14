@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use opengrok_core::id::{CoworkerId, MonitorId, ScheduleId};
 use opengrok_core::monitor::{Monitor, MonitorCommand};
-use opengrok_core::schedule::{Schedule, ScheduleCommand};
+use opengrok_core::schedule::{Schedule, ScheduleCommand, Wake};
 
 use crate::agui::routes::{AgUiState, account_from_bearer};
 
@@ -107,7 +107,6 @@ async fn create_schedule(
     let at_ms = now_ms();
     let events = match Schedule::default().decide(ScheduleCommand::Create {
         coworker_id,
-        cron: body.cron,
         // The pre-pane `/schedules` API has no name; the pane shows the prompt's first words.
         name: body
             .prompt
@@ -116,6 +115,7 @@ async fn create_schedule(
             .collect::<Vec<_>>()
             .join(" "),
         prompt: body.prompt,
+        wake: Wake::Cron { cron: body.cron },
         at_ms,
     }) {
         Ok(events) => events,
