@@ -1,6 +1,9 @@
-// Shared chrome: the Open Grok mark, the centered card the login sits in, and the signed-in frame
-// with its tabs. Kept deliberately small and plain — the brand is carried by styles.css, itself a
-// transcription of the server's auth/pages.rs shell.
+// Shared chrome: the Open Grok mark, the centred card the login sits in, and the signed-in frame.
+//
+// The signed-in frame is a rail, not a tab strip. Three tabs used to hide nine views — Admin alone
+// stacked seven cards in one route, 4,085px tall, and the only way to learn which section you were
+// in was to scroll back to its heading. The rail names every view at once and says which one is
+// open, so a section is reached rather than scrolled past.
 import type { ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 
@@ -15,7 +18,7 @@ export function Logo({ size = 40 }: { size?: number }) {
   );
 }
 
-/** The centered single-card layout the sign-in page uses. */
+/** The centred single-card layout the sign-in page uses. */
 export function CenterCard({ subtitle, children }: { subtitle?: string; children: ReactNode }) {
   return (
     <div className="center">
@@ -31,7 +34,53 @@ export function CenterCard({ subtitle, children }: { subtitle?: string; children
   );
 }
 
-/** The signed-in frame: brand, the person's email, a sign-out slot, and the Account/Admin tabs. */
+type NavItem = { to: string; label: string };
+type NavGroup = { heading: string; items: NavItem[]; adminOnly?: boolean };
+
+/**
+ * The rail, grouped by the question a person came to answer rather than by which handler serves it.
+ * "Who can use this" is one errand; "what it may spend" is another. Splitting Admin's seven cards
+ * along that line is the whole point of the reorganisation — users, invites and domains are the
+ * same errand, and were three scroll-lengths apart.
+ */
+const NAV: NavGroup[] = [
+  {
+    heading: "Workspace",
+    items: [
+      { to: "/account", label: "Account" },
+      { to: "/coworkers", label: "Coworkers" },
+    ],
+  },
+  {
+    heading: "People",
+    adminOnly: true,
+    items: [
+      { to: "/admin/users", label: "Users" },
+      { to: "/admin/invites", label: "Invites" },
+      { to: "/admin/domains", label: "Domains" },
+    ],
+  },
+  {
+    heading: "Model access",
+    adminOnly: true,
+    items: [
+      { to: "/admin/access", label: "Gateway access" },
+      { to: "/admin/points", label: "Points" },
+      { to: "/admin/templates", label: "Coworker templates" },
+    ],
+  },
+  {
+    heading: "Infrastructure",
+    adminOnly: true,
+    items: [{ to: "/admin/computers", label: "Computers" }],
+  },
+];
+
+function initial(email: string): string {
+  return (email[0] ?? "?").toUpperCase();
+}
+
+/** The signed-in frame: brand, the person's email, a sign-out slot, and the navigation rail. */
 export function Chrome({
   email,
   isAdmin,
@@ -44,34 +93,55 @@ export function Chrome({
   children: ReactNode;
 }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
+  const groups = NAV.filter((group) => isAdmin || !group.adminOnly);
   return (
-    <div className="wrap">
-      <div className="spread" style={{ marginBottom: "1.5rem" }}>
+    <div className="app">
+      <header className="topbar">
         <div className="brand">
-          <Logo size={32} />
+          <Logo size={26} />
           <b>Open Grok</b>
         </div>
-        <div className="row">
+        <div className="who">
+          <span className="avatar placeholder sm" aria-hidden="true">
+            {initial(email)}
+          </span>
           <span className="muted">{email}</span>
-          <button className="ghost" onClick={onSignOut}>
+          <button className="ghost sm" onClick={onSignOut}>
             Sign out
           </button>
         </div>
-      </div>
-      <nav className="tabs">
-        <Link to="/account" className={path.endsWith("/account") ? "active" : ""}>
-          Account
-        </Link>
-        <Link to="/coworkers" className={path.endsWith("/coworkers") ? "active" : ""}>
-          Coworkers
-        </Link>
-        {isAdmin ? (
-          <Link to="/admin" className={path.endsWith("/admin") ? "active" : ""}>
-            Admin
-          </Link>
-        ) : null}
+      </header>
+
+      <nav className="rail" aria-label="Console sections">
+        {groups.map((group) => (
+          <div className="group" key={group.heading}>
+            <h6>{group.heading}</h6>
+            {group.items.map((item) => (
+              <Link
+                key={item.to}
+                to={item.to}
+                className={path.endsWith(item.to) ? "active" : ""}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </div>
+        ))}
       </nav>
-      {children}
+
+      <main className="pane">
+        <div className="inner">{children}</div>
+      </main>
+    </div>
+  );
+}
+
+/** One view's heading. Every routed section renders exactly one, so the pane always says where it is. */
+export function PageHead({ title, children }: { title: string; children?: ReactNode }) {
+  return (
+    <div className="page-head">
+      <h1>{title}</h1>
+      {children ? <p>{children}</p> : null}
     </div>
   );
 }

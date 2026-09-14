@@ -1381,6 +1381,8 @@ pub async fn run(
 
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
+    let mut coworker_name = String::new();
+    let mut coworker_role: Option<String> = None;
 
     if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
         let policy = state
@@ -1413,21 +1415,10 @@ pub async fn run(
         // is how the turn is answered, not whether it is allowed, and that question was just asked.
         if let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await {
             model = coworker.model.clone();
+            coworker_name = coworker.name;
+            coworker_role = coworker.role;
         }
     }
-
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
-            .await,
-        spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
-        // An anonymous AG-UI run names nobody, so it is billed to nobody and the guard lets it
-        // through on the deployment's key — the same door an anonymous caller already had.
-        spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
-        model,
-        system: None,
-        messages: to_chat_messages(&input),
-        tools: Vec::new(),
-    };
 
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
@@ -1448,6 +1439,63 @@ pub async fn run(
         None => None,
     };
 
+    // Who this coworker is, plus whose computer its tools touch. Desktop `sendPrompt` already
+    // composes this; AG-UI used to send `system: None`, so a Description saved as the standing
+    // role never reached the model. Anonymous runs still compose nothing — there is nobody to
+    // introduce, and loading a named coworker's role without a principal would leak configuration
+    // by the shape of the reply.
+    let system = match (account_id.as_ref(), run_coworker.as_ref()) {
+        (Some(account_id), Some(coworker_id)) => {
+            let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
+            let has_computer = tools.is_some();
+            let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
+                runner
+                    .tool_schemas()
+                    .iter()
+                    .any(|schema| schema["function"]["name"] == opengrok_tools::USER_MACHINE_SHELL)
+            });
+            let user_machine_label = if reaches_user_machine {
+                crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str())
+                    .await
+                    .map(|(_id, label)| label)
+                    .filter(|label| !label.trim().is_empty())
+            } else {
+                None
+            };
+            let text = crate::persona::system_message(
+                &coworker_name,
+                &persona,
+                Some(&crate::persona::computer_system_prompt(
+                    has_computer,
+                    reaches_user_machine,
+                    user_machine_label.as_deref(),
+                )),
+            );
+            if text.is_empty() { None } else { Some(text) }
+        }
+        _ => None,
+    };
+
+    let mut messages = to_chat_messages(&input);
+    // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
+    // about the same coworker; drop it when we composed one.
+    if system.is_some() {
+        messages.retain(|message| message.role != "system");
+    }
+
+    let request = ModelRequest {
+        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
+            .await,
+        spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
+        // An anonymous AG-UI run names nobody, so it is billed to nobody and the guard lets it
+        // through on the deployment's key — the same door an anonymous caller already had.
+        spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
+        model,
+        system: system.clone(),
+        messages,
+        tools: Vec::new(),
+    };
+
     // The journal writes each round to Postgres before the next model call, and stamps the run's
     // owner so only they can read it back. A run that cannot be recorded fails inside the loop
     // rather than being streamed (CLAUDE.md #5).
@@ -1457,8 +1505,7 @@ pub async fn run(
         account_id: account_id.clone(),
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
-        // This path composes no system message; a resume of it has none to restore.
-        system: None,
+        system,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -1954,14 +2001,25 @@ async fn continue_run(
         return;
     };
 
+    // The system message this turn OPENED with, not a fresh composition: a role edited while the
+    // person was answering the card must not change the coworker halfway through. A run journalled
+    // before this was captured has none and composes identity+role, matching the desktop resume.
+    let system = match run.system_for_resume() {
+        Some(captured) => captured,
+        None => crate::persona::system_message(
+            &coworker.name,
+            &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
+            None,
+        ),
+    };
+
     let journal = StoreJournal {
         state: state.clone(),
         thread_id: run.thread_id.clone(),
         account_id: Some(account_id.clone()),
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
-        // This path composes no system message; a resume of it has none to restore.
-        system: None,
+        system: Some(system.clone()),
     };
 
     let request = ModelRequest {
@@ -1974,7 +2032,7 @@ async fn continue_run(
         // repinned while this run waited on a card must not change what the continuation thinks
         // with. Logs written before the pin was stored fall back to the current pin.
         model: run.pin_for_resume(&coworker.model),
-        system: None,
+        system: Some(system),
         messages: conversation_from(&run),
         tools: Vec::new(),
     };
