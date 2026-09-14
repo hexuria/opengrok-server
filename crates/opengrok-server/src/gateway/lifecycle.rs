@@ -1115,6 +1115,29 @@ fn parse_spec(args: &Value) -> Result<RoutineSpec, (u16, Value)> {
         });
     }
     // The pre-pane shape.
+    //
+    // A caller that sent a `trigger` reached here because it was NOT nested under `spec`, which is
+    // the only place this function looks for one. Answering such a call "cron is required" names a
+    // field the caller did not ask about and never mentions the one they did — it reads as "this
+    // server has no webhooks" even when the trigger is a perfectly good webhook. Say what is
+    // actually wrong instead; the shape is easy to get wrong and the old reply sent readers looking
+    // in the wrong place entirely.
+    if let Some(trigger) = args.get("trigger") {
+        let kind = trigger.get("type").and_then(Value::as_str).unwrap_or("");
+        let named = if kind.is_empty() {
+            String::from("a trigger")
+        } else {
+            format!("a \"{kind}\" trigger")
+        };
+        return Err((
+            400,
+            json!({
+                "error": format!(
+                    "{named} must be sent inside `spec` — {{\"spec\": {{\"trigger\": …}}}}, not beside it"
+                )
+            }),
+        ));
+    }
     let Some(cron) = args.get("cron").and_then(Value::as_str) else {
         return Err((400, json!({ "error": "cron is required" })));
     };
@@ -1698,8 +1721,47 @@ pub async fn set_group_members(state: &GatewayState, args: &Value, caller: &str)
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::describe_cron;
+    use super::{describe_cron, parse_spec};
+    use serde_json::json;
+
+    /// A trigger sent beside `spec` instead of inside it must say so.
+    ///
+    /// It used to fall through to the pre-pane branch and answer "cron is required" — naming a
+    /// field the caller never mentioned, and never naming the one they did. Someone reading that
+    /// reply concludes the server has no webhooks at all, which is exactly the wrong place to go
+    /// looking.
+    #[test]
+    fn a_trigger_outside_spec_names_the_real_mistake() {
+        let Err((status, body)) = parse_spec(&json!({
+            "agentId": "cw_1",
+            "trigger": { "type": "webhook" }
+        })) else {
+            panic!("a trigger beside spec must be refused, not accepted");
+        };
+        let message = body["error"].as_str().unwrap_or_default().to_string();
+        assert_eq!(status, 400);
+        assert!(
+            message.contains("spec") && message.contains("webhook"),
+            "the reply must name the nesting and the trigger the caller sent: {message}"
+        );
+        assert!(
+            !message.contains("cron is required"),
+            "cron is not what went wrong: {message}"
+        );
+
+        // Nested correctly, the same trigger is accepted.
+        parse_spec(&json!({
+            "agentId": "cw_1",
+            "spec": { "name": "n", "prompt": "p", "trigger": { "type": "webhook" } }
+        }))
+        .expect("a webhook inside spec is valid");
+
+        // And the pre-pane body, which carries no trigger at all, still works untouched.
+        parse_spec(&json!({ "agentId": "cw_1", "cron": "0 9 * * 1", "instruction": "go" }))
+            .expect("the pre-pane shape is still accepted");
+    }
 
     #[test]
     fn the_when_column_reads_as_a_sentence() {

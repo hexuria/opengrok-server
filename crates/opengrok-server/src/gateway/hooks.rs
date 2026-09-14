@@ -172,10 +172,7 @@ async fn inbound(
     let Some(coworker_id) = after.coworker_id.clone() else {
         return json_error(StatusCode::CONFLICT, "that routine has no coworker");
     };
-    let prompt = match payload {
-        None => after.prompt.clone(),
-        Some(event) => format!("{}\n\n<webhook_event>\n{event}", after.prompt),
-    };
+    let prompt = wake_prompt(&after.prompt, payload.as_ref());
     tokio::spawn(crate::autonomy::fire(
         state.agui.clone(),
         crate::autonomy::Firing {
@@ -224,6 +221,20 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
+/// The wake a fired hook hands the coworker: the routine's own instruction, and the caller's body
+/// fenced beneath it.
+///
+/// THE FENCE IS CLOSED ON PURPOSE. A `<webhook_event>` with no `</webhook_event>` leaves nothing
+/// marking where the caller's text stops — harmless only while the payload happens to be the last
+/// thing in the prompt, and wrong the moment anything is appended after it. The body arrives from
+/// whoever holds the hook key, so the boundary is the whole reason for wrapping it.
+fn wake_prompt(prompt: &str, payload: Option<&Value>) -> String {
+    match payload {
+        None => prompt.to_string(),
+        Some(event) => format!("{prompt}\n\n<webhook_event>\n{event}\n</webhook_event>"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -246,6 +257,25 @@ mod tests {
             webhook_payload(&Bytes::from_static(b"not json")).expect_err("refuse"),
             "body must be JSON"
         );
+    }
+
+    #[test]
+    fn a_payload_is_fenced_on_both_sides() {
+        let event = serde_json::json!({ "event": "push", "commits": 3 });
+        let wake = wake_prompt("Summarise it.", Some(&event));
+        assert!(
+            wake.starts_with("Summarise it.\n\n<webhook_event>\n"),
+            "{wake}"
+        );
+        assert!(
+            wake.ends_with("\n</webhook_event>"),
+            "the fence must close, or nothing marks where the caller's body ends: {wake}"
+        );
+        assert_eq!(wake.matches("<webhook_event>").count(), 1);
+        assert_eq!(wake.matches("</webhook_event>").count(), 1);
+
+        // A ping carries no body, so it gets no fence at all.
+        assert_eq!(wake_prompt("Summarise it.", None), "Summarise it.");
     }
 
     #[test]
