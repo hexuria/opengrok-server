@@ -11,11 +11,11 @@
 
 use axum::extract::Path;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::{self, Stream};
+use futures::stream::Stream;
 use opengrok_wire::agui::{Event, RunAgentInput};
 
 use super::provision;
@@ -23,7 +23,9 @@ use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
-use opengrok_harness::{ChatMessage, ModelDoor, ModelRequest, ToolRunner, run_conversation};
+use opengrok_harness::{
+    ChatMessage, EventSink, ModelDoor, ModelRequest, ToolRunner, run_conversation_streaming,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1618,27 +1620,39 @@ pub async fn run(
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
-    // an abandoned run. Released when this drops — including when the process dies, which is
-    // exactly the case the lease exists for.
-    let _lease = crate::recovery::Lease::new(crate::recovery::hold(
+    // an abandoned run. Released when the spawned turn drops — including when the process dies,
+    // which is exactly the case the lease exists for.
+    let thread_id = input.thread_id.clone();
+    let run_id = input.run_id.clone();
+    let at_ms = now_ms();
+    let door = state.door.clone();
+    let lease = crate::recovery::Lease::new(crate::recovery::hold(
         state.clone(),
-        RunId::from_stored(input.run_id.clone()),
+        RunId::from_stored(run_id.clone()),
     ));
-
-    let events = run_conversation(
-        state.door.as_ref(),
-        tools.as_ref(),
-        &journal,
-        request,
-        &input.thread_id,
-        &input.run_id,
-        now_ms(),
-    )
-    .await;
-
-    sse(stream::iter(
-        events.into_iter().map(Ok::<_, std::io::Error>),
-    ))
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // The HTTP body is the live sink. Awaiting the conversation first, then wrapping the
+    // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
+    tokio::spawn(async move {
+        let _lease = lease;
+        let sink = AgUiSink { tx };
+        let _ = run_conversation_streaming(
+            door.as_ref(),
+            tools.as_ref(),
+            &journal,
+            request,
+            &thread_id,
+            &run_id,
+            at_ms,
+            &sink,
+        )
+        .await;
+    });
+    sse(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|event| (Ok::<_, std::io::Error>(event), rx))
+    }))
 }
 
 /// The event store, as the harness's journal.
@@ -2223,6 +2237,23 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
         .collect()
 }
 
+/// Live AG-UI frames, forwarded as they are produced. Dropping the HTTP body closes the
+/// channel; the spawned turn still runs so a disconnect does not abandon the journal.
+struct AgUiSink {
+    tx: tokio::sync::mpsc::UnboundedSender<Event>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for AgUiSink {
+    async fn emit(&self, events: &[Event]) {
+        for event in events {
+            if self.tx.send(event.clone()).is_err() {
+                break;
+            }
+        }
+    }
+}
+
 /// Wrap an event stream in the SSE response openbot expects.
 fn sse<S, E>(events: S) -> Response
 where
@@ -2247,6 +2278,7 @@ where
             // exactly like a server that never streamed.
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONNECTION, "keep-alive"),
+            (HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         axum::body::Body::from_stream(body),
     )
