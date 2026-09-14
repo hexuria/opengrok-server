@@ -1471,11 +1471,7 @@ pub async fn run(
                     user_machine_label.as_deref(),
                 )),
             );
-            if text.is_empty() {
-                None
-            } else {
-                Some(text)
-            }
+            if text.is_empty() { None } else { Some(text) }
         }
         _ => None,
     };
