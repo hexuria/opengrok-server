@@ -684,12 +684,10 @@ impl PgStore {
         &self,
         account_id: &AccountId,
     ) -> StoreResult<HashSet<String>> {
-        let rows = sqlx::query(
-            "select coworker_id from coworker_hidden where account_id = $1",
-        )
-        .bind(account_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query("select coworker_id from coworker_hidden where account_id = $1")
+            .bind(account_id.as_str())
+            .fetch_all(&self.pool)
+            .await?;
         let mut ids = HashSet::new();
         for row in rows {
             ids.insert(row.try_get::<String, _>("coworker_id")?);
@@ -717,13 +715,11 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         } else {
-            sqlx::query(
-                "delete from coworker_hidden where account_id = $1 and coworker_id = $2",
-            )
-            .bind(account_id.as_str())
-            .bind(coworker_id.as_str())
-            .execute(&self.pool)
-            .await?;
+            sqlx::query("delete from coworker_hidden where account_id = $1 and coworker_id = $2")
+                .bind(account_id.as_str())
+                .bind(coworker_id.as_str())
+                .execute(&self.pool)
+                .await?;
         }
         Ok(())
     }
