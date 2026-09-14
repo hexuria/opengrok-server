@@ -231,31 +231,38 @@ fn serve_console_path(root: &std::path::Path, rel: &str) -> axum::response::Resp
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use axum::response::IntoResponse;
 
-    // Losing the entry document after boot — a `dist` wiped mid-rebuild, a mount that went away —
-    // means the console is gone, not that a blank client route should render. An empty 200 is the
-    // worst of the three answers: it looks like the page loaded and simply had nothing to say.
-    let Ok(index) = std::fs::read_to_string(root.join("index.html")) else {
-        return (
+    // The entry document is read only when it is about to be served — an asset request never
+    // touches it. It is a blocking read on a runtime thread, the same as the asset read below; on
+    // the file sizes a Vite build emits that is well under the noise floor, but it is not free,
+    // so it is not paid for a request that does not need it.
+    //
+    // Losing the document after boot — a `dist` wiped mid-rebuild, a mount that went away — means
+    // the console is gone, not that a blank client route should render. An empty 200 is the worst
+    // of the three answers: it looks like the page loaded and simply had nothing to say.
+    //
+    // `no-store`, not `no-cache`: the latter still lets a browser hold the copy and revalidate,
+    // and a 304 on a document naming dead hashes is exactly the failure being closed.
+    let spa = || match std::fs::read_to_string(root.join("index.html")) {
+        Ok(index) => (
+            [
+                (CONTENT_TYPE, "text/html; charset=utf-8"),
+                (CACHE_CONTROL, "no-store"),
+            ],
+            index,
+        )
+            .into_response(),
+        Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "the web console is not built",
         )
-            .into_response();
-    };
-
-    // `no-store`, not `no-cache`: the latter still lets a browser hold the copy and revalidate,
-    // and a 304 on a document naming dead hashes is exactly the failure we are closing.
-    let spa = || {
-        (
-            [
-                (CONTENT_TYPE, "text/html; charset=utf-8"),
-                (CACHE_CONTROL, "no-store, must-revalidate"),
-            ],
-            index.to_string(),
-        )
-            .into_response()
+            .into_response(),
     };
     let rel = rel.trim_start_matches('/');
-    if rel.is_empty() {
+    // The entry document BY ITS OWN NAME is still the entry document. Without this it carried an
+    // extension, took the file branch, and left with a five-minute `max-age` — a five-minute
+    // window in which the one URL a bookmark would use hands back a page naming hashes the next
+    // build deletes, which is the exact hole the `no-store` above exists to close.
+    if rel.is_empty() || rel == "index.html" {
         return spa();
     }
     // A request that names a file is a request for that file. Answering it with the SPA turns a
@@ -263,6 +270,10 @@ fn serve_console_path(root: &std::path::Path, rel: &str) -> axum::response::Resp
     // carrying a `..` segment is in the same class: whatever it is, it is not a client route, and
     // the confinement check below already refuses to serve through it — so say 404 rather than
     // hand a probe a 200 and let it wonder.
+    //
+    // THE EXTENSION TEST IS A CONSTRAINT ON THE ROUTER. A client route containing a `.` in any
+    // segment would be taken for a file and answered 404 instead of deep-linking. None does today;
+    // the day one is added, this heuristic has to learn about it first.
     let names_a_file = rel.starts_with("assets/")
         || std::path::Path::new(rel).extension().is_some()
         || rel.split('/').any(|segment| segment == "..");
@@ -488,13 +499,38 @@ mod console_tests {
         );
     }
 
-    /// A `dist` that disappears after boot says so, rather than serving a blank page.
+    /// The entry document asked for by name is the entry document, cache rule included.
+    ///
+    /// `index.html` carries an extension, so it used to take the file branch and leave with
+    /// `max-age=300` — a five-minute window in which the one URL a bookmark would use served a
+    /// page naming hashes the next build deletes. The exact hole `no-store` exists to close.
+    #[test]
+    fn the_entry_document_by_name_is_still_never_cached() {
+        let dist = Dist::new("byname");
+        let res = dist.get("index.html");
+        assert_eq!(res.status(), 200);
+        assert_eq!(header(&res, CONTENT_TYPE), "text/html; charset=utf-8");
+        assert_eq!(
+            header(&res, CACHE_CONTROL),
+            "no-store",
+            "index.html by name must carry the same no-store as the bare route"
+        );
+    }
+
+    /// A `dist` that disappears after boot says so, rather than serving a blank page — and an
+    /// asset that is still on disk is still served, because its request never reads the index.
     #[test]
     fn a_console_that_vanished_is_not_a_blank_page() {
         let dist = Dist::new("vanished");
         std::fs::remove_file(dist.root.join("index.html")).expect("remove index");
         assert_eq!(dist.get("").status(), 503);
+        assert_eq!(dist.get("index.html").status(), 503);
         assert_eq!(dist.get("account").status(), 503);
+        assert_eq!(
+            dist.get("assets/index-AAA.js").status(),
+            200,
+            "an asset request does not depend on the entry document"
+        );
     }
 
     /// A path cannot climb out of the console directory.

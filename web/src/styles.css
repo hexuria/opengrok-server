@@ -150,10 +150,12 @@ label.check .sub-check {
    the whole line and shoves every sibling button onto its own row — which is why Hire sat above
    Test, and Repin below its own input, on every screen in the console. Fields in a row grow from a
    basis instead, and `min-width: 0` lets them shrink rather than overflow. */
-.row > input:not([type="checkbox"]):not([type="radio"]),
-.row > select, .row > textarea,
-.row > *:not(label) > input:not([type="checkbox"]):not([type="radio"]),
-.row > *:not(label) > select {
+/* `:where()` ON PURPOSE. Each `:not([type=…])` carries its argument's specificity, so written
+   plainly this selector weighs (0,3,1) and silently beats every modifier below it — `.tight`,
+   `.wide` and the in-cell rule all resolved to this 13rem basis and nobody could tell from the
+   markup why. `:where()` contributes nothing, so the base stays at (0,1,0) and a modifier wins. */
+.row > :where(input:not([type="checkbox"]):not([type="radio"]), select, textarea),
+.row > :where(:not(label)) > :where(input:not([type="checkbox"]):not([type="radio"]), select) {
   width: auto; flex: 1 1 13rem; min-width: 0;
 }
 .row > input.tight, .row > select.tight { flex: 0 1 9rem; }

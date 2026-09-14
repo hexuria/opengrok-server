@@ -294,8 +294,9 @@ function CoworkerCard({ coworker, models }: { coworker: Coworker; models: string
       {open === "settings" ? (
         <div className="item-body stack">
           <div>
-            <label htmlFor={`route-${coworker.id}`}>Route</label>
-            <div className="row" id={`route-${coworker.id}`}>
+            {/* No htmlFor: a div is not labelable, and the input carries its own aria-label. */}
+            <label>Route</label>
+            <div className="row">
               <ModelField
                 value={model}
                 onChange={setModel}
