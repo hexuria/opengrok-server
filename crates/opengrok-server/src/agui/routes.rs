@@ -2388,15 +2388,11 @@ mod tests {
     fn a_tool_result_becomes_the_in_process_sentence() {
         let mut tool = message("tool", Some("shown in the chat"));
         tool.id = "c1".to_string();
-        tool.extra
-            .insert("toolCallId".to_string(), json!("c1"));
+        tool.extra.insert("toolCallId".to_string(), json!("c1"));
         let messages = to_chat_messages(&input(vec![tool]));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
-        assert_eq!(
-            messages[0].content,
-            "[tool c1 result] shown in the chat"
-        );
+        assert_eq!(messages[0].content, "[tool c1 result] shown in the chat");
     }
 
     /// A message with no content is a placeholder the client is still filling in.

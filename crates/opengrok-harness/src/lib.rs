@@ -60,7 +60,11 @@ pub const MAX_ROUNDS: usize = 8;
 /// bar_chart again in the same request.
 pub fn is_client_render_tool(name: &str) -> bool {
     matches!(
-        name.trim().to_ascii_lowercase().replace('_', "-").replace(' ', "-").as_str(),
+        name.trim()
+            .to_ascii_lowercase()
+            .replace('_', "-")
+            .replace(' ', "-")
+            .as_str(),
         "bar-chart"
             | "barchart"
             | "show-bar-chart"

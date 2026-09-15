@@ -145,7 +145,11 @@ pub async fn take_over_with_local_docker(
     org_id: Option<&str>,
 ) -> Option<(Arc<dyn Computer>, String)> {
     let computer = provider_for(state, org_id, "local-docker").await?;
-    tracing::info!(scope, scope_id, "computer: ascii box forbidden, asking local Docker");
+    tracing::info!(
+        scope,
+        scope_id,
+        "computer: ascii box forbidden, asking local Docker"
+    );
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     state
