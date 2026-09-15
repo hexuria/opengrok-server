@@ -131,6 +131,13 @@ pub(crate) async fn tools_for_coworker(
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
+                let msg = error.to_string();
+                if msg.contains("403") || msg.contains("forbidden") {
+                    // This key cannot use the box. Advertising Shell/Read anyway makes the
+                    // model promise to "look on the machine" and then stop. AG-UI still
+                    // attaches bar_chart/form below.
+                    return None;
+                }
             }
         }
     }
@@ -1546,9 +1553,13 @@ pub async fn run(
             }
             None => None,
         },
-        // No bearer, no identity, and therefore no tools: tools always run as somebody.
+        // No bearer, no identity, and therefore no computer tools.
         None => None,
     };
+    // bar_chart / form are painted by the client from TOOL_CALL frames. Offer them on
+    // every AG-UI turn, including coworkers with no computer, so a chart request is a
+    // tool call rather than streamed markdown.
+    let tools = Some(super::chat_ui::attach(tools));
 
     // Who this coworker is, plus whose computer its tools touch. Desktop `sendPrompt` already
     // composes this; AG-UI used to send `system: None`, so a Description saved as the standing
@@ -2227,12 +2238,29 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
     input
         .messages
         .iter()
-        .filter(|message| matches!(message.role.as_str(), "user" | "assistant" | "system"))
-        .filter_map(|message| {
-            message.content.as_ref().map(|content| ChatMessage {
-                role: message.role.clone(),
-                content: content.clone(),
-            })
+        .filter_map(|message| match message.role.as_str() {
+            "user" | "assistant" | "system" => {
+                message.content.as_ref().map(|content| ChatMessage {
+                    role: message.role.clone(),
+                    content: content.clone(),
+                })
+            }
+            // NativeChat continues a frontend tool by POSTing the result as a tool
+            // message. The door only speaks user/assistant/system, so this is the
+            // same sentence the in-process loop would have appended.
+            "tool" => {
+                let content = message.content.clone().unwrap_or_default();
+                let call_id = message
+                    .extra
+                    .get("toolCallId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(message.id.as_str());
+                Some(ChatMessage {
+                    role: "user".to_string(),
+                    content: format!("[tool {call_id} result] {content}"),
+                })
+            }
+            _ => None,
         })
         .collect()
 }
@@ -2334,11 +2362,25 @@ mod tests {
     fn roles_the_model_does_not_understand_are_dropped() {
         let messages = to_chat_messages(&input(vec![
             message("developer", Some("internal")),
-            message("tool", Some("result")),
             message("user", Some("hello")),
         ]));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
+    }
+
+    #[test]
+    fn a_tool_result_becomes_the_in_process_sentence() {
+        let mut tool = message("tool", Some("shown in the chat"));
+        tool.id = "c1".to_string();
+        tool.extra
+            .insert("toolCallId".to_string(), json!("c1"));
+        let messages = to_chat_messages(&input(vec![tool]));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[0].content,
+            "[tool c1 result] shown in the chat"
+        );
     }
 
     /// A message with no content is a placeholder the client is still filling in.

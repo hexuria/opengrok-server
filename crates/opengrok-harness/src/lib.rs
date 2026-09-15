@@ -55,6 +55,22 @@ pub async fn run_turn(
 /// run as a *result* the client can see rather than a silent stop.
 pub const MAX_ROUNDS: usize = 8;
 
+/// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
+/// streamed; after one chart/form this HTTP run ends so the model cannot call
+/// bar_chart again in the same request.
+pub fn is_client_render_tool(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().replace('_', "-").replace(' ', "-").as_str(),
+        "bar-chart"
+            | "barchart"
+            | "show-bar-chart"
+            | "render-bar-chart"
+            | "form"
+            | "show-form"
+            | "render-form"
+    )
+}
+
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
 /// durable multi-round loop.
 pub async fn run_turn_with_tools(
@@ -397,7 +413,18 @@ async fn converse(
             }
             if !broke {
                 // Tools for this round, run on the coworker's own computer.
-                let calls = collect_tool_calls(&round_events);
+                let mut calls = collect_tool_calls(&round_events);
+                // One chart/form per round. Extra bar_chart calls in the same
+                // completion are what turned "generate another" into 2, then 4.
+                if let Some(ui) = calls
+                    .iter()
+                    .rev()
+                    .find(|call| is_client_render_tool(&call.name))
+                    .cloned()
+                {
+                    calls.retain(|call| !is_client_render_tool(&call.name));
+                    calls.push(ui);
+                }
                 if let (Some(runner), false) = (tools, calls.is_empty()) {
                     let results = runner.run_all(&calls).await;
 
@@ -454,6 +481,16 @@ async fn converse(
                         return all;
                     }
                     all.append(&mut round_events);
+
+                    // bar_chart/form already painted from TOOL_CALL frames. Another model
+                    // round in this HTTP request is what doubled charts on "generate another".
+                    if calls.iter().any(|call| is_client_render_tool(&call.name)) {
+                        let mut ending = projection.finish();
+                        emit_live(sink, &ending).await;
+                        let _ = journal.record(run_id, &ending).await;
+                        all.append(&mut ending);
+                        return all;
+                    }
 
                     if round + 1 == MAX_ROUNDS {
                         // Ending as a result, not a silent stop: the client is told why.
