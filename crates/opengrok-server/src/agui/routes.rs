@@ -108,14 +108,14 @@ pub(crate) async fn tools_for_coworker(
         org_id.as_deref(),
         coworker_id.as_str(),
     );
-    let (box_id, kind, stopped) = state
+    let (mut box_id, kind, stopped) = state
         .auth
         .store
         .scoped_computer_full(scope, &scope_id)
         .await
         .ok()
         .flatten()?;
-    let computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
+    let mut computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
     // A sleeping box is woken before this turn runs (disk was kept, so it comes back where it was),
     // and its last-used stamp is refreshed so the sweep leaves it running while it is in use. Ask
     // the provider rather than trusting our `stopped` flag: box.ascii.dev archives a box on its own
@@ -131,12 +131,28 @@ pub(crate) async fn tools_for_coworker(
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
-                let msg = error.to_string();
-                if msg.contains("403") || msg.contains("forbidden") {
-                    // This key cannot use the box. Advertising Shell/Read anyway makes the
-                    // model promise to "look on the machine" and then stop. AG-UI still
-                    // attaches bar_chart/form below.
-                    return None;
+                let forbidden = matches!(
+                    &error,
+                    opengrok_box::BoxError::Refused {
+                        status: 401 | 403,
+                        ..
+                    }
+                ) || error.to_string().contains("forbidden");
+                if forbidden {
+                    match super::provision::take_over_with_local_docker(
+                        state,
+                        scope,
+                        &scope_id,
+                        org_id.as_deref(),
+                    )
+                    .await
+                    {
+                        Some((local, new_id)) => {
+                            computer = local;
+                            box_id = new_id;
+                        }
+                        None => return None,
+                    }
                 }
             }
         }
