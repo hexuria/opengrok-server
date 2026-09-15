@@ -25,6 +25,11 @@ set +a
 if [ -z "${OG_COMPUTER:-}" ]; then
   export OG_COMPUTER=docker
 fi
+# Each coworker gets its own local box. Shared ascii remains the hosted default
+# when OG_BOX_SHARE is set in .env.
+if [ -z "${OG_BOX_SHARE:-}" ]; then
+  export OG_BOX_SHARE=per-bot
+fi
 
 # The gate owns its database; a dev server there would race the smoke suite's sweeps.
 case "${OG_DATABASE_URL:-}" in

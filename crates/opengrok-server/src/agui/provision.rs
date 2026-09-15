@@ -282,6 +282,12 @@ pub async fn resolve_mode(state: &AgUiState, account_id: &AccountId) -> (String,
     {
         return (mode, org_id);
     }
+    if let Ok(mode) = std::env::var("OG_BOX_SHARE") {
+        match mode.as_str() {
+            "per-bot" | "per-account" | "per-org" => return (mode, org_id),
+            _ => {}
+        }
+    }
     ("per-account".to_string(), org_id)
 }
 
