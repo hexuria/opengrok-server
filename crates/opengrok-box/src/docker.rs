@@ -141,8 +141,11 @@ impl DockerComputer {
             args.push("BOX_DESKTOP=1".to_string());
             args.push("-e".to_string());
             args.push("BOX_DESKTOP_REQUIRED=1".to_string());
+            // The desktop must have something on it: with no browser, openbox's bare
+            // root is a black screen the moment a person opens the coworker's computer.
+            // The image starts Chromium on the display when allowed.
             args.push("-e".to_string());
-            args.push("BOX_CHROME=0".to_string());
+            args.push("BOX_CHROME=1".to_string());
             args.push("-e".to_string());
             args.push("BOX_ALLOW_INSECURE_DEV=1".to_string());
             args.push(self.image.clone());
@@ -485,7 +488,10 @@ mod tests {
             "desktop image must keep its entrypoint, got {args:?}"
         );
         assert!(args.iter().any(|arg| arg == "BOX_DESKTOP=1"));
-        assert!(args.iter().any(|arg| arg == "BOX_CHROME=0"));
+        assert!(
+            args.iter().any(|arg| arg == "BOX_CHROME=1"),
+            "a desktop with nothing on it is a black screen, got {args:?}"
+        );
         assert!(args.iter().any(|arg| arg.starts_with("BOX_TOKEN=og-")));
     }
 
