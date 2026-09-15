@@ -351,21 +351,22 @@ async fn list_daemons(State(state): State<AuthState>, headers: HeaderMap) -> Res
         Ok(caller) => caller,
         Err(refusal) => return refusal,
     };
-    let machines = state
+    let listed = state
         .store
         .list_daemons(account_id.as_str())
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(machine_id, label, enrolled_at_ms, revoked)| {
-            serde_json::json!({
-                "machineId": machine_id,
-                "label": label,
-                "enrolledAtMs": enrolled_at_ms,
-                "revoked": revoked,
-            })
-        })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
+    let mut machines = Vec::new();
+    for (machine_id, label, enrolled_at_ms, revoked) in listed {
+        let connected = !revoked && state.local_exec.has_provider(&machine_id).await;
+        machines.push(serde_json::json!({
+            "machineId": machine_id,
+            "label": label,
+            "enrolledAtMs": enrolled_at_ms,
+            "revoked": revoked,
+            "connected": connected,
+        }));
+    }
     Json(serde_json::json!({ "machines": machines })).into_response()
 }
 
