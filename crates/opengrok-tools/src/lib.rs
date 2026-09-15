@@ -455,7 +455,14 @@ impl Executor {
             match serde_json::from_value::<ShellArgs>(arguments.clone()) {
                 Ok(args) => Some(args.command),
                 Err(error) => {
-                    return ToolResult::refused(&call.id, format!("bad arguments: {error}"));
+                    // Say what would work: a model that sent nothing needs the shape, not
+                    // just the complaint, or it sends nothing again.
+                    return ToolResult::refused(
+                        &call.id,
+                        format!(
+                            "bad arguments: {error}; call again as {{\"command\": \"<the shell command>\"}}"
+                        ),
+                    );
                 }
             }
         } else {

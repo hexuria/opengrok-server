@@ -370,6 +370,11 @@ async fn converse(
     emit_live(sink, &opening).await;
     all.append(&mut opening);
 
+    // The calls the tools refused last round, by name and arguments. A model that asks
+    // for exactly the same thing again is not going to get a different answer, and
+    // burning the remaining rounds on it only delays telling the person.
+    let mut last_refused: Option<Vec<(String, serde_json::Value)>> = None;
+
     for round in 0..MAX_ROUNDS {
         let mut round_events = Vec::new();
 
@@ -463,6 +468,34 @@ async fn converse(
                         all.append(&mut waiting_events);
                         return all;
                     }
+
+                    let refused: Vec<(String, serde_json::Value)> = calls
+                        .iter()
+                        .zip(&results)
+                        .filter(|(_, result)| !result.ok)
+                        .map(|(call, _)| (call.name.clone(), call.arguments.clone()))
+                        .collect();
+                    let every_call_refused = !results.is_empty() && refused.len() == results.len();
+                    if every_call_refused && last_refused.as_ref() == Some(&refused) {
+                        let names: Vec<&str> =
+                            refused.iter().map(|(name, _)| name.as_str()).collect();
+                        let why = results
+                            .first()
+                            .map(|result| result.content.as_str())
+                            .unwrap_or("refused");
+                        let mut ending = projection.fail(format!(
+                            "`{}` was refused the same way twice ({why}); stopping instead of retrying",
+                            names.join("`, `")
+                        ));
+                        let _ = journal.record(run_id, &round_events).await;
+                        let _ = journal.record(run_id, &ending).await;
+                        emit_live(sink, &ending).await;
+                        all.append(&mut round_events);
+                        all.append(&mut ending);
+                        return all;
+                    }
+                    last_refused = every_call_refused.then_some(refused);
+
                     if !said.is_empty() {
                         request.messages.push(ChatMessage {
                             role: "assistant".to_string(),
@@ -873,6 +906,59 @@ mod tests {
                 .unwrap_or_default()
                 .contains("limit"),
             "{last:?}"
+        );
+    }
+
+    /// Seen live: a cheap model asked for `user_machine_shell` with no arguments, was refused,
+    /// and asked again identically until the round cap. The second identical refusal ends the
+    /// run with a reason, instead of six more model calls that change nothing.
+    #[tokio::test]
+    async fn a_call_refused_the_same_way_twice_ends_the_run() {
+        struct ArgumentLessDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for ArgumentLessDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let script = vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "user_machine_shell".to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let journal = MemoryJournal::new();
+        let runner = tool_runner();
+        let events = run_conversation(
+            &ArgumentLessDoor,
+            Some(&runner),
+            &journal,
+            request("run date on my computer"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let starts = events
+            .iter()
+            .filter(|event| event.event_type == opengrok_wire::agui::EventType::ToolCallStart)
+            .count();
+        assert_eq!(starts, 2, "two identical refusals, then stop: {events:?}");
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, opengrok_wire::agui::EventType::RunError);
+        let message = last
+            .extra
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        assert!(
+            message.contains("user_machine_shell") && message.contains("twice"),
+            "{message}"
         );
     }
 
