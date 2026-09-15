@@ -34,6 +34,12 @@ pub const DEFAULT_IMAGE: &str = "debian:stable-slim";
 /// refuses anything else with a reason rather than appearing to succeed.
 pub const PUBLISHED_PORTS: &[u16] = &[3000, 5173, 8000, 8080];
 
+/// noVNC (6080) and grok-box exec/host (1337/1340). Only published when the image is a desktop.
+pub const DESKTOP_PORTS: &[u16] = &[6080, 1337, 1340];
+
+/// x11vnc on grok-box uses the first 8 characters. Same value is put on the noVNC URL.
+const DESKTOP_VNC_PASSWORD: &str = "opengrok";
+
 #[derive(Debug, Clone)]
 pub struct DockerComputer {
     pub image: String,
@@ -93,6 +99,20 @@ impl DockerComputer {
         })
     }
 
+    /// A grok-box image (or `OG_DOCKER_DESKTOP=1`) runs its own entrypoint with a noVNC desktop.
+    /// Headless `debian:stable-slim` stays `sleep infinity` so existing boxes do not change.
+    pub fn wants_desktop(&self) -> bool {
+        std::env::var("OG_DOCKER_DESKTOP").as_deref() == Ok("1") || self.image.contains("grok-box")
+    }
+
+    fn published_ports(&self) -> Vec<u16> {
+        let mut ports = PUBLISHED_PORTS.to_vec();
+        if self.wants_desktop() {
+            ports.extend_from_slice(DESKTOP_PORTS);
+        }
+        ports
+    }
+
     /// The arguments that create a box. Split out so the shape is testable without a daemon.
     pub fn create_args(&self, ttl_seconds: Option<u64>) -> Vec<String> {
         let mut args = vec![
@@ -105,11 +125,26 @@ impl DockerComputer {
             args.push("--label".to_string());
             args.push(format!("dev.opengrok.run={tag}"));
         }
-        for port in PUBLISHED_PORTS {
+        for port in self.published_ports() {
             // Bound to loopback: a coworker's box must not be reachable from the network by
             // accident, and a person opening a preview is on this machine.
             args.push("-p".to_string());
             args.push(format!("127.0.0.1::{port}"));
+        }
+        if self.wants_desktop() {
+            // grok-box refuses tokens shorter than 16 characters. uuid_like is hex nanos.
+            args.push("-e".to_string());
+            args.push(format!("BOX_TOKEN=og-{}", uuid_like()));
+            args.push("-e".to_string());
+            args.push(format!("BOX_VNC_PASSWORD={DESKTOP_VNC_PASSWORD}"));
+            args.push("-e".to_string());
+            args.push("BOX_DESKTOP=1".to_string());
+            args.push("-e".to_string());
+            args.push("BOX_DESKTOP_REQUIRED=1".to_string());
+            args.push("-e".to_string());
+            args.push("BOX_ALLOW_INSECURE_DEV=1".to_string());
+            args.push(self.image.clone());
+            return args;
         }
         args.push(self.image.clone());
         // `sleep infinity` keeps the container alive with no service in it; the TTL is enforced by
@@ -296,12 +331,13 @@ impl Computer for DockerComputer {
         // Docker cannot publish a port on a running container, so a port that was not published at
         // creation cannot be exposed now. Saying so is better than returning a URL that refuses
         // every connection.
-        if !PUBLISHED_PORTS.contains(&port) {
+        if !self.published_ports().contains(&port) {
             return Err(BoxError::Refused {
                 status: 400,
                 body: format!(
                     "port {port} was not published when this box was created; \
-                     this computer publishes {PUBLISHED_PORTS:?}"
+                     this computer publishes {:?}",
+                    self.published_ports()
                 ),
             });
         }
@@ -348,6 +384,24 @@ impl Computer for DockerComputer {
             Err(other) => Err(other),
         }
     }
+
+    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        match self.docker(&["port", box_id, "6080"]).await {
+            Ok(mapping) => Ok(host_port(&mapping).map(|port| {
+                format!(
+                    "http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password={DESKTOP_VNC_PASSWORD}"
+                )
+            })),
+            Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn host_port(mapping: &str) -> Option<u16> {
+    let line = mapping.lines().next()?.trim();
+    let host = line.rsplit_once(':')?.1;
+    host.parse().ok()
 }
 
 /// A short unique-enough token for naming a process's log files.
@@ -412,6 +466,40 @@ mod tests {
             .with_image("rust:1-slim")
             .create_args(None);
         assert!(args.contains(&"rust:1-slim".to_string()));
+    }
+
+    #[test]
+    fn a_grok_box_image_keeps_its_entrypoint_and_publishes_novnc() {
+        let args = DockerComputer::new()
+            .with_image("grok-box:local")
+            .create_args(None);
+        assert!(args.contains(&"grok-box:local".to_string()));
+        assert!(
+            args.iter().any(|arg| arg == "127.0.0.1::6080"),
+            "noVNC must be published, got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("sleep")),
+            "desktop image must keep its entrypoint, got {args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "BOX_DESKTOP=1"));
+        assert!(args.iter().any(|arg| arg.starts_with("BOX_TOKEN=og-")));
+    }
+
+    #[test]
+    fn a_headless_image_still_sleeps() {
+        let args = DockerComputer::new()
+            .with_image("debian:stable-slim")
+            .create_args(None);
+        assert!(args.iter().any(|arg| arg == "sleep infinity"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "127.0.0.1::6080"));
+    }
+
+    #[test]
+    fn docker_port_mapping_yields_the_host_port() {
+        assert_eq!(host_port("127.0.0.1:58041"), Some(58041));
+        assert_eq!(host_port("0.0.0.0:6080\n"), Some(6080));
+        assert_eq!(host_port(""), None);
     }
 
     /// A port that was not published cannot be exposed later, and saying so beats handing back a
