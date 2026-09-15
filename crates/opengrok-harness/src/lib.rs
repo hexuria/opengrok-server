@@ -62,8 +62,7 @@ pub fn is_client_render_tool(name: &str) -> bool {
     matches!(
         name.trim()
             .to_ascii_lowercase()
-            .replace('_', "-")
-            .replace(' ', "-")
+            .replace(['_', ' '], "-")
             .as_str(),
         "bar-chart"
             | "barchart"
