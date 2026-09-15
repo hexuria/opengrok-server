@@ -384,14 +384,22 @@ pub async fn ensure_computer_for(
                     box_id
                 }
                 Err(error) => {
-                    return record_error(
-                        state,
-                        account_id,
-                        error.code(),
-                        &error.to_string(),
-                        at_ms,
-                    )
-                    .await;
+                    if kind == "ascii"
+                        && let Some((_, docker_id)) =
+                            take_over_with_local_docker(state, scope, &scope_id, org_id.as_deref())
+                                .await
+                    {
+                        docker_id
+                    } else {
+                        return record_error(
+                            state,
+                            account_id,
+                            error.code(),
+                            &error.to_string(),
+                            at_ms,
+                        )
+                        .await;
+                    }
                 }
             }
         }

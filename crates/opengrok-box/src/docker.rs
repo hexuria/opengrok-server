@@ -142,6 +142,8 @@ impl DockerComputer {
             args.push("-e".to_string());
             args.push("BOX_DESKTOP_REQUIRED=1".to_string());
             args.push("-e".to_string());
+            args.push("BOX_CHROME=0".to_string());
+            args.push("-e".to_string());
             args.push("BOX_ALLOW_INSECURE_DEV=1".to_string());
             args.push(self.image.clone());
             return args;
@@ -483,6 +485,7 @@ mod tests {
             "desktop image must keep its entrypoint, got {args:?}"
         );
         assert!(args.iter().any(|arg| arg == "BOX_DESKTOP=1"));
+        assert!(args.iter().any(|arg| arg == "BOX_CHROME=0"));
         assert!(args.iter().any(|arg| arg.starts_with("BOX_TOKEN=og-")));
     }
 
