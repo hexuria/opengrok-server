@@ -145,7 +145,11 @@ pub async fn take_over_with_local_docker(
     org_id: Option<&str>,
 ) -> Option<(Arc<dyn Computer>, String)> {
     let computer = provider_for(state, org_id, "local-docker").await?;
-    tracing::info!(scope, scope_id, "computer: ascii box forbidden, asking local Docker");
+    tracing::info!(
+        scope,
+        scope_id,
+        "computer: ascii box forbidden, asking local Docker"
+    );
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     state
@@ -562,6 +566,114 @@ pub async fn teardown_computer_for(
             }
         }
     }
+}
+
+/// Live screen NativeChat paints. Same facts as gateway `getForeverBoxStatus`, on the AG-UI
+/// cookie session so the desktop client does not need the host gateway bearer.
+pub async fn coworker_screen(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Value {
+    let agent_id = coworker_id.as_str();
+    let absent = json!({
+        "agentId": agent_id,
+        "state": "absent",
+        "vncUrl": Value::Null,
+    });
+    match state.auth.store.load_coworker(coworker_id).await {
+        Ok((coworker, _)) if !coworker.name.is_empty() => {}
+        _ => return absent,
+    }
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (scope, scope_id, _) = scope_for(&mode, account_id.as_str(), org_id.as_deref(), agent_id);
+    let Ok(Some((box_id, kind, stopped))) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+    else {
+        if let Ok(Some((code, message, at_ms))) = state
+            .auth
+            .store
+            .account_computer_error(account_id.as_str())
+            .await
+        {
+            return json!({
+                "agentId": agent_id,
+                "state": "absent",
+                "vncUrl": Value::Null,
+                "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
+            });
+        }
+        return absent;
+    };
+    let lookup = lookup_provider(state, org_id.as_deref(), &kind).await;
+    let Some(provider) = lookup.computer else {
+        let (code, message) = lookup.error.unwrap_or_else(|| {
+            (
+                "unknown".into(),
+                "the computer's provider is not available".into(),
+            )
+        });
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        return json!({
+            "agentId": agent_id,
+            "state": if stopped { "stopped" } else { "unknown" },
+            "vncUrl": Value::Null,
+            "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
+        });
+    };
+    let live_state = provider
+        .state(&box_id)
+        .await
+        .unwrap_or_else(|_| "unknown".to_string());
+    let vnc_url = if live_state == "running" {
+        provider.screen_url(&box_id).await.ok().flatten()
+    } else {
+        None
+    };
+    json!({
+        "agentId": agent_id,
+        "state": live_state,
+        "vncUrl": vnc_url,
+    })
+}
+
+/// Wake a stopped scope box so Open can show its screen. Best-effort: a missing mapping is
+/// `coworker_screen`'s absent, not a failure here.
+pub async fn wake_coworker_computer(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) {
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (scope, scope_id, _) = scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id.as_str(),
+    );
+    let Ok(Some((box_id, kind, _stopped))) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+    else {
+        return;
+    };
+    let Some(provider) = lookup_provider(state, org_id.as_deref(), &kind)
+        .await
+        .computer
+    else {
+        return;
+    };
+    let _ = provider
+        .wake(&box_id, std::time::Duration::from_secs(90))
+        .await;
 }
 
 /// How long a box may sit idle before the sweep stops it (disk kept, billing paused). Read from
