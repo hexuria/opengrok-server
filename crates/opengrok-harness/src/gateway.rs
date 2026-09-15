@@ -14,6 +14,9 @@
 //! be more machinery than the twenty lines below, and the shape is fixed by the OpenAI dialect the
 //! gateway already speaks.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
 use futures::{StreamExt, stream};
 use serde::Deserialize;
 
@@ -86,6 +89,10 @@ struct Chunk {
 struct Choice {
     #[serde(default)]
     delta: Delta,
+    /// Present on the last chunk of a completion. That is when a streamed tool
+    /// call is actually finished — not the first fragment that named it.
+    #[serde(default, rename = "finish_reason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -95,16 +102,18 @@ struct Delta {
     /// Where a provider exposes it; absent for most.
     #[serde(default, rename = "reasoning_content")]
     reasoning: Option<String>,
-    /// The model asking to call tools. This gateway delivers each call WHOLE in one chunk (id, name
-    /// and the complete JSON arguments together), so a per-line parse can emit the full start/args/end
-    /// without cross-chunk state. A provider that fragments arguments across chunks is not handled
-    /// here — this one does not.
+    /// The model asking to call tools. Some routes (Grok) send id, name and the
+    /// complete JSON arguments in one chunk. Others (OpenAI-shaped streams) name
+    /// the call on the first chunk and then send argument fragments keyed only
+    /// by `index`. `SseParser` holds that index → id map across lines.
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallChunk>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ToolCallChunk {
+    #[serde(default)]
+    index: Option<u32>,
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
@@ -119,44 +128,62 @@ struct FunctionChunk {
     arguments: Option<String>,
 }
 
-/// Turn one SSE line into deltas. Pure, so the parsing rules are tested without a socket.
-pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
-    let Some(payload) = line.strip_prefix("data: ") else {
-        return Vec::new();
-    };
-    let payload = payload.trim();
-    // The sentinel that ends every OpenAI-dialect stream. Not JSON, and parsing it as JSON is the
-    // classic way to end a working stream with a spurious error.
-    if payload == "[DONE]" || payload.is_empty() {
-        return Vec::new();
-    }
-    let Ok(chunk) = serde_json::from_str::<Chunk>(payload) else {
-        // A frame we cannot read is skipped, not fatal: one malformed chunk must not discard the
-        // reply that came before it.
-        return Vec::new();
-    };
-    chunk
-        .choices
-        .into_iter()
-        .flat_map(|choice| {
-            let mut deltas = Vec::new();
+/// Assembles one OpenAI-dialect SSE stream into `ModelDelta`s.
+///
+/// Tool calls are the reason this is a struct rather than a function: the first
+/// chunk names the call (`id`, `name`); later chunks send argument JSON keyed
+/// only by `index`. Ending the call on that first chunk is what dropped Hexuria
+/// `user_machine_shell` arguments and made NativeChat prompt with an empty command.
+#[derive(Debug, Default)]
+pub struct SseParser {
+    by_index: HashMap<u32, String>,
+    started: HashSet<String>,
+    ended: HashSet<String>,
+}
+
+impl SseParser {
+    /// One `data:` line. `[DONE]` and a `finish_reason` close every open tool call.
+    pub fn push_line(&mut self, line: &str) -> Vec<ModelDelta> {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            return Vec::new();
+        };
+        let payload = payload.trim();
+        if payload.is_empty() {
+            return Vec::new();
+        }
+        // The sentinel that ends every OpenAI-dialect stream. Not JSON, and parsing
+        // it as JSON is the classic way to end a working stream with a spurious error.
+        if payload == "[DONE]" {
+            return self.close_open();
+        }
+        let Ok(chunk) = serde_json::from_str::<Chunk>(payload) else {
+            // A frame we cannot read is skipped, not fatal: one malformed chunk must
+            // not discard the reply that came before it.
+            return Vec::new();
+        };
+        let mut deltas = Vec::new();
+        for choice in chunk.choices {
             if let Some(reasoning) = choice.delta.reasoning.filter(|text| !text.is_empty()) {
                 deltas.push(ModelDelta::Reasoning(reasoning));
             }
             if let Some(content) = choice.delta.content.filter(|text| !text.is_empty()) {
                 deltas.push(ModelDelta::Text(content));
             }
-            // Each tool call arrives whole: emit its start, its complete arguments, and its end
-            // together, keyed by the provider's own call id so `collect_tool_calls` can pair them.
             for call in choice.delta.tool_calls.into_iter().flatten() {
-                let Some(id) = call.id.filter(|id| !id.is_empty()) else {
+                let index = call.index.unwrap_or(0);
+                if let Some(id) = call.id.filter(|id| !id.is_empty()) {
+                    self.by_index.insert(index, id);
+                }
+                let Some(id) = self.by_index.get(&index).cloned() else {
                     continue;
                 };
                 let function = call.function.unwrap_or(FunctionChunk {
                     name: None,
                     arguments: None,
                 });
-                if let Some(name) = function.name.filter(|name| !name.is_empty()) {
+                if let Some(name) = function.name.filter(|name| !name.is_empty())
+                    && self.started.insert(id.clone())
+                {
                     deltas.push(ModelDelta::ToolCallStart {
                         id: id.clone(),
                         name,
@@ -168,11 +195,49 @@ pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
                         delta: arguments,
                     });
                 }
+            }
+            if choice
+                .finish_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty())
+            {
+                deltas.extend(self.close_open());
+            }
+        }
+        deltas
+    }
+
+    /// The HTTP body ended. Close any tool call that never got a `finish_reason`.
+    pub fn finish(&mut self) -> Vec<ModelDelta> {
+        self.close_open()
+    }
+
+    fn close_open(&mut self) -> Vec<ModelDelta> {
+        let mut ids: Vec<(u32, String)> = self
+            .by_index
+            .iter()
+            .map(|(index, id)| (*index, id.clone()))
+            .collect();
+        ids.sort_by_key(|(index, _)| *index);
+        let mut deltas = Vec::new();
+        for (_, id) in ids {
+            if self.started.contains(&id) && self.ended.insert(id.clone()) {
                 deltas.push(ModelDelta::ToolCallEnd { id });
             }
-            deltas
-        })
-        .collect()
+        }
+        deltas
+    }
+}
+
+/// Turn one SSE line into deltas, then close any tool call that line named.
+///
+/// For a whole stream — where argument fragments arrive on later lines — use
+/// `SseParser` instead. Closing here is what a single-frame test expects.
+pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
+    let mut parser = SseParser::default();
+    let mut deltas = parser.push_line(line);
+    deltas.extend(parser.finish());
+    deltas
 }
 
 /// An opaque, stable id for the CONVERSATION this request belongs to, for the gateway's session
@@ -317,25 +382,58 @@ impl ModelDoor for GatewayDoor {
         }
 
         // Frames can split across chunks, so bytes are buffered and consumed line by line.
-        let mut buffer = String::new();
-        let deltas = response.bytes_stream().flat_map(move |chunk| {
+        // Tool-call argument fragments share one parser so a later chunk without `id`
+        // still belongs to the call the first chunk named.
+        let live = Arc::new(Mutex::new(SseState::default()));
+        let body_state = live.clone();
+        let body = response.bytes_stream().flat_map(move |chunk| {
             let events = match chunk {
                 Err(error) => vec![Err(ModelError::Stream(error.to_string()))],
                 Ok(bytes) => {
-                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    let mut state = match body_state.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    state.buffer.push_str(&String::from_utf8_lossy(&bytes));
                     let mut out = Vec::new();
-                    while let Some(index) = buffer.find('\n') {
-                        let line: String = buffer.drain(..=index).collect();
-                        out.extend(parse_sse_line(line.trim_end()).into_iter().map(Ok));
+                    while let Some(index) = state.buffer.find('\n') {
+                        let line: String = state.buffer.drain(..=index).collect();
+                        out.extend(state.parser.push_line(line.trim_end()).into_iter().map(Ok));
                     }
                     out
                 }
             };
             stream::iter(events)
         });
+        let tail = futures::stream::once(async move {
+            let mut state = match live.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let leftover = std::mem::take(&mut state.buffer);
+            let mut out = Vec::new();
+            if !leftover.trim().is_empty() {
+                out.extend(
+                    state
+                        .parser
+                        .push_line(leftover.trim_end())
+                        .into_iter()
+                        .map(Ok),
+                );
+            }
+            out.extend(state.parser.finish().into_iter().map(Ok));
+            out
+        })
+        .flat_map(stream::iter);
 
-        Ok(Box::pin(deltas))
+        Ok(Box::pin(body.chain(tail)))
     }
+}
+
+#[derive(Default)]
+struct SseState {
+    buffer: String,
+    parser: SseParser,
 }
 
 #[cfg(test)]
@@ -406,6 +504,38 @@ mod tests {
                     id: "call_1".to_string()
                 },
             ]
+        );
+    }
+
+    /// OpenAI-shaped streams name the call on the first chunk (often with empty
+    /// `arguments`) and send the JSON on later chunks that have `index` but no `id`.
+    /// Closing the call on that first chunk is how Hexuria Ask cards showed no command.
+    #[test]
+    fn streamed_tool_call_arguments_are_assembled_across_chunks() {
+        let mut parser = SseParser::default();
+        assert_eq!(
+            parser.push_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"user_machine_shell","arguments":""}}]}}]}"#
+            ),
+            vec![ModelDelta::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "user_machine_shell".to_string()
+            }]
+        );
+        assert_eq!(
+            parser.push_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls /Volumes/goldcoders\"}"}}]}}]}"#
+            ),
+            vec![ModelDelta::ToolCallArgs {
+                id: "call_1".to_string(),
+                delta: "{\"command\":\"ls /Volumes/goldcoders\"}".to_string()
+            }]
+        );
+        assert_eq!(
+            parser.push_line(r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#),
+            vec![ModelDelta::ToolCallEnd {
+                id: "call_1".to_string()
+            }]
         );
     }
 

@@ -136,6 +136,32 @@ pub async fn provider_for(
     lookup_provider(state, org_id, kind).await.computer
 }
 
+/// When the stored ascii box refuses this key, give the account a local Docker box instead.
+/// NativeChat on a laptop still gets Shell/Read without vendoring hexuria/box.
+pub async fn take_over_with_local_docker(
+    state: &AgUiState,
+    scope: &str,
+    scope_id: &str,
+    org_id: Option<&str>,
+) -> Option<(Arc<dyn Computer>, String)> {
+    let computer = provider_for(state, org_id, "local-docker").await?;
+    tracing::info!(
+        scope,
+        scope_id,
+        "computer: ascii box forbidden, asking local Docker"
+    );
+    let box_id = computer.create(None).await.ok()?;
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    state
+        .auth
+        .store
+        .set_scoped_computer(scope, scope_id, &box_id, "local-docker", org_id, at_ms)
+        .await
+        .ok()?;
+    tracing::info!(scope, scope_id, box_id = %box_id, "computer: local Docker box is this scope's computer");
+    Some((computer, box_id))
+}
+
 /// The provider for an account's existing computer of `kind`, resolving the account's org itself.
 /// The run path uses this so tools execute on the same provider that created the box.
 pub async fn provider_for_account(
@@ -259,6 +285,12 @@ pub async fn resolve_mode(state: &AgUiState, account_id: &AccountId) -> (String,
         && let Ok(Some(mode)) = state.auth.store.sharing_mode("org", org).await
     {
         return (mode, org_id);
+    }
+    if let Ok(mode) = std::env::var("OG_BOX_SHARE") {
+        match mode.as_str() {
+            "per-bot" | "per-account" | "per-org" => return (mode, org_id),
+            _ => {}
+        }
     }
     ("per-account".to_string(), org_id)
 }

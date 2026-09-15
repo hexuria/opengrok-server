@@ -20,6 +20,17 @@ set -a
 source ./.env
 set +a
 
+# A leftover OG_BOX_API_KEY must not force ascii on a laptop. Empty OG_COMPUTER
+# here means local Docker, so NativeChat can get Shell without a working ascii box.
+if [ -z "${OG_COMPUTER:-}" ]; then
+  export OG_COMPUTER=docker
+fi
+# Each coworker gets its own local box. Shared ascii remains the hosted default
+# when OG_BOX_SHARE is set in .env.
+if [ -z "${OG_BOX_SHARE:-}" ]; then
+  export OG_BOX_SHARE=per-bot
+fi
+
 # The gate owns its database; a dev server there would race the smoke suite's sweeps.
 case "${OG_DATABASE_URL:-}" in
   *_gate) echo "OG_DATABASE_URL points at a gate database; refusing (docs/setup/gate.md)" >&2; exit 1 ;;

@@ -4,7 +4,7 @@
 
 use opengrok_harness::ToolRunner;
 use opengrok_tools::ToolResult;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub fn attach(runner: Option<ToolRunner>) -> ToolRunner {
