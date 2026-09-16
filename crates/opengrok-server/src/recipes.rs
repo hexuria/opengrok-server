@@ -519,8 +519,11 @@ async fn add_version(
     if let Err(why) = opengrok_recipes::lint(&request.steps, screen) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why.to_string()).into_response();
     }
+    // The DECLARATION is judged here, not the values: `bind` answers "may this run?", and a
+    // required parameter with nothing supplied rightly fails that — which made declaring one
+    // impossible. Values are judged at run time, where they exist.
     let params = request.parameters.as_deref().unwrap_or(&[]);
-    if let Err(why) = opengrok_recipes::bind(params, &Values::new()) {
+    if let Err(why) = opengrok_recipes::check(params) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
     }
     let mut body = json!({ "steps": request.steps, "stop_on_error": true, "screenshot": "end" });

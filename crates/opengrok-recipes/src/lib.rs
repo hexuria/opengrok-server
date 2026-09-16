@@ -43,6 +43,46 @@ fn is_valid_param_name(name: &str) -> bool {
 
 /// Check the values against the declaration and fill in defaults. The error names the
 /// parameter and says what is wrong, because this sentence is shown to a person.
+/// Check a DECLARATION on its own, with no values in sight.
+///
+/// Declaring and running are two different moments and must be judged differently. Binding asks
+/// "are these values good enough to run?", and a required parameter with nothing supplied fails
+/// that question by design. Declaring asks only "is this a sensible thing to ask for?" — running
+/// the run-time check here made it impossible to declare a required parameter at all, because
+/// the declaration was tested against an empty set of values it was never meant to have.
+pub fn check(params: &[Parameter]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for param in params {
+        if !is_valid_param_name(&param.name) {
+            return Err(format!(
+                "parameter name '{}' must contain only lowercase letters, digits, and underscores",
+                param.name
+            ));
+        }
+        if !seen.insert(param.name.as_str()) {
+            return Err(format!("parameter '{}' is declared twice", param.name));
+        }
+        if let Some(allowed) = &param.values
+            && allowed.is_empty()
+        {
+            return Err(format!(
+                "parameter '{}' allows no values at all, so nothing could ever be given for it",
+                param.name
+            ));
+        }
+        // A default is a value, so it is held to what a value must be — otherwise a recipe can
+        // be declared today and refuse every run tomorrow for a reason nobody typed.
+        if let Some(default) = &param.default {
+            let mut just_the_default = Values::new();
+            just_the_default.insert(param.name.clone(), default.clone());
+            let only_this = [param.clone()];
+            bind(&only_this, &just_the_default)
+                .map_err(|why| format!("the default for '{}' is not allowed: {why}", param.name))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn bind(params: &[Parameter], given: &Values) -> Result<Values, String> {
     let mut bound = given.clone();
 
@@ -736,6 +776,69 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_required_parameter_can_be_declared() {
+        // The bug this exists to stop: declaring was checked by binding against no values, so a
+        // required parameter was refused at declaration and could never be created at all.
+        let required = vec![Parameter {
+            name: "search_term".into(),
+            description: "What to search for".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: None,
+        }];
+        assert_eq!(check(&required), Ok(()));
+        // And it is still required when a run supplies nothing.
+        assert!(bind(&required, &Values::new()).is_err());
+    }
+
+    #[test]
+    fn a_declaration_that_could_never_be_satisfied_is_refused() {
+        let twice = vec![
+            Parameter {
+                name: "q".into(),
+                description: String::new(),
+                required: false,
+                kind: ParameterKind::Text,
+                default: None,
+                values: None,
+            },
+            Parameter {
+                name: "q".into(),
+                description: String::new(),
+                required: false,
+                kind: ParameterKind::Text,
+                default: None,
+                values: None,
+            },
+        ];
+        assert_eq!(check(&twice), Err("parameter 'q' is declared twice".into()));
+
+        let empty_set = vec![Parameter {
+            name: "pick".into(),
+            description: String::new(),
+            required: false,
+            kind: ParameterKind::Text,
+            default: None,
+            values: Some(Vec::new()),
+        }];
+        assert!(check(&empty_set).is_err());
+
+        // A default that the parameter's own rules would reject is a recipe that refuses every
+        // run for a reason nobody typed.
+        let bad_default = vec![Parameter {
+            name: "count".into(),
+            description: String::new(),
+            required: false,
+            kind: ParameterKind::Number,
+            default: Some("lots".into()),
+            values: None,
+        }];
+        let why = check(&bad_default).unwrap_err();
+        assert!(why.contains("count"), "{why}");
     }
 
     #[test]
