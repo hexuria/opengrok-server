@@ -68,6 +68,50 @@ pub struct AgUiState {
 /// *request*, not an authorisation: the id names a coworker, and the box comes from that
 /// coworker's own row. A client naming a coworker it does not own is the next thing policy must
 /// check (slice 5); today the row simply has to exist.
+/// Tools the person named for THIS turn, e.g. by typing `@websearch` in the composer.
+///
+/// A preference, not a restriction: every tool the bot may run stays on offer, because narrowing
+/// the set would turn a hint into a cage and strand a turn that needed one more tool. What the
+/// name buys is that the model is told, in the system message, which tools the person reached
+/// for — the thing a person means when they type one.
+fn preferred_tools_from(input: &RunAgentInput) -> Vec<String> {
+    input
+        .forwarded_props
+        .get("preferTools")
+        .and_then(|value| value.as_array())
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|name| name.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The named tools that this bot can actually run, in the order they were named.
+///
+/// A name the bot was never offered is dropped rather than repeated: a system message that
+/// names a tool the model has not been given is an instruction it cannot follow, and the model
+/// spends the turn looking for it.
+fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<String> {
+    let Some(runner) = runner else {
+        return Vec::new();
+    };
+    let offered: Vec<String> = runner
+        .tool_schemas()
+        .into_iter()
+        .filter_map(|schema| Some(schema.get("function")?.get("name")?.as_str()?.to_string()))
+        .collect();
+    preferred
+        .iter()
+        .filter(|name| offered.iter().any(|offered| offered == *name))
+        .cloned()
+        .collect()
+}
+
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
     input
         .forwarded_props
@@ -506,6 +550,7 @@ pub fn router(state: AgUiState) -> Router {
             get(computer_status).post(ensure_computer),
         )
         .route("/coworkers/{coworker_id}/screen", get(computer_screen))
+        .route("/coworkers/{coworker_id}/tools", get(list_tools))
         .route(
             "/coworkers/{coworker_id}/computer/update",
             post(computer_update),
@@ -1290,6 +1335,58 @@ async fn computer_status(
 
 /// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile.
 /// Same shape as the `image` on a `TOOL_CALL_RESULT`, so the client decodes it the same way.
+/// `GET /coworkers/{id}/tools` — what this bot would be offered on a turn RIGHT NOW.
+///
+/// The set is assembled per turn from the coworker's grant, its computer and its plugins, and
+/// until now it was only ever built inside the run handler and thrown away. A client that wants
+/// to name a tool has to be able to see the names, and a name it cannot see is a name it would
+/// guess wrong — so this answers with exactly what the model is told, nothing invented.
+async fn list_tools(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    // No approvals are pending on a listing, so the two gates are empty; the patience is short
+    // because nobody is waiting on a turn — a sleeping box should not hold a menu open.
+    let Some(runner) = tools_for_coworker(
+        &state,
+        &account_id,
+        &coworker_id,
+        &[],
+        &[],
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    else {
+        return Json(serde_json::json!({ "tools": [] })).into_response();
+    };
+    let tools: Vec<serde_json::Value> = runner
+        .tool_schemas()
+        .into_iter()
+        .filter_map(|schema| {
+            let function = schema.get("function")?;
+            let name = function.get("name")?.as_str()?.to_string();
+            // A qualified name (`plugin.server.tool`) is a plugin's; a bare one is a built-in.
+            let kind = if name.contains('.') { "plugin" } else { "builtin" };
+            Some(serde_json::json!({
+                "name": name,
+                "description": function.get("description").and_then(serde_json::Value::as_str).unwrap_or(""),
+                "kind": kind,
+            }))
+        })
+        .collect();
+    Json(serde_json::json!({ "tools": tools })).into_response()
+}
+
 async fn computer_screen(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -1778,15 +1875,21 @@ pub async fn run(
             };
             let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
             let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
+            // What the person named this turn, kept to what this bot can actually run.
+            let preferred = honour_preferences(&preferred_tools_from(&input), tools.as_ref());
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
-                Some(&crate::persona::computer_system_prompt(
-                    has_computer,
-                    has_screen,
-                    has_recipes,
-                    reaches_user_machine,
-                    user_machine_label.as_deref(),
+                Some(&format!(
+                    "{}{}",
+                    crate::persona::computer_system_prompt(
+                        has_computer,
+                        has_screen,
+                        has_recipes,
+                        reaches_user_machine,
+                        user_machine_label.as_deref(),
+                    ),
+                    crate::persona::preferred_tools_line(&preferred),
                 )),
             );
             if text.is_empty() { None } else { Some(text) }
@@ -2600,6 +2703,32 @@ mod tests {
             forwarded_props: json!(null),
             extra: Default::default(),
         }
+    }
+
+    #[test]
+    fn named_tools_are_read_off_the_request_and_kept_to_what_is_offered() {
+        let mut bare = input(Vec::new());
+        assert!(
+            preferred_tools_from(&bare).is_empty(),
+            "no props, nothing named"
+        );
+
+        bare.forwarded_props = json!({ "coworkerId": "cw_1" });
+        assert!(preferred_tools_from(&bare).is_empty(), "no preferTools key");
+
+        bare.forwarded_props = json!({ "preferTools": ["open_url", "  ", "", "computer"] });
+        assert_eq!(
+            preferred_tools_from(&bare),
+            vec!["open_url".to_string(), "computer".to_string()],
+            "blank names are not names"
+        );
+
+        // Nothing is offered without a runner, so nothing is named to the model — a system
+        // message naming a tool the model was not given is an instruction it cannot follow.
+        assert!(
+            honour_preferences(&["open_url".to_string()], None).is_empty(),
+            "no tools this turn means no preference to state"
+        );
     }
 
     fn message(role: &str, content: Option<&str>) -> Message {
