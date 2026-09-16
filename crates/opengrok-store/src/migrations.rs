@@ -802,6 +802,44 @@ create table if not exists recipe_run (
 );
 create index if not exists recipe_run_recipe_idx on recipe_run (recipe_id, at_ms);
 
+-- Bytes a run or a person produced: a screenshot off a bot's screen, a screen recording of a
+-- recipe playing, an image someone attached to a message.
+--
+-- Stored PLAINLY, unlike `secret_store`. The vault exists for credentials — things that open
+-- other systems — and pays a decrypt on every read to keep them out of a database dump. A
+-- screenshot is not that: the conversation it belongs to is already plaintext jsonb two tables
+-- up in `events`, so encrypting the picture while the words beside it are in the clear buys
+-- nothing against the same compromise and costs a decrypt every time a page of thumbnails is
+-- drawn. If message payloads are ever sealed, these should be sealed in the same change.
+--
+-- No foreign keys, like every other table here: this schema is append-mostly and a row that
+-- outlives its parent is readable history rather than an error.
+create table if not exists artifact (
+    id            text   primary key,
+    -- Whose bytes these are. Every read checks it; nothing is served across accounts.
+    account_id    text   not null,
+    -- `screenshot` | `recording` | `attachment`.
+    kind          text   not null,
+    mime          text   not null,
+    -- What to call it when someone saves it.
+    filename      text   not null,
+    size_bytes    bigint not null,
+    bytes         bytea  not null,
+    -- Where it came from. A recipe run fills the first three; a message fills the thread.
+    recipe_id     text,
+    run_id        text,
+    step_index    int,
+    thread_id     text,
+    -- Width, height, duration: what a viewer needs before it has the bytes.
+    meta          jsonb  not null default '{}'::jsonb,
+    created_at_ms bigint not null,
+    deleted_at_ms bigint
+);
+create index if not exists artifact_run_idx
+    on artifact (recipe_id, run_id, step_index) where deleted_at_ms is null;
+create index if not exists artifact_thread_idx
+    on artifact (account_id, thread_id) where deleted_at_ms is null;
+
 -- Data follows schema: everything above has created its tables by here.
 -- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
 -- EXACTLY the previous built-in set was "everything this server implements" when it was written,

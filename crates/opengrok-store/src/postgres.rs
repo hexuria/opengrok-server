@@ -2765,3 +2765,195 @@ impl PgStore {
             .collect()
     }
 }
+
+/// An artifact (screenshot, recording, or file attachment) as a listing shows it.
+/// Does not carry the bytes themselves — a listing must never carry megabytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRow {
+    pub id: String,
+    pub account_id: String,
+    pub kind: String,
+    pub mime: String,
+    pub filename: String,
+    pub size_bytes: i64,
+    pub recipe_id: Option<String>,
+    pub run_id: Option<String>,
+    pub step_index: Option<i32>,
+    pub thread_id: Option<String>,
+    pub meta: serde_json::Value,
+    pub created_at_ms: i64,
+    pub deleted_at_ms: Option<i64>,
+}
+
+/// Decode one artifact row from the database, excluding bytes.
+fn artifact_row(row: &sqlx::postgres::PgRow) -> StoreResult<ArtifactRow> {
+    Ok(ArtifactRow {
+        id: row.try_get("id")?,
+        account_id: row.try_get("account_id")?,
+        kind: row.try_get("kind")?,
+        mime: row.try_get("mime")?,
+        filename: row.try_get("filename")?,
+        size_bytes: row.try_get("size_bytes")?,
+        recipe_id: row.try_get("recipe_id")?,
+        run_id: row.try_get("run_id")?,
+        step_index: row.try_get("step_index")?,
+        thread_id: row.try_get("thread_id")?,
+        meta: row.try_get("meta")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+        deleted_at_ms: row.try_get("deleted_at_ms")?,
+    })
+}
+
+/// Artifacts: images, recordings, and files.
+impl PgStore {
+    /// Store an artifact's row and bytes together.
+    ///
+    /// Refuses an empty slice. Writes size_bytes from the actual byte length rather than trusting
+    /// the caller.
+    pub async fn put_artifact(&self, row: &ArtifactRow, bytes: &[u8]) -> StoreResult<()> {
+        if bytes.is_empty() {
+            return Err(StoreError::Database(
+                "artifact bytes cannot be empty".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            "insert into artifact
+               (id, account_id, kind, mime, filename, size_bytes, bytes, recipe_id, run_id,
+                step_index, thread_id, meta, created_at_ms, deleted_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             on conflict (id) do update set
+               account_id = excluded.account_id,
+               kind = excluded.kind,
+               mime = excluded.mime,
+               filename = excluded.filename,
+               size_bytes = excluded.size_bytes,
+               bytes = excluded.bytes,
+               recipe_id = excluded.recipe_id,
+               run_id = excluded.run_id,
+               step_index = excluded.step_index,
+               thread_id = excluded.thread_id,
+               meta = excluded.meta,
+               deleted_at_ms = excluded.deleted_at_ms",
+        )
+        .bind(&row.id)
+        .bind(&row.account_id)
+        .bind(&row.kind)
+        .bind(&row.mime)
+        .bind(&row.filename)
+        .bind(bytes.len() as i64)
+        .bind(bytes)
+        .bind(&row.recipe_id)
+        .bind(&row.run_id)
+        .bind(row.step_index)
+        .bind(&row.thread_id)
+        .bind(&row.meta)
+        .bind(row.created_at_ms)
+        .bind(row.deleted_at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// One artifact by id, without bytes. Ignores rows whose deleted_at_ms is set.
+    pub async fn artifact(&self, id: &str) -> StoreResult<Option<ArtifactRow>> {
+        let row = sqlx::query(
+            "select id, account_id, kind, mime, filename, size_bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact where id = $1 and deleted_at_ms is null",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(artifact_row).transpose()
+    }
+
+    /// One artifact by id, with bytes. Ignores rows whose deleted_at_ms is set.
+    /// This is the ONLY read that selects the bytes column so a megabyte never rides along
+    /// on a listing.
+    pub async fn artifact_bytes(&self, id: &str) -> StoreResult<Option<(ArtifactRow, Vec<u8>)>> {
+        let row = sqlx::query(
+            "select id, account_id, kind, mime, filename, size_bytes, bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact where id = $1 and deleted_at_ms is null",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let bytes: Vec<u8> = row.try_get("bytes")?;
+            // Decode the row without the bytes column.
+            let artifact = ArtifactRow {
+                id: row.try_get("id")?,
+                account_id: row.try_get("account_id")?,
+                kind: row.try_get("kind")?,
+                mime: row.try_get("mime")?,
+                filename: row.try_get("filename")?,
+                size_bytes: row.try_get("size_bytes")?,
+                recipe_id: row.try_get("recipe_id")?,
+                run_id: row.try_get("run_id")?,
+                step_index: row.try_get("step_index")?,
+                thread_id: row.try_get("thread_id")?,
+                meta: row.try_get("meta")?,
+                created_at_ms: row.try_get("created_at_ms")?,
+                deleted_at_ms: row.try_get("deleted_at_ms")?,
+            };
+            Ok((artifact, bytes))
+        })
+        .transpose()
+    }
+
+    /// Every artifact produced by a recipe run, ordered by step then creation time.
+    /// Ignores rows whose deleted_at_ms is set.
+    pub async fn artifacts_for_run(
+        &self,
+        recipe_id: &str,
+        run_id: &str,
+    ) -> StoreResult<Vec<ArtifactRow>> {
+        let rows = sqlx::query(
+            "select id, account_id, kind, mime, filename, size_bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact
+              where recipe_id = $1 and run_id = $2 and deleted_at_ms is null
+              order by step_index, created_at_ms",
+        )
+        .bind(recipe_id)
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(artifact_row).collect()
+    }
+
+    /// Every artifact attached to a thread, without bytes. Ignores rows whose deleted_at_ms is set.
+    pub async fn artifacts_for_thread(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+    ) -> StoreResult<Vec<ArtifactRow>> {
+        let rows = sqlx::query(
+            "select id, account_id, kind, mime, filename, size_bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact
+              where account_id = $1 and thread_id = $2 and deleted_at_ms is null",
+        )
+        .bind(account_id)
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(artifact_row).collect()
+    }
+
+    /// Soft-delete an artifact by setting deleted_at_ms. Idempotent.
+    pub async fn soft_delete_artifact(&self, id: &str, at_ms: i64) -> StoreResult<()> {
+        sqlx::query("update artifact set deleted_at_ms = $2 where id = $1")
+            .bind(id)
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}

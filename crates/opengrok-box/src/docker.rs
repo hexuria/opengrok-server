@@ -351,6 +351,29 @@ impl Computer for DockerComputer {
         self.docker(&["exec", box_id, "cat", path]).await
     }
 
+    async fn read_file_bytes(&self, box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+        let output = Command::new("docker")
+            .args(["exec", box_id, "cat", path])
+            .output()
+            .await
+            .map_err(|error| BoxError::Unreachable(format!("could not run docker: {error}")))?;
+
+        if output.status.success() {
+            return Ok(output.stdout);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Mirror the docker helper's error handling for consistency.
+        let lowered = stderr.to_lowercase();
+        if lowered.contains("no such container") || lowered.contains("no such object") {
+            return Err(BoxError::NoSuchBox);
+        }
+        Err(BoxError::Refused {
+            status: output.status.code().unwrap_or(-1).unsigned_abs() as u16,
+            body: stderr.chars().take(500).collect(),
+        })
+    }
+
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()> {
         // Written through stdin rather than interpolated into a shell string: content with a quote
         // in it would otherwise become part of the command.

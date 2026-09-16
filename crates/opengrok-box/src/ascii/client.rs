@@ -219,6 +219,49 @@ impl Client {
         .await
     }
 
+    /// `GET /boxes/{id}/files?path=` without encoding, returning raw bytes.
+    pub async fn read_file_bytes(&self, box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+        let response = self
+            .get(&format!("/boxes/{box_id}/files"))
+            .query(&[("path", path)])
+            .send()
+            .await
+            .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(BoxError::NoSuchBox);
+        }
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|error| BoxError::Unreachable(error.to_string()))?;
+            let detail = serde_json::from_str::<ErrorEnvelope>(&body)
+                .ok()
+                .filter(|e| !e.code.is_empty() || !e.message.is_empty())
+                .map(|e| {
+                    if e.message.is_empty() {
+                        e.code
+                    } else if e.code.is_empty() {
+                        e.message
+                    } else {
+                        format!("{}: {}", e.code, e.message)
+                    }
+                })
+                .unwrap_or_else(|| body.chars().take(500).collect());
+            return Err(BoxError::Refused {
+                status: status.as_u16(),
+                body: detail,
+            });
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|error| BoxError::Unreachable(error.to_string()))
+    }
+
     /// `PUT /boxes/{id}/files`.
     pub async fn write_file(
         &self,

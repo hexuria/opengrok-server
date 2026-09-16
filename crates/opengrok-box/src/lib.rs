@@ -218,6 +218,15 @@ pub trait Computer: Send + Sync {
     async fn watch(&self, box_id: &str, process_id: &str) -> BoxResult<StartedCommand>;
 
     async fn read_file(&self, box_id: &str, path: &str) -> BoxResult<String>;
+
+    /// Read a file's bytes without UTF-8 conversion. Binary files like screenshots or recordings
+    /// must use this instead of `read_file`, which would silently corrupt them with lossy UTF-8
+    /// decoding. The trait provides this seam because `read_file` returns a String and would hide
+    /// the corruption from callers that never see the mangling happen.
+    async fn read_file_bytes(&self, _box_id: &str, _path: &str) -> BoxResult<Vec<u8>> {
+        Err(not_supported("read binary files"))
+    }
+
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()>;
 
     /// Publish a port and get a URL a person can open.

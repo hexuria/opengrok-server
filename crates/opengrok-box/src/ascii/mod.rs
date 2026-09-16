@@ -162,6 +162,10 @@ impl Computer for AsciiBoxes {
         Ok(self.client.read_file(box_id, path).await?.content)
     }
 
+    async fn read_file_bytes(&self, box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+        self.client.read_file_bytes(box_id, path).await
+    }
+
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()> {
         let _ = self.client.write_file(box_id, path, content).await?;
         Ok(())
