@@ -489,6 +489,10 @@ pub fn router(state: AgUiState) -> Router {
             axum::routing::delete(revoke_bot_key),
         )
         .route("/coworkers/{coworker_id}/mcp-calls", get(list_mcp_calls))
+        .route(
+            "/coworkers/{coworker_id}/computer",
+            get(computer_status).post(ensure_computer),
+        )
         .with_state(state)
 }
 
@@ -1243,6 +1247,74 @@ async fn owned_coworker(
             Err((StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response())
         }
     }
+}
+
+/// `GET /coworkers/{id}/computer` — live box state and noVNC URL for NativeChat's Open button.
+async fn computer_status(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
+}
+
+/// `POST /coworkers/{id}/computer` — ensure the box is running, then return the same status.
+async fn ensure_computer(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    let Ok((mut coworker, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    };
+    let at_ms = now_ms();
+    let provisioned =
+        provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
+            .await;
+    if !provisioned.events.is_empty() {
+        for event in &provisioned.events {
+            coworker.apply(event);
+        }
+        let view = CoworkerView {
+            id: coworker_id.clone(),
+            name: coworker.name.clone(),
+            model: coworker.model.clone(),
+            box_id: coworker.computer().cloned(),
+            retired: coworker.retired,
+            members: coworker.members.clone(),
+            updated_at_ms: at_ms,
+            role: coworker.role.clone(),
+            visibility: coworker.visibility,
+        };
+        if let Err(error) = state
+            .auth
+            .store
+            .append_coworker(&coworker_id, &account_id, seq, &provisioned.events, &view)
+            .await
+        {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+    provision::wake_coworker_computer(&state, &account_id, &coworker_id).await;
+    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
 /// `GET /coworkers/{id}/spend` — the coworker's three meters and the limits it is under.
