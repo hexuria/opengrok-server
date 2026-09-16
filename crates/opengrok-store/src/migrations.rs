@@ -104,6 +104,19 @@ alter table scoped_computer add column if not exists stopped boolean not null de
 -- or resume it. Null for a Local VM (needs no key).
 alter table scoped_computer add column if not exists org_id text;
 
+-- An update of a scope's box in flight (or the failure it ended in): the phase the pane shows.
+-- One row per scope; cleared when the new box is up, kept as 'failed' with the reason until the
+-- next attempt.
+create table if not exists box_update (
+    scope         text   not null,
+    scope_id      text   not null,
+    phase         text   not null,
+    started_at_ms bigint not null,
+    updated_at_ms bigint not null,
+    error         text,
+    primary key (scope, scope_id)
+);
+
 -- How an org shares computers, and per-account overrides. scope 'org' with the org id is the org
 -- default; scope 'account' with an account id overrides it for that member. mode is
 -- 'per-org' | 'per-account' | 'per-bot'. Absent ⇒ the built-in default (per-account).

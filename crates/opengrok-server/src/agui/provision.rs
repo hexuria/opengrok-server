@@ -767,6 +767,7 @@ pub async fn coworker_screen(
         // The scope's live box, not the id frozen on the coworker's row: after an update or a
         // heal they differ, and the live one is the one a person is looking at.
         "boxId": box_id,
+        "update": update_status(state, scope, &scope_id).await,
         "image": image.map(|image| json!({
             "running": image.running,
             "latest": image.latest,
@@ -825,6 +826,231 @@ pub async fn coworker_screenshot(
             }
             other => (StatusCode::SERVICE_UNAVAILABLE, other.to_string()),
         })
+}
+
+/// How long an update waits for the new box to come up and show a screen.
+const UPDATE_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+const UPDATE_SCREEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An update older than this with no progress is a crashed one; a new attempt may replace it.
+const UPDATE_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
+
+/// The phases an update passes through, as the pane shows them. `failed` keeps its reason.
+pub const UPDATE_PULLING: &str = "pulling";
+pub const UPDATE_TRANSFERRING: &str = "transferring";
+pub const UPDATE_STARTING: &str = "starting";
+pub const UPDATE_FAILED: &str = "failed";
+
+/// Poll until the box's screen is reachable or patience runs out; the caller reports either way.
+pub async fn wait_for_screen(provider: &dyn Computer, box_id: &str, patience: std::time::Duration) {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(Some(_)) = provider.screen_url(box_id).await {
+            return;
+        }
+        if started.elapsed() >= patience {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// The update record as the client sees it, or `Null` when nothing is in flight.
+pub async fn update_status(state: &AgUiState, scope: &str, scope_id: &str) -> Value {
+    match state.auth.store.box_update(scope, scope_id).await {
+        Ok(Some((phase, started_at_ms, updated_at_ms, error))) => json!({
+            "phase": phase,
+            "startedAtMs": started_at_ms,
+            "updatedAtMs": updated_at_ms,
+            "error": error,
+        }),
+        _ => Value::Null,
+    }
+}
+
+/// Rebuild a scope's box on the provider's newest image, keeping its data: pull, recreate on the
+/// same volumes, record the new id, wait for it to come up. Every step writes its phase so the
+/// pane can say what is happening; a failure is recorded with its reason and the old box — still
+/// there, stopped at worst — stays the scope's computer.
+pub async fn update_scope_box(
+    state: AgUiState,
+    org_id: Option<String>,
+    scope: &'static str,
+    scope_id: String,
+) {
+    let store = state.auth.store.clone();
+    let fail = |why: String| {
+        let store = store.clone();
+        let scope_id = scope_id.clone();
+        async move {
+            tracing::warn!(scope, scope_id = %scope_id, why, "computer: update failed");
+            let _ = store
+                .set_box_update_phase(
+                    scope,
+                    &scope_id,
+                    UPDATE_FAILED,
+                    Some(&why),
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await;
+        }
+    };
+    let Ok(Some((old_box_id, kind, _stopped))) = store.scoped_computer_full(scope, &scope_id).await
+    else {
+        return fail("this scope has no computer to update".into()).await;
+    };
+    let Some(provider) = provider_for(&state, org_id.as_deref(), &kind).await else {
+        return fail("the computer's provider is not available".into()).await;
+    };
+
+    if let Err(error) = provider.pull_latest().await {
+        return fail(format!("could not fetch the newest image: {error}")).await;
+    }
+
+    let _ = store
+        .set_box_update_phase(
+            scope,
+            &scope_id,
+            UPDATE_TRANSFERRING,
+            None,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await;
+    let new_box_id = match provider.recreate(&old_box_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            // The old box was stopped for the copy; bring it back so the person is not left
+            // with nothing.
+            let _ = provider.resume(&old_box_id).await;
+            return fail(format!("could not rebuild the computer: {error}")).await;
+        }
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    if let Err(error) = store
+        .set_scoped_computer(
+            scope,
+            &scope_id,
+            &new_box_id,
+            &kind,
+            org_id.as_deref(),
+            at_ms,
+        )
+        .await
+    {
+        return fail(format!("the new computer could not be recorded: {error}")).await;
+    }
+    tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
+
+    let _ = store
+        .set_box_update_phase(scope, &scope_id, UPDATE_STARTING, None, at_ms)
+        .await;
+    match provider.wake(&new_box_id, UPDATE_WAKE_PATIENCE).await {
+        Ok(reached) if reached == "running" => {
+            wait_for_screen(provider.as_ref(), &new_box_id, UPDATE_SCREEN_PATIENCE).await;
+        }
+        Ok(reached) => {
+            return fail(format!("the new computer is {reached}, not running")).await;
+        }
+        Err(error) => return fail(format!("the new computer did not start: {error}")).await,
+    }
+    let _ = store.clear_box_update(scope, &scope_id).await;
+}
+
+/// Start an update of a coworker's computer in the background and answer at once; the status
+/// route carries the phases. Refuses while one is already running.
+pub async fn begin_update_for_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let (_mode, org_id, scope, scope_id, _) =
+        scope_of(state, account_id, coworker_id.as_str()).await;
+    let store = &state.auth.store;
+    if !matches!(store.scoped_computer(scope, &scope_id).await, Ok(Some(_))) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "this coworker has no computer to update".into(),
+        ));
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Ok(Some((phase, _started, updated_at_ms, _))) = store.box_update(scope, &scope_id).await
+        && phase != UPDATE_FAILED
+        && now - updated_at_ms < UPDATE_STALE_AFTER_MS
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "this computer is already being updated".into(),
+        ));
+    }
+    if let Err(error) = store
+        .begin_box_update(scope, &scope_id, UPDATE_PULLING, now)
+        .await
+    {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
+    }
+    tokio::spawn(update_scope_box(state.clone(), org_id, scope, scope_id));
+    Ok(())
+}
+
+/// Destroy a coworker's computer, data and all, and provision a fresh one in its place.
+pub async fn reset_for_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (String, String)> {
+    let (_mode, org_id, scope, scope_id, _) =
+        scope_of(state, account_id, coworker_id.as_str()).await;
+    let store = &state.auth.store;
+    if let Ok(Some((box_id, kind, _))) = store.scoped_computer_full(scope, &scope_id).await
+        && let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await
+    {
+        let _ = provider.destroy(&box_id).await;
+    }
+    let _ = store.clear_scoped_computer(scope, &scope_id).await;
+    let _ = store.clear_box_update(scope, &scope_id).await;
+    reprovision_coworker(state, account_id, coworker_id).await
+}
+
+/// Provision (or re-provision) a coworker's box and PERSIST the assignment to its aggregate, so
+/// a fresh coworker row points at a box even though the run path binds the scope's live one.
+pub async fn reprovision_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (String, String)> {
+    use opengrok_core::coworker::CoworkerView;
+
+    let Ok((mut coworker, seq)) = state.auth.store.load_coworker(coworker_id).await else {
+        return Err(("unknown".into(), "could not load the coworker".into()));
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let provisioned =
+        ensure_computer_for(state, account_id, coworker_id, &mut coworker, at_ms).await;
+    if let Some(error) = provisioned.error {
+        return Err(error);
+    }
+    if provisioned.events.is_empty() {
+        return Ok(());
+    }
+    let view = CoworkerView {
+        id: coworker_id.clone(),
+        name: coworker.name.clone(),
+        model: coworker.model.clone(),
+        box_id: coworker.computer().cloned(),
+        retired: false,
+        // Carried, not blanked: a group reprovisioned after hire keeps its members.
+        members: coworker.members.clone(),
+        updated_at_ms: at_ms,
+        role: coworker.role.clone(),
+        visibility: coworker.visibility,
+    };
+    let _ = state
+        .auth
+        .store
+        .append_coworker(coworker_id, account_id, seq, &provisioned.events, &view)
+        .await;
+    Ok(())
 }
 
 /// Wake a stopped scope box so Open can show its screen. Best-effort: a missing mapping is

@@ -1113,7 +1113,13 @@ async fn command(
             )
         }
         "updateForeverBox" => {
-            let (code, body) = super::conversation::box_status(&state, &args, &caller).await;
+            let (code, body) = super::conversation::box_control(
+                &state,
+                &args,
+                &caller,
+                super::conversation::BoxAction::Update,
+            )
+            .await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,

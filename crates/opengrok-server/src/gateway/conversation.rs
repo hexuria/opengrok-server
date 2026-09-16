@@ -422,6 +422,9 @@ pub enum BoxAction {
     HandBack,
     /// `resetForeverBox` — destroy the box and provision a fresh one in its place.
     Reset,
+    /// `updateForeverBox` — rebuild the box on the provider's newest image, keeping its data.
+    /// Answers at once; the status carries the phases.
+    Update,
 }
 
 /// The box-control verbs, for real — no stub that lies "running". ensure/handBack/reset ACT on the
@@ -537,6 +540,13 @@ pub async fn box_control(
                 }
             }
         },
+        BoxAction::Update => {
+            if let Err((_status, message)) =
+                provision::begin_update_for_coworker(&state.agui, &account.id, &coworker_id).await
+            {
+                return (200, error_status("update_refused".into(), message));
+            }
+        }
         BoxAction::Reset => {
             if let Some((box_id, kind, _)) = &existing
                 && let Some(provider) =
@@ -580,16 +590,7 @@ async fn wait_for_screen(
     box_id: &str,
     patience: std::time::Duration,
 ) {
-    let started = std::time::Instant::now();
-    loop {
-        if let Ok(Some(_)) = provider.screen_url(box_id).await {
-            return;
-        }
-        if started.elapsed() >= patience {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
+    crate::agui::provision::wait_for_screen(provider, box_id, patience).await
 }
 
 /// Provision (or re-provision) a coworker's box and PERSIST the re-assignment to its aggregate, so
@@ -600,42 +601,7 @@ pub(crate) async fn reprovision(
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
 ) -> Result<(), (String, String)> {
-    use opengrok_core::coworker::CoworkerView;
-
-    let Ok((mut coworker, seq)) = state.agui.auth.store.load_coworker(coworker_id).await else {
-        return Err(("unknown".into(), "could not load the coworker".into()));
-    };
-    let at_ms = now_ms();
-    let provisioned = crate::agui::provision::ensure_computer_for(
-        &state.agui,
-        account_id,
-        coworker_id,
-        &mut coworker,
-        at_ms,
-    )
-    .await;
-    if let Some(error) = provisioned.error {
-        return Err(error);
-    }
-    let view = CoworkerView {
-        id: coworker_id.clone(),
-        name: coworker.name.clone(),
-        model: coworker.model.clone(),
-        box_id: coworker.computer().cloned(),
-        retired: false,
-        // Carried, not blanked: a group reprovisioned after hire keeps its members.
-        members: coworker.members.clone(),
-        updated_at_ms: at_ms,
-        role: coworker.role.clone(),
-        visibility: coworker.visibility,
-    };
-    let _ = state
-        .agui
-        .auth
-        .store
-        .append_coworker(coworker_id, account_id, seq, &provisioned.events, &view)
-        .await;
-    Ok(())
+    crate::agui::provision::reprovision_coworker(&state.agui, account_id, coworker_id).await
 }
 
 /// How much of a quoted message the model is shown; a reply to a long answer names the answer,

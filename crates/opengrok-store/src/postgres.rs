@@ -1749,6 +1749,110 @@ impl PgStore {
     }
 
     /// A scoped computer with its idle state — (box_id, kind, stopped).
+    /// Every recorded box of one provider kind, for an admin's "update all" and its counts.
+    pub async fn scoped_computers_of_kind(
+        &self,
+        kind: &str,
+    ) -> StoreResult<Vec<(String, String, String, Option<String>)>> {
+        let rows = sqlx::query(
+            "select scope, scope_id, box_id, org_id from scoped_computer where kind = $1",
+        )
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("scope")?,
+                    row.try_get::<String, _>("scope_id")?,
+                    row.try_get::<String, _>("box_id")?,
+                    row.try_get::<Option<String>, _>("org_id")?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Start (or restart) the update record for a scope: phase set, clock reset, error cleared.
+    pub async fn begin_box_update(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        phase: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into box_update (scope, scope_id, phase, started_at_ms, updated_at_ms, error)
+             values ($1, $2, $3, $4, $4, null)
+             on conflict (scope, scope_id) do update set
+               phase = excluded.phase, started_at_ms = excluded.started_at_ms,
+               updated_at_ms = excluded.updated_at_ms, error = null",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(phase)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Move an update along, or end it in failure with the reason.
+    pub async fn set_box_update_phase(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        phase: &str,
+        error: Option<&str>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update box_update set phase = $3, error = $4, updated_at_ms = $5
+             where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(phase)
+        .bind(error)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `(phase, started_at_ms, updated_at_ms, error)` for a scope's update, if one is recorded.
+    pub async fn box_update(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, i64, i64, Option<String>)>> {
+        let row = sqlx::query(
+            "select phase, started_at_ms, updated_at_ms, error from box_update
+             where scope = $1 and scope_id = $2",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("phase")?,
+                row.try_get::<i64, _>("started_at_ms")?,
+                row.try_get::<i64, _>("updated_at_ms")?,
+                row.try_get::<Option<String>, _>("error")?,
+            ))
+        })
+        .transpose()
+    }
+
+    pub async fn clear_box_update(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from box_update where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn scoped_computer_full(
         &self,
         scope: &str,
