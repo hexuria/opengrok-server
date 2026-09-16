@@ -112,6 +112,7 @@ impl Persona {
 #[must_use]
 pub fn computer_system_prompt(
     has_computer: bool,
+    has_screen: bool,
     reaches_user_machine: bool,
     user_machine_label: Option<&str>,
 ) -> String {
@@ -127,6 +128,19 @@ pub fn computer_system_prompt(
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
          Never describe work done on your box as done on the user's computer."
             .to_string();
+        if has_screen {
+            // Says exactly what `open_url` and `computer` are offered as — the prompt and the
+            // offering must agree, or the model is told about a screen it cannot reach.
+            prompt.push_str(
+                " Your box ALSO has a SCREEN: a 1280x800 desktop with a dock (Terminal, Chromium, \
+                 Files). `open_url` opens a web page in your own browser there. `computer` looks at \
+                 the screen (action=screenshot, which returns an image) or acts on it at pixel \
+                 coordinates (click, right_click, double_click, move, drag, type, key, scroll) and \
+                 returns a fresh screenshot. Take a screenshot before you act, do one step at a \
+                 time, and read each screenshot before the next step. The user can watch your \
+                 screen, so say what you see and what you are doing.",
+            );
+        }
         if reaches_user_machine {
             // The enrolled label (e.g. "Uriah's-MacBook-Pro.local") is the one name for the
             // user's machine that stays TRUE whatever it runs — the daemon reported it at
@@ -348,7 +362,7 @@ mod tests {
 
     #[test]
     fn the_computer_prompt_tracks_whether_the_tools_exist() {
-        let box_only = computer_system_prompt(true, false, None);
+        let box_only = computer_system_prompt(true, false, false, None);
         assert!(
             box_only.contains("You have your OWN computer"),
             "{box_only}"
@@ -362,7 +376,7 @@ mod tests {
             "must not name a tool that is not offered: {box_only}"
         );
 
-        let with_user = computer_system_prompt(true, true, Some("office.local"));
+        let with_user = computer_system_prompt(true, false, true, Some("office.local"));
         assert!(
             with_user.contains("`user_machine_shell`"),
             "the offered tool must be named: {with_user}"
@@ -372,7 +386,7 @@ mod tests {
             "the enrolled label is the true name: {with_user}"
         );
 
-        let none = computer_system_prompt(false, true, Some("ignored"));
+        let none = computer_system_prompt(false, false, true, Some("ignored"));
         assert!(
             none.contains("You do NOT currently have a computer"),
             "{none}"

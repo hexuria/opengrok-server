@@ -182,9 +182,13 @@ pub(crate) async fn tools_for_coworker(
         coworker_id.clone(),
         &coworker,
     );
+    // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
+    // never told about them, so it cannot be sent down a dead end.
+    let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_screen(screen)
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned());
@@ -1672,11 +1676,13 @@ pub async fn run(
             } else {
                 None
             };
+            let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&crate::persona::computer_system_prompt(
                     has_computer,
+                    has_screen,
                     reaches_user_machine,
                     user_machine_label.as_deref(),
                 )),
@@ -2152,6 +2158,7 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
             // content would fail the whole resumed turn over nothing.
             "TEXT_MESSAGE_END" if !assistant.is_empty() => {
                 messages.push(ChatMessage {
+                    images: Vec::new(),
                     role: "assistant".to_string(),
                     content: std::mem::take(&mut assistant),
                 });
@@ -2159,6 +2166,7 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
             "TOOL_CALL_RESULT" => {
                 if let Some(content) = payload.get("content").and_then(|value| value.as_str()) {
                     messages.push(ChatMessage {
+                        images: Vec::new(),
                         role: "user".to_string(),
                         content: format!("[tool result] {content}"),
                     });
@@ -2329,6 +2337,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
         .filter_map(|message| match message.role.as_str() {
             "user" | "assistant" | "system" => {
                 message.content.as_ref().map(|content| ChatMessage {
+                    images: Vec::new(),
                     role: message.role.clone(),
                     content: content.clone(),
                 })
@@ -2344,6 +2353,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(message.id.as_str());
                 Some(ChatMessage {
+                    images: Vec::new(),
                     role: "user".to_string(),
                     content: format!("[tool {call_id} result] {content}"),
                 })
