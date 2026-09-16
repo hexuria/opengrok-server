@@ -7,6 +7,7 @@ use axum::Router;
 
 pub mod account_api;
 pub mod agui;
+pub mod artifacts;
 pub mod auth;
 pub mod auto_review;
 pub mod autonomy;
@@ -47,6 +48,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
+        .merge(artifacts::router(state.clone()))
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))

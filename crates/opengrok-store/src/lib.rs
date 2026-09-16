@@ -40,8 +40,8 @@ pub use gateway::{
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
-    CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow, RecipeRunRow, RecipeShareRow,
-    RecipeVersionRow, RosterOwner, ThreadRun,
+    ArtifactRow, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow, RecipeRunRow,
+    RecipeShareRow, RecipeVersionRow, RosterOwner, ThreadRun,
 };
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
