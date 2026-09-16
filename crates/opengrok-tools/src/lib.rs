@@ -234,6 +234,79 @@ pub struct WriteFileArgs {
 }
 
 /// The arguments `open_url` accepts.
+/// A recipe a bot may run: what the tool lists, by id and in words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipeOffer {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// What a recipe run leaves behind: the box's receipt, read for the parts a result needs.
+#[derive(Debug, Clone)]
+pub struct RecipeReceipt {
+    pub ok: bool,
+    pub ran: usize,
+    pub stopped_at: Option<usize>,
+    pub error: Option<String>,
+    pub image: Option<ToolImage>,
+    pub raw: Value,
+}
+
+impl RecipeReceipt {
+    pub fn from_value(raw: Value) -> Self {
+        let ok = raw.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let ran = raw.get("ran").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let stopped_at = raw
+            .get("stopped_at")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+        let error = raw
+            .get("steps")
+            .and_then(Value::as_array)
+            .and_then(|steps| steps.iter().find_map(|step| step.get("error")?.as_str()))
+            .map(str::to_string);
+        let image = raw.get("screenshot").and_then(|shot| {
+            Some(ToolImage {
+                mime: shot.get("mime")?.as_str()?.to_string(),
+                base64: shot.get("png_base64")?.as_str()?.to_string(),
+                width: shot.get("width")?.as_u64()? as u32,
+                height: shot.get("height")?.as_u64()? as u32,
+            })
+        });
+        Self {
+            ok,
+            ran,
+            stopped_at,
+            error,
+            image,
+            raw,
+        }
+    }
+}
+
+/// Where the executor gets a recipe's steps from, and tells what a run did — the server
+/// implements it over the store, so this crate stays free of Postgres.
+#[async_trait::async_trait]
+pub trait RecipeSource: Send + Sync {
+    /// The runnable version of a recipe: `(version, the box's request body)`.
+    async fn recipe_request(&self, recipe_id: &str) -> Result<(i32, Value), String>;
+    /// Write the run down.
+    async fn record_run(
+        &self,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &CoworkerId,
+        receipt: &RecipeReceipt,
+    );
+}
+
+/// The arguments `run_recipe` accepts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunRecipeArgs {
+    pub recipe: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenUrlArgs {
     pub url: String,
@@ -357,10 +430,15 @@ pub struct Executor {
     /// The name of the group whose shared computer this turn may use, when there is one; it
     /// puts `machine` on the box tools' schemas.
     group_box_name: Option<String>,
+    /// The taught recipes this bot may run; `run_recipe` is offered only when there are any.
+    recipes: Vec<RecipeOffer>,
+    recipe_source: Option<Arc<dyn RecipeSource>>,
 }
 
 /// The built-ins that need a display.
 const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
+/// The recipe tool's name; offered next to the screen tools, gated the same way.
+pub const RUN_RECIPE: &str = "run_recipe";
 
 /// The auto-review pair a run carries.
 struct AutoReview {
@@ -412,6 +490,8 @@ impl Executor {
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
             group_box_name: None,
+            recipes: Vec::new(),
+            recipe_source: None,
         }
     }
 
@@ -428,6 +508,8 @@ impl Executor {
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
             group_box_name: None,
+            recipes: Vec::new(),
+            recipe_source: None,
         }
     }
 
@@ -441,6 +523,22 @@ impl Executor {
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.screen
+    }
+
+    /// The recipes this bot was granted, and where their steps come from.
+    #[must_use]
+    pub fn with_recipes(
+        mut self,
+        recipes: Vec<RecipeOffer>,
+        source: Arc<dyn RecipeSource>,
+    ) -> Self {
+        self.recipes = recipes;
+        self.recipe_source = Some(source);
+        self
+    }
+
+    pub fn has_recipes(&self) -> bool {
+        self.screen && !self.recipes.is_empty()
     }
 
     /// Offer `machine: "group"` on the box tools, naming the room.
@@ -518,6 +616,7 @@ impl Executor {
     pub fn tool_names(&self) -> Vec<String> {
         self.offered_builtins()
             .map(str::to_string)
+            .chain(self.has_recipes().then(|| RUN_RECIPE.to_string()))
             .chain(
                 self.user_machine
                     .is_some()
@@ -582,6 +681,38 @@ impl Executor {
                     "function": { "name": name, "description": description, "parameters": parameters },
                 }));
             }
+        }
+        // Taught recipes: one tool whose description is the list, so the model reads what each
+        // one does and picks by id. Gated by the grant like the other box tools, and only where
+        // there is a screen to run them on.
+        if self.has_recipes() && permitted(RUN_RECIPE) {
+            let listing = self
+                .recipes
+                .iter()
+                .map(|recipe| format!("`{}` — {}: {}", recipe.id, recipe.name, recipe.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let ids: Vec<&str> = self
+                .recipes
+                .iter()
+                .map(|recipe| recipe.id.as_str())
+                .collect();
+            schemas.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": RUN_RECIPE,
+                    "description": format!(
+                        "Run a task a person taught on THIS BOT'S OWN computer, as one step, instead of \
+                         looking and clicking your way through it. Use one when the request matches its \
+                         description, and say which you used. Recipes you may run:\n{listing}"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": { "recipe": { "type": "string", "enum": ids, "description": "The recipe's id." } },
+                        "required": ["recipe"],
+                    },
+                },
+            }));
         }
         // The reverse-exec tool is NOT gated by the per-coworker tool grant: its authorization is
         // the account's local-exec policy (enrolled machine + never/ask/bypass) and the machine's
@@ -755,6 +886,13 @@ impl Executor {
         };
 
         match call.name.as_str() {
+            RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
+                Ok(args) => {
+                    self.run_recipe(box_id, context, &call.id, &args.recipe)
+                        .await
+                }
+                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
+            },
             "shell" => match serde_json::from_value::<ShellArgs>(arguments) {
                 Ok(args) => self.shell(box_id, &call.id, args).await,
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
@@ -790,6 +928,60 @@ impl Executor {
             // before a single byte leaves this process.
             other => self.call_plugin_tool(&call.id, other, arguments).await,
         }
+    }
+
+    /// A taught recipe, run as one box call. The receipt's end screenshot rides the result so
+    /// the model sees where the screen ended up; a stopped run is a refusal with the step.
+    async fn run_recipe(
+        &self,
+        box_id: &BoxId,
+        context: &ToolContext,
+        call_id: &str,
+        recipe_id: &str,
+    ) -> ToolResult {
+        let Some(offer) = self.recipes.iter().find(|recipe| recipe.id == recipe_id) else {
+            return ToolResult::refused(
+                call_id,
+                format!("no recipe `{recipe_id}` is granted to this coworker"),
+            );
+        };
+        let Some(source) = self.recipe_source.as_ref() else {
+            return ToolResult::refused(call_id, "recipes are not available on this server");
+        };
+        let (version, request) = match source.recipe_request(recipe_id).await {
+            Ok(found) => found,
+            Err(why) => return ToolResult::refused(call_id, why),
+        };
+        let receipt = match self.computer.run_recipe(box_id.as_str(), &request).await {
+            Ok(raw) => RecipeReceipt::from_value(raw),
+            Err(error) => return ToolResult::refused(call_id, describe(error)),
+        };
+        source
+            .record_run(recipe_id, version, &context.coworker_id, &receipt)
+            .await;
+        let mut result = if receipt.ok {
+            ToolResult::ok(
+                call_id,
+                format!(
+                    "ran recipe \"{}\" (v{version}): {} steps; screenshot of the screen afterwards attached",
+                    offer.name, receipt.ran
+                ),
+            )
+        } else {
+            ToolResult::refused(
+                call_id,
+                format!(
+                    "recipe \"{}\" (v{version}) stopped at step {}: {}",
+                    offer.name,
+                    receipt.stopped_at.unwrap_or(receipt.ran),
+                    receipt.error.as_deref().unwrap_or("a step failed")
+                ),
+            )
+        };
+        if let Some(image) = receipt.image.clone() {
+            result = result.with_image(image);
+        }
+        result
     }
 
     async fn open_url(&self, box_id: &BoxId, call_id: &str, args: OpenUrlArgs) -> ToolResult {
@@ -1116,6 +1308,22 @@ mod tests {
                 stderr_truncated: false,
                 timed_out: false,
             })
+        }
+        async fn run_recipe(&self, box_id: &str, request: &Value) -> BoxResult<Value> {
+            if let Ok(mut calls) = self.ran_on.lock() {
+                calls.push((box_id.to_string(), format!("recipe:{request}")));
+            }
+            let name = request.get("name").and_then(Value::as_str).unwrap_or("");
+            if name == "stops" {
+                return Ok(json!({
+                    "ok": false, "ran": 1, "stopped_at": 1,
+                    "steps": [{"ok": true}, {"ok": false, "error": "nothing at (5, 5)"}],
+                }));
+            }
+            Ok(json!({
+                "ok": true, "ran": 2, "stopped_at": null, "steps": [{"ok": true}, {"ok": true}],
+                "screenshot": {"mime": "image/png", "png_base64": "iVBORw0KGgo=", "width": 1280, "height": 800},
+            }))
         }
         async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
             unimplemented!("not used by these tests")
@@ -2297,6 +2505,148 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Finance desk")
+        );
+    }
+
+    /// The registry as the executor sees it: steps out, runs written down.
+    #[derive(Default)]
+    struct SpyRecipes {
+        runs: Mutex<Vec<(String, i32, bool)>>,
+    }
+
+    #[async_trait]
+    impl RecipeSource for SpyRecipes {
+        async fn recipe_request(&self, recipe_id: &str) -> Result<(i32, Value), String> {
+            match recipe_id {
+                "rcp_gmail" => Ok((
+                    2,
+                    json!({"name": "Open Gmail", "steps": [], "stop_on_error": true, "screenshot": "end"}),
+                )),
+                "rcp_stops" => Ok((
+                    3,
+                    json!({"name": "stops", "steps": [], "stop_on_error": true, "screenshot": "end"}),
+                )),
+                other => Err(format!("recipe `{other}` is gone")),
+            }
+        }
+        async fn record_run(
+            &self,
+            recipe_id: &str,
+            version: i32,
+            _by: &CoworkerId,
+            receipt: &RecipeReceipt,
+        ) {
+            if let Ok(mut runs) = self.runs.lock() {
+                runs.push((recipe_id.to_string(), version, receipt.ok));
+            }
+        }
+    }
+
+    fn offers() -> Vec<RecipeOffer> {
+        vec![
+            RecipeOffer {
+                id: "rcp_gmail".into(),
+                name: "Open Gmail".into(),
+                description: "Open Gmail in Chrome and land on the inbox".into(),
+            },
+            RecipeOffer {
+                id: "rcp_stops".into(),
+                name: "Stops".into(),
+                description: "a recipe whose second step fails".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn run_recipe_is_offered_only_with_a_screen_and_a_grant() {
+        let spy = Arc::new(SpyComputer::default());
+        let source: Arc<dyn RecipeSource> = Arc::new(SpyRecipes::default());
+
+        let no_grants = allowing(spy.clone()).with_screen(true);
+        assert!(!no_grants.tool_names().iter().any(|n| n == RUN_RECIPE));
+        assert!(!no_grants.has_recipes());
+
+        let headless = allowing(spy.clone()).with_recipes(offers(), source.clone());
+        assert!(
+            !headless.tool_names().iter().any(|n| n == RUN_RECIPE),
+            "no screen ⇒ nothing to run on"
+        );
+        assert!(!headless.has_recipes());
+
+        let granted = allowing(spy)
+            .with_screen(true)
+            .with_recipes(offers(), source);
+        assert!(granted.tool_names().iter().any(|n| n == RUN_RECIPE));
+        assert!(granted.has_recipes());
+        // The schema lists the granted recipes by id and in words, and pins the id to the grant.
+        let schema = serde_json::to_string(&granted.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        ))
+        .unwrap();
+        assert!(schema.contains("rcp_gmail"), "{schema}");
+        assert!(
+            schema.contains("Open Gmail in Chrome and land on the inbox"),
+            "{schema}"
+        );
+        assert!(schema.contains("\"enum\""), "{schema}");
+    }
+
+    #[tokio::test]
+    async fn a_recipe_run_carries_the_receipt_and_the_screenshot() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes.clone());
+        let context = context_with_box("box_mine");
+
+        let result = executor
+            .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert!(result.content.contains("Open Gmail"), "{result:?}");
+        assert!(result.content.contains("v2"), "{result:?}");
+        assert!(
+            result.image.is_some(),
+            "the end screenshot rides the result"
+        );
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+        assert_eq!(
+            recipes.runs.lock().unwrap().as_slice(),
+            &[("rcp_gmail".to_string(), 2, true)],
+            "the run is written down"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recipe_that_stops_is_a_refusal_in_words() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy)
+            .with_screen(true)
+            .with_recipes(offers(), recipes.clone());
+        let context = context_with_box("box_mine");
+
+        let result = executor
+            .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_stops"})))
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("stopped at step 1"), "{result:?}");
+        assert!(result.content.contains("nothing at (5, 5)"), "{result:?}");
+        assert_eq!(
+            recipes.runs.lock().unwrap().last().map(|r| r.2),
+            Some(false)
+        );
+
+        // A recipe that was never granted is refused before anything runs.
+        let result = executor
+            .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_other"})))
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(
+            result.content.contains("not granted") || result.content.contains("no recipe"),
+            "{result:?}"
         );
     }
 }

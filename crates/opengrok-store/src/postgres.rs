@@ -2111,3 +2111,589 @@ fn coworker_view_row(row: &sqlx::postgres::PgRow) -> StoreResult<CoworkerView> {
             .unwrap_or_default(),
     })
 }
+
+// ---- Recipes: taught tasks, their versions, who they are shared with, which bots run them ----
+
+/// A recipe as a list shows it, with the caller's relation to it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeRow {
+    pub id: String,
+    pub owner_id: String,
+    pub org_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub screen_w: i32,
+    pub screen_h: i32,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub deleted_at_ms: Option<i64>,
+    /// The newest version number.
+    pub latest_version: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeVersionRow {
+    pub recipe_id: String,
+    pub version: i32,
+    pub kind: String,
+    pub body: serde_json::Value,
+    pub note: String,
+    pub created_by: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeShareRow {
+    pub recipe_id: String,
+    pub scope: String,
+    pub scope_id: String,
+    pub granted_by: String,
+    pub granted_at_ms: i64,
+    pub accepted_at_ms: Option<i64>,
+    pub declined_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeGrantRow {
+    pub recipe_id: String,
+    pub coworker_id: String,
+    pub granted_by: String,
+    pub granted_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecipeRunRow {
+    pub id: String,
+    pub recipe_id: String,
+    pub version: i32,
+    pub coworker_id: String,
+    pub run_id: Option<String>,
+    pub ok: bool,
+    pub stopped_at: Option<i32>,
+    pub receipt: serde_json::Value,
+    pub at_ms: i64,
+}
+
+fn recipe_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRow> {
+    Ok(RecipeRow {
+        id: row.try_get("id")?,
+        owner_id: row.try_get("owner_id")?,
+        org_id: row.try_get("org_id")?,
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        screen_w: row.try_get("screen_w")?,
+        screen_h: row.try_get("screen_h")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+        updated_at_ms: row.try_get("updated_at_ms")?,
+        deleted_at_ms: row.try_get("deleted_at_ms")?,
+        latest_version: row
+            .try_get::<Option<i32>, _>("latest_version")?
+            .unwrap_or(0),
+    })
+}
+
+const RECIPE_SELECT: &str =
+    "select r.id, r.owner_id, r.org_id, r.name, r.description, r.screen_w, r.screen_h,
+        r.created_at_ms, r.updated_at_ms, r.deleted_at_ms,
+        (select max(version) from recipe_version v where v.recipe_id = r.id) as latest_version
+   from recipe r";
+
+impl PgStore {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_recipe(
+        &self,
+        id: &str,
+        owner_id: &str,
+        org_id: Option<&str>,
+        name: &str,
+        description: &str,
+        screen: (i32, i32),
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into recipe (id, owner_id, org_id, name, description, screen_w, screen_h, created_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
+        )
+        .bind(id)
+        .bind(owner_id)
+        .bind(org_id)
+        .bind(name)
+        .bind(description)
+        .bind(screen.0)
+        .bind(screen.1)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn rename_recipe(
+        &self,
+        id: &str,
+        name: &str,
+        description: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update recipe set name = $2, description = $3, updated_at_ms = $4 where id = $1",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn soft_delete_recipe(&self, id: &str, at_ms: i64) -> StoreResult<()> {
+        sqlx::query("update recipe set deleted_at_ms = $2, updated_at_ms = $2 where id = $1")
+            .bind(id)
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn recipe(&self, id: &str) -> StoreResult<Option<RecipeRow>> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{RECIPE_SELECT} where r.id = $1"
+        )))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(recipe_row).transpose()
+    }
+
+    /// The recipes a person owns (not deleted).
+    pub async fn recipes_owned_by(&self, owner_id: &str) -> StoreResult<Vec<RecipeRow>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{RECIPE_SELECT} where r.owner_id = $1 and r.deleted_at_ms is null order by r.updated_at_ms desc"
+        )))
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(recipe_row).collect()
+    }
+
+    /// Recipes shared to this person directly or to their org, each with its share row for
+    /// them (accepted, pending or declined). Excludes what they own and what is deleted.
+    pub async fn recipes_shared_with(
+        &self,
+        account_id: &str,
+        org_id: Option<&str>,
+    ) -> StoreResult<Vec<(RecipeRow, RecipeShareRow)>> {
+        // The recipe's columns and the share's, one row per share.
+        let select = RECIPE_SELECT.replace(
+            "   from recipe r",
+            ", s.scope, s.scope_id, s.granted_by, s.granted_at_ms, s.accepted_at_ms, s.declined_at_ms
+   from recipe r",
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{select}
+              join recipe_share s on s.recipe_id = r.id
+             where r.deleted_at_ms is null and r.owner_id <> $1
+               and ((s.scope = 'account' and s.scope_id = $1) or (s.scope = 'org' and s.scope_id = $2))
+             order by r.updated_at_ms desc"
+        )))
+        .bind(account_id)
+        .bind(org_id.unwrap_or(""))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in &rows {
+            out.push((
+                recipe_row(row)?,
+                RecipeShareRow {
+                    recipe_id: row.try_get("id")?,
+                    scope: row.try_get("scope")?,
+                    scope_id: row.try_get("scope_id")?,
+                    granted_by: row.try_get("granted_by")?,
+                    granted_at_ms: row.try_get("granted_at_ms")?,
+                    accepted_at_ms: row.try_get("accepted_at_ms")?,
+                    declined_at_ms: row.try_get("declined_at_ms")?,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// What an org's admin sees: every recipe shared org-wide, with how many members accepted.
+    pub async fn recipes_shared_to_org(&self, org_id: &str) -> StoreResult<Vec<(RecipeRow, i64)>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{RECIPE_SELECT}
+              join recipe_share s on s.recipe_id = r.id and s.scope = 'org' and s.scope_id = $1
+             where r.deleted_at_ms is null
+             order by r.updated_at_ms desc"
+        )))
+        .bind(org_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out = Vec::new();
+        for row in &rows {
+            let recipe = recipe_row(row)?;
+            let accepted: i64 = sqlx::query_scalar(
+                "select count(*) from recipe_share
+                  where recipe_id = $1 and scope = 'account' and granted_by = 'org:' || $2
+                    and accepted_at_ms is not null",
+            )
+            .bind(&recipe.id)
+            .bind(org_id)
+            .fetch_one(&self.pool)
+            .await?;
+            out.push((recipe, accepted));
+        }
+        Ok(out)
+    }
+
+    pub async fn add_recipe_version(
+        &self,
+        recipe_id: &str,
+        kind: &str,
+        body: &serde_json::Value,
+        note: &str,
+        created_by: &str,
+        at_ms: i64,
+    ) -> StoreResult<i32> {
+        let mut tx = self.pool.begin().await?;
+        let next: i32 = sqlx::query_scalar(
+            "select coalesce(max(version), 0) + 1 from recipe_version where recipe_id = $1",
+        )
+        .bind(recipe_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "insert into recipe_version (recipe_id, version, kind, body, note, created_by, created_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(recipe_id)
+        .bind(next)
+        .bind(kind)
+        .bind(body)
+        .bind(note)
+        .bind(created_by)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("update recipe set updated_at_ms = $2 where id = $1")
+            .bind(recipe_id)
+            .bind(at_ms)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(next)
+    }
+
+    pub async fn recipe_versions(&self, recipe_id: &str) -> StoreResult<Vec<RecipeVersionRow>> {
+        let rows = sqlx::query(
+            "select recipe_id, version, kind, body, note, created_by, created_at_ms
+               from recipe_version where recipe_id = $1 order by version",
+        )
+        .bind(recipe_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RecipeVersionRow {
+                    recipe_id: row.try_get("recipe_id")?,
+                    version: row.try_get("version")?,
+                    kind: row.try_get("kind")?,
+                    body: row.try_get("body")?,
+                    note: row.try_get("note")?,
+                    created_by: row.try_get("created_by")?,
+                    created_at_ms: row.try_get("created_at_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// The version a run should use: the newest that is not the raw tape.
+    pub async fn recipe_runnable_version(
+        &self,
+        recipe_id: &str,
+    ) -> StoreResult<Option<RecipeVersionRow>> {
+        Ok(self
+            .recipe_versions(recipe_id)
+            .await?
+            .into_iter()
+            .rfind(|version| version.kind != "raw"))
+    }
+
+    pub async fn share_recipe(
+        &self,
+        recipe_id: &str,
+        scope: &str,
+        scope_id: &str,
+        granted_by: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into recipe_share (recipe_id, scope, scope_id, granted_by, granted_at_ms)
+             values ($1, $2, $3, $4, $5)
+             on conflict (recipe_id, scope, scope_id) do update set
+               granted_by = excluded.granted_by, granted_at_ms = excluded.granted_at_ms,
+               accepted_at_ms = null, declined_at_ms = null",
+        )
+        .bind(recipe_id)
+        .bind(scope)
+        .bind(scope_id)
+        .bind(granted_by)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn unshare_recipe(
+        &self,
+        recipe_id: &str,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "delete from recipe_share where recipe_id = $1 and scope = $2 and scope_id = $3",
+        )
+        .bind(recipe_id)
+        .bind(scope)
+        .bind(scope_id)
+        .execute(&self.pool)
+        .await?;
+        // A person who accepted through the org keeps nothing once the org share is withdrawn.
+        if scope == "org" {
+            sqlx::query(
+                "delete from recipe_share where recipe_id = $1 and scope = 'account' and granted_by = 'org:' || $2",
+            )
+            .bind(recipe_id)
+            .bind(scope_id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The share rows of a recipe, for its owner's view.
+    pub async fn recipe_shares(&self, recipe_id: &str) -> StoreResult<Vec<RecipeShareRow>> {
+        let rows = sqlx::query(
+            "select recipe_id, scope, scope_id, granted_by, granted_at_ms, accepted_at_ms, declined_at_ms
+               from recipe_share where recipe_id = $1 order by granted_at_ms",
+        )
+        .bind(recipe_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RecipeShareRow {
+                    recipe_id: row.try_get("recipe_id")?,
+                    scope: row.try_get("scope")?,
+                    scope_id: row.try_get("scope_id")?,
+                    granted_by: row.try_get("granted_by")?,
+                    granted_at_ms: row.try_get("granted_at_ms")?,
+                    accepted_at_ms: row.try_get("accepted_at_ms")?,
+                    declined_at_ms: row.try_get("declined_at_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// A person answers a share. Accepting through an org share writes their own account row
+    /// (`granted_by = "org:<org>"`) so the answer is theirs alone.
+    pub async fn answer_recipe_share(
+        &self,
+        recipe_id: &str,
+        account_id: &str,
+        org_id: Option<&str>,
+        accept: bool,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let direct = sqlx::query(
+            "select granted_by from recipe_share where recipe_id = $1 and scope = 'account' and scope_id = $2",
+        )
+        .bind(recipe_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let via_org = match org_id {
+            Some(org) => sqlx::query(
+                "select 1 from recipe_share where recipe_id = $1 and scope = 'org' and scope_id = $2",
+            )
+            .bind(recipe_id)
+            .bind(org)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some(),
+            None => false,
+        };
+        if direct.is_none() && !via_org {
+            return Ok(false);
+        }
+        let (accepted, declined) = if accept {
+            (Some(at_ms), None::<i64>)
+        } else {
+            (None, Some(at_ms))
+        };
+        if direct.is_some() {
+            sqlx::query(
+                "update recipe_share set accepted_at_ms = $3, declined_at_ms = $4
+                  where recipe_id = $1 and scope = 'account' and scope_id = $2",
+            )
+            .bind(recipe_id)
+            .bind(account_id)
+            .bind(accepted)
+            .bind(declined)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "insert into recipe_share (recipe_id, scope, scope_id, granted_by, granted_at_ms, accepted_at_ms, declined_at_ms)
+                 values ($1, 'account', $2, 'org:' || $3, $4, $5, $6)
+                 on conflict (recipe_id, scope, scope_id) do update set
+                   accepted_at_ms = excluded.accepted_at_ms, declined_at_ms = excluded.declined_at_ms",
+            )
+            .bind(recipe_id)
+            .bind(account_id)
+            .bind(org_id.unwrap_or(""))
+            .bind(at_ms)
+            .bind(accepted)
+            .bind(declined)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(true)
+    }
+
+    /// Whether this person has accepted a share of the recipe (directly or through their org).
+    pub async fn recipe_accepted_by(&self, recipe_id: &str, account_id: &str) -> StoreResult<bool> {
+        let row = sqlx::query(
+            "select 1 from recipe_share where recipe_id = $1 and scope = 'account' and scope_id = $2
+              and accepted_at_ms is not null",
+        )
+        .bind(recipe_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn grant_recipe(
+        &self,
+        recipe_id: &str,
+        coworker_id: &str,
+        granted_by: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into recipe_grant (recipe_id, coworker_id, granted_by, granted_at_ms)
+             values ($1, $2, $3, $4) on conflict (recipe_id, coworker_id) do nothing",
+        )
+        .bind(recipe_id)
+        .bind(coworker_id)
+        .bind(granted_by)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn revoke_recipe_grant(&self, recipe_id: &str, coworker_id: &str) -> StoreResult<()> {
+        sqlx::query("delete from recipe_grant where recipe_id = $1 and coworker_id = $2")
+            .bind(recipe_id)
+            .bind(coworker_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn recipe_grants(&self, recipe_id: &str) -> StoreResult<Vec<RecipeGrantRow>> {
+        let rows = sqlx::query(
+            "select recipe_id, coworker_id, granted_by, granted_at_ms from recipe_grant
+              where recipe_id = $1 order by granted_at_ms",
+        )
+        .bind(recipe_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RecipeGrantRow {
+                    recipe_id: row.try_get("recipe_id")?,
+                    coworker_id: row.try_get("coworker_id")?,
+                    granted_by: row.try_get("granted_by")?,
+                    granted_at_ms: row.try_get("granted_at_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// The recipes a bot may run: granted, and not deleted.
+    pub async fn recipes_granted_to(&self, coworker_id: &str) -> StoreResult<Vec<RecipeRow>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{RECIPE_SELECT} join recipe_grant g on g.recipe_id = r.id
+             where g.coworker_id = $1 and r.deleted_at_ms is null order by r.name"
+        )))
+        .bind(coworker_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(recipe_row).collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_recipe_run(
+        &self,
+        id: &str,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &str,
+        run_id: Option<&str>,
+        ok: bool,
+        stopped_at: Option<i32>,
+        receipt: &serde_json::Value,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into recipe_run (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(id)
+        .bind(recipe_id)
+        .bind(version)
+        .bind(coworker_id)
+        .bind(run_id)
+        .bind(ok)
+        .bind(stopped_at)
+        .bind(receipt)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
+        let rows = sqlx::query(
+            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms
+               from recipe_run where recipe_id = $1 order by at_ms desc limit $2",
+        )
+        .bind(recipe_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RecipeRunRow {
+                    id: row.try_get("id")?,
+                    recipe_id: row.try_get("recipe_id")?,
+                    version: row.try_get("version")?,
+                    coworker_id: row.try_get("coworker_id")?,
+                    run_id: row.try_get("run_id")?,
+                    ok: row.try_get("ok")?,
+                    stopped_at: row.try_get("stopped_at")?,
+                    receipt: row.try_get("receipt")?,
+                    at_ms: row.try_get("at_ms")?,
+                })
+            })
+            .collect()
+    }
+}

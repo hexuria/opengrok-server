@@ -69,6 +69,13 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// Whether this runner offers `run_recipe`: a screen plus at least one granted recipe.
+    pub fn has_recipes(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.has_recipes())
+    }
+
     fn local_for(&self, name: &str) -> Option<&LocalTool> {
         self.local
             .iter()

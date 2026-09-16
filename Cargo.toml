@@ -14,6 +14,7 @@ members = [
   "crates/opengrok-box",     # the coworker's computer
   "crates/opengrok-plugins",# Agent Plugins: the bundle of skills + MCP servers a coworker is given
   "crates/opengrok-tools",   # tool definitions and the executor
+  "crates/opengrok-recipes", # a taught tape into the box's recipe steps; the lint that keeps them runnable
   "crates/opengrok-policy",  # what a principal may make a coworker do
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
   "crates/opengrok-server",  # Axum: the host-facing API and the event stream

@@ -545,6 +545,18 @@ impl Computer for DockerComputer {
         })
     }
 
+    async fn run_recipe(
+        &self,
+        box_id: &str,
+        request: &serde_json::Value,
+    ) -> BoxResult<serde_json::Value> {
+        self.guest(box_id)
+            .await?
+            .recipe(request)
+            .await
+            .map_err(guest_error)
+    }
+
     async fn act(&self, box_id: &str, action: &CuaAction) -> BoxResult<()> {
         let guest = self.guest(box_id).await?;
         let done = match action {
