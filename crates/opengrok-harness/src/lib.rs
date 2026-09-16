@@ -390,6 +390,9 @@ async fn converse(
     // The last screenshot the model was shown, and how many times in a row it was the same.
     let mut last_screen: Option<u64> = None;
     let mut same_screen = 0usize;
+    // Whether the model has produced anything at all this run — a word, a tool call, a thought.
+    // A run that ends having produced nothing is a failure with a sentence, not a silent finish.
+    let mut any_delta = false;
 
     for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
         let mut round_events = Vec::new();
@@ -411,6 +414,7 @@ async fn converse(
             while let Some(delta) = stream.next().await {
                 match delta {
                     Ok(delta) => {
+                        any_delta = true;
                         if let ModelDelta::Text(text) = &delta {
                             said.push_str(text);
                         }
@@ -608,7 +612,17 @@ async fn converse(
         }
 
         // No tools were asked for, or the run failed: this is the last round either way.
-        let mut ending = projection.finish();
+        //
+        // A run that produced nothing at all ends as a failure that says so. Finishing cleanly
+        // with an empty transcript is the dangerous empty success (CLAUDE.md, three facts №3):
+        // the client cannot tell it from a coworker with nothing to say, and every one of them
+        // invented its own placeholder. A run that already failed keeps its own message — `fail`
+        // and `finish` are both no-ops once the run has ended.
+        let mut ending = if any_delta {
+            projection.finish()
+        } else {
+            projection.fail("the model returned no text")
+        };
         emit_live(sink, &ending).await;
         round_events.append(&mut ending);
         let _ = journal.record(run_id, &round_events).await;
@@ -786,6 +800,47 @@ mod tests {
                 .unwrap()
                 .contains("upstream hung up")
         );
+    }
+
+    /// AN EMPTY SUCCESS IS THE DANGEROUS REPLY (CLAUDE.md, three facts №3). A round that produced
+    /// nothing — no words, no tool calls — used to end the run with `RUN_FINISHED` and an empty
+    /// transcript, which every client had to invent a reason for. It says the reason itself now.
+    #[tokio::test]
+    async fn a_run_that_produced_nothing_ends_as_an_error_that_says_so() {
+        let events = run_conversation(
+            &MockDoor::silent(),
+            None,
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.first().unwrap().event_type, EventType::RunStarted);
+        let ending = events.last().unwrap();
+        assert_eq!(ending.event_type, EventType::RunError);
+        assert_eq!(
+            ending.extra.get("message").unwrap(),
+            "the model returned no text"
+        );
+    }
+
+    /// And a run that did produce something still ends cleanly: the new ending must not turn a
+    /// working turn into a failure.
+    #[tokio::test]
+    async fn a_run_that_said_something_still_finishes() {
+        let events = run_conversation(
+            &MockDoor::echoing(),
+            None,
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     }
 
     /// THE WHOLE CHAIN, JOINED. A model asks for a tool, the tool runs on the coworker's own

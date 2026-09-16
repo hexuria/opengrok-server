@@ -2427,6 +2427,68 @@ pub async fn list_awaiting(
     }
 }
 
+/// The message a reply points at, as the one bracketed line `reply_context` writes for the
+/// desktop's own transcript — so a reply reads the same whichever door the turn came through.
+///
+/// `replyTo` is either the quoted message's id or NativeChat's object (`messageId`, `preview`,
+/// `isMe`). The quoted message itself is preferred, with all of its words; the preview is what is
+/// left when the client has since dropped the message from the array it sends.
+fn reply_quote(
+    message: &opengrok_wire::agui::Message,
+    sent: &[opengrok_wire::agui::Message],
+) -> Option<String> {
+    let reply_to = message.extra.get("replyTo")?;
+    let (id, preview, is_me) = match reply_to {
+        serde_json::Value::String(id) => (Some(id.as_str()), None, None),
+        serde_json::Value::Object(_) => (
+            reply_to
+                .get("messageId")
+                .and_then(serde_json::Value::as_str),
+            reply_to.get("preview").and_then(serde_json::Value::as_str),
+            reply_to.get("isMe").and_then(serde_json::Value::as_bool),
+        ),
+        _ => return None,
+    };
+    let quoted = id.and_then(|id| sent.iter().find(|candidate| candidate.id == id));
+    let text = quoted
+        .and_then(|quoted| quoted.content.as_deref())
+        .or(preview)?;
+    // Whose words are being quoted, from the model's side of the conversation: the person's own
+    // earlier message, or the coworker's.
+    let from_person = quoted
+        .map(|quoted| quoted.role == "user")
+        .or(is_me)
+        .unwrap_or(false);
+    let who = if from_person {
+        "their own earlier message"
+    } else {
+        "your earlier message"
+    };
+    crate::gateway::conversation::reply_quote_line(who, text)
+}
+
+/// A user message with the quote it answers ahead of it.
+///
+/// IDEMPOTENT ON PURPOSE. A client that cannot rely on this field spells the quote into `content`
+/// itself — NativeChat does, so a reply works against a server that predates `replyTo` — and
+/// saying it twice is worse than not reading the field at all.
+fn with_reply_context(
+    content: &str,
+    message: &opengrok_wire::agui::Message,
+    sent: &[opengrok_wire::agui::Message],
+) -> String {
+    if content
+        .trim_start()
+        .starts_with(crate::gateway::conversation::REPLY_QUOTE_OPENING)
+    {
+        return content.to_string();
+    }
+    match reply_quote(message, sent) {
+        Some(quote) => format!("{quote}\n\n{content}"),
+        None => content.to_string(),
+    }
+}
+
 /// AG-UI messages to the model's vocabulary.
 ///
 /// Roles the model door does not understand are dropped rather than passed through: a provider
@@ -2441,7 +2503,12 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
                 message.content.as_ref().map(|content| ChatMessage {
                     images: Vec::new(),
                     role: message.role.clone(),
-                    content: content.clone(),
+                    // Only a person replies: the field on anything else is not a quote the model
+                    // should be read to.
+                    content: match message.role.as_str() {
+                        "user" => with_reply_context(content, message, &input.messages),
+                        _ => content.clone(),
+                    },
                 })
             }
             // NativeChat continues a frontend tool by POSTing the result as a tool
@@ -2577,6 +2644,79 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "[tool c1 result] shown in the chat");
+    }
+
+    /// The desktop's reply chip has to reach the model as words, or "what am I replying to?"
+    /// arrives with nothing to answer from.
+    #[test]
+    fn a_reply_is_read_to_the_model_as_a_quote_ahead_of_its_own_words() {
+        let mut quoted = message("assistant", Some("The build is green."));
+        quoted.id = "m1".to_string();
+        let mut reply = message("user", Some("what am I replying to?"));
+        reply.id = "m2".to_string();
+        reply.extra.insert(
+            "replyTo".to_string(),
+            json!({"messageId": "m1", "preview": "The build is green.", "isMe": false}),
+        );
+        let messages = to_chat_messages(&input(vec![quoted, reply]));
+        assert_eq!(
+            messages[1].content,
+            "[Replying to your earlier message: \"The build is green.\"]\n\nwhat am I replying to?"
+        );
+    }
+
+    /// Answering yourself is a different sentence, and the model has to be able to tell.
+    #[test]
+    fn a_reply_to_the_persons_own_message_says_whose_it_was() {
+        let mut quoted = message("user", Some("remind me at five"));
+        quoted.id = "m1".to_string();
+        let mut reply = message("user", Some("make that six"));
+        reply.id = "m2".to_string();
+        reply.extra.insert("replyTo".to_string(), json!("m1"));
+        let messages = to_chat_messages(&input(vec![quoted, reply]));
+        assert_eq!(
+            messages[1].content,
+            "[Replying to their own earlier message: \"remind me at five\"]\n\nmake that six"
+        );
+    }
+
+    /// NativeChat writes the quote into `content` as well, so a reply works against a server that
+    /// has never heard of `replyTo`. Reading the field must not say it twice.
+    #[test]
+    fn a_quote_the_client_already_wrote_is_not_written_again() {
+        let mut quoted = message("assistant", Some("The build is green."));
+        quoted.id = "m1".to_string();
+        let mut reply = message(
+            "user",
+            Some("[Replying to your earlier message: \"The build is green.\"]\n\nwhy?"),
+        );
+        reply.id = "m2".to_string();
+        reply.extra.insert(
+            "replyTo".to_string(),
+            json!({"messageId": "m1", "preview": "The build is green.", "isMe": false}),
+        );
+        let messages = to_chat_messages(&input(vec![quoted, reply]));
+        assert_eq!(
+            messages[1].content,
+            "[Replying to your earlier message: \"The build is green.\"]\n\nwhy?"
+        );
+    }
+
+    /// The quoted message may be gone from the array the client sends; the preview it saved with
+    /// the reply is what is left of it.
+    #[test]
+    fn a_quote_whose_message_is_not_in_the_array_falls_back_to_the_preview() {
+        let mut reply = message("user", Some("why?"));
+        reply.id = "m2".to_string();
+        reply.extra.insert(
+            "replyTo".to_string(),
+            json!({"messageId": "gone", "preview": "The build is green.", "isMe": false}),
+        );
+        let messages = to_chat_messages(&input(vec![reply]));
+        assert_eq!(
+            messages[0].content,
+            "[Replying to your earlier message: \"The build is green.\"]\n\nwhy?"
+        );
     }
 
     /// A message with no content is a placeholder the client is still filling in.

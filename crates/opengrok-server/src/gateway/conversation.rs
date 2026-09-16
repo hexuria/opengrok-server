@@ -608,6 +608,30 @@ pub(crate) async fn reprovision(
 /// it does not replay it.
 const REPLY_QUOTE_CHARS: usize = 1_000;
 
+/// How every quote line opens. A client that spells the quote into the message itself — NativeChat
+/// does, because that is all a server without this field would read — is recognised by it, so the
+/// context is not said twice.
+pub(crate) const REPLY_QUOTE_OPENING: &str = "[Replying to";
+
+/// The one sentence a quote is written as, wherever the reply came from: the desktop's transcript
+/// or an AG-UI message with a `replyTo` on it. Shared so the two cannot drift, and so a message
+/// that carries the sentence already can be told apart from one that does not.
+///
+/// `None` when the quoted message had no words to quote.
+pub(crate) fn reply_quote_line(who: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
+        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
+        format!("{head}…")
+    } else {
+        text.to_string()
+    };
+    Some(format!("{REPLY_QUOTE_OPENING} {who}: \"{clipped}\"]"))
+}
+
 /// The message a reply points at, as one bracketed line the model reads ahead of the prompt —
 /// who said it and what, capped — or nothing when there is no link or it names an entry that is
 /// not in this transcript (deleted, or from another coworker's history). Shared with the room's
@@ -644,17 +668,7 @@ pub(crate) fn reply_context(entries: &[Value], entry: &Value) -> Option<String> 
         ),
         _ => return None,
     };
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
-        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
-        format!("{head}…")
-    } else {
-        text.to_string()
-    };
-    Some(format!("[Replying to {who}: \"{clipped}\"]"))
+    reply_quote_line(&who, text)
 }
 
 /// An answer entry, carrying the turn's reply link when it has one — every rebuild of the answer
