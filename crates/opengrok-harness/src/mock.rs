@@ -22,6 +22,10 @@ pub struct MockDoor {
     script: Vec<ModelDelta>,
     /// Fails after the script, to exercise the error path on demand.
     fail_with: Option<String>,
+    /// Answers with nothing at all: no words, no tool calls, no error. What a provider that
+    /// returns an empty completion looks like from here, which is the case a run must not
+    /// finish silently on.
+    silent: bool,
     /// When set, the door asks for its tool until it can see the result in the conversation, then
     /// answers in words.
     ///
@@ -355,6 +359,15 @@ impl MockDoor {
         }
     }
 
+    /// A door that opens and says nothing. Not the same as a door that fails: the HTTP call
+    /// succeeded, and the run has to decide what an empty answer means.
+    pub fn silent() -> Self {
+        Self {
+            silent: true,
+            ..Self::default()
+        }
+    }
+
     /// What the default door says back, split so the stream has several frames.
     fn echo_script(request: &ModelRequest) -> Vec<ModelDelta> {
         let asked = request
@@ -385,6 +398,9 @@ impl ModelDoor for MockDoor {
         if let Some(message) = &self.fail_with {
             let error = ModelError::Stream(message.clone());
             return Ok(Box::pin(stream::once(async move { Err(error) })));
+        }
+        if self.silent {
+            return Ok(Box::pin(stream::empty()));
         }
         if let Some(word) = &self.judge_verdict
             && request

@@ -143,23 +143,36 @@ pub struct SseParser {
 
 impl SseParser {
     /// One `data:` line. `[DONE]` and a `finish_reason` close every open tool call.
-    pub fn push_line(&mut self, line: &str) -> Vec<ModelDelta> {
+    ///
+    /// An `{"error": …}` body is a failure, not a frame to skip. A gateway that answers 200 and
+    /// then says the error in the body used to end the run silently: the line was unreadable, so
+    /// it was dropped, and the client was handed a successful run with nothing in it.
+    pub fn push_line(&mut self, line: &str) -> Result<Vec<ModelDelta>, ModelError> {
         let Some(payload) = line.strip_prefix("data: ") else {
-            return Vec::new();
+            // Not a frame at all. A body that is not SSE still arrives here line by line, and an
+            // error body is the one shape worth reading; anything else (a comment, a blank line,
+            // an `event:` field) is skipped as before.
+            return match error_sentence(line.trim()) {
+                Some(message) => Err(ModelError::Stream(message)),
+                None => Ok(Vec::new()),
+            };
         };
         let payload = payload.trim();
         if payload.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         // The sentinel that ends every OpenAI-dialect stream. Not JSON, and parsing
         // it as JSON is the classic way to end a working stream with a spurious error.
         if payload == "[DONE]" {
-            return self.close_open();
+            return Ok(self.close_open());
+        }
+        if let Some(message) = error_sentence(payload) {
+            return Err(ModelError::Stream(message));
         }
         let Ok(chunk) = serde_json::from_str::<Chunk>(payload) else {
             // A frame we cannot read is skipped, not fatal: one malformed chunk must
             // not discard the reply that came before it.
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut deltas = Vec::new();
         for choice in chunk.choices {
@@ -204,7 +217,7 @@ impl SseParser {
                 deltas.extend(self.close_open());
             }
         }
-        deltas
+        Ok(deltas)
     }
 
     /// The HTTP body ended. Close any tool call that never got a `finish_reason`.
@@ -229,15 +242,35 @@ impl SseParser {
     }
 }
 
+/// The sentence in an `{"error": …}` body, when that is what this text is.
+///
+/// Both shapes providers use: `{"error": {"message": "…"}}` and `{"error": "…"}`. Anything else
+/// — including a frame that simply has no `error` field — is not an error and returns `None`.
+fn error_sentence(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let error = value.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    Some(if message.trim().is_empty() {
+        "the model gateway reported an error with no message".to_string()
+    } else {
+        message
+    })
+}
+
 /// Turn one SSE line into deltas, then close any tool call that line named.
 ///
 /// For a whole stream — where argument fragments arrive on later lines — use
 /// `SseParser` instead. Closing here is what a single-frame test expects.
-pub fn parse_sse_line(line: &str) -> Vec<ModelDelta> {
+pub fn parse_sse_line(line: &str) -> Result<Vec<ModelDelta>, ModelError> {
     let mut parser = SseParser::default();
-    let mut deltas = parser.push_line(line);
+    let mut deltas = parser.push_line(line)?;
     deltas.extend(parser.finish());
-    deltas
+    Ok(deltas)
 }
 
 /// An opaque, stable id for the CONVERSATION this request belongs to, for the gateway's session
@@ -414,7 +447,10 @@ impl ModelDoor for GatewayDoor {
                     let mut out = Vec::new();
                     while let Some(index) = state.buffer.find('\n') {
                         let line: String = state.buffer.drain(..=index).collect();
-                        out.extend(state.parser.push_line(line.trim_end()).into_iter().map(Ok));
+                        match state.parser.push_line(line.trim_end()) {
+                            Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
+                            Err(error) => out.push(Err(error)),
+                        }
                     }
                     out
                 }
@@ -429,13 +465,10 @@ impl ModelDoor for GatewayDoor {
             let leftover = std::mem::take(&mut state.buffer);
             let mut out = Vec::new();
             if !leftover.trim().is_empty() {
-                out.extend(
-                    state
-                        .parser
-                        .push_line(leftover.trim_end())
-                        .into_iter()
-                        .map(Ok),
-                );
+                match state.parser.push_line(leftover.trim_end()) {
+                    Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
+                    Err(error) => out.push(Err(error)),
+                }
             }
             out.extend(state.parser.finish().into_iter().map(Ok));
             out
@@ -506,7 +539,7 @@ mod tests {
     fn a_tool_call_frame_becomes_start_args_end() {
         let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
         assert_eq!(
-            parse_sse_line(line),
+            parse_sse_line(line).expect("a tool call frame is not an error"),
             vec![
                 ModelDelta::ToolCallStart {
                     id: "call_1".to_string(),
@@ -530,25 +563,31 @@ mod tests {
     fn streamed_tool_call_arguments_are_assembled_across_chunks() {
         let mut parser = SseParser::default();
         assert_eq!(
-            parser.push_line(
-                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"user_machine_shell","arguments":""}}]}}]}"#
-            ),
+            parser
+                .push_line(
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"user_machine_shell","arguments":""}}]}}]}"#
+                )
+                .expect("a tool call frame is not an error"),
             vec![ModelDelta::ToolCallStart {
                 id: "call_1".to_string(),
                 name: "user_machine_shell".to_string()
             }]
         );
         assert_eq!(
-            parser.push_line(
-                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls /Volumes/goldcoders\"}"}}]}}]}"#
-            ),
+            parser
+                .push_line(
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls /Volumes/goldcoders\"}"}}]}}]}"#
+                )
+                .expect("an arguments frame is not an error"),
             vec![ModelDelta::ToolCallArgs {
                 id: "call_1".to_string(),
                 delta: "{\"command\":\"ls /Volumes/goldcoders\"}".to_string()
             }]
         );
         assert_eq!(
-            parser.push_line(r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#),
+            parser
+                .push_line(r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#)
+                .expect("a finish frame is not an error"),
             vec![ModelDelta::ToolCallEnd {
                 id: "call_1".to_string()
             }]
@@ -559,7 +598,7 @@ mod tests {
     fn a_content_frame_becomes_a_text_delta() {
         let line = r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#;
         assert_eq!(
-            parse_sse_line(line),
+            parse_sse_line(line).expect("a content frame is not an error"),
             vec![ModelDelta::Text("hello".to_string())]
         );
     }
@@ -568,20 +607,63 @@ mod tests {
     /// with a spurious error.
     #[test]
     fn the_done_sentinel_is_not_an_error() {
-        assert!(parse_sse_line("data: [DONE]").is_empty());
+        assert!(
+            parse_sse_line("data: [DONE]")
+                .expect("a sentinel")
+                .is_empty()
+        );
     }
 
     #[test]
     fn comments_and_blank_lines_are_ignored() {
-        assert!(parse_sse_line(": ping").is_empty());
-        assert!(parse_sse_line("").is_empty());
-        assert!(parse_sse_line("data: ").is_empty());
+        assert!(parse_sse_line(": ping").expect("a comment").is_empty());
+        assert!(parse_sse_line("").expect("a blank line").is_empty());
+        assert!(parse_sse_line("data: ").expect("an empty frame").is_empty());
+    }
+
+    /// AN EMPTY SUCCESS IS THE DANGEROUS REPLY (CLAUDE.md). A gateway that answers 200 and puts
+    /// the error in the body left the run with no deltas at all, which reached the person as the
+    /// coworker having nothing to say.
+    #[test]
+    fn an_error_frame_breaks_the_stream_instead_of_being_skipped() {
+        let line = r#"data: {"error":{"message":"upstream provider is out of credit","type":"insufficient_quota"}}"#;
+        let error = parse_sse_line(line).expect_err("an error frame is not deltas");
+        assert!(
+            matches!(&error, ModelError::Stream(message) if message == "upstream provider is out of credit"),
+            "{error:?}"
+        );
+    }
+
+    /// The other shape, and the same reasoning: a bare string under `error`.
+    #[test]
+    fn an_error_frame_with_a_bare_string_still_breaks_the_stream() {
+        let error = parse_sse_line(r#"data: {"error":"model not found"}"#)
+            .expect_err("an error frame is not deltas");
+        assert!(
+            matches!(&error, ModelError::Stream(message) if message == "model not found"),
+            "{error:?}"
+        );
+    }
+
+    /// A 200 whose body is not SSE at all reaches the parser as ordinary lines.
+    #[test]
+    fn an_error_body_that_is_not_sse_breaks_the_stream() {
+        let error = parse_sse_line(r#"{"error":{"message":"bad request"}}"#)
+            .expect_err("an error body is not deltas");
+        assert!(
+            matches!(&error, ModelError::Stream(message) if message == "bad request"),
+            "{error:?}"
+        );
     }
 
     /// One bad frame must not discard the reply that came before it.
     #[test]
     fn a_malformed_frame_is_skipped_rather_than_fatal() {
-        assert!(parse_sse_line("data: {not json").is_empty());
+        assert!(
+            parse_sse_line("data: {not json")
+                .expect("a malformed frame")
+                .is_empty()
+        );
     }
 
     /// An empty content string is a keepalive, not a word — emitting it would open a message for
@@ -589,13 +671,21 @@ mod tests {
     #[test]
     fn an_empty_content_delta_produces_nothing() {
         let line = r#"data: {"choices":[{"delta":{"content":""}}]}"#;
-        assert!(parse_sse_line(line).is_empty());
+        assert!(parse_sse_line(line).expect("a keepalive").is_empty());
     }
 
     #[test]
     fn a_frame_with_no_choices_produces_nothing() {
-        assert!(parse_sse_line(r#"data: {"choices":[]}"#).is_empty());
-        assert!(parse_sse_line(r#"data: {"id":"x","object":"chunk"}"#).is_empty());
+        assert!(
+            parse_sse_line(r#"data: {"choices":[]}"#)
+                .expect("a frame")
+                .is_empty()
+        );
+        assert!(
+            parse_sse_line(r#"data: {"id":"x","object":"chunk"}"#)
+                .expect("a frame")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -603,7 +693,7 @@ mod tests {
         let line =
             r#"data: {"choices":[{"delta":{"reasoning_content":"hmm","content":"answer"}}]}"#;
         assert_eq!(
-            parse_sse_line(line),
+            parse_sse_line(line).expect("a reasoning frame is not an error"),
             vec![
                 ModelDelta::Reasoning("hmm".to_string()),
                 ModelDelta::Text("answer".to_string()),
@@ -616,7 +706,7 @@ mod tests {
     fn unknown_fields_do_not_break_a_frame() {
         let line = r#"data: {"choices":[{"delta":{"content":"hi","somethingNew":42}}],"extra":1}"#;
         assert_eq!(
-            parse_sse_line(line),
+            parse_sse_line(line).expect("an unknown field is not an error"),
             vec![ModelDelta::Text("hi".to_string())]
         );
     }
