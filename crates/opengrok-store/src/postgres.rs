@@ -2715,6 +2715,28 @@ impl PgStore {
 
     /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
     /// long-lived recipe cannot grow an unbounded history nobody reads.
+    /// Drop the artifacts of runs that are no longer there.
+    ///
+    /// Called after pruning, because an artifact outliving its run is a megabyte nobody can
+    /// reach: history is read a run at a time, and a row pointing at a run that was pruned has
+    /// no page to appear on. Soft, like every other delete here.
+    pub async fn orphan_artifacts_of_gone_runs(
+        &self,
+        recipe_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<u64> {
+        let done = sqlx::query(
+            "update artifact set deleted_at_ms = $2
+              where recipe_id = $1 and deleted_at_ms is null and run_id is not null
+                and run_id not in (select id from recipe_run where recipe_id = $1)",
+        )
+        .bind(recipe_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
+    }
+
     pub async fn prune_recipe_runs(
         &self,
         recipe_id: &str,
