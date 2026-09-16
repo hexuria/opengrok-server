@@ -327,3 +327,71 @@ pub async fn store_box_artifact(
 
     Ok(row)
 }
+
+/// Take everything a run left on the box and keep it, returning what was kept and what was not.
+///
+/// Best effort on purpose. A recipe that ran is a recipe that ran, and refusing the whole run
+/// because one screenshot could not be read would throw away the thing the person actually asked
+/// for. What must not happen is silence: a run whose recording did not survive looks exactly like
+/// a run that was never recorded, so every failure comes back in words the page can show.
+pub async fn keep_run_artifacts(
+    state: &AgUiState,
+    account: &AccountId,
+    provider: &std::sync::Arc<dyn opengrok_box::Computer>,
+    box_id: &str,
+    recipe_id: &str,
+    run_id: &str,
+    receipt: &serde_json::Value,
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    let Some(found) = receipt
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut kept: Vec<serde_json::Value> = Vec::new();
+    let mut missed = Vec::new();
+    for one in found {
+        let (Some(path), Some(kind)) = (
+            one.get("path").and_then(serde_json::Value::as_str),
+            one.get("kind").and_then(serde_json::Value::as_str),
+        ) else {
+            missed.push("the box described an artifact with no path".to_string());
+            continue;
+        };
+        let described = BoxArtifact {
+            recipe_id,
+            run_id,
+            step_index: one
+                .get("step_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as i32),
+            kind,
+            path,
+            mime: one
+                .get("mime")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("application/octet-stream"),
+            width: one
+                .get("width")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as i32),
+            height: one
+                .get("height")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as i32),
+        };
+        match store_box_artifact(state, account, provider, box_id, described).await {
+            Ok(row) => kept.push(json!({
+                "id": row.id,
+                "kind": row.kind,
+                "mime": row.mime,
+                "stepIndex": row.step_index,
+                "sizeBytes": row.size_bytes,
+                "meta": row.meta,
+            })),
+            Err(why) => missed.push(why),
+        }
+    }
+    (kept, missed)
+}

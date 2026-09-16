@@ -136,4 +136,48 @@ async fn an_artifact_round_trips_and_belongs_to_one_account() {
         .expect("delete");
     assert!(store.artifact(&id).await.expect("read").is_none());
     assert!(store.artifact_bytes(&id).await.expect("read").is_none());
+
+    // ---- an artifact whose run is gone goes with it ----
+    let gone_run = format!("rrun_gone_{stamp}");
+    let mut orphan = row(&format!("art_orphan_{stamp}"), &mine, "recording", stamp);
+    orphan.recipe_id = Some(recipe.clone());
+    orphan.run_id = Some(gone_run.clone());
+    store.put_artifact(&orphan, &bytes).await.expect("store");
+    assert_eq!(
+        store
+            .artifacts_for_run(&recipe, &gone_run)
+            .await
+            .expect("read")
+            .len(),
+        1
+    );
+
+    // No recipe_run row was ever written for that id, so pruning finds it orphaned. The three
+    // step screenshots above are orphaned too — none of them has a run row either.
+    let dropped = store
+        .orphan_artifacts_of_gone_runs(&recipe, stamp + 2)
+        .await
+        .expect("orphan");
+    assert_eq!(
+        dropped, 4,
+        "the recording and the three step shots all had no run"
+    );
+    assert!(
+        store
+            .artifacts_for_run(&recipe, &gone_run)
+            .await
+            .expect("read")
+            .is_empty(),
+        "an artifact with no run has no page, so it is gone"
+    );
+    // Another recipe's artifacts are not touched: the sweep is per recipe.
+    assert_eq!(
+        store
+            .artifacts_for_thread(&mine, &thread)
+            .await
+            .expect("read")
+            .len(),
+        1,
+        "an attachment has no run and must survive the sweep"
+    );
 }

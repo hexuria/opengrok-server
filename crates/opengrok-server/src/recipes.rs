@@ -382,6 +382,37 @@ async fn detail_body(
         .filter(|view| !view.retired && view.members.is_empty())
         .map(|view| json!({ "id": view.id.as_str(), "name": view.name }))
         .collect();
+    // A run carries what it produced, so the history can show a step's picture and play a
+    // recording without a second round trip per row. The bytes themselves are never in here —
+    // these are ids the page turns into URLs.
+    let mut runs_with_artifacts = Vec::with_capacity(runs.len());
+    for run in &runs {
+        let of_run = store
+            .artifacts_for_run(id, &run.id)
+            .await
+            .unwrap_or_default();
+        let mut row = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
+        if let Some(object) = row.as_object_mut() {
+            object.insert(
+                "artifacts".to_string(),
+                json!(
+                    of_run
+                        .iter()
+                        .map(|artifact| json!({
+                            "id": artifact.id,
+                            "kind": artifact.kind,
+                            "mime": artifact.mime,
+                            "stepIndex": artifact.step_index,
+                            "sizeBytes": artifact.size_bytes,
+                            "meta": artifact.meta,
+                        }))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        runs_with_artifacts.push(row);
+    }
+
     Json(json!({
         "recipe": summary(&recipe, relation, None),
         "versions": versions.iter().map(|version| json!({
@@ -409,7 +440,7 @@ async fn detail_body(
         })).collect::<Vec<_>>(),
         "shares": shares,
         "grants": grants,
-        "runs": runs,
+        "runs": runs_with_artifacts,
         "myBots": my_bots,
     }))
     .into_response()
@@ -808,31 +839,80 @@ async fn run(
     let source = StoreRecipes {
         store: state.auth.store.clone(),
     };
-    let (version, body) = match source.recipe_request(&id).await {
+    let (version, mut body) = match source.recipe_request(&id).await {
         Ok(found) => found,
         Err(why) => return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response(),
     };
+
+    // The run's id is minted BEFORE the run, because the box writes its files into a directory
+    // named after it: a recording and eleven screenshots from two runs of the same recipe would
+    // otherwise land on top of each other.
+    let run_id = format!("rrun_{}", uuid::Uuid::now_v7());
+    // A person watching a run wants to see what it did, so this asks for a picture of every step
+    // and a recording of the whole thing. An agent's run does not: it needs the end screenshot as
+    // its tool result, and a video of every turn would be bytes nobody opens.
+    //
+    // Setting `artifact_dir` also makes the box write the pictures to disk INSTEAD of inlining
+    // them, so the receipt comes back without `png_base64`. That is the trade: the page gets its
+    // images from the artifact routes rather than out of this response.
+    if let Some(object) = body.as_object_mut() {
+        object.insert("screenshot".to_string(), json!("each"));
+        object.insert("record".to_string(), json!(true));
+        object.insert(
+            "artifact_dir".to_string(),
+            json!(format!("/workspace/.recipe-runs/{run_id}")),
+        );
+    }
+
     let receipt = match provider.run_recipe(&box_id, &body).await {
         Ok(raw) => RecipeReceipt::from_value(raw),
         Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     };
-    source.record_run(&id, version, &coworker, &receipt).await;
+
+    // Pull what the box made onto the server while the box is still around. A box can be reset
+    // or stopped a moment later, and then the files are gone with it.
+    let (kept, missed) = crate::artifacts::keep_run_artifacts(
+        &state,
+        &account,
+        &provider,
+        &box_id,
+        &id,
+        &run_id,
+        &receipt.raw,
+    )
+    .await;
+
+    source
+        .record_run_as(&run_id, &id, version, &coworker, &receipt)
+        .await;
     // History is for reading, not for keeping: five runs per version is what the page shows.
     let _ = state
         .auth
         .store
         .prune_recipe_runs(&id, version, RUNS_KEPT_PER_VERSION)
         .await;
+    // Whatever those runs produced goes with them; an artifact with no run has no page.
+    let _ = state
+        .auth
+        .store
+        .orphan_artifacts_of_gone_runs(&id, now_ms())
+        .await;
     Json(json!({
         "recipe": recipe.id,
         "version": version,
+        "runId": run_id,
         "ok": receipt.ok,
         "ran": receipt.ran,
         "stoppedAt": receipt.stopped_at,
         "error": receipt.error,
+        // Present only when the box inlined one, which it stops doing once it is writing files.
         "image": receipt.image.as_ref().map(|image| json!({
             "mime": image.mime, "base64": image.base64, "width": image.width, "height": image.height,
         })),
+        "artifacts": kept,
+        // Said out loud rather than swallowed: a run whose recording did not survive looks
+        // identical to one that was never recorded, and the difference matters when debugging.
+        "artifactsMissed": missed,
     }))
     .into_response()
 }
@@ -878,6 +958,34 @@ impl RecipeSource for StoreRecipes {
         receipt: &RecipeReceipt,
     ) {
         let id = format!("rrun_{}", uuid::Uuid::now_v7());
+        self.write_run(&id, recipe_id, version, coworker_id, receipt)
+            .await;
+    }
+}
+
+impl StoreRecipes {
+    /// Record a run under an id the caller already minted, because the artifacts were filed
+    /// against that id before the run finished.
+    pub async fn record_run_as(
+        &self,
+        run_id: &str,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &CoworkerId,
+        receipt: &RecipeReceipt,
+    ) {
+        self.write_run(run_id, recipe_id, version, coworker_id, receipt)
+            .await;
+    }
+
+    async fn write_run(
+        &self,
+        id: &str,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &CoworkerId,
+        receipt: &RecipeReceipt,
+    ) {
         // The receipt is kept without its picture: the picture rode the tool result; the
         // history shows what happened, not a gallery.
         let mut receipt_json = receipt.raw.clone();
@@ -887,11 +995,11 @@ impl RecipeSource for StoreRecipes {
         let _ = self
             .store
             .record_recipe_run(
-                &id,
+                id,
                 recipe_id,
                 version,
                 coworker_id.as_str(),
-                None,
+                Some(id),
                 receipt.ok,
                 receipt.stopped_at.map(|n| n as i32),
                 &receipt_json,
