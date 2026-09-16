@@ -21,6 +21,7 @@ pub mod mcp_door;
 pub mod models;
 pub mod persona;
 pub mod points;
+pub mod recipes;
 pub mod recovery;
 pub mod seamb;
 pub mod seamb_send;
@@ -45,6 +46,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
+        .merge(recipes::router(state.clone()))
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))

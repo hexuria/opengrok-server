@@ -39,6 +39,7 @@ import {
   type SharingMode,
   getDockerStatus,
   updateAllDockerBoxes,
+  listOrgRecipes,
 } from "../api/admin";
 import { ApiError } from "../api/client";
 
@@ -349,6 +350,56 @@ function DomainsCard() {
           <p className="empty">No domains yet.</p>
         )}
       </div>
+    </section>
+  );
+}
+
+/// Recipes members have shared with the whole org — taught tasks bots can run on their screens.
+/// The admin reads; only a recipe's owner changes or withdraws it.
+function RecipesCard() {
+  const recipes = useQuery({ queryKey: ["admin", "recipes"], queryFn: listOrgRecipes, retry: false });
+  if (recipes.error instanceof ApiError && recipes.error.status === 403) {
+    return null;
+  }
+  const rows = recipes.data?.recipes ?? [];
+  return (
+    <section className="card">
+      <h3 style={{ margin: "0 0 0.25rem" }}>Recipes shared with the org ({rows.length})</h3>
+      <p className="muted" style={{ fontSize: "0.8rem", margin: "0 0 0.75rem" }}>
+        Tasks members taught on their bots’ screens and shared org-wide. Each member accepts a recipe
+        before granting it to their own bots; only its owner can change or withdraw it.
+      </p>
+      {recipes.isLoading ? (
+        <p className="empty">Loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="empty">Nothing has been shared with the org yet.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Recipe</th>
+              <th>Owner</th>
+              <th>Version</th>
+              <th>Accepted</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((recipe) => (
+              <tr key={recipe.id}>
+                <td>
+                  <strong>{recipe.name}</strong>
+                  {recipe.description ? <div className="muted" style={{ fontSize: "0.8rem" }}>{recipe.description}</div> : null}
+                </td>
+                <td>{recipe.ownerEmail ?? recipe.ownerId}</td>
+                <td>{recipe.latestVersion == null ? "—" : `v${recipe.latestVersion}`}</td>
+                <td>
+                  {recipe.accepted} of {recipe.members}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </section>
   );
 }
@@ -1275,6 +1326,7 @@ export function AdminComputersPage() {
       blurb="Where your organization’s bots run. Set a provider key and every member’s computer is provisioned from it — the key is sealed on the server and never leaves it."
     >
       <ComputersCard />
+      <RecipesCard />
     </AdminSection>
   );
 }

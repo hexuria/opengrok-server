@@ -302,3 +302,20 @@ export async function deleteTemplate(id: string): Promise<void> {
   const res = await request(`/admin/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw new ApiError(res.status, await res.text());
 }
+
+/// A recipe shared with the whole org, as the admin sees it: read-only.
+export interface OrgRecipe {
+  id: string;
+  name: string;
+  description: string;
+  ownerId: string;
+  ownerEmail: string | null;
+  latestVersion: number | null;
+  updatedAtMs: number;
+  accepted: number;
+  members: number;
+}
+
+export function listOrgRecipes(): Promise<{ recipes: OrgRecipe[] }> {
+  return getJson<{ recipes: OrgRecipe[] }>("/admin/recipes");
+}

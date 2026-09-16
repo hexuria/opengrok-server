@@ -113,6 +113,7 @@ impl Persona {
 pub fn computer_system_prompt(
     has_computer: bool,
     has_screen: bool,
+    has_recipes: bool,
     reaches_user_machine: bool,
     user_machine_label: Option<&str>,
 ) -> String {
@@ -139,6 +140,17 @@ pub fn computer_system_prompt(
                  returns a fresh screenshot. Take a screenshot before you act, do one step at a \
                  time, and read each screenshot before the next step. The user can watch your \
                  screen, so say what you see and what you are doing.",
+            );
+        }
+        if has_screen && has_recipes {
+            // `run_recipe` is offered only with a screen and at least one grant; the prompt says
+            // it under the same condition.
+            prompt.push_str(
+                " You have TAUGHT RECIPES for this computer: tasks a person showed you step by \
+                 step. When a request matches a recipe's description, run it with `run_recipe` \
+                 (one call, the whole task) instead of clicking through it yourself, then read \
+                 the screenshot it returns and say which recipe you used. If it stops part way, \
+                 say at which step and finish by hand with `computer`.",
             );
         }
         if reaches_user_machine {
@@ -362,7 +374,7 @@ mod tests {
 
     #[test]
     fn the_computer_prompt_tracks_whether_the_tools_exist() {
-        let box_only = computer_system_prompt(true, false, false, None);
+        let box_only = computer_system_prompt(true, false, false, false, None);
         assert!(
             box_only.contains("You have your OWN computer"),
             "{box_only}"
@@ -376,7 +388,7 @@ mod tests {
             "must not name a tool that is not offered: {box_only}"
         );
 
-        let with_user = computer_system_prompt(true, false, true, Some("office.local"));
+        let with_user = computer_system_prompt(true, false, false, true, Some("office.local"));
         assert!(
             with_user.contains("`user_machine_shell`"),
             "the offered tool must be named: {with_user}"
@@ -386,7 +398,16 @@ mod tests {
             "the enrolled label is the true name: {with_user}"
         );
 
-        let none = computer_system_prompt(false, false, true, Some("ignored"));
+        // Recipes are named only with a screen to run them on; the tool is offered the same way.
+        let taught = computer_system_prompt(true, true, true, false, None);
+        assert!(taught.contains("`run_recipe`"), "{taught}");
+        let headless_grant = computer_system_prompt(true, false, true, false, None);
+        assert!(
+            !headless_grant.contains("run_recipe"),
+            "no screen ⇒ no recipe tool ⇒ not named: {headless_grant}"
+        );
+
+        let none = computer_system_prompt(false, false, false, true, Some("ignored"));
         assert!(
             none.contains("You do NOT currently have a computer"),
             "{none}"

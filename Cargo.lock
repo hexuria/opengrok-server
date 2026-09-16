@@ -2096,6 +2096,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengrok-recipes"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "opengrok-server"
 version = "0.1.0"
 dependencies = [
@@ -2113,6 +2121,7 @@ dependencies = [
  "opengrok-plugins",
  "opengrok-policy",
  "opengrok-proto",
+ "opengrok-recipes",
  "opengrok-store",
  "opengrok-tools",
  "opengrok-wire",

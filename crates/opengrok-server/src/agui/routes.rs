@@ -188,8 +188,15 @@ pub(crate) async fn tools_for_coworker(
     let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
+    // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
+    let recipes = if screen {
+        crate::recipes::offers_for(state, &coworker_id).await
+    } else {
+        Vec::new()
+    };
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
         .with_screen(screen)
+        .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned());
@@ -1249,7 +1256,7 @@ async fn list_templates(
 
 /// Is this coworker the caller's? `None` ⇒ 404: another account's coworker id must read as
 /// "no such coworker", never as an empty or refused one.
-async fn owned_coworker(
+pub(crate) async fn owned_coworker(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
@@ -1770,12 +1777,14 @@ pub async fn run(
                 None
             };
             let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
+            let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&crate::persona::computer_system_prompt(
                     has_computer,
                     has_screen,
+                    has_recipes,
                     reaches_user_machine,
                     user_machine_label.as_deref(),
                 )),

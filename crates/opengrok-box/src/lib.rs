@@ -335,6 +335,17 @@ pub trait Computer: Send + Sync {
         Err(not_supported("update a box in place"))
     }
 
+    /// Run a whole taught recipe in one call — hexuria/box's `POST /v1/cua/recipe` body in,
+    /// its receipt out (`ok`, `ran`, `stopped_at`, per-step results, an end screenshot).
+    /// Default: no screen.
+    async fn run_recipe(
+        &self,
+        _box_id: &str,
+        _request: &serde_json::Value,
+    ) -> BoxResult<serde_json::Value> {
+        Err(no_screen())
+    }
+
     /// Which kind of computer this is, for advertising the options to a client:
     /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
     /// local-docker; the ascii provider overrides it.

@@ -736,6 +736,72 @@ create table if not exists coworker_last_viewed (
 -- (`agent-db.ts`: markUnread sets it, markViewed takes `preserveManualUnread`).
 alter table coworker_last_viewed add column if not exists manually_unread boolean not null default false;
 
+-- Recipes: a task a person taught on a coworker's screen, kept in versions (1 raw tape,
+-- 2 filtered into steps, 3+ edited), owned by the teacher, shared to people or an org, and
+-- granted to the bots that may run it. A deleted recipe keeps its rows (soft delete) so the
+-- runs it made stay readable.
+create table if not exists recipe (
+    id            text   primary key,
+    owner_id      text   not null,
+    org_id        text,
+    name          text   not null,
+    description   text   not null default '',
+    screen_w      int    not null default 1280,
+    screen_h      int    not null default 800,
+    created_at_ms bigint not null,
+    updated_at_ms bigint not null,
+    deleted_at_ms bigint
+);
+create index if not exists recipe_owner_idx on recipe (owner_id);
+create index if not exists recipe_org_idx on recipe (org_id);
+
+create table if not exists recipe_version (
+    recipe_id     text   not null references recipe (id),
+    version       int    not null,
+    kind          text   not null,
+    body          jsonb  not null,
+    note          text   not null default '',
+    created_by    text   not null,
+    created_at_ms bigint not null,
+    primary key (recipe_id, version)
+);
+
+-- scope 'account' with an account id, or 'org' with an org id. An org share is accepted per
+-- member: accepting writes an 'account' row for that member, so acceptance is always a person's.
+create table if not exists recipe_share (
+    recipe_id      text   not null references recipe (id),
+    scope          text   not null,
+    scope_id       text   not null,
+    granted_by     text   not null,
+    granted_at_ms  bigint not null,
+    accepted_at_ms bigint,
+    declined_at_ms bigint,
+    primary key (recipe_id, scope, scope_id)
+);
+create index if not exists recipe_share_scope_idx on recipe_share (scope, scope_id);
+
+create table if not exists recipe_grant (
+    recipe_id     text   not null references recipe (id),
+    coworker_id   text   not null,
+    granted_by    text   not null,
+    granted_at_ms bigint not null,
+    primary key (recipe_id, coworker_id)
+);
+create index if not exists recipe_grant_coworker_idx on recipe_grant (coworker_id);
+
+create table if not exists recipe_run (
+    id          text   primary key,
+    recipe_id   text   not null references recipe (id),
+    version     int    not null,
+    coworker_id text   not null,
+    run_id      text,
+    ok          boolean not null,
+    stopped_at  int,
+    receipt     jsonb  not null,
+    at_ms       bigint not null
+);
+create index if not exists recipe_run_recipe_idx on recipe_run (recipe_id, at_ms);
+
 -- Data follows schema: everything above has created its tables by here.
 -- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
 -- EXACTLY the previous built-in set was "everything this server implements" when it was written,

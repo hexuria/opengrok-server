@@ -28,6 +28,7 @@ argon2.workspace = true
 tonic.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
+opengrok-recipes = { path = "../opengrok-recipes" }
 opengrok-tools = { path = "../opengrok-tools" }
 opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-wire = { path = "../opengrok-wire" }

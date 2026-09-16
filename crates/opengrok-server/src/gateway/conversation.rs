@@ -1221,12 +1221,14 @@ pub(crate) async fn run_turn(
     // resume says the same thing. Two compositions could disagree, which is the whole reason
     // this is one message.
     let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
+    let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
     let system = crate::persona::system_message(
         &name,
         &persona,
         Some(&crate::persona::computer_system_prompt(
             has_computer,
             has_screen,
+            has_recipes,
             reaches_user_machine,
             user_machine_label.as_deref(),
         )),

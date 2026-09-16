@@ -1,0 +1,13 @@
+[package]
+name = "opengrok-recipes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A taught tape (raw pointer and key events) into the box's recipe steps, and the lint that keeps a stored recipe runnable."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
