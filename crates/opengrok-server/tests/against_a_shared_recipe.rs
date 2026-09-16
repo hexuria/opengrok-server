@@ -316,6 +316,55 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
     assert!(!runs[0].ok);
     assert_eq!(runs[0].stopped_at, Some(0));
 
+    // ---- one version at a time: an edit can be taken back, the tape cannot ----
+    assert!(
+        store
+            .delete_recipe_version(&id, 9)
+            .await
+            .expect("delete")
+            .is_none(),
+        "a version that was never there deletes nothing"
+    );
+    let v4 = store
+        .add_recipe_version(&id, "edited", &json!({"steps": []}), "later", &owner, stamp)
+        .await
+        .expect("v4");
+    assert_eq!(v4, 4);
+    assert_eq!(
+        store
+            .recipe_runnable_version(&id)
+            .await
+            .expect("read")
+            .expect("v4")
+            .version,
+        4
+    );
+    let gone = store
+        .delete_recipe_version(&id, 4)
+        .await
+        .expect("delete")
+        .expect("v4 was there");
+    assert_eq!(gone.kind, "edited");
+    assert_eq!(
+        store
+            .recipe_runnable_version(&id)
+            .await
+            .expect("read")
+            .expect("v3")
+            .version,
+        3,
+        "deleting the newest edit leaves the one before it running"
+    );
+    assert!(
+        store
+            .recipe_runs(&id, 50)
+            .await
+            .expect("runs")
+            .iter()
+            .all(|run| run.version != 4),
+        "a version's runs go with it, since history is read a version at a time"
+    );
+
     // ---- soft delete: gone from lists and from the bot, history still readable ----
     store
         .soft_delete_recipe(&id, stamp + 1)
