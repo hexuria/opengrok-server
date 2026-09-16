@@ -28,6 +28,14 @@ use crate::agui::routes::{account_from_bearer, owned_coworker};
 /// The raw tape is capped so a runaway teach cannot fill the table.
 const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
 
+/// How much of a raw tape a detail response carries. Enough to read what was taped, few
+/// enough that a long teach does not push a megabyte of pointer moves through the page.
+const RAW_EVENTS_SENT: usize = 2_000;
+
+/// How many runs of one version the history keeps. Older ones are dropped as new ones land,
+/// so the page's five rows per version are the whole table, not a window onto an endless one.
+const RUNS_KEPT_PER_VERSION: i64 = 5;
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -381,9 +389,19 @@ async fn detail_body(
             "note": version.note,
             "createdBy": version.created_by,
             "createdAtMs": version.created_at_ms,
-            // The raw tape is big and only its size matters on the page; steps travel whole.
+            // The raw tape travels with its count, so a page can show what was taped and not
+            // merely how much of it there was. A tape is capped at 5 MB on the way in but can
+            // still be tens of thousands of moves, which is neither readable nor worth sending,
+            // so a long one is cut and says so; the whole tape stays in the store either way.
             "body": if version.kind == "raw" {
-                json!({ "events": version.body.as_array().map(Vec::len).unwrap_or(0) })
+                let events = version.body.as_array().cloned().unwrap_or_default();
+                let total = events.len();
+                let shown: Vec<Value> = events.into_iter().take(RAW_EVENTS_SENT).collect();
+                json!({
+                    "events": total,
+                    "tape": shown,
+                    "truncated": total > RAW_EVENTS_SENT,
+                })
             } else {
                 version.body.clone()
             },
@@ -761,6 +779,12 @@ async fn run(
         Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     };
     source.record_run(&id, version, &coworker, &receipt).await;
+    // History is for reading, not for keeping: five runs per version is what the page shows.
+    let _ = state
+        .auth
+        .store
+        .prune_recipe_runs(&id, version, RUNS_KEPT_PER_VERSION)
+        .await;
     Json(json!({
         "recipe": recipe.id,
         "version": version,

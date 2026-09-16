@@ -2671,6 +2671,32 @@ impl PgStore {
         Ok(())
     }
 
+    /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
+    /// long-lived recipe cannot grow an unbounded history nobody reads.
+    pub async fn prune_recipe_runs(
+        &self,
+        recipe_id: &str,
+        version: i32,
+        keep: i64,
+    ) -> StoreResult<u64> {
+        let done = sqlx::query(
+            "delete from recipe_run
+              where recipe_id = $1 and version = $2
+                and id not in (
+                    select id from recipe_run
+                     where recipe_id = $1 and version = $2
+                     order by at_ms desc
+                     limit $3
+                )",
+        )
+        .bind(recipe_id)
+        .bind(version)
+        .bind(keep)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
+    }
+
     pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
         let rows = sqlx::query(
             "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms

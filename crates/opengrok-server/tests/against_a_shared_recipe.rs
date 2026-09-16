@@ -260,6 +260,59 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
         .expect("record");
     let runs = store.recipe_runs(&id, 10).await.expect("runs");
     assert_eq!(runs.len(), 1);
+
+    // History keeps the newest five of a version: the page shows five, so five is what is kept.
+    // One run of v3 is already recorded above, and one of v2 proves a version is pruned alone.
+    store
+        .record_recipe_run(
+            &format!("rrun_{stamp}_v2"),
+            &id,
+            2,
+            &bot,
+            None,
+            true,
+            None,
+            &json!({"ok": true}),
+            stamp,
+        )
+        .await
+        .expect("record");
+    for n in 0..7 {
+        store
+            .record_recipe_run(
+                &format!("rrun_{stamp}_{n}"),
+                &id,
+                3,
+                &bot,
+                None,
+                true,
+                None,
+                &json!({"ok": true}),
+                stamp + n,
+            )
+            .await
+            .expect("record");
+    }
+    let dropped = store.prune_recipe_runs(&id, 3, 5).await.expect("prune");
+    assert_eq!(dropped, 3, "eight runs of v3, five kept");
+    let kept: Vec<_> = store
+        .recipe_runs(&id, 50)
+        .await
+        .expect("runs")
+        .into_iter()
+        .filter(|run| run.version == 3)
+        .collect();
+    assert_eq!(kept.len(), 5);
+    assert_eq!(kept[0].at_ms, stamp + 6, "the newest survives");
+    assert!(
+        store
+            .recipe_runs(&id, 50)
+            .await
+            .expect("runs")
+            .iter()
+            .any(|run| run.version == 2),
+        "another version's history is untouched"
+    );
     assert!(!runs[0].ok);
     assert_eq!(runs[0].stopped_at, Some(0));
 
@@ -301,5 +354,6 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
             .deleted_at_ms
             .is_some()
     );
-    assert_eq!(store.recipe_runs(&id, 10).await.expect("runs").len(), 1);
+    // Deleting the recipe does not delete what it did: five kept runs of v3 and one of v2.
+    assert_eq!(store.recipe_runs(&id, 50).await.expect("runs").len(), 6);
 }
