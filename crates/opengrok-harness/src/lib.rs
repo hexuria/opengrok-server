@@ -22,7 +22,8 @@ pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{
-    ChatMessage, DeltaStream, GatewayKey, ModelDelta, ModelDoor, ModelError, ModelRequest,
+    ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
+    ModelRequest,
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
@@ -60,7 +61,10 @@ pub const MAX_ROUNDS: usize = 8;
 /// bar_chart again in the same request.
 pub fn is_client_render_tool(name: &str) -> bool {
     matches!(
-        name.trim().to_ascii_lowercase().replace('_', "-").replace(' ', "-").as_str(),
+        name.trim()
+            .to_ascii_lowercase()
+            .replace(['_', ' '], "-")
+            .as_str(),
         "bar-chart"
             | "barchart"
             | "show-bar-chart"
@@ -292,10 +296,7 @@ pub async fn resume_conversation(
     };
     for result in &results {
         all.extend(projection.push_tool_result(result));
-        request.messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: format!("[tool {} result] {}", result.call_id, result.content),
-        });
+        request.messages.push(tool_result_message(result));
     }
     let _ = journal.record(&run_id, &all).await;
 
@@ -378,6 +379,7 @@ async fn converse(
     for round in 0..MAX_ROUNDS {
         let mut round_events = Vec::new();
 
+        keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
@@ -438,10 +440,7 @@ async fn converse(
                         emit_live(sink, &produced).await;
                         round_events.extend(produced);
                         // The model needs to see what its tool said, in its own transcript.
-                        request.messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: format!("[tool {} result] {}", result.call_id, result.content),
-                        });
+                        request.messages.push(tool_result_message(result));
                     }
 
                     if let Some((waiting, reason, why)) = results
@@ -498,6 +497,7 @@ async fn converse(
 
                     if !said.is_empty() {
                         request.messages.push(ChatMessage {
+                            images: Vec::new(),
                             role: "assistant".to_string(),
                             content: said,
                         });
@@ -550,6 +550,40 @@ async fn converse(
     }
 
     all
+}
+
+/// How many screenshots a request carries. They are the model's eyes and also by far the widest
+/// thing in it; the latest one or two say where the screen is now, older ones only cost.
+const RECENT_IMAGES: usize = 2;
+
+/// What the model is told a tool said, in its own transcript — with the picture, when there is one.
+fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: format!("[tool {} result] {}", result.call_id, result.content),
+        images: result
+            .image
+            .iter()
+            .map(|image| ImagePart {
+                mime: image.mime.clone(),
+                base64: image.base64.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Keep the last `keep` messages that carry images; older ones keep their words, lose their pictures.
+fn keep_recent_images(messages: &mut [ChatMessage], keep: usize) {
+    let mut seen = 0;
+    for message in messages.iter_mut().rev() {
+        if message.images.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if seen > keep {
+            message.images.clear();
+        }
+    }
 }
 
 /// The gate's sentence out of an awaiting result. `ToolResult::awaiting` writes
@@ -624,6 +658,7 @@ mod tests {
             system: None,
             tools: Vec::new(),
             messages: vec![ChatMessage {
+                images: Vec::new(),
                 role: "user".to_string(),
                 content: text.to_string(),
             }],

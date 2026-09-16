@@ -27,7 +27,7 @@ pub use mcp::{Endpoint, McpError, McpTool};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use opengrok_box::{BoxError, Computer};
+use opengrok_box::{BoxError, Computer, CuaAction, Screenshot};
 use opengrok_core::coworker::Coworker;
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,30 @@ pub struct ToolResult {
     /// can come from the same tool, so the tool name no longer says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_reason: Option<AwaitingReason>,
+    /// A picture that goes with the words: the screen after a `computer` action. The model is
+    /// shown it as an image, the client paints it, the journal keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ToolImage>,
+}
+
+/// An image a tool hands back, base64 so it rides JSON as-is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolImage {
+    pub mime: String,
+    pub base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl From<Screenshot> for ToolImage {
+    fn from(shot: Screenshot) -> Self {
+        Self {
+            mime: shot.mime,
+            base64: shot.png_base64,
+            width: shot.width,
+            height: shot.height,
+        }
+    }
 }
 
 impl ToolResult {
@@ -89,7 +113,14 @@ impl ToolResult {
             content: content.into(),
             awaiting_approval: false,
             awaiting_reason: None,
+            image: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_image(mut self, image: ToolImage) -> Self {
+        self.image = Some(image);
+        self
     }
 
     /// Waiting on a person. `ok` is false because nothing ran — treating a pending approval as
@@ -101,6 +132,7 @@ impl ToolResult {
             content: format!("waiting for approval: {}", why.into()),
             awaiting_approval: true,
             awaiting_reason: Some(reason),
+            image: None,
         }
     }
 
@@ -112,6 +144,7 @@ impl ToolResult {
             content: format!("refused: {}", why.into()),
             awaiting_approval: false,
             awaiting_reason: None,
+            image: None,
         }
     }
 }
@@ -188,6 +221,91 @@ pub struct WriteFileArgs {
     pub content: String,
 }
 
+/// The arguments `open_url` accepts.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenUrlArgs {
+    pub url: String,
+}
+
+/// The arguments `computer` accepts: one action, with the fields that action needs. Modelled
+/// on the shape models already know from computer-use APIs, so one tool covers the screen.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComputerArgs {
+    pub action: String,
+    #[serde(default)]
+    pub coordinate: Option<[i32; 2]>,
+    #[serde(default)]
+    pub to: Option<[i32; 2]>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub scroll: Option<[i32; 2]>,
+    #[serde(default)]
+    pub button: Option<u8>,
+}
+
+impl ComputerArgs {
+    /// `Ok(None)` is a screenshot; `Ok(Some(action))` acts first and then looks. The error
+    /// names the missing field, so a model can fix its call instead of guessing.
+    pub fn into_action(self) -> Result<Option<CuaAction>, String> {
+        let at = |coordinate: Option<[i32; 2]>, what: &str| {
+            coordinate.ok_or_else(|| format!("{what} needs `coordinate`: [x, y]"))
+        };
+        let action = match self.action.as_str() {
+            "screenshot" => return Ok(None),
+            "click" | "left_click" => {
+                let [x, y] = at(self.coordinate, "click")?;
+                CuaAction::Click {
+                    x,
+                    y,
+                    button: self.button,
+                }
+            }
+            "right_click" => {
+                let [x, y] = at(self.coordinate, "right_click")?;
+                CuaAction::Click {
+                    x,
+                    y,
+                    button: Some(3),
+                }
+            }
+            "double_click" => {
+                let [x, y] = at(self.coordinate, "double_click")?;
+                CuaAction::DoubleClick { x, y }
+            }
+            "move" | "mouse_move" => {
+                let [x, y] = at(self.coordinate, "move")?;
+                CuaAction::Move { x, y }
+            }
+            "drag" | "left_click_drag" => {
+                let [x1, y1] = at(self.coordinate, "drag")?;
+                let [x2, y2] = self.to.ok_or("drag needs `to`: [x, y]")?;
+                CuaAction::Drag { x1, y1, x2, y2 }
+            }
+            "type" => CuaAction::Type {
+                text: self.text.ok_or("type needs `text`")?,
+            },
+            "key" => CuaAction::Key {
+                key: self.key.ok_or("key needs `key`, e.g. Return or ctrl+l")?,
+            },
+            "scroll" => {
+                let [x, y] = at(self.coordinate, "scroll")?;
+                let [dx, dy] = self.scroll.ok_or("scroll needs `scroll`: [dx, dy]")?;
+                CuaAction::Scroll { x, y, dx, dy }
+            }
+            other => {
+                return Err(format!(
+                    "unknown action `{other}`; one of screenshot, click, right_click, \
+                     double_click, move, drag, type, key, scroll"
+                ));
+            }
+        };
+        Ok(Some(action))
+    }
+}
+
 /// Runs tool calls on the caller's own computer, if policy allows.
 pub struct Executor {
     computer: Arc<dyn Computer>,
@@ -221,7 +339,13 @@ pub struct Executor {
     /// Auto-review, when the run's effective policy is on: the instruction texts (resolved once
     /// per run by the server) and the judge that reads them. `None` is the cheapest short-circuit.
     auto_review: Option<AutoReview>,
+    /// The box has a display. Only then are `open_url` and `computer` offered: a headless box
+    /// would refuse every call, and a tool that always refuses is a dead end the model retries.
+    screen: bool,
 }
+
+/// The built-ins that need a display.
+const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
 
 /// The auto-review pair a run carries.
 struct AutoReview {
@@ -271,6 +395,7 @@ impl Executor {
             user_machine: None,
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
+            screen: false,
         }
     }
 
@@ -285,7 +410,20 @@ impl Executor {
             user_machine: None,
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
+            screen: false,
         }
+    }
+
+    /// Say the box has a display, so the screen tools are offered and run.
+    #[must_use]
+    pub fn with_screen(mut self, screen: bool) -> Self {
+        self.screen = screen;
+        self
+    }
+
+    /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
+    pub fn has_screen(&self) -> bool {
+        self.screen
     }
 
     /// Carry the calls a person has already answered yes to.
@@ -335,9 +473,18 @@ impl Executor {
         self
     }
 
-    /// The tools that need no plugin: always present, always executable.
+    /// The tools that need no plugin. `open_url` and `computer` are in the default grant but are
+    /// OFFERED only when the box has a display (`with_screen`).
     pub fn builtin_tool_names() -> &'static [&'static str] {
-        &["shell", "read_file", "write_file"]
+        &["shell", "read_file", "write_file", "open_url", "computer"]
+    }
+
+    /// The built-ins this executor can actually run right now.
+    fn offered_builtins(&self) -> impl Iterator<Item = &'static str> + '_ {
+        Self::builtin_tool_names()
+            .iter()
+            .copied()
+            .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
     }
 
     /// EVERY tool a model is offered on THIS request — built-ins plus whatever this coworker's
@@ -347,9 +494,8 @@ impl Executor {
     /// this coworker has. The invariant it protects is unchanged and load-bearing: the offered set
     /// must equal the executed set, or the model is told about a dead end and keeps trying it.
     pub fn tool_names(&self) -> Vec<String> {
-        Self::builtin_tool_names()
-            .iter()
-            .map(|name| (*name).to_string())
+        self.offered_builtins()
+            .map(str::to_string)
             .chain(
                 self.user_machine
                     .is_some()
@@ -389,7 +535,7 @@ impl Executor {
             )
         };
         let mut schemas = Vec::new();
-        for name in Self::builtin_tool_names() {
+        for name in self.offered_builtins() {
             if permitted(name)
                 && let Some((description, parameters)) = builtin_tool_spec(name)
             {
@@ -576,10 +722,73 @@ impl Executor {
                 },
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
             },
+            "open_url" => match serde_json::from_value::<OpenUrlArgs>(arguments) {
+                Ok(args) => self.open_url(box_id, &call.id, args).await,
+                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
+            },
+            "computer" => match serde_json::from_value::<ComputerArgs>(arguments) {
+                Ok(args) => self.computer_use(box_id, &call.id, args).await,
+                Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
+            },
             // A plugin's tool. Reached only AFTER the policy check above, so a connector is
             // governed exactly like `shell` — the grant, the ceiling and the approval all apply
             // before a single byte leaves this process.
             other => self.call_plugin_tool(&call.id, other, arguments).await,
+        }
+    }
+
+    async fn open_url(&self, box_id: &BoxId, call_id: &str, args: OpenUrlArgs) -> ToolResult {
+        if !self.screen {
+            return ToolResult::refused(call_id, "this computer has no screen");
+        }
+        match self.computer.open_url(box_id.as_str(), &args.url).await {
+            Ok(()) => ToolResult::ok(
+                call_id,
+                format!(
+                    "opened {} in the browser on your box; take a screenshot with `computer` to see it",
+                    args.url
+                ),
+            ),
+            Err(error) => ToolResult::refused(call_id, describe(error)),
+        }
+    }
+
+    /// Act, then look: every action answers with a fresh screenshot, so the model sees what it
+    /// did without a second call. A plain `screenshot` just looks.
+    async fn computer_use(&self, box_id: &BoxId, call_id: &str, args: ComputerArgs) -> ToolResult {
+        if !self.screen {
+            return ToolResult::refused(call_id, "this computer has no screen");
+        }
+        let action = match args.into_action() {
+            Ok(action) => action,
+            Err(why) => return ToolResult::refused(call_id, format!("bad arguments: {why}")),
+        };
+        let mut said = String::new();
+        if let Some(action) = &action {
+            if let Err(error) = self.computer.act(box_id.as_str(), action).await {
+                return ToolResult::refused(call_id, describe(error));
+            }
+            said = format!("{}; ", action.describe());
+            // The display needs a moment to repaint after input before it is worth looking.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        match self.computer.screenshot(box_id.as_str()).await {
+            Ok(shot) => ToolResult::ok(
+                call_id,
+                format!(
+                    "{said}screenshot of the {}x{} screen attached",
+                    shot.width, shot.height
+                ),
+            )
+            .with_image(ToolImage::from(shot)),
+            Err(error) if action.is_some() => ToolResult::ok(
+                call_id,
+                format!(
+                    "{said}but the screen could not be captured: {}",
+                    describe(error)
+                ),
+            ),
+            Err(error) => ToolResult::refused(call_id, describe(error)),
         }
     }
 
@@ -695,6 +904,36 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                     "content": { "type": "string", "description": "The file's full new contents." },
                 },
                 "required": ["path", "content"],
+            }),
+        )),
+        "open_url" => Some((
+            "Open a web page in the browser on THIS BOT'S OWN computer — its sandboxed box, which \
+             has a screen. The page appears on that display; use `computer` with \
+             action=screenshot to see it, then click and type on it.",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "url": { "type": "string", "description": "The page to open, with its scheme (https://…)." } },
+                "required": ["url"],
+            }),
+        )),
+        "computer" => Some((
+            "Use the screen of THIS BOT'S OWN computer: a 1280x800 display with a desktop, a dock \
+             (Terminal, Chromium, Files) and whatever windows are open. `screenshot` returns the \
+             display as an image. `click`, `right_click`, `double_click`, `move`, `drag`, `type`, \
+             `key` and `scroll` act at pixel coordinates and return a fresh screenshot. Look before \
+             you act, do one step at a time, and check each result before the next.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["screenshot", "click", "right_click", "double_click", "move", "drag", "type", "key", "scroll"] },
+                    "coordinate": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "[x, y] in display pixels, 0,0 top-left." },
+                    "to": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "For drag: where to drop, [x, y]." },
+                    "text": { "type": "string", "description": "For type: the text to type." },
+                    "key": { "type": "string", "description": "For key: a key or chord, e.g. Return, Escape, ctrl+l, alt+F4." },
+                    "scroll": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "For scroll: [dx, dy]; positive dy scrolls down." },
+                    "button": { "type": "integer", "description": "For click: 1 left (default), 2 middle, 3 right." }
+                },
+                "required": ["action"],
             }),
         )),
         USER_MACHINE_SHELL => Some((
