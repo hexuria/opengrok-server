@@ -648,9 +648,13 @@ impl DockerComputer {
     /// and a box updated to an image with new launchers should see them — while a panel the
     /// person rearranged is theirs. Pure, so the shape is testable.
     pub fn seed_defaults_command(&self, volume: &str) -> String {
+        // The lock cleanup lives here, not only in the copy: a volume reused across a recreate
+        // still holds the OLD container's Singleton{Lock,Socket,Cookie}, and the new one has a
+        // new hostname, so Chromium would call the profile "in use on another computer".
         format!(
             "docker run --rm -u 0 --entrypoint sh -v {volume}:/dst {} \
-             -c 'mkdir -p /dst/.config && cp -rn {HOME_DIR}/.config/. /dst/.config/ \
+             -c 'find /dst -maxdepth 3 -name \"Singleton*\" -exec rm -f {{}} + ; \
+                 mkdir -p /dst/.config && cp -rn {HOME_DIR}/.config/. /dst/.config/ \
                  && chown -R {BOX_USER}:{BOX_USER} /dst/.config'",
             self.image
         )
@@ -879,6 +883,8 @@ mod tests {
             "{command}"
         );
         assert!(command.contains("chown -R box:box /dst/.config"));
+        // Every recreate, not only a copy: a reused volume holds the old container's locks.
+        assert!(command.contains(r#"-name "Singleton*""#), "{command}");
     }
 
     #[test]
