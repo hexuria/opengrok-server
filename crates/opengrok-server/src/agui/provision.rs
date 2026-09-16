@@ -651,6 +651,57 @@ pub async fn coworker_screen(
     })
 }
 
+/// The coworker's screen right now, as the box's PNG — what the Computer pane paints in its
+/// tile. Resolved the same way as `coworker_screen`; a box without a display is a 404 the
+/// client can stop asking about, not a failure.
+pub async fn coworker_screenshot(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<opengrok_box::Screenshot, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    match state.auth.store.load_coworker(coworker_id).await {
+        Ok((coworker, _)) if !coworker.name.is_empty() => {}
+        _ => return Err((StatusCode::NOT_FOUND, "no such coworker".into())),
+    }
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (scope, scope_id, _) = scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id.as_str(),
+    );
+    let Ok(Some((box_id, kind, _stopped))) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "this coworker has no computer".into(),
+        ));
+    };
+    let Some(provider) = lookup_provider(state, org_id.as_deref(), &kind)
+        .await
+        .computer
+    else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the computer's provider is not available".into(),
+        ));
+    };
+    provider
+        .screenshot(&box_id)
+        .await
+        .map_err(|error| match error {
+            opengrok_box::BoxError::Refused { status: 501, .. } => {
+                (StatusCode::NOT_FOUND, "this computer has no screen".into())
+            }
+            other => (StatusCode::SERVICE_UNAVAILABLE, other.to_string()),
+        })
+}
+
 /// Wake a stopped scope box so Open can show its screen. Best-effort: a missing mapping is
 /// `coworker_screen`'s absent, not a failure here.
 pub async fn wake_coworker_computer(

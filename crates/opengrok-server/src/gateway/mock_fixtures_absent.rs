@@ -33,6 +33,7 @@ pub fn tool() -> (opengrok_harness::LocalTool, Arc<Mutex<Vec<Value>>>) {
     let handler: opengrok_harness::LocalTool =
         Arc::new(
             move |call: &opengrok_tools::ToolCall| opengrok_tools::ToolResult {
+                image: None,
                 call_id: call.id.clone(),
                 ok: false,
                 content: "this server was built without the mock fixture catalogue".to_string(),

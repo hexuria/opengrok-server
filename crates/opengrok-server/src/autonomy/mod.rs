@@ -117,6 +117,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
         system: Some(system.clone()),
         tools: Vec::new(),
         messages: vec![ChatMessage {
+            images: Vec::new(),
             role: "user".to_string(),
             content: prompt,
         }],

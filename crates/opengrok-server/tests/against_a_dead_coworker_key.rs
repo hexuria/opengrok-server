@@ -136,6 +136,7 @@ fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
         model: "xai/grok-4.6@sub".to_string(),
         system: None,
         messages: vec![ChatMessage {
+            images: Vec::new(),
             role: "user".to_string(),
             content: "ok".to_string(),
         }],

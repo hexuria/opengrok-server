@@ -210,14 +210,26 @@ impl Projection {
         let mut events = self.start();
         // A result belongs after the call it answers, never inside an open message.
         events.extend(self.close_open());
-        events.push(
-            self.event(EventType::ToolCallResult)
-                .with("toolCallId", result.call_id.clone())
-                .with("content", result.content.clone())
-                // A refusal is a result the model reads, so whether it succeeded must be legible
-                // rather than inferred from the wording.
-                .with("ok", result.ok),
-        );
+        let mut event = self
+            .event(EventType::ToolCallResult)
+            .with("toolCallId", result.call_id.clone())
+            .with("content", result.content.clone())
+            // A refusal is a result the model reads, so whether it succeeded must be legible
+            // rather than inferred from the wording.
+            .with("ok", result.ok);
+        // A screenshot rides the frame: the client paints it, the journal keeps it.
+        if let Some(image) = &result.image {
+            event = event.with(
+                "image",
+                serde_json::json!({
+                    "mime": image.mime,
+                    "base64": image.base64,
+                    "width": image.width,
+                    "height": image.height,
+                }),
+            );
+        }
+        events.push(event);
         events
     }
 
@@ -542,5 +554,37 @@ mod tests {
             assert_eq!(event.extra.get("threadId").unwrap(), "t1");
             assert_eq!(event.extra.get("runId").unwrap(), "r1");
         }
+    }
+
+    #[test]
+    fn a_tool_result_with_a_picture_puts_it_on_the_frame() {
+        let mut projection = Projection::new("t1", "r1", 100);
+        let result = opengrok_tools::ToolResult::ok("c1", "screenshot attached").with_image(
+            opengrok_tools::ToolImage {
+                mime: "image/png".into(),
+                base64: "AAAA".into(),
+                width: 1280,
+                height: 800,
+            },
+        );
+        let events = projection.push_tool_result(&result);
+        let frame = events
+            .iter()
+            .find(|event| event.event_type == EventType::ToolCallResult)
+            .unwrap();
+        let image = frame.extra.get("image").unwrap();
+        assert_eq!(image["mime"], "image/png");
+        assert_eq!(image["base64"], "AAAA");
+        assert_eq!(
+            (image["width"].as_u64(), image["height"].as_u64()),
+            (Some(1280), Some(800))
+        );
+
+        let plain = projection.push_tool_result(&opengrok_tools::ToolResult::ok("c2", "done"));
+        let frame = plain
+            .iter()
+            .find(|event| event.event_type == EventType::ToolCallResult)
+            .unwrap();
+        assert!(frame.extra.get("image").is_none());
     }
 }

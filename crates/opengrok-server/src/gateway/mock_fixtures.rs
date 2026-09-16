@@ -331,6 +331,7 @@ pub fn tool() -> (opengrok_harness::LocalTool, Arc<Mutex<Vec<Value>>>) {
         // ordinary bubble. A person asking what is available should not have to read a tool card.
         if asked == "help" || asked.is_empty() {
             return ToolResult {
+                image: None,
                 call_id: call.id.clone(),
                 ok: true,
                 content: help_text(),
@@ -346,6 +347,7 @@ pub fn tool() -> (opengrok_harness::LocalTool, Arc<Mutex<Vec<Value>>>) {
                     sink.extend(entries);
                 }
                 ToolResult {
+                    image: None,
                     call_id: call.id.clone(),
                     ok: true,
                     content: format!("appended the `{asked}` fixture ({count} entries)"),
@@ -355,6 +357,7 @@ pub fn tool() -> (opengrok_harness::LocalTool, Arc<Mutex<Vec<Value>>>) {
             }
             // Fail closed and say why, with the way out in the same breath.
             None => ToolResult {
+                image: None,
                 call_id: call.id.clone(),
                 ok: false,
                 content: format!("no fixture named `{asked}`.\n\n{}", help_text()),

@@ -938,6 +938,7 @@ pub(crate) async fn history_for(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 Some(ChatMessage {
+                    images: Vec::new(),
                     role: entry
                         .get("role")
                         .and_then(Value::as_str)
@@ -958,6 +959,7 @@ pub(crate) async fn history_for(
                     None
                 } else {
                     Some(ChatMessage {
+                        images: Vec::new(),
                         role: "assistant".to_string(),
                         content: content.to_string(),
                     })
@@ -1253,11 +1255,13 @@ pub(crate) async fn run_turn(
     // Composed once and used twice: what the model is told, and what the run captures so a
     // resume says the same thing. Two compositions could disagree, which is the whole reason
     // this is one message.
+    let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
     let system = crate::persona::system_message(
         &name,
         &persona,
         Some(&crate::persona::computer_system_prompt(
             has_computer,
+            has_screen,
             reaches_user_machine,
             user_machine_label.as_deref(),
         )),

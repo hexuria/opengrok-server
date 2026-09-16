@@ -100,6 +100,78 @@ pub fn is_starting(state: &str) -> bool {
     )
 }
 
+/// What the box's screen looks like right now: the whole display as a PNG, base64 so it can
+/// ride a JSON frame and a model message without decoding on the way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Screenshot {
+    pub mime: String,
+    pub png_base64: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One computer-use action, in the box's own vocabulary (hexuria/box's client has a method per
+/// variant). Coordinates are pixels of the display.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CuaAction {
+    Click {
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        button: Option<u8>,
+    },
+    DoubleClick {
+        x: i32,
+        y: i32,
+    },
+    Move {
+        x: i32,
+        y: i32,
+    },
+    Drag {
+        x1: i32,
+        y1: i32,
+        x2: i32,
+        y2: i32,
+    },
+    Type {
+        text: String,
+    },
+    Key {
+        key: String,
+    },
+    Scroll {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+}
+
+impl CuaAction {
+    /// A few words for a status line: "clicking at 120,40", "typing".
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Click { x, y, .. } => format!("clicking at {x},{y}"),
+            Self::DoubleClick { x, y } => format!("double-clicking at {x},{y}"),
+            Self::Move { x, y } => format!("moving to {x},{y}"),
+            Self::Drag { x1, y1, x2, y2 } => format!("dragging {x1},{y1} to {x2},{y2}"),
+            Self::Type { .. } => "typing".to_string(),
+            Self::Key { key } => format!("pressing {key}"),
+            Self::Scroll { .. } => "scrolling".to_string(),
+        }
+    }
+}
+
+/// The refusal every provider without a desktop gives for a screen action.
+pub fn no_screen() -> BoxError {
+    BoxError::Refused {
+        status: 501,
+        body: "this computer has no screen".to_string(),
+    }
+}
+
 /// A computer a coworker can work on.
 #[async_trait]
 pub trait Computer: Send + Sync {
@@ -195,10 +267,102 @@ pub trait Computer: Send + Sync {
         Ok(None)
     }
 
+    /// The display as a PNG. Default: no screen, so a refusal the model can read.
+    async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
+        Err(no_screen())
+    }
+
+    /// Click, type, press, scroll or drag on the display. Default: no screen.
+    async fn act(&self, _box_id: &str, _action: &CuaAction) -> BoxResult<()> {
+        Err(no_screen())
+    }
+
+    /// Open a page in the box's own browser. The desktop image ships `box-chromium`, which
+    /// joins the running Chromium's profile; `start` is the detached exec every provider has.
+    async fn open_url(&self, box_id: &str, url: &str) -> BoxResult<()> {
+        let quoted = url.replace('\'', "'\\''");
+        self.start(box_id, &format!("box-chromium '{quoted}'"))
+            .await?;
+        Ok(())
+    }
+
     /// Which kind of computer this is, for advertising the options to a client:
     /// `"local-docker"` (a VM on the server host) or `"ascii"` (a box.ascii.dev box). Defaults to
     /// local-docker; the ascii provider overrides it.
     fn kind(&self) -> &'static str {
         "local-docker"
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The action names and fields are the box's own request bodies; a rename here would be a
+    /// silent 400 from every box.
+    #[test]
+    fn a_cua_action_serializes_in_the_boxs_vocabulary() {
+        let click = serde_json::to_value(CuaAction::Click {
+            x: 17,
+            y: 781,
+            button: None,
+        })
+        .unwrap();
+        assert_eq!(
+            click,
+            serde_json::json!({"action": "click", "x": 17, "y": 781})
+        );
+
+        let drag = serde_json::to_value(CuaAction::Drag {
+            x1: 1,
+            y1: 2,
+            x2: 3,
+            y2: 4,
+        })
+        .unwrap();
+        assert_eq!(drag["action"], "drag");
+        assert_eq!(
+            (drag["x1"].as_i64(), drag["y2"].as_i64()),
+            (Some(1), Some(4))
+        );
+
+        let parsed: CuaAction =
+            serde_json::from_value(serde_json::json!({"action": "double_click", "x": 5, "y": 6}))
+                .unwrap();
+        assert_eq!(parsed, CuaAction::DoubleClick { x: 5, y: 6 });
+    }
+
+    #[test]
+    fn describe_says_where_not_what_was_typed() {
+        assert_eq!(
+            CuaAction::Click {
+                x: 17,
+                y: 781,
+                button: None
+            }
+            .describe(),
+            "clicking at 17,781"
+        );
+        // Typed text can be a password; the status line never repeats it.
+        assert_eq!(
+            CuaAction::Type {
+                text: "hunter2".into()
+            }
+            .describe(),
+            "typing"
+        );
+        assert_eq!(
+            CuaAction::Key {
+                key: "Return".into()
+            }
+            .describe(),
+            "pressing Return"
+        );
+    }
+
+    #[test]
+    fn no_screen_is_a_refusal_not_an_outage() {
+        assert!(matches!(no_screen(), BoxError::Refused { status: 501, .. }));
     }
 }

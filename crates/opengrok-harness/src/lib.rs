@@ -22,7 +22,8 @@ pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{
-    ChatMessage, DeltaStream, GatewayKey, ModelDelta, ModelDoor, ModelError, ModelRequest,
+    ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
+    ModelRequest,
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
@@ -295,10 +296,7 @@ pub async fn resume_conversation(
     };
     for result in &results {
         all.extend(projection.push_tool_result(result));
-        request.messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: format!("[tool {} result] {}", result.call_id, result.content),
-        });
+        request.messages.push(tool_result_message(result));
     }
     let _ = journal.record(&run_id, &all).await;
 
@@ -381,6 +379,7 @@ async fn converse(
     for round in 0..MAX_ROUNDS {
         let mut round_events = Vec::new();
 
+        keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
@@ -441,10 +440,7 @@ async fn converse(
                         emit_live(sink, &produced).await;
                         round_events.extend(produced);
                         // The model needs to see what its tool said, in its own transcript.
-                        request.messages.push(ChatMessage {
-                            role: "user".to_string(),
-                            content: format!("[tool {} result] {}", result.call_id, result.content),
-                        });
+                        request.messages.push(tool_result_message(result));
                     }
 
                     if let Some((waiting, reason, why)) = results
@@ -501,6 +497,7 @@ async fn converse(
 
                     if !said.is_empty() {
                         request.messages.push(ChatMessage {
+                            images: Vec::new(),
                             role: "assistant".to_string(),
                             content: said,
                         });
@@ -553,6 +550,40 @@ async fn converse(
     }
 
     all
+}
+
+/// How many screenshots a request carries. They are the model's eyes and also by far the widest
+/// thing in it; the latest one or two say where the screen is now, older ones only cost.
+const RECENT_IMAGES: usize = 2;
+
+/// What the model is told a tool said, in its own transcript — with the picture, when there is one.
+fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_string(),
+        content: format!("[tool {} result] {}", result.call_id, result.content),
+        images: result
+            .image
+            .iter()
+            .map(|image| ImagePart {
+                mime: image.mime.clone(),
+                base64: image.base64.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Keep the last `keep` messages that carry images; older ones keep their words, lose their pictures.
+fn keep_recent_images(messages: &mut [ChatMessage], keep: usize) {
+    let mut seen = 0;
+    for message in messages.iter_mut().rev() {
+        if message.images.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if seen > keep {
+            message.images.clear();
+        }
+    }
 }
 
 /// The gate's sentence out of an awaiting result. `ToolResult::awaiting` writes
@@ -627,6 +658,7 @@ mod tests {
             system: None,
             tools: Vec::new(),
             messages: vec![ChatMessage {
+                images: Vec::new(),
                 role: "user".to_string(),
                 content: text.to_string(),
             }],
@@ -1113,5 +1145,50 @@ mod tests {
         );
         let events = handle.await.unwrap();
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    fn shot(call_id: &str) -> opengrok_tools::ToolResult {
+        opengrok_tools::ToolResult::ok(call_id, "screenshot of the 1280x800 screen attached")
+            .with_image(opengrok_tools::ToolImage {
+                mime: "image/png".into(),
+                base64: "iVBORw0KGgo=".into(),
+                width: 1280,
+                height: 800,
+            })
+    }
+
+    #[test]
+    fn a_tool_result_with_a_picture_becomes_a_message_with_an_image() {
+        let message = tool_result_message(&shot("c1"));
+        assert_eq!(message.role, "user");
+        assert!(message.content.starts_with("[tool c1 result] screenshot"));
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].mime, "image/png");
+
+        let plain = tool_result_message(&opengrok_tools::ToolResult::ok("c2", "done"));
+        assert!(plain.images.is_empty());
+    }
+
+    /// Screenshots are the widest thing in a request; only the last two say where the screen is.
+    #[test]
+    fn only_the_two_most_recent_screenshots_travel() {
+        let mut messages: Vec<ChatMessage> = (1..=4)
+            .map(|n| tool_result_message(&shot(&format!("c{n}"))))
+            .collect();
+        messages.insert(
+            2,
+            ChatMessage {
+                role: "assistant".into(),
+                content: "clicking".into(),
+                images: Vec::new(),
+            },
+        );
+
+        keep_recent_images(&mut messages, RECENT_IMAGES);
+
+        let carried: Vec<bool> = messages.iter().map(|m| !m.images.is_empty()).collect();
+        assert_eq!(carried, vec![false, false, false, true, true]);
+        // The words stay even where the picture went.
+        assert!(messages[0].content.contains("[tool c1 result]"));
     }
 }

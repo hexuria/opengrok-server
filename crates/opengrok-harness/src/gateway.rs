@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use futures::{StreamExt, stream};
 use serde::Deserialize;
 
-use crate::model::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
+use crate::model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 
 /// How much of a refused key reaches the log: `oag_live_` plus seven characters, which is exactly
 /// what the gateway stores as `api_key.key_prefix` and therefore exactly what identifies the row.
@@ -288,6 +288,22 @@ fn conversation_pin(request: &ModelRequest) -> Option<String> {
     )
 }
 
+/// A message's `content` on the wire: the bare string when it is only words, OpenAI content
+/// parts when it carries images — a screenshot the model must see to act on the screen.
+fn message_content(message: &ChatMessage) -> serde_json::Value {
+    if message.images.is_empty() {
+        return serde_json::Value::String(message.content.clone());
+    }
+    let mut parts = vec![serde_json::json!({ "type": "text", "text": message.content })];
+    for image in &message.images {
+        parts.push(serde_json::json!({
+            "type": "image_url",
+            "image_url": { "url": format!("data:{};base64,{}", image.mime, image.base64) },
+        }));
+    }
+    serde_json::Value::Array(parts)
+}
+
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
@@ -298,7 +314,7 @@ impl ModelDoor for GatewayDoor {
         for message in &request.messages {
             messages.push(serde_json::json!({
                 "role": message.role,
-                "content": message.content,
+                "content": message_content(message),
             }));
         }
 
@@ -656,5 +672,32 @@ mod tests {
         let printed = format!("{door:?}");
         assert!(!printed.contains("oag_live_secret"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
+    }
+
+    #[test]
+    fn a_message_without_images_is_a_bare_string_on_the_wire() {
+        let message = ChatMessage {
+            role: "user".into(),
+            content: "hello".into(),
+            images: Vec::new(),
+        };
+        assert_eq!(message_content(&message), serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn a_message_with_a_screenshot_is_text_then_image_url_parts() {
+        let message = ChatMessage {
+            role: "user".into(),
+            content: "[tool c1 result] screenshot attached".into(),
+            images: vec![crate::ImagePart {
+                mime: "image/png".into(),
+                base64: "AAAA".into(),
+            }],
+        };
+        let parts = message_content(&message);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "[tool c1 result] screenshot attached");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }

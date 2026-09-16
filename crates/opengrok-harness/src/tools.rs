@@ -48,6 +48,14 @@ impl ToolRunner {
         self
     }
 
+    /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
+    /// offer. The prompt must say the same thing the offering does.
+    pub fn has_screen(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.has_screen())
+    }
+
     fn local_for(&self, name: &str) -> Option<&LocalTool> {
         self.local
             .iter()
@@ -80,6 +88,7 @@ impl ToolRunner {
         match self.executor.as_ref() {
             Some((executor, context)) => executor.execute(context, call).await,
             None => ToolResult {
+                image: None,
                 call_id: call.id.clone(),
                 ok: false,
                 content: "this coworker has no computer, so it has no tools to run".to_string(),
