@@ -21,7 +21,9 @@
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use crate::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand};
+use crate::{
+    BoxError, BoxResult, CommandOutput, Computer, CuaAction, Screenshot, StartedCommand, no_screen,
+};
 
 /// A small image with a shell and the usual utilities. Overridable, because a coworker that needs
 /// a toolchain should get one rather than installing it on every turn.
@@ -397,6 +399,87 @@ impl Computer for DockerComputer {
             Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    async fn screenshot(&self, box_id: &str) -> BoxResult<Screenshot> {
+        let shot = self
+            .guest(box_id)
+            .await?
+            .screenshot()
+            .await
+            .map_err(guest_error)?;
+        Ok(Screenshot {
+            mime: shot.mime,
+            png_base64: shot.png_base64,
+            width: shot.width,
+            height: shot.height,
+        })
+    }
+
+    async fn act(&self, box_id: &str, action: &CuaAction) -> BoxResult<()> {
+        let guest = self.guest(box_id).await?;
+        let done = match action {
+            CuaAction::Click { x, y, button } => guest.click(*x, *y, *button).await,
+            CuaAction::DoubleClick { x, y } => guest.double_click(*x, *y, None).await,
+            CuaAction::Move { x, y } => guest.move_pointer(*x, *y).await,
+            CuaAction::Drag { x1, y1, x2, y2 } => guest.drag(*x1, *y1, *x2, *y2, None).await,
+            CuaAction::Type { text } => guest.type_text(text).await,
+            CuaAction::Key { key } => guest.key(key).await,
+            CuaAction::Scroll { x, y, dx, dy } => guest.scroll(*x, *y, *dx, *dy).await,
+        };
+        done.map(|_| ()).map_err(guest_error)
+    }
+}
+
+/// The guest agents inside a desktop box (`box-exec` on 1337, `box-host` on 1340), spoken to
+/// with hexuria/box's own client. What this side owns is only what the client cannot know:
+/// the ports Docker published for them, and the `BOX_TOKEN` the box was created with — read
+/// back from the container's environment, so a server restart does not lose it.
+impl DockerComputer {
+    async fn guest(&self, box_id: &str) -> BoxResult<grok_box::GrokBox> {
+        let exec_url = self.published_url(box_id, 1337).await?;
+        let host_url = self.published_url(box_id, 1340).await?;
+        let token = self.box_token(box_id).await?;
+        grok_box::GrokBox::connect(exec_url, host_url, token).map_err(guest_error)
+    }
+
+    async fn box_token(&self, box_id: &str) -> BoxResult<String> {
+        let env = self
+            .docker(&[
+                "inspect",
+                box_id,
+                "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}",
+            ])
+            .await?;
+        env.lines()
+            .find_map(|line| line.strip_prefix("BOX_TOKEN="))
+            .map(str::to_string)
+            .ok_or_else(no_screen)
+    }
+
+    async fn published_url(&self, box_id: &str, port: u16) -> BoxResult<String> {
+        let mapping = match self.docker(&["port", box_id, &port.to_string()]).await {
+            Ok(mapping) => mapping,
+            Err(BoxError::Refused { .. }) => return Err(no_screen()),
+            Err(error) => return Err(error),
+        };
+        host_port(&mapping)
+            .map(|host| format!("http://127.0.0.1:{host}"))
+            .ok_or_else(no_screen)
+    }
+}
+
+/// The guest's refusal, kept readable for the model: "HTTP 400: x=5000 exceeds width 1280".
+fn guest_error(error: grok_box::Error) -> BoxError {
+    match error {
+        grok_box::Error::Http {
+            status, message, ..
+        } => BoxError::Refused {
+            status,
+            body: message,
+        },
+        other => BoxError::Unreachable(format!("box-exec: {other}")),
     }
 }
 

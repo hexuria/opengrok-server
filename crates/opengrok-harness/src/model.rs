@@ -104,6 +104,17 @@ pub struct ModelRequest {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Pictures that go with the words: the screen after a `computer` action, which the model
+    /// must see to act on it. Sent to the door as image parts; empty for a message of words only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImagePart>,
+}
+
+/// One image in a message, base64 with its media type — what an `image_url` data URL needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePart {
+    pub mime: String,
+    pub base64: String,
 }
 
 #[derive(Debug, thiserror::Error)]

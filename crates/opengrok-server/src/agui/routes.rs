@@ -182,9 +182,13 @@ pub(crate) async fn tools_for_coworker(
         coworker_id.clone(),
         &coworker,
     );
+    // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
+    // never told about them, so it cannot be sent down a dead end.
+    let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
 
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_screen(screen)
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned());
@@ -493,6 +497,7 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/computer",
             get(computer_status).post(ensure_computer),
         )
+        .route("/coworkers/{coworker_id}/screen", get(computer_screen))
         .with_state(state)
 }
 
@@ -1267,6 +1272,34 @@ async fn computer_status(
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
+/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile.
+/// Same shape as the `image` on a `TOOL_CALL_RESULT`, so the client decodes it the same way.
+async fn computer_screen(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    match provision::coworker_screenshot(&state, &account_id, &coworker_id).await {
+        Ok(shot) => Json(serde_json::json!({
+            "mime": shot.mime,
+            "base64": shot.png_base64,
+            "width": shot.width,
+            "height": shot.height,
+        }))
+        .into_response(),
+        Err((status, message)) => (status, message).into_response(),
+    }
+}
+
 /// `POST /coworkers/{id}/computer` — ensure the box is running, then return the same status.
 async fn ensure_computer(
     State(state): State<AgUiState>,
@@ -1672,11 +1705,13 @@ pub async fn run(
             } else {
                 None
             };
+            let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&crate::persona::computer_system_prompt(
                     has_computer,
+                    has_screen,
                     reaches_user_machine,
                     user_machine_label.as_deref(),
                 )),
@@ -2152,6 +2187,7 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
             // content would fail the whole resumed turn over nothing.
             "TEXT_MESSAGE_END" if !assistant.is_empty() => {
                 messages.push(ChatMessage {
+                    images: Vec::new(),
                     role: "assistant".to_string(),
                     content: std::mem::take(&mut assistant),
                 });
@@ -2159,6 +2195,7 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
             "TOOL_CALL_RESULT" => {
                 if let Some(content) = payload.get("content").and_then(|value| value.as_str()) {
                     messages.push(ChatMessage {
+                        images: Vec::new(),
                         role: "user".to_string(),
                         content: format!("[tool result] {content}"),
                     });
@@ -2329,6 +2366,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
         .filter_map(|message| match message.role.as_str() {
             "user" | "assistant" | "system" => {
                 message.content.as_ref().map(|content| ChatMessage {
+                    images: Vec::new(),
                     role: message.role.clone(),
                     content: content.clone(),
                 })
@@ -2344,6 +2382,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(message.id.as_str());
                 Some(ChatMessage {
+                    images: Vec::new(),
                     role: "user".to_string(),
                     content: format!("[tool {call_id} result] {content}"),
                 })

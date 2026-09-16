@@ -189,6 +189,7 @@ mod tests {
             messages: messages
                 .iter()
                 .map(|(role, content)| ChatMessage {
+                    images: Vec::new(),
                     role: (*role).to_string(),
                     content: (*content).to_string(),
                 })

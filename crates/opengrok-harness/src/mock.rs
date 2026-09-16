@@ -502,6 +502,7 @@ mod tests {
             system: None,
             tools: Vec::new(),
             messages: vec![crate::model::ChatMessage {
+                images: Vec::new(),
                 role: "user".to_string(),
                 content: text.to_string(),
             }],

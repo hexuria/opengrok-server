@@ -511,6 +511,7 @@ async fn member_runner(
             sent.push(content);
         }
         ToolResult {
+            image: None,
             call_id: call.id.clone(),
             ok: true,
             content: "delivered to the room".to_string(),
@@ -605,6 +606,7 @@ async fn run_member_turn(
         // every transcribed line stays byte-identical and the member still knows what it is for.
         system: Some(system.clone()),
         messages: vec![ChatMessage {
+            images: Vec::new(),
             role: "user".to_string(),
             content: turn_prompt(member, room.name, peers, new_messages),
         }],

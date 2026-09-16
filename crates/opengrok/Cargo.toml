@@ -34,3 +34,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
 chrono.workspace = true
+# Only to pin the process-level TLS backend (see main.rs). reqwest asks rustls for aws-lc-rs and
+# the grok-box SDK asks for ring; with both present rustls refuses to guess and panics on the
+# first HTTPS call — inside a tokio task, which silently killed model turns.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }

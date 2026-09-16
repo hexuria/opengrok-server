@@ -164,6 +164,7 @@ impl ReviewJudge for ModelJudge {
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage {
+                images: Vec::new(),
                 role: "user".to_string(),
                 content: Self::prompt_for(&ask),
             }],

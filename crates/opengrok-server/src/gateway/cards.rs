@@ -108,6 +108,7 @@ pub fn surface_for(tool: &str) -> &'static str {
     match tool {
         USER_MACHINE_SHELL => "host_shell",
         "shell" | "read_file" | "write_file" => "box_shell",
+        "computer" | "open_url" => "computer",
         other if other.matches('.').count() >= 2 => "mcp",
         _ => "computer",
     }
