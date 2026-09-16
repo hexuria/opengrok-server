@@ -235,11 +235,13 @@ pub struct WriteFileArgs {
 
 /// The arguments `open_url` accepts.
 /// A recipe a bot may run: what the tool lists, by id and in words.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipeOffer {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub parameters: Vec<opengrok_recipes::Parameter>,
 }
 
 /// What a recipe run leaves behind: the box's receipt, read for the parts a result needs.
@@ -290,7 +292,12 @@ impl RecipeReceipt {
 #[async_trait::async_trait]
 pub trait RecipeSource: Send + Sync {
     /// The runnable version of a recipe: `(version, the box's request body)`.
-    async fn recipe_request(&self, recipe_id: &str) -> Result<(i32, Value), String>;
+    /// Values bind parameters to their supplied values; pass an empty map for recipes with no parameters.
+    async fn recipe_request(
+        &self,
+        recipe_id: &str,
+        values: &opengrok_recipes::Values,
+    ) -> Result<(i32, Value), String>;
     /// Write the run down.
     async fn record_run(
         &self,
@@ -305,6 +312,8 @@ pub trait RecipeSource: Send + Sync {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunRecipeArgs {
     pub recipe: String,
+    #[serde(default)]
+    pub values: Option<opengrok_recipes::Values>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -699,7 +708,26 @@ impl Executor {
             let listing = self
                 .recipes
                 .iter()
-                .map(|recipe| format!("`{}` — {}: {}", recipe.id, recipe.name, recipe.description))
+                .map(|recipe| {
+                    let mut entry =
+                        format!("`{}` — {}: {}", recipe.id, recipe.name, recipe.description);
+                    if !recipe.parameters.is_empty() {
+                        let params = recipe
+                            .parameters
+                            .iter()
+                            .map(|p| {
+                                format!(
+                                    "{} ({}text)",
+                                    p.name,
+                                    if p.required { "required " } else { "optional " }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        entry.push_str(&format!("; parameters: {}", params));
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             let ids: Vec<&str> = self
@@ -707,6 +735,51 @@ impl Executor {
                 .iter()
                 .map(|recipe| recipe.id.as_str())
                 .collect();
+
+            // Build properties that include parameters for each recipe.
+            let mut properties = serde_json::json!({
+                "recipe": { "type": "string", "enum": ids, "description": "The recipe's id." }
+            });
+
+            // Add a values object property that describes the parameters of the recipes.
+            let recipe_params_info = self
+                .recipes
+                .iter()
+                .filter(|r| !r.parameters.is_empty())
+                .map(|r| {
+                    let param_info = r
+                        .parameters
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{}: {} ({}required)",
+                                p.name,
+                                format!("{:?}", p.kind).to_lowercase(),
+                                if p.required { "" } else { "not " }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("`{}`: {}", r.id, param_info)
+                })
+                .collect::<Vec<_>>();
+
+            if !recipe_params_info.is_empty() {
+                let values_description = format!(
+                    "Parameter values for recipes that require them. For recipes with parameters, pass `values` as a map of parameter names to values. Recipes with parameters:\n{}",
+                    recipe_params_info.join("\n")
+                );
+                if let Some(props) = properties.as_object_mut() {
+                    props.insert(
+                        "values".to_string(),
+                        serde_json::json!({
+                            "type": "object",
+                            "description": values_description
+                        }),
+                    );
+                }
+            }
+
             schemas.push(serde_json::json!({
                 "type": "function",
                 "function": {
@@ -718,7 +791,7 @@ impl Executor {
                     ),
                     "parameters": {
                         "type": "object",
-                        "properties": { "recipe": { "type": "string", "enum": ids, "description": "The recipe's id." } },
+                        "properties": properties,
                         "required": ["recipe"],
                     },
                 },
@@ -898,7 +971,8 @@ impl Executor {
         match call.name.as_str() {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
                 Ok(args) => {
-                    self.run_recipe(box_id, context, &call.id, &args.recipe)
+                    let values = args.values.unwrap_or_default();
+                    self.run_recipe(box_id, context, &call.id, &args.recipe, &values)
                         .await
                 }
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
@@ -948,6 +1022,7 @@ impl Executor {
         context: &ToolContext,
         call_id: &str,
         recipe_id: &str,
+        values: &opengrok_recipes::Values,
     ) -> ToolResult {
         let Some(offer) = self.recipes.iter().find(|recipe| recipe.id == recipe_id) else {
             return ToolResult::refused(
@@ -955,10 +1030,15 @@ impl Executor {
                 format!("no recipe `{recipe_id}` is granted to this coworker"),
             );
         };
+        // Bind parameter values against the recipe's declaration. A refusal from binding is a
+        // refusal in words the model can act on.
+        if let Err(why) = opengrok_recipes::bind(&offer.parameters, values) {
+            return ToolResult::refused(call_id, why);
+        }
         let Some(source) = self.recipe_source.as_ref() else {
             return ToolResult::refused(call_id, "recipes are not available on this server");
         };
-        let (version, request) = match source.recipe_request(recipe_id).await {
+        let (version, request) = match source.recipe_request(recipe_id, values).await {
             Ok(found) => found,
             Err(why) => return ToolResult::refused(call_id, why),
         };
@@ -2526,7 +2606,11 @@ mod tests {
 
     #[async_trait]
     impl RecipeSource for SpyRecipes {
-        async fn recipe_request(&self, recipe_id: &str) -> Result<(i32, Value), String> {
+        async fn recipe_request(
+            &self,
+            recipe_id: &str,
+            _values: &opengrok_recipes::Values,
+        ) -> Result<(i32, Value), String> {
             match recipe_id {
                 "rcp_gmail" => Ok((
                     2,
@@ -2535,6 +2619,10 @@ mod tests {
                 "rcp_stops" => Ok((
                     3,
                     json!({"name": "stops", "steps": [], "stop_on_error": true, "screenshot": "end"}),
+                )),
+                "rcp_search" => Ok((
+                    1,
+                    json!({"name": "Search", "steps": [], "stop_on_error": true, "screenshot": "end"}),
                 )),
                 other => Err(format!("recipe `{other}` is gone")),
             }
@@ -2558,11 +2646,26 @@ mod tests {
                 id: "rcp_gmail".into(),
                 name: "Open Gmail".into(),
                 description: "Open Gmail in Chrome and land on the inbox".into(),
+                parameters: vec![],
             },
             RecipeOffer {
                 id: "rcp_stops".into(),
                 name: "Stops".into(),
                 description: "a recipe whose second step fails".into(),
+                parameters: vec![],
+            },
+            RecipeOffer {
+                id: "rcp_search".into(),
+                name: "Search".into(),
+                description: "Search for a term on a website".into(),
+                parameters: vec![opengrok_recipes::Parameter {
+                    name: "search_term".into(),
+                    description: "What to search for".into(),
+                    required: true,
+                    kind: opengrok_recipes::ParameterKind::Text,
+                    default: None,
+                    values: None,
+                }],
             },
         ]
     }
@@ -2658,5 +2761,111 @@ mod tests {
             result.content.contains("not granted") || result.content.contains("no recipe"),
             "{result:?}"
         );
+    }
+
+    /// A recipe's parameters appear in the schema so a model can see what it needs to provide.
+    #[test]
+    fn a_recipe_with_parameters_lists_them_in_the_schema() {
+        let executor = allowing(Arc::new(SpyComputer::default()))
+            .with_screen(true)
+            .with_recipes(offers(), Arc::new(SpyRecipes::default()));
+        let schemas = executor.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        let run_recipe_schema = schemas
+            .iter()
+            .find(|schema| schema["function"]["name"] == RUN_RECIPE)
+            .unwrap();
+
+        // The enum includes all recipe ids.
+        let recipe_enum =
+            &run_recipe_schema["function"]["parameters"]["properties"]["recipe"]["enum"];
+        let recipe_ids: Vec<&str> = recipe_enum
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            recipe_ids.contains(&"rcp_search"),
+            "rcp_search must be in enum"
+        );
+
+        // The schema mentions parameters for recipes that have them.
+        let description = run_recipe_schema["function"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains("rcp_search"),
+            "recipe id must be in description"
+        );
+        assert!(
+            description.contains("search_term"),
+            "parameter name must be in description"
+        );
+        assert!(
+            description.contains("text"),
+            "parameter type must be in description"
+        );
+    }
+
+    /// A run whose missing required value comes back as a refusal the model can act on.
+    #[tokio::test]
+    async fn a_recipe_with_missing_required_parameter_is_refused() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes);
+        let context = context_with_box("box_mine");
+
+        // Call the recipe without providing the required search_term parameter.
+        let result = executor
+            .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_search"})))
+            .await;
+
+        // The refusal names the parameter, so the model can try again with it.
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("refused:"), "{result:?}");
+        assert!(
+            result.content.contains("search_term"),
+            "must name the missing parameter: {result:?}"
+        );
+        assert!(
+            result.content.contains("required"),
+            "must explain it is required: {result:?}"
+        );
+
+        // Nothing reached the box — binding is a gate.
+        assert_eq!(spy.last_box(), None);
+    }
+
+    /// A run with the required parameter supplied succeeds without error.
+    #[tokio::test]
+    async fn a_recipe_with_supplied_parameter_values_runs() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes);
+        let context = context_with_box("box_mine");
+
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    RUN_RECIPE,
+                    json!({"recipe": "rcp_search", "values": {"search_term": "hello"}}),
+                ),
+            )
+            .await;
+
+        assert!(result.ok, "{result:?}");
+        assert!(
+            result.content.contains("Search"),
+            "should mention recipe name"
+        );
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
     }
 }

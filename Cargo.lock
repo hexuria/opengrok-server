@@ -2171,6 +2171,7 @@ dependencies = [
  "opengrok-core",
  "opengrok-plugins",
  "opengrok-policy",
+ "opengrok-recipes",
  "reqwest",
  "rmcp",
  "serde",
