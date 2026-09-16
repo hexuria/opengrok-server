@@ -242,6 +242,10 @@ pub fn member_system_prompt(
         "You have your full toolkit in this room. Do the work first, then deliver the result with SendMessage."
             .to_string(),
     );
+    lines.push(
+        "The room also has a shared computer every participant can see and use: pass machine=\"group\" to shell, read_file, write_file, open_url or computer to work there; without it you use your own computer."
+            .to_string(),
+    );
     lines.push(String::new());
     lines.push(format!(
         "Stay fully in character as {}. The ONLY way to say something the room can see is the SendMessage tool. Keep each message short and conversational. If you have nothing new worth adding, send exactly \"(pass)\". Never reveal private one-on-one context.",
@@ -493,10 +497,22 @@ enum MemberOutcome {
 async fn member_runner(
     state: &GatewayState,
     account_id: &AccountId,
+    room: &Room<'_>,
     member: &Member,
     gate_yes: &[String],
     review_yes: &[String],
 ) -> MemberTools {
+    // The room's shared computer, if the group has one: every member's turn can reach it with
+    // `machine: "group"` next to its own box.
+    let room_box = state
+        .agui
+        .auth
+        .store
+        .scoped_computer("group", room.id.as_str())
+        .await
+        .ok()
+        .flatten()
+        .map(|(box_id, _kind)| opengrok_core::id::BoxId::from_stored(box_id));
     let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = sent.clone();
     let deliver: opengrok_harness::LocalTool = Arc::new(move |call: &ToolCall| {
@@ -530,6 +546,10 @@ async fn member_runner(
     .await
     .unwrap_or_else(ToolRunner::local_only)
     .with_local(send_message_schema(), deliver);
+    let runner = match room_box {
+        Some(box_id) => runner.with_group_box(box_id, room.name),
+        None => runner,
+    };
     // The catalogue door fires for room members too — `MockDoor::stream` checks it before
     // `room_speaker` — so without the fixture tool here a group turn asks for `mock_fixture`
     // against a runner that does not have it, and the room fills with tool-not-found chatter
@@ -592,7 +612,7 @@ async fn run_member_turn(
     history: &[GroupMessage],
 ) -> MemberOutcome {
     let group_id = room.id;
-    let tools = member_runner(state, account_id, member, &[], &[]).await;
+    let tools = member_runner(state, account_id, room, member, &[], &[]).await;
     let new_messages = messages_since_last_spoke(history, &member.id);
     // Composed once: what this member is told, and what the run captures for its resume.
     let system = crate::persona::with_standing_role(
@@ -945,7 +965,7 @@ pub async fn resume_member_turn(
         }
         _ => (std::slice::from_ref(&pending.call_id), &[]),
     };
-    let tools = member_runner(&state, &account_id, &member, gate_yes, review_yes).await;
+    let tools = member_runner(&state, &account_id, &room, &member, gate_yes, review_yes).await;
     // The room prompt this member's turn opened with, restored rather than recomposed.
     let system = run.system_for_resume().unwrap_or_else(|| {
         crate::persona::with_standing_role(

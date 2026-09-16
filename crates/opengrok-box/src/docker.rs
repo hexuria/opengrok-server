@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::{
-    BoxError, BoxResult, CommandOutput, Computer, CuaAction, Screenshot, StartedCommand, no_screen,
+    BoxError, BoxResult, CommandOutput, Computer, CuaAction, ImageStatus, Screenshot,
+    StartedCommand, no_screen,
 };
 
 /// A small image with a shell and the usual utilities. Overridable, because a coworker that needs
@@ -41,6 +42,55 @@ pub const DESKTOP_PORTS: &[u16] = &[6080, 1337, 1340];
 
 /// x11vnc on grok-box uses the first 8 characters. Same value is put on the noVNC URL.
 const DESKTOP_VNC_PASSWORD: &str = "opengrok";
+
+/// The label that names a box's data volumes, so a later `recreate` mounts the same ones.
+const VOLUMES_LABEL: &str = "dev.opengrok.volumes";
+
+/// Where a box keeps what a person would miss: the desktop user's home (browser profile,
+/// desktop, dotfiles) and the workspace the tools write to.
+const HOME_DIR: &str = "/home/box";
+const WORKSPACE_DIR: &str = "/workspace";
+
+/// The user the desktop image runs as; copied data has to end up owned by it.
+const BOX_USER: &str = "box";
+
+/// A box's two named volumes. Chosen at create, written to the container's labels, read back for
+/// `recreate` and `destroy_with_data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoxVolumes {
+    pub home: String,
+    pub workspace: String,
+}
+
+impl BoxVolumes {
+    pub fn fresh() -> Self {
+        let suffix = uuid_like();
+        Self {
+            home: format!("ogbox-{suffix}-home"),
+            workspace: format!("ogbox-{suffix}-ws"),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("{VOLUMES_LABEL}={},{}", self.home, self.workspace)
+    }
+
+    fn parse(label: &str) -> Option<Self> {
+        let (home, workspace) = label.trim().split_once(',')?;
+        (!home.is_empty() && !workspace.is_empty()).then(|| Self {
+            home: home.to_string(),
+            workspace: workspace.to_string(),
+        })
+    }
+}
+
+/// `image:local` is a convention for "built on this machine": there is nothing to pull, the
+/// newest build is whatever `docker build` last tagged.
+pub fn image_is_local(image: &str) -> bool {
+    image
+        .rsplit_once(':')
+        .is_some_and(|(_, tag)| tag == "local")
+}
 
 #[derive(Debug, Clone)]
 pub struct DockerComputer {
@@ -117,6 +167,12 @@ impl DockerComputer {
 
     /// The arguments that create a box. Split out so the shape is testable without a daemon.
     pub fn create_args(&self, ttl_seconds: Option<u64>) -> Vec<String> {
+        self.create_args_on(ttl_seconds, &BoxVolumes::fresh())
+    }
+
+    /// `create_args` on a chosen pair of volumes — `recreate` passes the old box's, so the new
+    /// container comes up on the same home and workspace.
+    pub fn create_args_on(&self, ttl_seconds: Option<u64>, volumes: &BoxVolumes) -> Vec<String> {
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
@@ -126,6 +182,18 @@ impl DockerComputer {
         if let Some(tag) = &self.run_tag {
             args.push("--label".to_string());
             args.push(format!("dev.opengrok.run={tag}"));
+        }
+        // The data lives in named volumes, not the container layer, so a box can be recreated
+        // on a newer image without losing what the person and the coworker put there. A fresh
+        // named volume is seeded from the image's own directory on first mount, so the desktop
+        // config the image ships still arrives. Headless boxes keep only the workspace.
+        args.push("--label".to_string());
+        args.push(volumes.label());
+        args.push("-v".to_string());
+        args.push(format!("{}:{WORKSPACE_DIR}", volumes.workspace));
+        if self.wants_desktop() {
+            args.push("-v".to_string());
+            args.push(format!("{}:{HOME_DIR}", volumes.home));
         }
         for port in self.published_ports() {
             // Bound to loopback: a coworker's box must not be reachable from the network by
@@ -370,8 +438,64 @@ impl Computer for DockerComputer {
         self.docker(&["start", box_id]).await.map(|_| ())
     }
 
+    /// The container and its data volumes: "the disk goes with it" is the trait's promise, and
+    /// a retired coworker must not leave a home directory behind. `recreate` never comes here —
+    /// it removes only the container, so the volumes carry over.
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
-        self.docker(&["rm", "-f", box_id]).await.map(|_| ())
+        let volumes = self.volumes_of(box_id).await.ok().flatten();
+        self.docker(&["rm", "-f", box_id]).await?;
+        if let Some(volumes) = volumes {
+            let _ = self
+                .docker(&["volume", "rm", "-f", &volumes.home, &volumes.workspace])
+                .await;
+        }
+        Ok(())
+    }
+
+    fn image(&self) -> String {
+        self.image.clone()
+    }
+
+    async fn image_status(&self, box_id: &str) -> BoxResult<ImageStatus> {
+        Ok(ImageStatus {
+            running: self.running_image(box_id).await?,
+            latest: self.latest_image().await?,
+        })
+    }
+
+    async fn pull_latest(&self) -> BoxResult<bool> {
+        if image_is_local(&self.image) {
+            return Ok(false);
+        }
+        self.docker(&["pull", &self.image]).await.map(|_| true)
+    }
+
+    /// Stop the old box, make sure its data is in volumes (copying it there once if it predates
+    /// them), start a new box on those volumes, remove the old one. The old box is only stopped
+    /// while its data is read, so the window a person notices is the copy, not the pull.
+    async fn recreate(&self, old_box_id: &str) -> BoxResult<String> {
+        let (volumes, needs_copy) = match self.volumes_of(old_box_id).await? {
+            Some(volumes) => (volumes, false),
+            None => (BoxVolumes::fresh(), true),
+        };
+        self.docker(&["stop", old_box_id]).await?;
+        if needs_copy {
+            for volume in [&volumes.home, &volumes.workspace] {
+                self.docker(&["volume", "create", volume]).await?;
+            }
+            self.copy_dir(old_box_id, WORKSPACE_DIR, &volumes.workspace)
+                .await?;
+            if self.wants_desktop() {
+                self.copy_dir(old_box_id, HOME_DIR, &volumes.home).await?;
+            }
+        }
+        let args = self.create_args_on(None, &volumes);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let id = self.docker(&borrowed).await?;
+        // Only once the new box exists: a failed create above leaves the old one stopped but
+        // intact, which `resume` brings back.
+        let _ = self.docker(&["rm", "-f", old_box_id]).await;
+        Ok(id.chars().take(12).collect())
     }
 
     async fn state(&self, box_id: &str) -> BoxResult<String> {
@@ -467,6 +591,67 @@ impl DockerComputer {
         host_port(&mapping)
             .map(|host| format!("http://127.0.0.1:{host}"))
             .ok_or_else(no_screen)
+    }
+}
+
+/// Reading a box's volumes and moving its data — the pieces behind update and reset.
+impl DockerComputer {
+    /// The volumes a box was created on, from its labels; `None` for a box made before data
+    /// lived in volumes (its data is in the container layer and needs the one-time copy).
+    async fn volumes_of(&self, box_id: &str) -> BoxResult<Option<BoxVolumes>> {
+        let label = self
+            .docker(&[
+                "inspect",
+                box_id,
+                "--format",
+                &format!("{{{{index .Config.Labels \"{VOLUMES_LABEL}\"}}}}"),
+            ])
+            .await?;
+        Ok(BoxVolumes::parse(&label))
+    }
+
+    /// The image id a box runs.
+    async fn running_image(&self, box_id: &str) -> BoxResult<String> {
+        self.docker(&["inspect", "--format", "{{.Image}}", box_id])
+            .await
+    }
+
+    /// The id of the image a new box would get — what `docker run <image>` resolves to now.
+    async fn latest_image(&self) -> BoxResult<String> {
+        self.docker(&["image", "inspect", "--format", "{{.Id}}", &self.image])
+            .await
+    }
+
+    /// The shell pipeline that copies one directory out of a (stopped) container into a volume,
+    /// owned by the box user: `docker cp` streams a tar, a throwaway container on our own image
+    /// unpacks it. Pure, so the shape is testable.
+    pub fn copy_dir_command(&self, from_box: &str, dir: &str, volume: &str) -> String {
+        format!(
+            "docker cp {from_box}:{dir} - | docker run --rm -i -u 0 --entrypoint sh -v {volume}:/dst {} \
+             -c 'tar -x -C /dst --strip-components=1 && chown -R {BOX_USER}:{BOX_USER} /dst'",
+            self.image
+        )
+    }
+
+    async fn copy_dir(&self, from_box: &str, dir: &str, volume: &str) -> BoxResult<()> {
+        let output = Command::new("sh")
+            .args(["-c", &self.copy_dir_command(from_box, dir, volume)])
+            .output()
+            .await
+            .map_err(|error| BoxError::Unreachable(format!("could not run docker: {error}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(BoxError::Refused {
+            status: output.status.code().unwrap_or(-1).unsigned_abs() as u16,
+            body: format!(
+                "copying {dir} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            ),
+        })
     }
 }
 
@@ -579,6 +764,60 @@ mod tests {
             .create_args(None);
         assert!(args.iter().any(|arg| arg == "sleep infinity"), "{args:?}");
         assert!(!args.iter().any(|arg| arg == "127.0.0.1::6080"));
+    }
+
+    #[test]
+    fn a_box_keeps_its_data_in_named_volumes_it_is_labelled_with() {
+        let volumes = BoxVolumes {
+            home: "ogbox-abc-home".into(),
+            workspace: "ogbox-abc-ws".into(),
+        };
+        let args = DockerComputer::new()
+            .with_image("grok-box:local")
+            .create_args_on(None, &volumes);
+        assert!(
+            args.iter().any(|a| a == "ogbox-abc-ws:/workspace"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "ogbox-abc-home:/home/box"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "dev.opengrok.volumes=ogbox-abc-home,ogbox-abc-ws"),
+            "{args:?}"
+        );
+        assert_eq!(
+            BoxVolumes::parse("ogbox-abc-home,ogbox-abc-ws"),
+            Some(volumes)
+        );
+        assert_eq!(BoxVolumes::parse(""), None);
+
+        // A headless box has no desktop user; only the workspace travels.
+        let args = DockerComputer::new()
+            .with_image("debian:stable-slim")
+            .create_args_on(None, &BoxVolumes::fresh());
+        assert!(!args.iter().any(|a| a.ends_with(":/home/box")), "{args:?}");
+        assert!(args.iter().any(|a| a.ends_with(":/workspace")), "{args:?}");
+    }
+
+    #[test]
+    fn a_local_tag_is_never_pulled() {
+        assert!(image_is_local("grok-box:local"));
+        assert!(!image_is_local("ghcr.io/hexuria/box:latest"));
+        assert!(!image_is_local("debian:stable-slim"));
+    }
+
+    #[test]
+    fn the_one_time_copy_streams_the_old_dir_into_the_volume_as_the_box_user() {
+        let command = DockerComputer::new()
+            .with_image("grok-box:local")
+            .copy_dir_command("abc123", "/home/box", "ogbox-x-home");
+        assert!(command.starts_with("docker cp abc123:/home/box - | docker run --rm -i -u 0"));
+        assert!(command.contains("-v ogbox-x-home:/dst grok-box:local"));
+        assert!(command.contains("--strip-components=1"));
+        assert!(command.contains("chown -R box:box /dst"));
     }
 
     #[test]

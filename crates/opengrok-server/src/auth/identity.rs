@@ -192,6 +192,9 @@ async fn do_signup(
             "could not create the account".to_string(),
         ));
     }
+    if let Some(created) = &state.account_created {
+        let _ = created.send(account_id.clone());
+    }
     // The invite is spent only after the account exists.
     let mut org_state = org;
     for event in &redeem {

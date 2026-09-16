@@ -1620,6 +1620,12 @@ pub async fn create_group(state: &GatewayState, args: &Value, caller: &str) -> (
         tracing::error!(%error, "createGroup could not hire the group");
         return (500, json!({ "error": "hire failed" }));
     }
+    // The room's shared computer, made the moment the room exists so its first message finds it.
+    if let Err((code, message)) =
+        crate::gateway::conversation::reprovision(state, &account.id, &id).await
+    {
+        tracing::warn!(code, message, group = %id, "createGroup: the group has no computer yet");
+    }
     let profile = json!({
         "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
         "title": "",

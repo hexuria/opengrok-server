@@ -37,6 +37,8 @@ import {
   type GatewayKey,
   type OrgDomain,
   type SharingMode,
+  getDockerStatus,
+  updateAllDockerBoxes,
 } from "../api/admin";
 import { ApiError } from "../api/client";
 
@@ -372,6 +374,15 @@ function ComputersCard() {
     },
   });
   const test = useMutation({ mutationFn: testBoxConnection, onSuccess: setTestResult });
+  const docker = useQuery({ queryKey: ["admin", "docker"], queryFn: getDockerStatus, retry: false, refetchInterval: 5000 });
+  const [confirmUpdateAll, setConfirmUpdateAll] = useState(false);
+  const updateAll = useMutation({
+    mutationFn: updateAllDockerBoxes,
+    onSuccess: async () => {
+      setConfirmUpdateAll(false);
+      await queryClient.invalidateQueries({ queryKey: ["admin", "docker"] });
+    },
+  });
 
   if (computers.error instanceof ApiError && computers.error.status === 403) {
     return (
@@ -409,6 +420,46 @@ function ComputersCard() {
         </p>
       </div>
 
+      {docker.data?.active ? (
+        <div style={{ marginTop: "1rem" }}>
+          <div className="spread">
+            <strong>Local Docker</strong>
+            <span className="pill on">active</span>
+          </div>
+          <p className="muted" style={{ fontSize: "0.82rem", margin: "0.3rem 0 0" }}>
+            Boxes run on this server's Docker from <code>{docker.data.image}</code>
+            {docker.data.source === "local"
+              ? " — a local build; Update rebuilds boxes on whatever was last built."
+              : " — pulled from its registry on Update."}{" "}
+            Set <code>OG_DOCKER_IMAGE</code> in the server's <code>.env</code> to change it.
+          </p>
+          <p className="muted" style={{ fontSize: "0.82rem", margin: "0.3rem 0 0" }}>
+            {docker.data.boxes ?? 0} box{(docker.data.boxes ?? 0) === 1 ? "" : "es"}
+            {docker.data.stale ? `, ${docker.data.stale} on an older image` : ""}
+            {docker.data.gone ? `, ${docker.data.gone} gone` : ""}
+            {docker.data.updating ? `, ${docker.data.updating} updating` : ""}.
+          </p>
+          <div className="row" style={{ marginTop: "0.8rem" }}>
+            <button
+              className={confirmUpdateAll ? "danger" : ""}
+              disabled={updateAll.isPending || (docker.data.boxes ?? 0) === 0}
+              onClick={() => (confirmUpdateAll ? updateAll.mutate() : setConfirmUpdateAll(true))}
+              onBlur={() => setConfirmUpdateAll(false)}
+            >
+              {updateAll.isPending
+                ? "Starting…"
+                : confirmUpdateAll
+                  ? "Click again to confirm"
+                  : "Update all boxes"}
+            </button>
+          </div>
+          {updateAll.isError ? (
+            <p className="err">
+              {updateAll.error instanceof ApiError ? updateAll.error.message : "Could not start."}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <div style={{ marginTop: "1rem" }}>
         <div className="spread">
           <strong>box.ascii.dev</strong>

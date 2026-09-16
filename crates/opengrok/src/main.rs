@@ -76,11 +76,16 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| format!("http://{bind}"));
+    // New accounts get their computer warmed as soon as they exist (per-org: the org's box,
+    // per-account: their own). Auth only announces; the listener below does the provisioning
+    // once the full state exists.
+    let (account_created, mut new_accounts) = tokio::sync::mpsc::unbounded_channel();
     let auth = AuthState::new(
         PgStore::new(pool),
         Arc::new(TokenMinter::new(token_secret.as_bytes())),
         login_email,
     )
+    .with_account_created(account_created)
     .with_resend(
         std::env::var("OG_RESEND_API_KEY")
             .ok()
@@ -273,6 +278,15 @@ async fn main() -> anyhow::Result<()> {
     // Pick up whatever the last process abandoned. Started before the listener, because the most
     // likely moment to find an abandoned run is immediately after the restart that abandoned it.
     tokio::spawn(opengrok_server::recovery::sweep_forever(state.clone()));
+
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            while let Some(account_id) = new_accounts.recv().await {
+                opengrok_server::agui::provision::warm_scope_for_account(&state, &account_id).await;
+            }
+        }
+    });
 
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
     // the half of the mission that does not wait for a request. The schedule sweep is started

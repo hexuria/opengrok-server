@@ -48,6 +48,19 @@ impl ToolRunner {
         self
     }
 
+    /// Give this turn the room's shared computer as well: `machine: "group"` on the box tools.
+    #[must_use]
+    pub fn with_group_box(mut self, box_id: opengrok_core::id::BoxId, name: &str) -> Self {
+        if let Some((executor, context)) = self.executor.as_mut() {
+            executor.set_group_box_name(name);
+            context.group_box = Some(opengrok_tools::GroupBox {
+                box_id,
+                name: name.to_string(),
+            });
+        }
+        self
+    }
+
     /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
     /// offer. The prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {

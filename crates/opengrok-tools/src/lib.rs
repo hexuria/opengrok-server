@@ -42,6 +42,17 @@ pub struct ToolContext {
     pub coworker_id: CoworkerId,
     /// The coworker's own machine. `None` means one has not been assigned yet.
     pub box_id: Option<BoxId>,
+    /// A room's shared computer, when this turn is spoken in a group that has one. Reached by
+    /// passing `machine: "group"`; without it every call goes to the coworker's own box.
+    pub group_box: Option<GroupBox>,
+}
+
+/// The shared computer of the group a turn is spoken in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupBox {
+    pub box_id: BoxId,
+    /// The room's name, for the tool descriptions.
+    pub name: String,
 }
 
 impl ToolContext {
@@ -52,6 +63,7 @@ impl ToolContext {
             account_id,
             coworker_id: id,
             box_id: coworker.computer().cloned(),
+            group_box: None,
         }
     }
 }
@@ -342,6 +354,9 @@ pub struct Executor {
     /// The box has a display. Only then are `open_url` and `computer` offered: a headless box
     /// would refuse every call, and a tool that always refuses is a dead end the model retries.
     screen: bool,
+    /// The name of the group whose shared computer this turn may use, when there is one; it
+    /// puts `machine` on the box tools' schemas.
+    group_box_name: Option<String>,
 }
 
 /// The built-ins that need a display.
@@ -396,6 +411,7 @@ impl Executor {
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
+            group_box_name: None,
         }
     }
 
@@ -411,6 +427,7 @@ impl Executor {
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
+            group_box_name: None,
         }
     }
 
@@ -424,6 +441,11 @@ impl Executor {
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.screen
+    }
+
+    /// Offer `machine: "group"` on the box tools, naming the room.
+    pub fn set_group_box_name(&mut self, name: &str) {
+        self.group_box_name = Some(name.to_string());
     }
 
     /// Carry the calls a person has already answered yes to.
@@ -537,8 +559,24 @@ impl Executor {
         let mut schemas = Vec::new();
         for name in self.offered_builtins() {
             if permitted(name)
-                && let Some((description, parameters)) = builtin_tool_spec(name)
+                && let Some((description, mut parameters)) = builtin_tool_spec(name)
             {
+                if let Some(group) = &self.group_box_name
+                    && let Some(properties) = parameters
+                        .get_mut("properties")
+                        .and_then(Value::as_object_mut)
+                {
+                    properties.insert(
+                        "machine".to_string(),
+                        serde_json::json!({
+                            "type": "string",
+                            "enum": ["mine", "group"],
+                            "description": format!(
+                                "Which computer: \"mine\" (your own box, the default) or \"group\" (the shared computer of the {group} group, which every member can see and use)."
+                            ),
+                        }),
+                    );
+                }
                 schemas.push(serde_json::json!({
                     "type": "function",
                     "function": { "name": name, "description": description, "parameters": parameters },
@@ -692,11 +730,28 @@ impl Executor {
             };
         }
 
-        let Some(box_id) = context.box_id.as_ref() else {
-            return ToolResult::refused(
-                &call.id,
-                "this coworker has no computer yet, so nothing can be run",
-            );
+        // `machine: "group"` aims the call at the room's shared computer; anything else is the
+        // coworker's own box. The model chooses this one, so it is read from the arguments
+        // rather than stamped by `overwrite_identity`.
+        let on_group = arguments.get("machine").and_then(Value::as_str) == Some("group");
+        let box_id = if on_group {
+            match context.group_box.as_ref() {
+                Some(group) => &group.box_id,
+                None => {
+                    return ToolResult::refused(
+                        &call.id,
+                        "this conversation has no shared group computer; leave `machine` out to use your own",
+                    );
+                }
+            }
+        } else {
+            let Some(box_id) = context.box_id.as_ref() else {
+                return ToolResult::refused(
+                    &call.id,
+                    "this coworker has no computer yet, so nothing can be run",
+                );
+            };
+            box_id
         };
 
         match call.name.as_str() {
@@ -1282,6 +1337,7 @@ mod tests {
             account_id: AccountId::from_stored("acct_1"),
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
+            group_box: None,
         };
         let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
         assert!(
@@ -1297,6 +1353,7 @@ mod tests {
             account_id: AccountId::from_stored("acct_1"),
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
+            group_box: None,
         };
         let result = executor
             .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -1656,6 +1713,7 @@ mod tests {
             account_id: AccountId::from_stored("acct_1"),
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
+            group_box: None,
         }
     }
 
@@ -2164,5 +2222,81 @@ mod tests {
         assert!(!result.ok, "{result:?}");
         assert!(result.content.contains("no screen"), "{result:?}");
         assert!(result.image.is_none());
+    }
+
+    /// A room's shared computer is a second target for the same tools, chosen per call.
+    #[tokio::test]
+    async fn machine_group_aims_a_call_at_the_rooms_box() {
+        let spy = Arc::new(SpyComputer::default());
+        let mut executor = allowing(spy.clone());
+        executor.set_group_box_name("Finance desk");
+        let mut context = context_with_box("box_mine");
+        context.group_box = Some(GroupBox {
+            box_id: BoxId::from_stored("box_room"),
+            name: "Finance desk".into(),
+        });
+
+        let result = executor
+            .execute(
+                &context,
+                &call("shell", json!({"command": "ls", "machine": "group"})),
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(spy.last_box().as_deref(), Some("box_room"));
+
+        // Without `machine`, the coworker's own box — the default nobody has to spell.
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn machine_group_without_a_room_box_is_refused_in_words() {
+        let executor = allowing(Arc::new(SpyComputer::default()));
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call("shell", json!({"command": "ls", "machine": "group"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(
+            result.content.contains("no shared group computer"),
+            "{result:?}"
+        );
+    }
+
+    /// The schema says `machine` exists only when there is a room box to aim at.
+    #[test]
+    fn the_box_tools_offer_machine_only_in_a_room_with_a_box() {
+        let account = AccountId::from_stored("acct_1");
+        let coworker = CoworkerId::from_stored("cw_1");
+        let plain = allowing(Arc::new(SpyComputer::default()));
+        let shell = plain
+            .tool_schemas(&account, &coworker)
+            .into_iter()
+            .find(|schema| schema["function"]["name"] == "shell")
+            .unwrap();
+        assert!(shell["function"]["parameters"]["properties"]["machine"].is_null());
+
+        let mut in_room = allowing(Arc::new(SpyComputer::default()));
+        in_room.set_group_box_name("Finance desk");
+        let shell = in_room
+            .tool_schemas(&account, &coworker)
+            .into_iter()
+            .find(|schema| schema["function"]["name"] == "shell")
+            .unwrap();
+        let machine = &shell["function"]["parameters"]["properties"]["machine"];
+        assert_eq!(machine["enum"], json!(["mine", "group"]));
+        assert!(
+            machine["description"]
+                .as_str()
+                .unwrap()
+                .contains("Finance desk")
+        );
     }
 }

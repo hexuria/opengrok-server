@@ -302,7 +302,13 @@ pub fn scope_for(
     account_id: &str,
     org_id: Option<&str>,
     coworker_id: &str,
+    group: bool,
 ) -> (&'static str, String, BoxMode) {
+    // A group has a computer of its own whatever the sharing mode: the room's shared desk, which
+    // every member can reach next to its own box.
+    if group {
+        return ("group", coworker_id.to_string(), BoxMode::Shared);
+    }
     match mode {
         "per-org" => match org_id {
             Some(org) => ("org", org.to_string(), BoxMode::Shared),
@@ -310,6 +316,72 @@ pub fn scope_for(
         },
         "per-bot" => ("bot", coworker_id.to_string(), BoxMode::Dedicated),
         _ => ("account", account_id.to_string(), BoxMode::Shared),
+    }
+}
+
+/// The scope a coworker's computer lives under, with everything `scope_for` needs looked up:
+/// the account's mode and org, and whether the coworker is a group. The one call sites should
+/// make when they have only an id.
+pub async fn scope_of(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &str,
+) -> (String, Option<String>, &'static str, String, BoxMode) {
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let group = state
+        .auth
+        .store
+        .load_coworker(&CoworkerId::from_stored(coworker_id.to_string()))
+        .await
+        .map(|(coworker, _)| coworker.is_group())
+        .unwrap_or(false);
+    let (scope, scope_id, box_mode) = scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        coworker_id,
+        group,
+    );
+    (mode, org_id, scope, scope_id, box_mode)
+}
+
+/// Whether a recorded box is gone from its provider — removed by hand, by a `docker system
+/// prune`, or by a host that was rebuilt. Such a row is a dead pointer; the caller clears it and
+/// provisions again. Only `absent` counts: a stopped box is asleep, not gone.
+async fn box_is_gone(state: &AgUiState, org_id: Option<&str>, kind: &str, box_id: &str) -> bool {
+    match provider_for(state, org_id, kind).await {
+        Some(provider) => matches!(provider.state(box_id).await.as_deref(), Ok("absent")),
+        None => false,
+    }
+}
+
+/// Warm the box an account's coworkers will share, as soon as the account exists: per-org the
+/// org's one box, per-account the member's own. Per-bot boxes come at hire. Best effort — a
+/// signup never fails over a computer.
+pub async fn warm_scope_for_account(state: &AgUiState, account_id: &AccountId) {
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (scope, scope_id) = match (mode.as_str(), org_id.as_deref()) {
+        ("per-org", Some(org)) => ("org", org.to_string()),
+        ("per-account", _) | ("per-org", None) => ("account", account_id.as_str().to_string()),
+        _ => return,
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    match ensure_scope_box(state, org_id.as_deref(), scope, &scope_id, at_ms).await {
+        Ok(box_id) => tracing::info!(
+            scope,
+            scope_id,
+            box_id,
+            "computer: warmed for a new account"
+        ),
+        Err((code, message)) => {
+            tracing::warn!(
+                scope,
+                scope_id,
+                code,
+                message,
+                "computer: could not warm for a new account"
+            )
+        }
     }
 }
 
@@ -331,10 +403,27 @@ pub async fn ensure_computer_for(
         account_id.as_str(),
         org_id.as_deref(),
         coworker_id.as_str(),
+        coworker.is_group(),
     );
 
-    let box_id = match store.scoped_computer(scope, &scope_id).await {
-        Ok(Some((box_id, _kind))) => box_id,
+    // A recorded box whose container no longer exists is healed here rather than reported: the
+    // row is cleared and the scope gets a new box below, so a bot whose computer vanished comes
+    // back with one instead of a black screen forever.
+    let recorded = match store.scoped_computer(scope, &scope_id).await {
+        Ok(Some((box_id, kind))) => {
+            if box_is_gone(state, org_id.as_deref(), &kind, &box_id).await {
+                tracing::warn!(scope, scope_id = %scope_id, box_id, "computer: the recorded box is gone; provisioning a new one");
+                let _ = store.clear_scoped_computer(scope, &scope_id).await;
+                Ok(None)
+            } else {
+                Ok(Some(box_id))
+            }
+        }
+        Ok(None) => Ok(None),
+        Err(error) => Err(error),
+    };
+    let box_id = match recorded {
+        Ok(Some(box_id)) => box_id,
         Ok(None) => {
             let kind = kind_for_new(state, org_id.as_deref()).await;
             let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
@@ -533,6 +622,24 @@ pub async fn teardown_computer_for(
 ) {
     let store = &state.auth.store;
     let (mode, org_id) = resolve_mode(state, account_id).await;
+    // A group's box is nobody else's; it goes when the group does.
+    if let Ok((coworker, _)) = store.load_coworker(coworker_id).await
+        && coworker.is_group()
+    {
+        if let Ok(Some((box_id, kind))) = store.scoped_computer("group", coworker_id.as_str()).await
+        {
+            destroy_and_clear(
+                state,
+                org_id.as_deref(),
+                "group",
+                coworker_id.as_str(),
+                &box_id,
+                &kind,
+            )
+            .await;
+        }
+        return;
+    }
     match mode.as_str() {
         "per-bot" => {
             if let Ok(Some((box_id, kind))) =
@@ -589,12 +696,18 @@ pub async fn coworker_screen(
         "state": "absent",
         "vncUrl": Value::Null,
     });
-    match state.auth.store.load_coworker(coworker_id).await {
-        Ok((coworker, _)) if !coworker.name.is_empty() => {}
+    let group = match state.auth.store.load_coworker(coworker_id).await {
+        Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
         _ => return absent,
-    }
+    };
     let (mode, org_id) = resolve_mode(state, account_id).await;
-    let (scope, scope_id, _) = scope_for(&mode, account_id.as_str(), org_id.as_deref(), agent_id);
+    let (scope, scope_id, _) = scope_for(
+        &mode,
+        account_id.as_str(),
+        org_id.as_deref(),
+        agent_id,
+        group,
+    );
     let Ok(Some((box_id, kind, stopped))) = state
         .auth
         .store
@@ -639,15 +752,27 @@ pub async fn coworker_screen(
         .state(&box_id)
         .await
         .unwrap_or_else(|_| "unknown".to_string());
-    let vnc_url = if live_state == "running" {
-        provider.screen_url(&box_id).await.ok().flatten()
+    let (vnc_url, image) = if live_state == "running" {
+        (
+            provider.screen_url(&box_id).await.ok().flatten(),
+            provider.image_status(&box_id).await.ok(),
+        )
     } else {
-        None
+        (None, None)
     };
     json!({
         "agentId": agent_id,
         "state": live_state,
         "vncUrl": vnc_url,
+        // The scope's live box, not the id frozen on the coworker's row: after an update or a
+        // heal they differ, and the live one is the one a person is looking at.
+        "boxId": box_id,
+        "update": update_status(state, scope, &scope_id).await,
+        "image": image.map(|image| json!({
+            "running": image.running,
+            "latest": image.latest,
+            "stale": image.stale(),
+        })),
     })
 }
 
@@ -660,16 +785,17 @@ pub async fn coworker_screenshot(
     coworker_id: &CoworkerId,
 ) -> Result<opengrok_box::Screenshot, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
-    match state.auth.store.load_coworker(coworker_id).await {
-        Ok((coworker, _)) if !coworker.name.is_empty() => {}
+    let group = match state.auth.store.load_coworker(coworker_id).await {
+        Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
         _ => return Err((StatusCode::NOT_FOUND, "no such coworker".into())),
-    }
+    };
     let (mode, org_id) = resolve_mode(state, account_id).await;
     let (scope, scope_id, _) = scope_for(
         &mode,
         account_id.as_str(),
         org_id.as_deref(),
         coworker_id.as_str(),
+        group,
     );
     let Ok(Some((box_id, kind, _stopped))) = state
         .auth
@@ -702,6 +828,231 @@ pub async fn coworker_screenshot(
         })
 }
 
+/// How long an update waits for the new box to come up and show a screen.
+const UPDATE_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+const UPDATE_SCREEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An update older than this with no progress is a crashed one; a new attempt may replace it.
+const UPDATE_STALE_AFTER_MS: i64 = 15 * 60 * 1000;
+
+/// The phases an update passes through, as the pane shows them. `failed` keeps its reason.
+pub const UPDATE_PULLING: &str = "pulling";
+pub const UPDATE_TRANSFERRING: &str = "transferring";
+pub const UPDATE_STARTING: &str = "starting";
+pub const UPDATE_FAILED: &str = "failed";
+
+/// Poll until the box's screen is reachable or patience runs out; the caller reports either way.
+pub async fn wait_for_screen(provider: &dyn Computer, box_id: &str, patience: std::time::Duration) {
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(Some(_)) = provider.screen_url(box_id).await {
+            return;
+        }
+        if started.elapsed() >= patience {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// The update record as the client sees it, or `Null` when nothing is in flight.
+pub async fn update_status(state: &AgUiState, scope: &str, scope_id: &str) -> Value {
+    match state.auth.store.box_update(scope, scope_id).await {
+        Ok(Some((phase, started_at_ms, updated_at_ms, error))) => json!({
+            "phase": phase,
+            "startedAtMs": started_at_ms,
+            "updatedAtMs": updated_at_ms,
+            "error": error,
+        }),
+        _ => Value::Null,
+    }
+}
+
+/// Rebuild a scope's box on the provider's newest image, keeping its data: pull, recreate on the
+/// same volumes, record the new id, wait for it to come up. Every step writes its phase so the
+/// pane can say what is happening; a failure is recorded with its reason and the old box — still
+/// there, stopped at worst — stays the scope's computer.
+pub async fn update_scope_box(
+    state: AgUiState,
+    org_id: Option<String>,
+    scope: &'static str,
+    scope_id: String,
+) {
+    let store = state.auth.store.clone();
+    let fail = |why: String| {
+        let store = store.clone();
+        let scope_id = scope_id.clone();
+        async move {
+            tracing::warn!(scope, scope_id = %scope_id, why, "computer: update failed");
+            let _ = store
+                .set_box_update_phase(
+                    scope,
+                    &scope_id,
+                    UPDATE_FAILED,
+                    Some(&why),
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await;
+        }
+    };
+    let Ok(Some((old_box_id, kind, _stopped))) = store.scoped_computer_full(scope, &scope_id).await
+    else {
+        return fail("this scope has no computer to update".into()).await;
+    };
+    let Some(provider) = provider_for(&state, org_id.as_deref(), &kind).await else {
+        return fail("the computer's provider is not available".into()).await;
+    };
+
+    if let Err(error) = provider.pull_latest().await {
+        return fail(format!("could not fetch the newest image: {error}")).await;
+    }
+
+    let _ = store
+        .set_box_update_phase(
+            scope,
+            &scope_id,
+            UPDATE_TRANSFERRING,
+            None,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await;
+    let new_box_id = match provider.recreate(&old_box_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            // The old box was stopped for the copy; bring it back so the person is not left
+            // with nothing.
+            let _ = provider.resume(&old_box_id).await;
+            return fail(format!("could not rebuild the computer: {error}")).await;
+        }
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    if let Err(error) = store
+        .set_scoped_computer(
+            scope,
+            &scope_id,
+            &new_box_id,
+            &kind,
+            org_id.as_deref(),
+            at_ms,
+        )
+        .await
+    {
+        return fail(format!("the new computer could not be recorded: {error}")).await;
+    }
+    tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
+
+    let _ = store
+        .set_box_update_phase(scope, &scope_id, UPDATE_STARTING, None, at_ms)
+        .await;
+    match provider.wake(&new_box_id, UPDATE_WAKE_PATIENCE).await {
+        Ok(reached) if reached == "running" => {
+            wait_for_screen(provider.as_ref(), &new_box_id, UPDATE_SCREEN_PATIENCE).await;
+        }
+        Ok(reached) => {
+            return fail(format!("the new computer is {reached}, not running")).await;
+        }
+        Err(error) => return fail(format!("the new computer did not start: {error}")).await,
+    }
+    let _ = store.clear_box_update(scope, &scope_id).await;
+}
+
+/// Start an update of a coworker's computer in the background and answer at once; the status
+/// route carries the phases. Refuses while one is already running.
+pub async fn begin_update_for_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+    let (_mode, org_id, scope, scope_id, _) =
+        scope_of(state, account_id, coworker_id.as_str()).await;
+    let store = &state.auth.store;
+    if !matches!(store.scoped_computer(scope, &scope_id).await, Ok(Some(_))) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "this coworker has no computer to update".into(),
+        ));
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Ok(Some((phase, _started, updated_at_ms, _))) = store.box_update(scope, &scope_id).await
+        && phase != UPDATE_FAILED
+        && now - updated_at_ms < UPDATE_STALE_AFTER_MS
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "this computer is already being updated".into(),
+        ));
+    }
+    if let Err(error) = store
+        .begin_box_update(scope, &scope_id, UPDATE_PULLING, now)
+        .await
+    {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
+    }
+    tokio::spawn(update_scope_box(state.clone(), org_id, scope, scope_id));
+    Ok(())
+}
+
+/// Destroy a coworker's computer, data and all, and provision a fresh one in its place.
+pub async fn reset_for_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (String, String)> {
+    let (_mode, org_id, scope, scope_id, _) =
+        scope_of(state, account_id, coworker_id.as_str()).await;
+    let store = &state.auth.store;
+    if let Ok(Some((box_id, kind, _))) = store.scoped_computer_full(scope, &scope_id).await
+        && let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await
+    {
+        let _ = provider.destroy(&box_id).await;
+    }
+    let _ = store.clear_scoped_computer(scope, &scope_id).await;
+    let _ = store.clear_box_update(scope, &scope_id).await;
+    reprovision_coworker(state, account_id, coworker_id).await
+}
+
+/// Provision (or re-provision) a coworker's box and PERSIST the assignment to its aggregate, so
+/// a fresh coworker row points at a box even though the run path binds the scope's live one.
+pub async fn reprovision_coworker(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Result<(), (String, String)> {
+    use opengrok_core::coworker::CoworkerView;
+
+    let Ok((mut coworker, seq)) = state.auth.store.load_coworker(coworker_id).await else {
+        return Err(("unknown".into(), "could not load the coworker".into()));
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let provisioned =
+        ensure_computer_for(state, account_id, coworker_id, &mut coworker, at_ms).await;
+    if let Some(error) = provisioned.error {
+        return Err(error);
+    }
+    if provisioned.events.is_empty() {
+        return Ok(());
+    }
+    let view = CoworkerView {
+        id: coworker_id.clone(),
+        name: coworker.name.clone(),
+        model: coworker.model.clone(),
+        box_id: coworker.computer().cloned(),
+        retired: false,
+        // Carried, not blanked: a group reprovisioned after hire keeps its members.
+        members: coworker.members.clone(),
+        updated_at_ms: at_ms,
+        role: coworker.role.clone(),
+        visibility: coworker.visibility,
+    };
+    let _ = state
+        .auth
+        .store
+        .append_coworker(coworker_id, account_id, seq, &provisioned.events, &view)
+        .await;
+    Ok(())
+}
+
 /// Wake a stopped scope box so Open can show its screen. Best-effort: a missing mapping is
 /// `coworker_screen`'s absent, not a failure here.
 pub async fn wake_coworker_computer(
@@ -709,13 +1060,8 @@ pub async fn wake_coworker_computer(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) {
-    let (mode, org_id) = resolve_mode(state, account_id).await;
-    let (scope, scope_id, _) = scope_for(
-        &mode,
-        account_id.as_str(),
-        org_id.as_deref(),
-        coworker_id.as_str(),
-    );
+    let (_mode, org_id, scope, scope_id, _) =
+        scope_of(state, account_id, coworker_id.as_str()).await;
     let Ok(Some((box_id, kind, _stopped))) = state
         .auth
         .store
@@ -805,4 +1151,42 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
         }
     }
     stopped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_group_is_its_own_scope_whatever_the_sharing_mode() {
+        for mode in ["per-org", "per-account", "per-bot"] {
+            let (scope, id, box_mode) = scope_for(mode, "acct_1", Some("org_1"), "cw_room", true);
+            assert_eq!(
+                (scope, id.as_str(), box_mode),
+                ("group", "cw_room", BoxMode::Shared),
+                "{mode}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_coworker_follows_the_mode() {
+        assert_eq!(
+            scope_for("per-bot", "acct_1", Some("org_1"), "cw_1", false),
+            ("bot", "cw_1".to_string(), BoxMode::Dedicated)
+        );
+        assert_eq!(
+            scope_for("per-account", "acct_1", Some("org_1"), "cw_1", false),
+            ("account", "acct_1".to_string(), BoxMode::Shared)
+        );
+        assert_eq!(
+            scope_for("per-org", "acct_1", Some("org_1"), "cw_1", false),
+            ("org", "org_1".to_string(), BoxMode::Shared)
+        );
+        // No org to share: the member's own box stands in.
+        assert_eq!(
+            scope_for("per-org", "acct_1", None, "cw_1", false),
+            ("account", "acct_1".to_string(), BoxMode::Shared)
+        );
+    }
 }

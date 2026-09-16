@@ -107,6 +107,7 @@ pub(crate) async fn tools_for_coworker(
         account_id.as_str(),
         org_id.as_deref(),
         coworker_id.as_str(),
+        coworker.is_group(),
     );
     let (mut box_id, kind, stopped) = state
         .auth
@@ -498,6 +499,14 @@ pub fn router(state: AgUiState) -> Router {
             get(computer_status).post(ensure_computer),
         )
         .route("/coworkers/{coworker_id}/screen", get(computer_screen))
+        .route(
+            "/coworkers/{coworker_id}/computer/update",
+            post(computer_update),
+        )
+        .route(
+            "/coworkers/{coworker_id}/computer/reset",
+            post(computer_reset),
+        )
         .with_state(state)
 }
 
@@ -1298,6 +1307,61 @@ async fn computer_screen(
         .into_response(),
         Err((status, message)) => (status, message).into_response(),
     }
+}
+
+/// `POST /coworkers/{id}/computer/update` — rebuild the coworker's computer on the newest image,
+/// keeping its files. Answers 202 with the status; the phases arrive on `GET …/computer`.
+async fn computer_update(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    if let Err((status, message)) =
+        provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
+    {
+        return (status, message).into_response();
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(provision::coworker_screen(&state, &account_id, &coworker_id).await),
+    )
+        .into_response()
+}
+
+/// `POST /coworkers/{id}/computer/reset` — destroy the computer, data and all, and start fresh.
+async fn computer_reset(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    if let Err((code, message)) =
+        provision::reset_for_coworker(&state, &account_id, &coworker_id).await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{code}: {message}"),
+        )
+            .into_response();
+    }
+    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
 /// `POST /coworkers/{id}/computer` — ensure the box is running, then return the same status.

@@ -104,6 +104,19 @@ alter table scoped_computer add column if not exists stopped boolean not null de
 -- or resume it. Null for a Local VM (needs no key).
 alter table scoped_computer add column if not exists org_id text;
 
+-- An update of a scope's box in flight (or the failure it ended in): the phase the pane shows.
+-- One row per scope; cleared when the new box is up, kept as 'failed' with the reason until the
+-- next attempt.
+create table if not exists box_update (
+    scope         text   not null,
+    scope_id      text   not null,
+    phase         text   not null,
+    started_at_ms bigint not null,
+    updated_at_ms bigint not null,
+    error         text,
+    primary key (scope, scope_id)
+);
+
 -- How an org shares computers, and per-account overrides. scope 'org' with the org id is the org
 -- default; scope 'account' with an account id overrides it for that member. mode is
 -- 'per-org' | 'per-account' | 'per-bot'. Absent ⇒ the built-in default (per-account).
@@ -722,6 +735,18 @@ create table if not exists coworker_last_viewed (
 -- disappears before they look away. Official keeps the same flag for the same reason
 -- (`agent-db.ts`: markUnread sets it, markViewed takes `preserveManualUnread`).
 alter table coworker_last_viewed add column if not exists manually_unread boolean not null default false;
+
+-- Data follows schema: everything above has created its tables by here.
+-- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
+-- EXACTLY the previous built-in set was "everything this server implements" when it was written,
+-- so it follows the built-ins; a narrower or wider list was chosen on purpose and is left alone.
+-- Idempotent: once widened, the row no longer matches.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
