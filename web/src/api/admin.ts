@@ -87,6 +87,26 @@ export function testBoxConnection(): Promise<{ ok: boolean; detail: string }> {
   return postJson<{ ok: boolean; detail: string }>("/admin/computers/ascii/test");
 }
 
+// ---- Local Docker (the provider when no hosted key is set) ----
+
+export interface DockerStatus {
+  active: boolean;
+  image?: string;
+  source?: "registry" | "local";
+  boxes?: number;
+  stale?: number;
+  gone?: number;
+  updating?: number;
+}
+
+export function getDockerStatus(): Promise<DockerStatus> {
+  return getJson<DockerStatus>("/admin/computers/docker");
+}
+
+export function updateAllDockerBoxes(): Promise<{ started: number }> {
+  return postJson<{ started: number }>("/admin/computers/docker/update-all");
+}
+
 // ---- Computer sharing mode (admin) ----
 
 export type SharingMode = "per-org" | "per-account" | "per-bot";

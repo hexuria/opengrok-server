@@ -31,6 +31,11 @@ const CONFIGURABLE: &[(&str, &str)] = &[("ascii", "box.ascii.dev"), ("windows365
 pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/admin/computers", get(status))
+        .route("/admin/computers/docker", get(docker_status))
+        .route(
+            "/admin/computers/docker/update-all",
+            post(docker_update_all),
+        )
         .route("/admin/computers/{kind}", post(set).delete(clear))
         .route("/admin/computers/{kind}/test", post(test))
         .route("/admin/computers/mode", get(get_mode).put(set_mode))
@@ -67,6 +72,130 @@ async fn status(State(state): State<AgUiState>, headers: HeaderMap) -> Response 
         })
         .collect();
     Json(json!({ "computers": computers })).into_response()
+}
+
+/// The local Docker boxes this deployment runs for the admin's org: which rows, and whether
+/// each still exists, runs the newest image, or is mid-update.
+async fn docker_boxes(
+    state: &AgUiState,
+    org_id: &str,
+) -> Vec<(&'static str, String, String, Option<String>)> {
+    let rows = state
+        .auth
+        .store
+        .scoped_computers_of_kind("local-docker")
+        .await
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter(|(_, _, _, row_org)| row_org.as_deref().is_none_or(|org| org == org_id))
+        .map(|(scope, scope_id, box_id, row_org)| {
+            let scope: &'static str = match scope.as_str() {
+                "org" => "org",
+                "account" => "account",
+                "bot" => "bot",
+                "group" => "group",
+                _ => "account",
+            };
+            (scope, scope_id, box_id, row_org)
+        })
+        .collect()
+}
+
+/// `GET /admin/computers/docker` — the local Docker provider as the admin sees it: active or
+/// not, the image tag and where it comes from, and how many boxes run an older image.
+async fn docker_status(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    let Some(provider) = state
+        .computer
+        .as_ref()
+        .filter(|computer| computer.kind() == "local-docker")
+    else {
+        return Json(json!({ "active": false })).into_response();
+    };
+    let image = provider.image();
+    let mut boxes = 0;
+    let mut stale = 0;
+    let mut gone = 0;
+    let mut updating = 0;
+    for (scope, scope_id, box_id, _) in docker_boxes(&state, org_id.as_str()).await {
+        boxes += 1;
+        match provider.state(&box_id).await.as_deref() {
+            Ok("absent") => gone += 1,
+            _ => {
+                if provider
+                    .image_status(&box_id)
+                    .await
+                    .is_ok_and(|status| status.stale())
+                {
+                    stale += 1;
+                }
+            }
+        }
+        if let Ok(Some((phase, _, _, _))) = state.auth.store.box_update(scope, &scope_id).await
+            && phase != crate::agui::provision::UPDATE_FAILED
+        {
+            updating += 1;
+        }
+    }
+    Json(json!({
+        "active": true,
+        "image": image,
+        "source": if opengrok_box::docker::image_is_local(&image) { "local" } else { "registry" },
+        "boxes": boxes,
+        "stale": stale,
+        "gone": gone,
+        "updating": updating,
+    }))
+    .into_response()
+}
+
+/// `POST /admin/computers/docker/update-all` — rebuild every box on the newest image, one after
+/// another so the host is not asked to copy everything at once. Answers with how many started.
+async fn docker_update_all(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    use crate::agui::provision::{UPDATE_FAILED, UPDATE_PULLING, update_scope_box};
+    let (org_id, _, _) = match admin_org(&state.auth, &headers).await {
+        Ok(pair) => pair,
+        Err(refusal) => return refusal,
+    };
+    if state
+        .computer
+        .as_ref()
+        .is_none_or(|computer| computer.kind() != "local-docker")
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            "local Docker is not the provider here",
+        )
+            .into_response();
+    }
+    let mut queued = Vec::new();
+    for (scope, scope_id, _box_id, row_org) in docker_boxes(&state, org_id.as_str()).await {
+        if let Ok(Some((phase, _, _, _))) = state.auth.store.box_update(scope, &scope_id).await
+            && phase != UPDATE_FAILED
+        {
+            continue;
+        }
+        if state
+            .auth
+            .store
+            .begin_box_update(scope, &scope_id, UPDATE_PULLING, now_ms())
+            .await
+            .is_ok()
+        {
+            queued.push((scope, scope_id, row_org));
+        }
+    }
+    let started = queued.len();
+    let state_for_task = state.clone();
+    tokio::spawn(async move {
+        for (scope, scope_id, row_org) in queued {
+            update_scope_box(state_for_task.clone(), row_org, scope, scope_id).await;
+        }
+    });
+    Json(json!({ "started": started })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
