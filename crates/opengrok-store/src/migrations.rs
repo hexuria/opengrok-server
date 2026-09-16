@@ -104,6 +104,17 @@ alter table scoped_computer add column if not exists stopped boolean not null de
 -- or resume it. Null for a Local VM (needs no key).
 alter table scoped_computer add column if not exists org_id text;
 
+-- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
+-- EXACTLY the previous built-in set was "everything this server implements" when it was written,
+-- so it follows the built-ins; a narrower or wider list was chosen on purpose and is left alone.
+-- Idempotent: once widened, the row no longer matches.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+
 -- An update of a scope's box in flight (or the failure it ended in): the phase the pane shows.
 -- One row per scope; cleared when the new box is up, kept as 'failed' with the reason until the
 -- next attempt.
