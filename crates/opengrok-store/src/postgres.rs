@@ -2197,6 +2197,19 @@ fn recipe_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRow> {
     })
 }
 
+/// One `recipe_version` row, read the same way wherever it is read.
+fn recipe_version_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeVersionRow> {
+    Ok(RecipeVersionRow {
+        recipe_id: row.try_get("recipe_id")?,
+        version: row.try_get("version")?,
+        kind: row.try_get("kind")?,
+        body: row.try_get("body")?,
+        note: row.try_get("note")?,
+        created_by: row.try_get("created_by")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+    })
+}
+
 const RECIPE_SELECT: &str =
     "select r.id, r.owner_id, r.org_id, r.name, r.description, r.screen_w, r.screen_h,
         r.created_at_ms, r.updated_at_ms, r.deleted_at_ms,
@@ -2389,6 +2402,47 @@ impl PgStore {
         Ok(next)
     }
 
+    /// Drop one version and the runs that played it. The runs go with it because history is
+    /// read a version at a time: a run pointing at a version nobody can open is a row with no
+    /// home. Returns what was deleted, so a caller can tell "gone" from "was never there".
+    pub async fn delete_recipe_version(
+        &self,
+        recipe_id: &str,
+        version: i32,
+    ) -> StoreResult<Option<RecipeVersionRow>> {
+        let Some(row) = self.recipe_version(recipe_id, version).await? else {
+            return Ok(None);
+        };
+        sqlx::query("delete from recipe_run where recipe_id = $1 and version = $2")
+            .bind(recipe_id)
+            .bind(version)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("delete from recipe_version where recipe_id = $1 and version = $2")
+            .bind(recipe_id)
+            .bind(version)
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(row))
+    }
+
+    /// One version of a recipe, by its number.
+    pub async fn recipe_version(
+        &self,
+        recipe_id: &str,
+        version: i32,
+    ) -> StoreResult<Option<RecipeVersionRow>> {
+        let row = sqlx::query(
+            "select recipe_id, version, kind, body, note, created_by, created_at_ms
+               from recipe_version where recipe_id = $1 and version = $2",
+        )
+        .bind(recipe_id)
+        .bind(version)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(recipe_version_row).transpose()
+    }
+
     pub async fn recipe_versions(&self, recipe_id: &str) -> StoreResult<Vec<RecipeVersionRow>> {
         let rows = sqlx::query(
             "select recipe_id, version, kind, body, note, created_by, created_at_ms
@@ -2397,19 +2451,7 @@ impl PgStore {
         .bind(recipe_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(RecipeVersionRow {
-                    recipe_id: row.try_get("recipe_id")?,
-                    version: row.try_get("version")?,
-                    kind: row.try_get("kind")?,
-                    body: row.try_get("body")?,
-                    note: row.try_get("note")?,
-                    created_by: row.try_get("created_by")?,
-                    created_at_ms: row.try_get("created_at_ms")?,
-                })
-            })
-            .collect()
+        rows.iter().map(recipe_version_row).collect()
     }
 
     /// The version a run should use: the newest that is not the raw tape.

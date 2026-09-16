@@ -45,6 +45,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/recipes", get(list).post(create))
         .route("/recipes/{id}", get(detail).put(rename).delete(remove))
         .route("/recipes/{id}/versions", post(add_version))
+        .route("/recipes/{id}/versions/{version}", delete(remove_version))
         .route("/recipes/{id}/share", post(share))
         .route("/recipes/{id}/share/{scope}/{scope_id}", delete(unshare))
         .route("/recipes/{id}/accept", post(accept))
@@ -496,6 +497,43 @@ async fn add_version(
         .add_recipe_version(&id, "edited", &body, note, account.as_str(), now_ms())
         .await
     {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    detail_body(&state, &account, org.as_deref(), &id).await
+}
+
+/// `DELETE /recipes/{id}/versions/{version}` — one edited version; the owner's.
+///
+/// The tape and the filtered steps read off it are what the recipe IS: the tape is the record
+/// of what a person did, and the filtered version is that tape turned into steps. Everything
+/// after them is an edit, and an edit is the only thing there is to take back. Deleting the
+/// newest edit leaves the one before it running, which is what falling back means here.
+async fn remove_version(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path((id, version)): Path<(String, i32)>,
+) -> Response {
+    let (account, org, _, _) = match permitted(&state, &headers, &id, Action::Edit).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let store = &state.auth.store;
+    let found = match store.recipe_version(&id, version).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such version").into_response(),
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    if found.kind != "edited" {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "v{version} is the {}, which is what this recipe was taught; only an edited version can be deleted",
+                if found.kind == "raw" { "tape as taught" } else { "tape filtered into steps" }
+            ),
+        )
+            .into_response();
+    }
+    if let Err(error) = store.delete_recipe_version(&id, version).await {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
     detail_body(&state, &account, org.as_deref(), &id).await
