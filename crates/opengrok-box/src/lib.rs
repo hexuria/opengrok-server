@@ -293,3 +293,76 @@ pub trait Computer: Send + Sync {
         "local-docker"
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// The action names and fields are the box's own request bodies; a rename here would be a
+    /// silent 400 from every box.
+    #[test]
+    fn a_cua_action_serializes_in_the_boxs_vocabulary() {
+        let click = serde_json::to_value(CuaAction::Click {
+            x: 17,
+            y: 781,
+            button: None,
+        })
+        .unwrap();
+        assert_eq!(
+            click,
+            serde_json::json!({"action": "click", "x": 17, "y": 781})
+        );
+
+        let drag = serde_json::to_value(CuaAction::Drag {
+            x1: 1,
+            y1: 2,
+            x2: 3,
+            y2: 4,
+        })
+        .unwrap();
+        assert_eq!(drag["action"], "drag");
+        assert_eq!(
+            (drag["x1"].as_i64(), drag["y2"].as_i64()),
+            (Some(1), Some(4))
+        );
+
+        let parsed: CuaAction =
+            serde_json::from_value(serde_json::json!({"action": "double_click", "x": 5, "y": 6}))
+                .unwrap();
+        assert_eq!(parsed, CuaAction::DoubleClick { x: 5, y: 6 });
+    }
+
+    #[test]
+    fn describe_says_where_not_what_was_typed() {
+        assert_eq!(
+            CuaAction::Click {
+                x: 17,
+                y: 781,
+                button: None
+            }
+            .describe(),
+            "clicking at 17,781"
+        );
+        // Typed text can be a password; the status line never repeats it.
+        assert_eq!(
+            CuaAction::Type {
+                text: "hunter2".into()
+            }
+            .describe(),
+            "typing"
+        );
+        assert_eq!(
+            CuaAction::Key {
+                key: "Return".into()
+            }
+            .describe(),
+            "pressing Return"
+        );
+    }
+
+    #[test]
+    fn no_screen_is_a_refusal_not_an_outage() {
+        assert!(matches!(no_screen(), BoxError::Refused { status: 501, .. }));
+    }
+}

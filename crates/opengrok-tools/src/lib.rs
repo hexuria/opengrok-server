@@ -2068,4 +2068,101 @@ mod tests {
             "the sink must not be told the owner consented"
         );
     }
+
+    fn computer_args(value: Value) -> Result<Option<CuaAction>, String> {
+        serde_json::from_value::<ComputerArgs>(value)
+            .map_err(|error| error.to_string())?
+            .into_action()
+    }
+
+    #[test]
+    fn computer_args_map_onto_the_boxs_actions() {
+        assert_eq!(computer_args(json!({"action": "screenshot"})), Ok(None));
+        assert_eq!(
+            computer_args(json!({"action": "click", "coordinate": [17, 781]})),
+            Ok(Some(CuaAction::Click {
+                x: 17,
+                y: 781,
+                button: None
+            }))
+        );
+        assert_eq!(
+            computer_args(json!({"action": "right_click", "coordinate": [1, 2]})),
+            Ok(Some(CuaAction::Click {
+                x: 1,
+                y: 2,
+                button: Some(3)
+            }))
+        );
+        assert_eq!(
+            computer_args(json!({"action": "drag", "coordinate": [1, 2], "to": [3, 4]})),
+            Ok(Some(CuaAction::Drag {
+                x1: 1,
+                y1: 2,
+                x2: 3,
+                y2: 4
+            }))
+        );
+        assert_eq!(
+            computer_args(json!({"action": "type", "text": "uname -a\n"})),
+            Ok(Some(CuaAction::Type {
+                text: "uname -a\n".into()
+            }))
+        );
+        assert_eq!(
+            computer_args(json!({"action": "scroll", "coordinate": [5, 6], "scroll": [0, -3]})),
+            Ok(Some(CuaAction::Scroll {
+                x: 5,
+                y: 6,
+                dx: 0,
+                dy: -3
+            }))
+        );
+    }
+
+    /// The error names the field, so the model's next call can be right.
+    #[test]
+    fn a_computer_call_missing_its_field_is_told_which() {
+        let error = computer_args(json!({"action": "click"})).unwrap_err();
+        assert!(error.contains("`coordinate`"), "{error}");
+        let error = computer_args(json!({"action": "type"})).unwrap_err();
+        assert!(error.contains("`text`"), "{error}");
+        let error = computer_args(json!({"action": "teleport"})).unwrap_err();
+        assert!(error.contains("unknown action `teleport`"), "{error}");
+    }
+
+    /// The screen tools are offered only where there is a screen — the offered set and the
+    /// executed set stay equal either way.
+    #[test]
+    fn screen_tools_are_offered_only_with_a_screen() {
+        let spy = Arc::new(SpyComputer::default());
+        let headless = allowing(spy.clone());
+        let names = headless.tool_names();
+        assert!(!names.iter().any(|name| name == "computer"), "{names:?}");
+        assert!(!names.iter().any(|name| name == "open_url"), "{names:?}");
+        assert!(!headless.has_screen());
+
+        let with_screen = allowing(spy).with_screen(true);
+        let names = with_screen.tool_names();
+        assert!(names.iter().any(|name| name == "computer"), "{names:?}");
+        assert!(names.iter().any(|name| name == "open_url"), "{names:?}");
+        assert!(with_screen.has_screen());
+    }
+
+    /// A provider without a desktop refuses in words the model can act on, and nothing panics.
+    #[tokio::test]
+    async fn a_screen_action_on_a_headless_box_is_refused() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_screen(true);
+        let context = context_with_box("box_mine");
+
+        let result = executor
+            .execute(
+                &context,
+                &call("computer", json!({"action": "click", "coordinate": [1, 1]})),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("no screen"), "{result:?}");
+        assert!(result.image.is_none());
+    }
 }

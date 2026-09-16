@@ -673,4 +673,31 @@ mod tests {
         assert!(!printed.contains("oag_live_secret"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
     }
+
+    #[test]
+    fn a_message_without_images_is_a_bare_string_on_the_wire() {
+        let message = ChatMessage {
+            role: "user".into(),
+            content: "hello".into(),
+            images: Vec::new(),
+        };
+        assert_eq!(message_content(&message), serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn a_message_with_a_screenshot_is_text_then_image_url_parts() {
+        let message = ChatMessage {
+            role: "user".into(),
+            content: "[tool c1 result] screenshot attached".into(),
+            images: vec![crate::ImagePart {
+                mime: "image/png".into(),
+                base64: "AAAA".into(),
+            }],
+        };
+        let parts = message_content(&message);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "[tool c1 result] screenshot attached");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
 }

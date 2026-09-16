@@ -1146,4 +1146,49 @@ mod tests {
         let events = handle.await.unwrap();
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     }
+
+    fn shot(call_id: &str) -> opengrok_tools::ToolResult {
+        opengrok_tools::ToolResult::ok(call_id, "screenshot of the 1280x800 screen attached")
+            .with_image(opengrok_tools::ToolImage {
+                mime: "image/png".into(),
+                base64: "iVBORw0KGgo=".into(),
+                width: 1280,
+                height: 800,
+            })
+    }
+
+    #[test]
+    fn a_tool_result_with_a_picture_becomes_a_message_with_an_image() {
+        let message = tool_result_message(&shot("c1"));
+        assert_eq!(message.role, "user");
+        assert!(message.content.starts_with("[tool c1 result] screenshot"));
+        assert_eq!(message.images.len(), 1);
+        assert_eq!(message.images[0].mime, "image/png");
+
+        let plain = tool_result_message(&opengrok_tools::ToolResult::ok("c2", "done"));
+        assert!(plain.images.is_empty());
+    }
+
+    /// Screenshots are the widest thing in a request; only the last two say where the screen is.
+    #[test]
+    fn only_the_two_most_recent_screenshots_travel() {
+        let mut messages: Vec<ChatMessage> = (1..=4)
+            .map(|n| tool_result_message(&shot(&format!("c{n}"))))
+            .collect();
+        messages.insert(
+            2,
+            ChatMessage {
+                role: "assistant".into(),
+                content: "clicking".into(),
+                images: Vec::new(),
+            },
+        );
+
+        keep_recent_images(&mut messages, RECENT_IMAGES);
+
+        let carried: Vec<bool> = messages.iter().map(|m| !m.images.is_empty()).collect();
+        assert_eq!(carried, vec![false, false, false, true, true]);
+        // The words stay even where the picture went.
+        assert!(messages[0].content.contains("[tool c1 result]"));
+    }
 }
