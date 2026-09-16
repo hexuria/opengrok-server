@@ -56,6 +56,15 @@ pub async fn run_turn(
 /// run as a *result* the client can see rather than a silent stop.
 pub const MAX_ROUNDS: usize = 8;
 
+/// How many rounds may be spent looking at and acting on the box's screen. A look is a model
+/// call too, but a cheap and expected one: a task on a desktop is a dozen screenshots and clicks
+/// before a sentence, so those rounds are counted apart from the words.
+pub const MAX_COMPUTER_ROUNDS: usize = 24;
+
+/// Identical screenshots in a row before the run stops: the model is waiting for something
+/// that is not happening, and the honest thing is to say so rather than to keep looking.
+pub const SAME_SCREEN_LIMIT: usize = 4;
+
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
 /// bar_chart again in the same request.
@@ -375,8 +384,14 @@ async fn converse(
     // for exactly the same thing again is not going to get a different answer, and
     // burning the remaining rounds on it only delays telling the person.
     let mut last_refused: Option<Vec<(String, serde_json::Value)>> = None;
+    // Rounds that ended in words or box tools, and rounds spent on the screen: two budgets.
+    let mut spoken_rounds = 0usize;
+    let mut computer_rounds = 0usize;
+    // The last screenshot the model was shown, and how many times in a row it was the same.
+    let mut last_screen: Option<u64> = None;
+    let mut same_screen = 0usize;
 
-    for round in 0..MAX_ROUNDS {
+    for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
         let mut round_events = Vec::new();
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
@@ -472,7 +487,16 @@ async fn converse(
                         .iter()
                         .zip(&results)
                         .filter(|(_, result)| !result.ok)
-                        .map(|(call, _)| (call.name.clone(), call.arguments.clone()))
+                        // A person's no on their own machine was about the machine, not one
+                        // spelling of the command: a reworded retry is the same ask.
+                        .map(|(call, _)| {
+                            let arguments = if call.name == opengrok_tools::USER_MACHINE_SHELL {
+                                serde_json::Value::Null
+                            } else {
+                                call.arguments.clone()
+                            };
+                            (call.name.clone(), arguments)
+                        })
                         .collect();
                     let every_call_refused = !results.is_empty() && refused.len() == results.len();
                     if every_call_refused && last_refused.as_ref() == Some(&refused) {
@@ -494,6 +518,30 @@ async fn converse(
                         return all;
                     }
                     last_refused = every_call_refused.then_some(refused);
+
+                    // Screens: the same picture four times running means waiting, not working.
+                    for result in results.iter().filter(|result| result.ok) {
+                        if let Some(image) = &result.image {
+                            let hash = screen_hash(&image.base64);
+                            if last_screen == Some(hash) {
+                                same_screen += 1;
+                            } else {
+                                last_screen = Some(hash);
+                                same_screen = 0;
+                            }
+                        }
+                    }
+                    if same_screen + 1 >= SAME_SCREEN_LIMIT {
+                        let mut ending = projection.fail(format!(
+                            "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
+                        ));
+                        let _ = journal.record(run_id, &round_events).await;
+                        let _ = journal.record(run_id, &ending).await;
+                        emit_live(sink, &ending).await;
+                        all.append(&mut round_events);
+                        all.append(&mut ending);
+                        return all;
+                    }
 
                     if !said.is_empty() {
                         request.messages.push(ChatMessage {
@@ -525,11 +573,30 @@ async fn converse(
                         return all;
                     }
 
-                    if round + 1 == MAX_ROUNDS {
-                        // Ending as a result, not a silent stop: the client is told why.
-                        let mut ending = projection.fail(format!(
+                    // Which budget this round drew on: every call a successful screen action, or anything
+                    // else. The screen budget is wider because looking is the work there.
+                    let on_screen = calls
+                        .iter()
+                        .zip(&results)
+                        .all(|(call, result)| call.name == "computer" && result.ok);
+                    if on_screen {
+                        computer_rounds += 1;
+                    } else {
+                        spoken_rounds += 1;
+                    }
+                    let over = if spoken_rounds >= MAX_ROUNDS {
+                        Some(format!(
                             "this run reached its limit of {MAX_ROUNDS} model calls"
-                        ));
+                        ))
+                    } else if computer_rounds >= MAX_COMPUTER_ROUNDS {
+                        Some(format!(
+                            "this run reached its limit of {MAX_COMPUTER_ROUNDS} looks and actions on its computer"
+                        ))
+                    } else {
+                        None
+                    };
+                    if let Some(why) = over {
+                        let mut ending = projection.fail(why);
                         let _ = journal.record(run_id, &ending).await;
                         emit_live(sink, &ending).await;
                         all.append(&mut ending);
@@ -555,6 +622,14 @@ async fn converse(
 /// How many screenshots a request carries. They are the model's eyes and also by far the widest
 /// thing in it; the latest one or two say where the screen is now, older ones only cost.
 const RECENT_IMAGES: usize = 2;
+
+/// A screenshot's identity for the same-screen guard: the encoded bytes, hashed.
+fn screen_hash(base64: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    base64.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// What the model is told a tool said, in its own transcript — with the picture, when there is one.
 fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
@@ -599,13 +674,32 @@ fn awaiting_why(content: &str) -> Option<&str> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use opengrok_tools::Executor;
     use opengrok_wire::agui::EventType;
+    use std::sync::{Arc, Mutex};
 
     fn tool_runner() -> ToolRunner {
+        tool_runner_on(
+            Arc::new(crate::tools::tests_support::RecordingComputer::default()),
+            |executor| executor,
+        )
+    }
+
+    fn tool_runner_with(shape: impl FnOnce(Executor) -> Executor) -> ToolRunner {
+        tool_runner_on(
+            Arc::new(crate::tools::tests_support::RecordingComputer::default()),
+            shape,
+        )
+    }
+
+    /// Ada's runner on any computer, with the executor shaped by the caller (a screen, a sink).
+    fn tool_runner_on(
+        computer: Arc<dyn opengrok_box::Computer>,
+        shape: impl FnOnce(Executor) -> Executor,
+    ) -> ToolRunner {
         use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
         use opengrok_core::id::{BoxId, CoworkerId};
         use opengrok_tools::{Executor, ToolContext};
-        use std::sync::Arc;
 
         let mut coworker = Coworker::default();
         for command in [
@@ -641,10 +735,7 @@ mod tests {
             }),
         };
         ToolRunner::new(
-            Executor::with_policy(
-                Arc::new(crate::tools::tests_support::RecordingComputer::default()),
-                policy,
-            ),
+            shape(Executor::with_policy(computer, policy)),
             ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
         )
     }
@@ -1190,5 +1281,268 @@ mod tests {
         assert_eq!(carried, vec![false, false, false, true, true]);
         // The words stay even where the picture went.
         assert!(messages[0].content.contains("[tool c1 result]"));
+    }
+
+    /// A person's no is about their machine, not about one spelling of the command. Seen live:
+    /// the model reworded the command eight times after a deny and the round cap was what
+    /// stopped it.
+    #[tokio::test]
+    async fn a_denied_machine_ends_the_run_even_when_the_command_is_reworded() {
+        struct RewordingDoor(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for RewordingDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let n = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                let script = vec![
+                    ModelDelta::ToolCallStart {
+                        id: format!("c{n}"),
+                        name: "user_machine_shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: format!("c{n}"),
+                        delta: format!(
+                            r#"{{"command":"open -a Safari https://facebook.com/{n}"}}"#
+                        ),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: format!("c{n}"),
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+        struct DenyingSink;
+        #[async_trait::async_trait]
+        impl opengrok_tools::UserMachineSink for DenyingSink {
+            async fn decide(
+                &self,
+                _account_id: &opengrok_core::id::AccountId,
+                _command: &str,
+            ) -> opengrok_tools::UserMachineVerdict {
+                opengrok_tools::UserMachineVerdict::Deny("the machine's owner said no".into())
+            }
+            async fn run(
+                &self,
+                _account_id: &opengrok_core::id::AccountId,
+                _command: &str,
+                _call_id: &str,
+                _approved: bool,
+            ) -> opengrok_tools::UserMachineReply {
+                opengrok_tools::UserMachineReply::Refused("the machine's owner said no".into())
+            }
+        }
+
+        let journal = MemoryJournal::new();
+        let runner = tool_runner_with(|executor| executor.with_user_machine(Arc::new(DenyingSink)));
+        let events = run_conversation(
+            &RewordingDoor(Mutex::new(0)),
+            Some(&runner),
+            &journal,
+            request("visit facebook.com"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let starts = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ToolCallStart)
+            .count();
+        assert_eq!(starts, 2, "a no, one more ask, then stop: {events:?}");
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunError);
+        assert!(
+            last.extra
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .contains("twice"),
+            "{last:?}"
+        );
+    }
+
+    /// A computer whose screen changes on every look (or not), for the screen budgets.
+    struct ScreenComputer {
+        changing: bool,
+        looks: Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl opengrok_box::Computer for ScreenComputer {
+        async fn create(&self, _ttl: Option<u64>) -> opengrok_box::BoxResult<String> {
+            Ok("box_screen".into())
+        }
+        async fn run(
+            &self,
+            _b: &str,
+            _c: &str,
+            _t: u32,
+        ) -> opengrok_box::BoxResult<opengrok_box::CommandOutput> {
+            Err(opengrok_box::BoxError::NoSuchBox)
+        }
+        async fn start(
+            &self,
+            _b: &str,
+            _c: &str,
+        ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+            Err(opengrok_box::BoxError::NoSuchBox)
+        }
+        async fn watch(
+            &self,
+            _b: &str,
+            _p: &str,
+        ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+            Err(opengrok_box::BoxError::NoSuchBox)
+        }
+        async fn read_file(&self, _b: &str, _p: &str) -> opengrok_box::BoxResult<String> {
+            Ok(String::new())
+        }
+        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> opengrok_box::BoxResult<()> {
+            Ok(())
+        }
+        async fn expose_port(
+            &self,
+            _b: &str,
+            _p: u16,
+            _t: &str,
+        ) -> opengrok_box::BoxResult<String> {
+            Ok(String::new())
+        }
+        async fn stop(&self, _b: &str) -> opengrok_box::BoxResult<()> {
+            Ok(())
+        }
+        async fn resume(&self, _b: &str) -> opengrok_box::BoxResult<()> {
+            Ok(())
+        }
+        async fn destroy(&self, _b: &str) -> opengrok_box::BoxResult<()> {
+            Ok(())
+        }
+        async fn state(&self, _b: &str) -> opengrok_box::BoxResult<String> {
+            Ok("running".into())
+        }
+        async fn screen_url(&self, _b: &str) -> opengrok_box::BoxResult<Option<String>> {
+            Ok(Some("http://127.0.0.1:1/vnc.html".into()))
+        }
+        async fn screenshot(&self, _b: &str) -> opengrok_box::BoxResult<opengrok_box::Screenshot> {
+            let n = {
+                let mut looks = self.looks.lock().unwrap();
+                *looks += 1;
+                *looks
+            };
+            Ok(opengrok_box::Screenshot {
+                mime: "image/png".into(),
+                png_base64: if self.changing {
+                    format!("frame-{n}")
+                } else {
+                    "frame-same".into()
+                },
+                width: 1280,
+                height: 800,
+            })
+        }
+        async fn act(&self, _b: &str, _a: &opengrok_box::CuaAction) -> opengrok_box::BoxResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A model that only ever takes screenshots.
+    struct LookingDoor(Mutex<usize>, usize);
+    #[async_trait::async_trait]
+    impl ModelDoor for LookingDoor {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let n = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = if n > self.1 {
+                vec![ModelDelta::Text("done looking".to_string())]
+            } else {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: format!("c{n}"),
+                        name: "computer".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: format!("c{n}"),
+                        delta: r#"{"action":"screenshot"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: format!("c{n}"),
+                    },
+                ]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    fn screen_runner(changing: bool) -> ToolRunner {
+        tool_runner_on(
+            Arc::new(ScreenComputer {
+                changing,
+                looks: Mutex::new(0),
+            }),
+            |executor| executor.with_screen(true),
+        )
+    }
+
+    /// Looking is the work on a desktop: twelve screenshots must not trip the eight-call cap
+    /// meant for chatter.
+    #[tokio::test]
+    async fn looking_at_a_changing_screen_is_not_chatter() {
+        let journal = MemoryJournal::new();
+        let runner = screen_runner(true);
+        let events = run_conversation(
+            &LookingDoor(Mutex::new(0), 12),
+            Some(&runner),
+            &journal,
+            request("find the terminal"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let looks = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ToolCallStart)
+            .count();
+        assert_eq!(looks, 12, "{events:?}");
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    /// The same picture four times running is waiting, not working; the run says so.
+    #[tokio::test]
+    async fn the_same_screen_four_times_ends_the_run() {
+        let journal = MemoryJournal::new();
+        let runner = screen_runner(false);
+        let events = run_conversation(
+            &LookingDoor(Mutex::new(0), 40),
+            Some(&runner),
+            &journal,
+            request("wait for the page"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let looks = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ToolCallStart)
+            .count();
+        assert_eq!(looks, SAME_SCREEN_LIMIT, "{events:?}");
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunError);
+        assert!(
+            last.extra
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .contains("has not changed"),
+            "{last:?}"
+        );
     }
 }
