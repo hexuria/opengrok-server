@@ -70,7 +70,16 @@ async fn a_grant_of_the_old_builtin_set_follows_the_builtins_and_a_chosen_list_d
         .expect("migrations");
 
     let widened = store.policy_for(&account, &old).await.expect("policy");
-    let expected = only(&["computer", "open_url", "read_file", "shell", "write_file"]);
+    // The widening statements chain, so a row written as the three-tool set arrives at today's
+    // full built-in set in one boot — which is what "follows the built-ins" has to mean.
+    let expected = only(&[
+        "computer",
+        "open_url",
+        "read_file",
+        "run_recipe",
+        "shell",
+        "write_file",
+    ]);
     assert_eq!(
         widened.grant.map(|grant| grant.profile),
         Some(expected.clone())

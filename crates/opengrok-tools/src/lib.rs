@@ -594,9 +594,17 @@ impl Executor {
     }
 
     /// The tools that need no plugin. `open_url` and `computer` are in the default grant but are
-    /// OFFERED only when the box has a display (`with_screen`).
+    /// OFFERED only when the box has a display (`with_screen`); `run_recipe` only with a display
+    /// and at least one granted recipe (`with_recipes`). A grant that omits a name here denies it.
     pub fn builtin_tool_names() -> &'static [&'static str] {
-        &["shell", "read_file", "write_file", "open_url", "computer"]
+        &[
+            "shell",
+            "read_file",
+            "write_file",
+            "open_url",
+            "computer",
+            RUN_RECIPE,
+        ]
     }
 
     /// The built-ins this executor can actually run right now.
@@ -605,6 +613,8 @@ impl Executor {
             .iter()
             .copied()
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
+            // Offered by `tool_names` / `tool_schemas` on its own terms: a screen AND a grant.
+            .filter(|name| *name != RUN_RECIPE)
     }
 
     /// EVERY tool a model is offered on THIS request — built-ins plus whatever this coworker's
