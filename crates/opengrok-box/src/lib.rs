@@ -164,6 +164,31 @@ impl CuaAction {
     }
 }
 
+/// What a box runs against what the provider would create today. `stale` is the whole
+/// question a person asks before clicking Update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImageStatus {
+    /// The image the box was created from, as the provider identifies it (a digest for Docker).
+    pub running: String,
+    /// The image a box created now would get.
+    pub latest: String,
+}
+
+impl ImageStatus {
+    pub fn stale(&self) -> bool {
+        self.running != self.latest
+    }
+}
+
+/// The refusal for a lifecycle step this provider does not do (update, keep data across a
+/// recreate). Read by a person, so it says which step.
+pub fn not_supported(what: &str) -> BoxError {
+    BoxError::Refused {
+        status: 501,
+        body: format!("this computer's provider cannot {what}"),
+    }
+}
+
 /// The refusal every provider without a desktop gives for a screen action.
 pub fn no_screen() -> BoxError {
     BoxError::Refused {
@@ -284,6 +309,30 @@ pub trait Computer: Send + Sync {
         self.start(box_id, &format!("box-chromium '{quoted}'"))
             .await?;
         Ok(())
+    }
+
+    /// The image (or template) a box created now would run. Empty when the provider has no such
+    /// notion.
+    fn image(&self) -> String {
+        String::new()
+    }
+
+    /// What this box runs against what a new one would get. Default: no way to tell, which the
+    /// caller shows as "up to date" rather than inventing an update.
+    async fn image_status(&self, _box_id: &str) -> BoxResult<ImageStatus> {
+        Err(not_supported("compare images"))
+    }
+
+    /// Fetch the newest image so the next create (or `recreate`) runs it. `Ok(false)` means there
+    /// was nothing to fetch — a local-only image is already whatever was built last.
+    async fn pull_latest(&self) -> BoxResult<bool> {
+        Ok(false)
+    }
+
+    /// A fresh box on the newest image that keeps the old box's data (home and workspace), then
+    /// removes the old one. Returns the new id. The step behind "Update this computer".
+    async fn recreate(&self, _old_box_id: &str) -> BoxResult<String> {
+        Err(not_supported("update a box in place"))
     }
 
     /// Which kind of computer this is, for advertising the options to a client:
