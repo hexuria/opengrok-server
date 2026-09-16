@@ -489,6 +489,11 @@ impl Computer for DockerComputer {
                 self.copy_dir(old_box_id, HOME_DIR, &volumes.home).await?;
             }
         }
+        // Whether the home was just copied or has lived in this volume for a while, the newest
+        // image's desktop defaults fill in whatever is missing.
+        if self.wants_desktop() {
+            self.seed_defaults(&volumes.home).await?;
+        }
         let args = self.create_args_on(None, &volumes);
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let id = self.docker(&borrowed).await?;
@@ -626,11 +631,50 @@ impl DockerComputer {
     /// owned by the box user: `docker cp` streams a tar, a throwaway container on our own image
     /// unpacks it. Pure, so the shape is testable.
     pub fn copy_dir_command(&self, from_box: &str, dir: &str, volume: &str) -> String {
+        // Chromium's Singleton{Lock,Socket,Cookie} name the old container's hostname and pid;
+        // carried over they read as "the profile is in use on another computer". They are
+        // per-process, never data, so the copy drops them.
         format!(
             "docker cp {from_box}:{dir} - | docker run --rm -i -u 0 --entrypoint sh -v {volume}:/dst {} \
-             -c 'tar -x -C /dst --strip-components=1 && chown -R {BOX_USER}:{BOX_USER} /dst'",
+             -c 'tar -x -C /dst --strip-components=1 \
+                 && find /dst -maxdepth 3 -name \"Singleton*\" -exec rm -f {{}} + \
+                 && chown -R {BOX_USER}:{BOX_USER} /dst'",
             self.image
         )
+    }
+
+    /// The image's own desktop config (panel, launchers) into a home volume, only where the
+    /// volume has nothing: a home copied from an older box never got Docker's first-mount seed,
+    /// and a box updated to an image with new launchers should see them — while a panel the
+    /// person rearranged is theirs. Pure, so the shape is testable.
+    pub fn seed_defaults_command(&self, volume: &str) -> String {
+        format!(
+            "docker run --rm -u 0 --entrypoint sh -v {volume}:/dst {} \
+             -c 'mkdir -p /dst/.config && cp -rn {HOME_DIR}/.config/. /dst/.config/ \
+                 && chown -R {BOX_USER}:{BOX_USER} /dst/.config'",
+            self.image
+        )
+    }
+
+    async fn seed_defaults(&self, volume: &str) -> BoxResult<()> {
+        let output = Command::new("sh")
+            .args(["-c", &self.seed_defaults_command(volume)])
+            .output()
+            .await
+            .map_err(|error| BoxError::Unreachable(format!("could not run docker: {error}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(BoxError::Refused {
+            status: output.status.code().unwrap_or(-1).unsigned_abs() as u16,
+            body: format!(
+                "seeding the desktop defaults failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            ),
+        })
     }
 
     async fn copy_dir(&self, from_box: &str, dir: &str, volume: &str) -> BoxResult<()> {
@@ -818,6 +862,23 @@ mod tests {
         assert!(command.contains("-v ogbox-x-home:/dst grok-box:local"));
         assert!(command.contains("--strip-components=1"));
         assert!(command.contains("chown -R box:box /dst"));
+        // Chromium's per-process locks would say "in use on another computer" on the new box.
+        assert!(command.contains(r#"-name "Singleton*""#), "{command}");
+    }
+
+    /// The image's panel and launchers arrive where the volume has none; a rearranged panel
+    /// is never overwritten (`cp -n`).
+    #[test]
+    fn the_desktop_defaults_are_seeded_without_overwriting() {
+        let command = DockerComputer::new()
+            .with_image("grok-box:local")
+            .seed_defaults_command("ogbox-x-home");
+        assert!(command.contains("-v ogbox-x-home:/dst grok-box:local"));
+        assert!(
+            command.contains("cp -rn /home/box/.config/. /dst/.config/"),
+            "{command}"
+        );
+        assert!(command.contains("chown -R box:box /dst/.config"));
     }
 
     #[test]
