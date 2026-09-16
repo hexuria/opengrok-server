@@ -651,10 +651,17 @@ impl DockerComputer {
         // The lock cleanup lives here, not only in the copy: a volume reused across a recreate
         // still holds the OLD container's Singleton{Lock,Socket,Cookie}, and the new one has a
         // new hostname, so Chromium would call the profile "in use on another computer".
+        //
+        // The desktop's own config (`.config/xfce4`: panel, dock, wallpaper) is the IMAGE's, so
+        // an update brings the newest look — that is what "update" means for a desktop. What a
+        // person made is elsewhere (Desktop, the browser profile, the workspace) and is kept;
+        // everything else under `.config` is only filled in where missing.
         format!(
             "docker run --rm -u 0 --entrypoint sh -v {volume}:/dst {} \
              -c 'find /dst -maxdepth 3 -name \"Singleton*\" -exec rm -f {{}} + ; \
-                 mkdir -p /dst/.config && cp -rn {HOME_DIR}/.config/. /dst/.config/ \
+                 mkdir -p /dst/.config && rm -rf /dst/.config/xfce4 \
+                 && cp -r {HOME_DIR}/.config/xfce4 /dst/.config/xfce4 \
+                 && cp -rn {HOME_DIR}/.config/. /dst/.config/ \
                  && chown -R {BOX_USER}:{BOX_USER} /dst/.config'",
             self.image
         )
@@ -883,6 +890,12 @@ mod tests {
             "{command}"
         );
         assert!(command.contains("chown -R box:box /dst/.config"));
+        // The desktop's config follows the image; the rest is only filled in.
+        assert!(command.contains("rm -rf /dst/.config/xfce4"), "{command}");
+        assert!(
+            command.contains("cp -r /home/box/.config/xfce4 /dst/.config/xfce4"),
+            "{command}"
+        );
         // Every recreate, not only a copy: a reused volume holds the old container's locks.
         assert!(command.contains(r#"-name "Singleton*""#), "{command}");
     }
