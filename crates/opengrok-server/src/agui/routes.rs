@@ -497,6 +497,7 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/computer",
             get(computer_status).post(ensure_computer),
         )
+        .route("/coworkers/{coworker_id}/screen", get(computer_screen))
         .with_state(state)
 }
 
@@ -1269,6 +1270,34 @@ async fn computer_status(
         Err(refusal) => return refusal,
     }
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
+}
+
+/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile.
+/// Same shape as the `image` on a `TOOL_CALL_RESULT`, so the client decodes it the same way.
+async fn computer_screen(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+    match provision::coworker_screenshot(&state, &account_id, &coworker_id).await {
+        Ok(shot) => Json(serde_json::json!({
+            "mime": shot.mime,
+            "base64": shot.png_base64,
+            "width": shot.width,
+            "height": shot.height,
+        }))
+        .into_response(),
+        Err((status, message)) => (status, message).into_response(),
+    }
 }
 
 /// `POST /coworkers/{id}/computer` — ensure the box is running, then return the same status.
