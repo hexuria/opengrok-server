@@ -2223,4 +2223,80 @@ mod tests {
         assert!(result.content.contains("no screen"), "{result:?}");
         assert!(result.image.is_none());
     }
+
+    /// A room's shared computer is a second target for the same tools, chosen per call.
+    #[tokio::test]
+    async fn machine_group_aims_a_call_at_the_rooms_box() {
+        let spy = Arc::new(SpyComputer::default());
+        let mut executor = allowing(spy.clone());
+        executor.set_group_box_name("Finance desk");
+        let mut context = context_with_box("box_mine");
+        context.group_box = Some(GroupBox {
+            box_id: BoxId::from_stored("box_room"),
+            name: "Finance desk".into(),
+        });
+
+        let result = executor
+            .execute(
+                &context,
+                &call("shell", json!({"command": "ls", "machine": "group"})),
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(spy.last_box().as_deref(), Some("box_room"));
+
+        // Without `machine`, the coworker's own box — the default nobody has to spell.
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn machine_group_without_a_room_box_is_refused_in_words() {
+        let executor = allowing(Arc::new(SpyComputer::default()));
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call("shell", json!({"command": "ls", "machine": "group"})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(
+            result.content.contains("no shared group computer"),
+            "{result:?}"
+        );
+    }
+
+    /// The schema says `machine` exists only when there is a room box to aim at.
+    #[test]
+    fn the_box_tools_offer_machine_only_in_a_room_with_a_box() {
+        let account = AccountId::from_stored("acct_1");
+        let coworker = CoworkerId::from_stored("cw_1");
+        let plain = allowing(Arc::new(SpyComputer::default()));
+        let shell = plain
+            .tool_schemas(&account, &coworker)
+            .into_iter()
+            .find(|schema| schema["function"]["name"] == "shell")
+            .unwrap();
+        assert!(shell["function"]["parameters"]["properties"]["machine"].is_null());
+
+        let mut in_room = allowing(Arc::new(SpyComputer::default()));
+        in_room.set_group_box_name("Finance desk");
+        let shell = in_room
+            .tool_schemas(&account, &coworker)
+            .into_iter()
+            .find(|schema| schema["function"]["name"] == "shell")
+            .unwrap();
+        let machine = &shell["function"]["parameters"]["properties"]["machine"];
+        assert_eq!(machine["enum"], json!(["mine", "group"]));
+        assert!(
+            machine["description"]
+                .as_str()
+                .unwrap()
+                .contains("Finance desk")
+        );
+    }
 }
