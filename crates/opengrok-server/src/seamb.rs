@@ -615,6 +615,7 @@ async fn grok_bot(
                 account_id.as_str(),
                 org_id.as_deref(),
                 "",
+                false,
             );
             let active_kind: Option<String> = store
                 .scoped_computer(active_scope, &active_scope_id)

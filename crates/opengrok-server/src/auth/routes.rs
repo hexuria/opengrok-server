@@ -77,9 +77,22 @@ pub struct AuthState {
     /// system resolver at boot, tests answer from a map. The default refuses every lookup with a
     /// reason, so a state that was never given one answers 503 rather than "not verified".
     pub dns: Arc<dyn crate::domain_proof::TxtLookup>,
+    /// Told the id of every account created here. The binary listens and warms the account's
+    /// computer (`provision::warm_scope_for_account`); auth itself knows nothing about boxes.
+    pub account_created: Option<tokio::sync::mpsc::UnboundedSender<opengrok_core::id::AccountId>>,
 }
 
 impl AuthState {
+    /// Who hears about new accounts (see `account_created`).
+    #[must_use]
+    pub fn with_account_created(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<opengrok_core::id::AccountId>,
+    ) -> Self {
+        self.account_created = Some(sender);
+        self
+    }
+
     pub fn new(store: PgStore, minter: Arc<TokenMinter>, login_email: String) -> Self {
         Self {
             store,
@@ -94,6 +107,7 @@ impl AuthState {
             budgets: Arc::new(super::budget::Budgets::default()),
             cimd_cache: Arc::new(Mutex::new(HashMap::new())),
             cimd_allow_loopback: false,
+            account_created: None,
         }
     }
 

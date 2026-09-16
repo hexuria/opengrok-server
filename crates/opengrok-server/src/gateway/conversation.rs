@@ -352,9 +352,8 @@ pub async fn box_status(state: &GatewayState, args: &Value, caller: &str) -> (u1
     let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await else {
         return (200, absent());
     };
-    let (mode, org_id) = provision::resolve_mode(&state.agui, &account.id).await;
-    let (scope, scope_id, _) =
-        provision::scope_for(&mode, account.id.as_str(), org_id.as_deref(), &agent_id);
+    let (_mode, org_id, scope, scope_id, _) =
+        provision::scope_of(&state.agui, &account.id, &agent_id).await;
     let Ok(Some((box_id, kind, stopped))) = state
         .agui
         .auth
@@ -457,9 +456,8 @@ pub async fn box_control(
             error_status("unknown".into(), "no such account".into()),
         );
     };
-    let (mode, org_id) = provision::resolve_mode(&state.agui, &account.id).await;
-    let (scope, scope_id, _) =
-        provision::scope_for(&mode, account.id.as_str(), org_id.as_deref(), &agent_id);
+    let (_mode, org_id, scope, scope_id, _) =
+        provision::scope_of(&state.agui, &account.id, &agent_id).await;
     let existing = state
         .agui
         .auth
@@ -597,7 +595,7 @@ async fn wait_for_screen(
 /// Provision (or re-provision) a coworker's box and PERSIST the re-assignment to its aggregate, so
 /// the executor — which binds `coworker.computer()`, not the scope mapping — points at the new box.
 /// Returns the provisioning error as `(code, message)` if it could not get a box.
-async fn reprovision(
+pub(crate) async fn reprovision(
     state: &GatewayState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
@@ -625,7 +623,8 @@ async fn reprovision(
         model: coworker.model.clone(),
         box_id: coworker.computer().cloned(),
         retired: false,
-        members: Vec::new(),
+        // Carried, not blanked: a group reprovisioned after hire keeps its members.
+        members: coworker.members.clone(),
         updated_at_ms: at_ms,
         role: coworker.role.clone(),
         visibility: coworker.visibility,

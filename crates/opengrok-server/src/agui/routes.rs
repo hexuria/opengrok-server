@@ -107,6 +107,7 @@ pub(crate) async fn tools_for_coworker(
         account_id.as_str(),
         org_id.as_deref(),
         coworker_id.as_str(),
+        coworker.is_group(),
     );
     let (mut box_id, kind, stopped) = state
         .auth
