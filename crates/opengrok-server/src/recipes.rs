@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use opengrok_core::id::{AccountId, CoworkerId};
-use opengrok_recipes::{Screen, Step, TapeEvent};
+use opengrok_recipes::{Parameter, Screen, Step, TapeEvent, Values};
 use opengrok_store::{PgStore, RecipeRow};
 use opengrok_tools::{RecipeReceipt, RecipeSource};
 use serde::Deserialize;
@@ -492,10 +492,13 @@ async fn rename(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct VersionRequest {
     steps: Vec<Step>,
     #[serde(default)]
     note: String,
+    #[serde(default)]
+    parameters: Option<Vec<Parameter>>,
 }
 
 /// `POST /recipes/{id}/versions` — an edited version; the owner's.
@@ -516,7 +519,21 @@ async fn add_version(
     if let Err(why) = opengrok_recipes::lint(&request.steps, screen) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why.to_string()).into_response();
     }
-    let body = json!({ "steps": request.steps, "stop_on_error": true, "screenshot": "end" });
+    let params = request.parameters.as_deref().unwrap_or(&[]);
+    if let Err(why) = opengrok_recipes::bind(params, &Values::new()) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+    }
+    let mut body = json!({ "steps": request.steps, "stop_on_error": true, "screenshot": "end" });
+    // Only written when there are some, so a version with no parameters keeps the exact body
+    // shape it has today and nothing downstream has to special-case an empty list.
+    if let Some(params) = &request.parameters
+        && let Some(object) = body.as_object_mut()
+    {
+        object.insert(
+            "parameters".to_string(),
+            serde_json::to_value(params).unwrap_or(json!([])),
+        );
+    }
     let note = if request.note.trim().is_empty() {
         "edited"
     } else {
@@ -790,6 +807,8 @@ async fn revoke(
 #[serde(rename_all = "camelCase")]
 struct RunRequest {
     coworker_id: String,
+    #[serde(default)]
+    values: Option<Values>,
 }
 
 /// `POST /recipes/{id}/run` — run it now on one of the caller's bots; the receipt comes back
@@ -839,7 +858,8 @@ async fn run(
     let source = StoreRecipes {
         store: state.auth.store.clone(),
     };
-    let (version, mut body) = match source.recipe_request(&id).await {
+    let values = request.values.unwrap_or_default();
+    let (version, mut body) = match source.recipe_request(&id, &values).await {
         Ok(found) => found,
         Err(why) => return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response(),
     };
@@ -925,7 +945,11 @@ pub struct StoreRecipes {
 
 #[async_trait::async_trait]
 impl RecipeSource for StoreRecipes {
-    async fn recipe_request(&self, recipe_id: &str) -> Result<(i32, Value), String> {
+    async fn recipe_request(
+        &self,
+        recipe_id: &str,
+        values: &Values,
+    ) -> Result<(i32, Value), String> {
         let recipe = match self.store.recipe(recipe_id).await {
             Ok(Some(recipe)) if recipe.deleted_at_ms.is_none() => recipe,
             Ok(_) => return Err(format!("recipe `{recipe_id}` is gone")),
@@ -944,9 +968,19 @@ impl RecipeSource for StoreRecipes {
                         version.version
                     )
                 })?;
+        let params: Vec<Parameter> = serde_json::from_value(
+            version
+                .body
+                .get("parameters")
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+        .unwrap_or_default();
+        let bound = opengrok_recipes::bind(&params, values)?;
+        let filled = opengrok_recipes::fill(&steps, &bound)?;
         Ok((
             version.version,
-            opengrok_recipes::recipe_request(&recipe.name, &steps),
+            opengrok_recipes::recipe_request(&recipe.name, &params, &filled, &bound),
         ))
     }
 
@@ -1014,19 +1048,33 @@ pub async fn offers_for(
     state: &AgUiState,
     coworker_id: &CoworkerId,
 ) -> Vec<opengrok_tools::RecipeOffer> {
-    state
-        .auth
-        .store
+    let store = &state.auth.store;
+    let mut offers = Vec::new();
+    for recipe in store
         .recipes_granted_to(coworker_id.as_str())
         .await
         .unwrap_or_default()
-        .into_iter()
-        .map(|recipe| opengrok_tools::RecipeOffer {
+    {
+        let params = if let Ok(Some(version)) = store.recipe_runnable_version(&recipe.id).await {
+            serde_json::from_value(
+                version
+                    .body
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        offers.push(opengrok_tools::RecipeOffer {
             id: recipe.id,
             name: recipe.name,
             description: recipe.description,
-        })
-        .collect()
+            parameters: params,
+        });
+    }
+    offers
 }
 
 pub fn source_for(state: &AgUiState) -> Arc<dyn RecipeSource> {

@@ -406,3 +406,85 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
     // Deleting the recipe does not delete what it did: five kept runs of v3 and one of v2.
     assert_eq!(store.recipe_runs(&id, 50).await.expect("runs").len(), 6);
 }
+
+#[tokio::test]
+async fn recipe_parameters_declare_and_bind() {
+    let Some(store) = connect().await else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let stamp = now_ms();
+    let owner = format!("acct_owner_{stamp}");
+    let org = format!("org_{stamp}");
+    let id = format!("rcp_{stamp}");
+
+    store
+        .create_recipe(
+            &id,
+            &owner,
+            Some(&org),
+            "Search YouTube",
+            "teaches a search on YouTube",
+            (1280, 800),
+            stamp,
+        )
+        .await
+        .expect("create");
+
+    let raw_version = store
+        .add_recipe_version(&id, "raw", &json!([]), "taped", &owner, stamp)
+        .await
+        .expect("v1");
+    assert_eq!(raw_version, 1);
+
+    // Add a version with parameters
+    let params = json!([
+        {
+            "name": "search_term",
+            "description": "What to search for",
+            "required": true,
+            "kind": "text",
+            "default": null,
+            "values": null,
+        }
+    ]);
+    let body = json!({
+        "steps": [
+            {"op": "type", "text": "search {{search_term}}"},
+            {"op": "key", "key": "Return"},
+        ],
+        "stop_on_error": true,
+        "screenshot": "end",
+        "parameters": params,
+    });
+
+    let v2 = store
+        .add_recipe_version(&id, "edited", &body, "with parameters", &owner, stamp)
+        .await
+        .expect("v2");
+    assert_eq!(v2, 2);
+
+    // Verify the parameters round-trip through storage
+    let version = store
+        .recipe_version(&id, v2)
+        .await
+        .expect("read")
+        .expect("found");
+    let stored_params = version
+        .body
+        .get("parameters")
+        .cloned()
+        .unwrap_or(json!(null));
+    assert_eq!(
+        stored_params, params,
+        "parameters round-trip through storage"
+    );
+
+    // Verify steps are also present
+    let stored_steps = version
+        .body
+        .get("steps")
+        .and_then(|s| s.as_array())
+        .expect("steps array");
+    assert_eq!(stored_steps.len(), 2, "both steps are stored");
+}

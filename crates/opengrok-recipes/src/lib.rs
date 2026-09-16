@@ -7,6 +7,167 @@
 //! agree, and so a recipe the registry holds is one the box will accept (`lint`).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// What a recipe needs from whoever runs it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Parameter {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+    pub kind: ParameterKind,
+    pub default: Option<String>,
+    pub values: Option<Vec<String>>,
+}
+
+/// The type of a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterKind {
+    Text,
+    Number,
+    Boolean,
+}
+
+/// Values a run supplies, by parameter name.
+pub type Values = BTreeMap<String, String>;
+
+/// Check that a parameter name matches the required pattern.
+fn is_valid_param_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Check the values against the declaration and fill in defaults. The error names the
+/// parameter and says what is wrong, because this sentence is shown to a person.
+pub fn bind(params: &[Parameter], given: &Values) -> Result<Values, String> {
+    let mut bound = given.clone();
+
+    for param in params {
+        if !is_valid_param_name(&param.name) {
+            return Err(format!(
+                "parameter name '{}' must contain only lowercase letters, digits, and underscores",
+                param.name
+            ));
+        }
+
+        match bound.get(&param.name) {
+            Some(value) => {
+                // Validate the value based on its kind
+                match param.kind {
+                    ParameterKind::Text => {
+                        // Text values are always valid
+                    }
+                    ParameterKind::Number => {
+                        if value.parse::<f64>().is_err() {
+                            return Err(format!("parameter '{}' expects a number", param.name));
+                        }
+                    }
+                    ParameterKind::Boolean => {
+                        if !matches!(value.as_str(), "true" | "false") {
+                            return Err(format!(
+                                "parameter '{}' expects 'true' or 'false'",
+                                param.name
+                            ));
+                        }
+                    }
+                }
+
+                // A declared set of values is the whole point of declaring it: anything else is
+                // refused by name, listing what would have been accepted.
+                if let Some(allowed) = &param.values
+                    && !allowed.contains(value)
+                {
+                    return Err(format!(
+                        "parameter '{}' must be one of: {}",
+                        param.name,
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            None => {
+                // Value is missing
+                if let Some(default) = &param.default {
+                    bound.insert(param.name.clone(), default.clone());
+                } else if param.required {
+                    return Err(format!("parameter '{}' is required", param.name));
+                }
+            }
+        }
+    }
+
+    Ok(bound)
+}
+
+/// Replace {{name}} everywhere a step carries text. Unknown placeholders are an error,
+/// never silently left in place — a step that types a literal "{{search_term}}" into a
+/// search box is exactly the confident-wrong-thing this work exists to stop.
+pub fn fill(steps: &[Step], bound: &Values) -> Result<Vec<Step>, String> {
+    steps
+        .iter()
+        .map(|step| match step {
+            Step::Type { text } => {
+                let filled = substitute_placeholders(text, bound)?;
+                Ok(Step::Type { text: filled })
+            }
+            Step::Key { key } => {
+                let filled = substitute_placeholders(key, bound)?;
+                Ok(Step::Key { key: filled })
+            }
+            other => Ok(other.clone()),
+        })
+        .collect()
+}
+
+/// Substitute {{name}} placeholders in text with values from bound.
+/// Returns an error if an unknown placeholder is found.
+fn substitute_placeholders(text: &str, bound: &Values) -> Result<String, String> {
+    let mut result = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '{' && chars.peek() == Some(&'{') {
+            // Found start of placeholder
+            chars.next(); // consume second {
+            let mut placeholder = String::new();
+            let mut found_end = false;
+
+            while let Some(ch) = chars.next() {
+                if ch == '}' && chars.peek() == Some(&'}') {
+                    chars.next(); // consume second }
+                    found_end = true;
+                    break;
+                }
+                placeholder.push(ch);
+            }
+
+            if !found_end {
+                return Err(format!(
+                    "unclosed placeholder '{{{{{}' in text",
+                    placeholder
+                ));
+            }
+
+            // Look up placeholder value
+            match bound.get(&placeholder) {
+                Some(value) => result.push_str(value),
+                None => {
+                    return Err(format!(
+                        "unknown placeholder '{{{{{}}}}}' in text",
+                        placeholder
+                    ));
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Ok(result)
+}
 
 /// The screen the tape was taught on. The box's is 1280×800.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,13 +444,29 @@ pub fn lint(steps: &[Step], screen: Screen) -> Result<(), LintError> {
 }
 
 /// The request body the box's `POST /v1/cua/recipe` takes.
-pub fn recipe_request(name: &str, steps: &[Step]) -> serde_json::Value {
-    serde_json::json!({
+/// Accepts parameters and values for templating. Pass empty slices/maps for recipes with no parameters.
+pub fn recipe_request(
+    name: &str,
+    params: &[Parameter],
+    steps: &[Step],
+    values: &Values,
+) -> serde_json::Value {
+    let mut request = serde_json::json!({
         "name": name,
         "stop_on_error": true,
         "screenshot": "end",
         "steps": steps,
-    })
+    });
+
+    // Include parameters and values if present
+    if !params.is_empty() {
+        request["params"] = serde_json::to_value(params).unwrap_or(serde_json::json!([]));
+    }
+    if !values.is_empty() {
+        request["values"] = serde_json::to_value(values).unwrap_or(serde_json::json!({}));
+    }
+
+    request
 }
 
 fn is_modifier(key: &str) -> bool {
@@ -517,5 +694,280 @@ mod tests {
             Screen::default(),
         );
         assert!(lint(&clamped, Screen::default()).is_ok());
+    }
+
+    // Parameter binding and substitution tests
+
+    #[test]
+    fn happy_path_substitution() {
+        let params = vec![Parameter {
+            name: "search_term".into(),
+            description: "What to search for".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: None,
+        }];
+
+        let mut given = Values::new();
+        given.insert("search_term".into(), "hello".into());
+
+        let bound = bind(&params, &given).unwrap();
+        assert_eq!(bound.get("search_term").unwrap(), "hello");
+
+        let steps = vec![
+            Step::Type {
+                text: "search {{search_term}}".into(),
+            },
+            Step::Key {
+                key: "Return".into(),
+            },
+        ];
+
+        let filled = fill(&steps, &bound).unwrap();
+        assert_eq!(
+            filled,
+            vec![
+                Step::Type {
+                    text: "search hello".into(),
+                },
+                Step::Key {
+                    key: "Return".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_required_parameter() {
+        let params = vec![Parameter {
+            name: "query".into(),
+            description: "Search query".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: None,
+        }];
+
+        let given = Values::new();
+        let result = bind(&params, &given);
+        assert_eq!(result, Err("parameter 'query' is required".into()));
+    }
+
+    #[test]
+    fn bad_number_parameter() {
+        let params = vec![Parameter {
+            name: "count".into(),
+            description: "How many".into(),
+            required: true,
+            kind: ParameterKind::Number,
+            default: None,
+            values: None,
+        }];
+
+        let mut given = Values::new();
+        given.insert("count".into(), "not a number".into());
+
+        let result = bind(&params, &given);
+        assert_eq!(result, Err("parameter 'count' expects a number".into()));
+    }
+
+    #[test]
+    fn value_outside_enum() {
+        let params = vec![Parameter {
+            name: "action".into(),
+            description: "What to do".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: Some(vec!["click".into(), "type".into(), "scroll".into()]),
+        }];
+
+        let mut given = Values::new();
+        given.insert("action".into(), "jump".into());
+
+        let result = bind(&params, &given);
+        assert_eq!(
+            result,
+            Err("parameter 'action' must be one of: click, type, scroll".into())
+        );
+    }
+
+    #[test]
+    fn unknown_placeholder() {
+        let steps = vec![Step::Type {
+            text: "find {{unknown}}".into(),
+        }];
+
+        let bound = Values::new();
+        let result = fill(&steps, &bound);
+        assert_eq!(
+            result,
+            Err("unknown placeholder '{{unknown}}' in text".into())
+        );
+    }
+
+    #[test]
+    fn invalid_parameter_name() {
+        let params = vec![Parameter {
+            name: "Bad-Name".into(),
+            description: "Invalid".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: None,
+        }];
+
+        let given = Values::new();
+        let result = bind(&params, &given);
+        assert!(
+            result
+                .unwrap_err()
+                .contains("must contain only lowercase letters, digits, and underscores")
+        );
+    }
+
+    #[test]
+    fn no_parameters_unchanged() {
+        let steps = vec![
+            Step::Type {
+                text: "hello".into(),
+            },
+            Step::Key {
+                key: "Return".into(),
+            },
+        ];
+
+        let params: Vec<Parameter> = vec![];
+        let values = Values::new();
+
+        let bound = bind(&params, &values).unwrap();
+        assert_eq!(bound, values);
+
+        let filled = fill(&steps, &bound).unwrap();
+        assert_eq!(filled, steps);
+    }
+
+    #[test]
+    fn default_value_filled() {
+        let params = vec![Parameter {
+            name: "timeout".into(),
+            description: "Wait time".into(),
+            required: false,
+            kind: ParameterKind::Number,
+            default: Some("5000".into()),
+            values: None,
+        }];
+
+        let given = Values::new();
+        let bound = bind(&params, &given).unwrap();
+        assert_eq!(bound.get("timeout").unwrap(), "5000");
+    }
+
+    #[test]
+    fn boolean_parameter() {
+        let params = vec![Parameter {
+            name: "enabled".into(),
+            description: "Toggle".into(),
+            required: true,
+            kind: ParameterKind::Boolean,
+            default: None,
+            values: None,
+        }];
+
+        let mut given = Values::new();
+        given.insert("enabled".into(), "true".into());
+        let bound = bind(&params, &given).unwrap();
+        assert_eq!(bound.get("enabled").unwrap(), "true");
+
+        // Test invalid boolean
+        given.clear();
+        given.insert("enabled".into(), "yes".into());
+        let result = bind(&params, &given);
+        assert_eq!(
+            result,
+            Err("parameter 'enabled' expects 'true' or 'false'".into())
+        );
+    }
+
+    #[test]
+    fn multiple_placeholders_in_one_step() {
+        let params = vec![
+            Parameter {
+                name: "first".into(),
+                description: "First".into(),
+                required: true,
+                kind: ParameterKind::Text,
+                default: None,
+                values: None,
+            },
+            Parameter {
+                name: "second".into(),
+                description: "Second".into(),
+                required: true,
+                kind: ParameterKind::Text,
+                default: None,
+                values: None,
+            },
+        ];
+
+        let mut given = Values::new();
+        given.insert("first".into(), "hello".into());
+        given.insert("second".into(), "world".into());
+
+        let bound = bind(&params, &given).unwrap();
+
+        let steps = vec![Step::Type {
+            text: "{{first}} {{second}}".into(),
+        }];
+
+        let filled = fill(&steps, &bound).unwrap();
+        assert_eq!(
+            filled,
+            vec![Step::Type {
+                text: "hello world".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn recipe_request_with_parameters() {
+        let params = vec![Parameter {
+            name: "query".into(),
+            description: "Search query".into(),
+            required: true,
+            kind: ParameterKind::Text,
+            default: None,
+            values: None,
+        }];
+
+        let mut values = Values::new();
+        values.insert("query".into(), "test".into());
+
+        let steps = vec![Step::Type {
+            text: "search".into(),
+        }];
+
+        let request = recipe_request("test_recipe", &params, &steps, &values);
+
+        assert_eq!(request["name"], "test_recipe");
+        assert!(request["params"].is_array());
+        assert!(request["values"].is_object());
+        assert_eq!(request["values"]["query"], "test");
+    }
+
+    #[test]
+    fn recipe_request_without_parameters() {
+        let steps = vec![Step::Type {
+            text: "hello".into(),
+        }];
+
+        let request = recipe_request("simple_recipe", &[], &steps, &Values::new());
+
+        assert_eq!(request["name"], "simple_recipe");
+        assert!(request["params"].is_null());
+        assert!(request["values"].is_null());
+        assert!(request["steps"].is_array());
+        assert_eq!(request["steps"].as_array().unwrap().len(), 1);
     }
 }
