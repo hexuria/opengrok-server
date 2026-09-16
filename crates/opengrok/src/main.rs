@@ -18,6 +18,14 @@ const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Pick the TLS backend before anything opens a connection. Two crates in the build ask rustls
+    // for different backends (reqwest: aws-lc-rs, grok-box: ring); left to guess, rustls panics
+    // on the first HTTPS call, and a panic inside a spawned turn only shows up as a run the
+    // recovery sweep later ends as "abandoned".
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("a TLS crypto provider was already installed"))?;
+
     // `opengrok admin …` runs a CLI command and exits before any listener starts.
     if let Some(code) = admin::maybe_run().await {
         std::process::exit(code);

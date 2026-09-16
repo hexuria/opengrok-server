@@ -1998,6 +1998,7 @@ dependencies = [
  "opengrok-server",
  "opengrok-store",
  "rand 0.10.2",
+ "rustls",
  "serde_json",
  "sqlx",
  "tokio",
