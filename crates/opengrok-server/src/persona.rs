@@ -110,6 +110,26 @@ impl Persona {
 /// same tail rather than each inventing one. The two halves MUST track the tool list: a prompt
 /// that contradicts the offering silently disables the tool.
 #[must_use]
+/// What the person reached for this turn, said once, at the end of the computer prompt.
+///
+/// The tools are already on offer; this only tells the model which ones the person named, and
+/// says plainly that the rest are still there. Without the second half a model reads a named
+/// tool as the only permitted one and gives up when it does not fit.
+pub fn preferred_tools_line(preferred: &[String]) -> String {
+    if preferred.is_empty() {
+        return String::new();
+    }
+    let named = preferred
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let these = if preferred.len() == 1 { "it" } else { "them" };
+    format!(
+        " For THIS message the person named {named}. Reach for {these} first where {these} fits          the request, and say so if you do not. Every other tool you have is still available: a          named tool is what they reached for, not the only thing you may use."
+    )
+}
+
 pub fn computer_system_prompt(
     has_computer: bool,
     has_screen: bool,
@@ -370,6 +390,23 @@ mod tests {
             "You are Ada.",
             "an empty tail adds no blank block"
         );
+    }
+
+    #[test]
+    fn a_named_tool_is_a_preference_and_says_the_rest_are_still_there() {
+        assert_eq!(preferred_tools_line(&[]), "", "nothing named, nothing said");
+
+        let one = preferred_tools_line(&["open_url".to_string()]);
+        assert!(one.contains("`open_url`"), "{one}");
+        assert!(
+            one.contains("still available"),
+            "a named tool must not read as the only permitted one: {one}"
+        );
+        assert!(one.contains(" it "), "one tool is singular: {one}");
+
+        let two = preferred_tools_line(&["open_url".to_string(), "computer".to_string()]);
+        assert!(two.contains("`open_url`, `computer`"), "{two}");
+        assert!(two.contains(" them "), "two tools are plural: {two}");
     }
 
     #[test]
