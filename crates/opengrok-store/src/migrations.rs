@@ -740,6 +740,13 @@ alter table coworker_last_viewed add column if not exists manually_unread boolea
 -- 2 filtered into steps, 3+ edited), owned by the teacher, shared to people or an org, and
 -- granted to the bots that may run it. A deleted recipe keeps its rows (soft delete) so the
 -- runs it made stay readable.
+--
+-- AND WORKFLOWS, WHICH ARE THE SAME ROWS. A workflow is a decision tree that calls recipes as its
+-- actions, and it is stored as a `recipe_version` of kind 'workflow' rather than in tables of its
+-- own. Ownership, versioning, sharing, grants, run history and artifacts are built and tested
+-- here and none of them care whether a body is clicks or a tree; a second set of tables would be
+-- every one of these queries written a second time, to be got wrong once. Splitting them out
+-- later is a migration; writing them twice now is a permanent tax.
 create table if not exists recipe (
     id            text   primary key,
     owner_id      text   not null,
@@ -758,6 +765,15 @@ create index if not exists recipe_org_idx on recipe (org_id);
 create table if not exists recipe_version (
     recipe_id     text   not null references recipe (id),
     version       int    not null,
+    -- FOUR VALUES: 'raw' (the tape as taught), 'filtered' (that tape as steps), 'edited' (a
+    -- person's edit of those steps) and 'workflow' (a decision tree, `opengrok-tools/workflow.rs`).
+    -- Deliberately NOT a check constraint or an enum type: the values are read by name in Rust,
+    -- and a constraint here would make adding the fifth a lock on a table that several replicas
+    -- migrate at once for no protection the code does not already give.
+    --
+    -- A ROW IS ALL ONE OR ALL THE OTHER. Mixing a 'workflow' version into a taped recipe would
+    -- make `recipe_runnable_version` hand a tree to the box's recipe runner; the routes refuse the
+    -- mix, which is where a refusal can say why in a sentence.
     kind          text   not null,
     body          jsonb  not null,
     note          text   not null default '',

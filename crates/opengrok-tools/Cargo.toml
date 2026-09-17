@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `test-util` for the paused clock: the workflow engine's wall-clock bound is asserted in
+# milliseconds of virtual time rather than by making the suite sit out a real budget.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 axum.workspace = true
 
 [lints]

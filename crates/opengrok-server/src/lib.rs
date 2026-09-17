@@ -29,6 +29,7 @@ pub mod seamb;
 pub mod seamb_send;
 pub mod spend;
 pub mod templates;
+pub mod workflows;
 
 pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
@@ -49,6 +50,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(autonomy::routes::router(state.clone()))
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
+        .merge(workflows::router(state.clone()))
         .merge(artifacts::router(state.clone()))
         .merge(jev::routes::router(state.clone()))
         .merge(local_exec::router(state.auth.clone()))

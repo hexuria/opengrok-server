@@ -7,6 +7,12 @@
 //! - a RECIPIENT (a person who accepted a share, directly or through their org) reads, grants
 //!   to their own bots, runs on their own bots — and never shares onward, edits or deletes;
 //! - an org member who has not accepted yet sees the pending share and may accept or decline.
+//!
+//! WORKFLOWS ARE THESE ROWS, AND THESE RULES (`crate::workflows`). A decision tree is a
+//! `recipe_version` of kind `workflow` on an ordinary `recipe` row, so reading one, renaming it,
+//! sharing it, granting it to a bot, deleting it and reading its run history are these routes,
+//! unchanged. `permitted` and `may` below are `pub(crate)` for exactly that: the workflow routes
+//! call them rather than growing a second set that could refuse differently.
 
 use std::sync::Arc;
 
@@ -59,7 +65,7 @@ pub fn router(state: AgUiState) -> Router {
 
 /// What a caller is to a recipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Relation {
+pub(crate) enum Relation {
     Owner,
     /// Accepted a share, directly or through the org.
     Recipient,
@@ -70,7 +76,7 @@ enum Relation {
 
 /// What a caller wants to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
+pub(crate) enum Action {
     Read,
     Edit,
     Share,
@@ -111,7 +117,7 @@ async fn relation(
 }
 
 /// The one answer to "may this person do that to this recipe".
-fn may(relation: Relation, action: Action) -> Result<(), &'static str> {
+pub(crate) fn may(relation: Relation, action: Action) -> Result<(), &'static str> {
     use Action::*;
     use Relation::*;
     let ok = matches!(
@@ -141,7 +147,7 @@ async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
 }
 
 /// Loads the recipe and checks the action; a deleted recipe is a 404 to everyone but its owner.
-async fn permitted(
+pub(crate) async fn permitted(
     state: &AgUiState,
     headers: &HeaderMap,
     id: &str,
@@ -182,29 +188,89 @@ fn relation_word(relation: Relation) -> &'static str {
     }
 }
 
-/// What the version a run would actually play asks for.
+/// What the version a run would actually play IS, and what it asks for.
 ///
 /// Read from the runnable version rather than the newest, because that is the one a run binds
 /// against: a draft edit that declares a third parameter must not make a client ask for
 /// something the run will not use.
-async fn declared_parameters(state: &AgUiState, recipe_id: &str) -> Vec<Parameter> {
+///
+/// One read for both answers on purpose. The kind and the parameters come off the same row, and a
+/// listing that fetched them separately would be two round trips per recipe on every page open.
+pub(crate) async fn runnable_shape(
+    state: &AgUiState,
+    recipe_id: &str,
+) -> (&'static str, Vec<Parameter>) {
     let Ok(Some(version)) = state.auth.store.recipe_runnable_version(recipe_id).await else {
-        return Vec::new();
+        return (TAPE, Vec::new());
     };
-    serde_json::from_value(
+    let parameters = serde_json::from_value(
         version
             .body
             .get("parameters")
             .cloned()
             .unwrap_or(Value::Null),
     )
-    .unwrap_or_default()
+    .unwrap_or_default();
+    let kind = if version.kind == opengrok_tools::workflow::KIND {
+        opengrok_tools::workflow::KIND
+    } else {
+        TAPE
+    };
+    (kind, parameters)
 }
 
-fn summary(
+/// Refuse a row that is the other shape.
+///
+/// A ROW IS ALL TAPE OR ALL TREE, and it is checked from the versions rather than from a column
+/// because there is no column: the kind lives on each version, and "what is this row" is "what
+/// have its versions been". A row with no versions yet is whichever the caller says it is, which
+/// is the moment between creating the row and writing its first version.
+pub(crate) async fn expect_kind(
+    state: &AgUiState,
+    recipe_id: &str,
+    workflow: bool,
+) -> Result<(), Response> {
+    let versions = state
+        .auth
+        .store
+        .recipe_versions(recipe_id)
+        .await
+        .unwrap_or_default();
+    let has_tree = versions
+        .iter()
+        .any(|row| row.kind == opengrok_tools::workflow::KIND);
+    let has_tape = versions
+        .iter()
+        .any(|row| row.kind != opengrok_tools::workflow::KIND);
+    if workflow && has_tape {
+        return Err((
+            StatusCode::CONFLICT,
+            "that is a taught recipe, not a workflow: a recipe is a taped sequence and a workflow \
+             is a decision tree, and one row cannot be both",
+        )
+            .into_response());
+    }
+    if !workflow && has_tree {
+        return Err((
+            StatusCode::CONFLICT,
+            "that is a workflow, not a taught recipe: a workflow is a decision tree and a recipe \
+             is a taped sequence, and one row cannot be both",
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// What a row is when it is not a workflow. A word for the wire, not a `recipe_version.kind` —
+/// the three tape kinds are versions of one another and a client only ever needs to know which of
+/// the two things it is holding.
+pub(crate) const TAPE: &str = "recipe";
+
+pub(crate) fn summary(
     recipe: &RecipeRow,
     relation: Relation,
     share_state: Option<&str>,
+    kind: &str,
     parameters: &[Parameter],
 ) -> Value {
     json!({
@@ -220,6 +286,9 @@ fn summary(
         "latestVersion": recipe.latest_version,
         "relation": relation_word(relation),
         "shareState": share_state,
+        // `recipe` or `workflow`. A page has to be able to tell a taped sequence from a decision
+        // tree before it offers to edit one, and the two live on the same table.
+        "kind": kind,
         // On the listing, not only the detail: a composer that has just been handed a recipe has
         // to know what it needs before it can ask for it, and a second fetch per row to find out
         // is a round trip per recipe on every open.
@@ -231,9 +300,13 @@ fn summary(
 struct ListQuery {
     /// `mine` | `shared` | `org` | (absent: everything visible)
     filter: Option<String>,
+    /// `recipe` | `workflow` | (absent: both). A QUERY RATHER THAN A SECOND LISTING ROUTE: the
+    /// rows, the relations and the share states are identical, and `GET /workflows` would be this
+    /// handler with one line different and its own bugs.
+    kind: Option<String>,
 }
 
-/// `GET /recipes?filter=mine|shared|org`
+/// `GET /recipes?filter=mine|shared|org&kind=recipe|workflow`
 async fn list(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -245,13 +318,21 @@ async fn list(
     let org = org_of(&state, &account).await;
     let store = &state.auth.store;
     let filter = query.filter.as_deref().unwrap_or("all");
+    let wanted = query
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty());
     let mut out = Vec::new();
     if matches!(filter, "mine" | "all") {
         match store.recipes_owned_by(account.as_str()).await {
             Ok(rows) => {
                 for row in &rows {
-                    let params = declared_parameters(&state, &row.id).await;
-                    out.push(summary(row, Relation::Owner, None, &params));
+                    let (kind, params) = runnable_shape(&state, &row.id).await;
+                    if wanted.is_some_and(|wanted| wanted != kind) {
+                        continue;
+                    }
+                    out.push(summary(row, Relation::Owner, None, kind, &params));
                 }
             }
             Err(error) => {
@@ -289,8 +370,11 @@ async fn list(
                     } else {
                         (Relation::Invited, "pending")
                     };
-                    let params = declared_parameters(&state, &row.id).await;
-                    out.push(summary(&row, relation, Some(share_state), &params));
+                    let (kind, params) = runnable_shape(&state, &row.id).await;
+                    if wanted.is_some_and(|wanted| wanted != kind) {
+                        continue;
+                    }
+                    out.push(summary(&row, relation, Some(share_state), kind, &params));
                 }
             }
             Err(error) => {
@@ -388,7 +472,7 @@ async fn create(
     detail_body(&state, &account, org.as_deref(), &id).await
 }
 
-async fn detail_body(
+pub(crate) async fn detail_body(
     state: &AgUiState,
     account: &AccountId,
     org: Option<&str>,
@@ -447,8 +531,9 @@ async fn detail_body(
         runs_with_artifacts.push(row);
     }
 
+    let (kind, parameters) = runnable_shape(state, id).await;
     Json(json!({
-        "recipe": summary(&recipe, relation, None, &declared_parameters(state, id).await),
+        "recipe": summary(&recipe, relation, None, kind, &parameters),
         "versions": versions.iter().map(|version| json!({
             "version": version.version,
             "kind": version.kind,
@@ -546,6 +631,13 @@ async fn add_version(
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
+    // A ROW IS ALL TAPE OR ALL TREE. `recipe_runnable_version` is "the newest version that is not
+    // the raw tape", so a `filtered` version added on top of a workflow would quietly become what
+    // every run of that workflow plays. The refusal says which it is rather than letting the next
+    // run hand a decision tree to the box's step runner.
+    if let Err(refusal) = expect_kind(&state, &id, false).await {
+        return refusal;
+    }
     let screen = Screen {
         width: recipe.screen_w,
         height: recipe.screen_h,
@@ -608,7 +700,27 @@ async fn remove_version(
         Ok(None) => return (StatusCode::NOT_FOUND, "no such version").into_response(),
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
-    if found.kind != "edited" {
+    // A WORKFLOW'S VERSIONS FALL BACK THE SAME WAY AN EDIT DOES — deleting the newest tree leaves
+    // the one before it running — EXCEPT THE LAST ONE, which is not an edit of anything: taking it
+    // away leaves a row with nothing to run and no tape to fall back to.
+    if found.kind == opengrok_tools::workflow::KIND {
+        let trees = store
+            .recipe_versions(&id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| row.kind == opengrok_tools::workflow::KIND)
+            .count();
+        if trees <= 1 {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "v{version} is the only version of this workflow; delete the workflow instead"
+                ),
+            )
+                .into_response();
+        }
+    } else if found.kind != "edited" {
         return (
             StatusCode::CONFLICT,
             format!(
@@ -997,6 +1109,14 @@ impl RecipeSource for StoreRecipes {
             Ok(None) => return Err(format!("recipe `{recipe_id}` has no runnable version")),
             Err(error) => return Err(error.to_string()),
         };
+        // Said in words rather than failing as "unreadable". A workflow body has no `steps`, so
+        // without this the model (and the run route) would be told a tree was a corrupt recipe.
+        if version.kind == opengrok_tools::workflow::KIND {
+            return Err(format!(
+                "`{recipe_id}` is a workflow, not a recipe: it is a decision tree that calls \
+                 recipes, and it is run from the workflow route rather than played as a tape"
+            ));
+        }
         let steps: Vec<Step> =
             serde_json::from_value(version.body.get("steps").cloned().unwrap_or(Value::Null))
                 .map_err(|error| {
@@ -1027,10 +1147,11 @@ impl RecipeSource for StoreRecipes {
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
-    ) {
+    ) -> Option<String> {
         let id = format!("rrun_{}", uuid::Uuid::now_v7());
         self.write_run(&id, recipe_id, version, coworker_id, receipt)
             .await;
+        Some(id)
     }
 }
 
@@ -1092,7 +1213,13 @@ pub async fn offers_for(
         .await
         .unwrap_or_default()
     {
-        let params = declared_parameters(state, &recipe.id).await;
+        let (kind, params) = runnable_shape(state, &recipe.id).await;
+        // A GRANTED WORKFLOW IS NOT A `run_recipe` OPTION. The tool plays a tape in one box call;
+        // a tree is walked by the engine, which is not something the model can be handed here. It
+        // would arrive in the tool's enum and refuse on every call.
+        if kind != TAPE {
+            continue;
+        }
         offers.push(opengrok_tools::RecipeOffer {
             id: recipe.id,
             name: recipe.name,

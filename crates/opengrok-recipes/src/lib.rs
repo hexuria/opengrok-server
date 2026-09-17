@@ -162,6 +162,18 @@ pub fn fill(steps: &[Step], bound: &Values) -> Result<Vec<Step>, String> {
         .collect()
 }
 
+/// Substitute {{name}} in one piece of text — a shell probe, a question, a value a workflow hands
+/// a recipe.
+///
+/// PUBLIC BECAUSE THE WORKFLOW ENGINE FILLS THE SAME PLACEHOLDERS IN TEXT THAT IS NOT A STEP.
+/// `fill` walks a recipe's steps and is the only caller that has steps to walk; a decision tree
+/// carries strings in other places and needs exactly this rule applied to them — including the
+/// part that makes an unknown placeholder an error rather than a literal, which is the whole
+/// reason the rule is worth sharing rather than writing a second time.
+pub fn substitute(text: &str, bound: &Values) -> Result<String, String> {
+    substitute_placeholders(text, bound)
+}
+
 /// Substitute {{name}} placeholders in text with values from bound.
 /// Returns an error if an unknown placeholder is found.
 fn substitute_placeholders(text: &str, bound: &Values) -> Result<String, String> {

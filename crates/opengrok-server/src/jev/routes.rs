@@ -37,6 +37,18 @@ use crate::agui::routes::account_from_bearer;
 /// why this constant exists rather than a bare `0.5` in the middle of the mapping.
 const YES_ABOVE: f64 = 0.5;
 
+/// A NOUL ANSWER IS ONE NUMBER, AND IT IS NOT A CONFIDENCE. It is the probability that the answer
+/// is yes; reporting it as a confidence would read a confident no — 0.02 — as almost no confidence
+/// at all, and a caller thresholding on it would act on exactly the wrong half of the answers. So
+/// the reading and the confidence in it are derived HERE, once, and every caller shares it: this
+/// route, and the workflow engine's adapter, which branches on the same reading a person would see
+/// in this route's reply. A second copy is free to drift, and the drift would be invisible —
+/// both copies would keep returning plausible booleans.
+pub(crate) fn noul_reading(noul: f64) -> (bool, f64) {
+    let yes = noul >= YES_ABOVE;
+    (yes, if yes { noul } else { 1.0 - noul })
+}
+
 pub fn router(state: AgUiState) -> Router {
     Router::new().route("/jev/ask", post(ask)).with_state(state)
 }
@@ -266,14 +278,7 @@ fn number(value: f64) -> Value {
 fn answered_question(name: String, answer: Answer) -> AnsweredQuestion {
     match answer {
         Answer::Noul(noul) => {
-            // A NOUL ANSWER IS ONE NUMBER, AND IT IS NOT A CONFIDENCE. It is the probability that
-            // the answer is yes, which the SDK's own notes are explicit about; reporting it as a
-            // confidence would read a confident no — 0.02 — as almost no confidence at all, and a
-            // caller thresholding on it would act on exactly the wrong half of the answers. So
-            // the reading and the confidence in it are derived here, once, and every answer this
-            // route returns carries the same two things.
-            let yes = noul.noul >= YES_ABOVE;
-            let confidence = if yes { noul.noul } else { 1.0 - noul.noul };
+            let (yes, confidence) = noul_reading(noul.noul);
             let mut probabilities = Map::new();
             probabilities.insert("yes".to_string(), number(noul.noul));
             probabilities.insert("no".to_string(), number(1.0 - noul.noul));
@@ -325,7 +330,7 @@ fn answered_question(name: String, answer: Answer) -> AnsweredQuestion {
 }
 
 /// Which rung of the rubric a score names, or `None` for a number that cannot be one.
-fn rung_of(score: f64) -> Option<u32> {
+pub(crate) fn rung_of(score: f64) -> Option<u32> {
     if !score.is_finite() || score < 0.0 || score > f64::from(u32::MAX) {
         return None;
     }
