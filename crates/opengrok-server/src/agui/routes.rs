@@ -1865,6 +1865,9 @@ pub async fn run(
         }
     }
 
+    // Read once. The tool runner needs it to bind the run, and the system prompt needs it to say
+    // so; reading it twice would let the two disagree about what the person chose.
+    let chosen = chosen_recipe_from(&input);
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
             Some(coworker_id) => {
@@ -1877,7 +1880,7 @@ pub async fn run(
                     TURN_WAKE_PATIENCE,
                 )
                 .await;
-                match (runner, chosen_recipe_from(&input)) {
+                match (runner, chosen.clone()) {
                     (Some(runner), Some((recipe, values))) => {
                         Some(runner.with_chosen_recipe(recipe, values))
                     }
@@ -1921,11 +1924,25 @@ pub async fn run(
             let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
             // What the person named this turn, kept to what this bot can actually run.
             let preferred = honour_preferences(&preferred_tools_from(&input), tools.as_ref());
+            // The recipe is named to the model by its NAME, not its id: the sentence is read by
+            // something that has to repeat it back to a person, and `rcp_01a0ac0a-…` is not a
+            // thing anybody chose. A recipe the store cannot produce says nothing at all rather
+            // than naming an id, because a prompt that cites what the person cannot see is worse
+            // than a prompt that stays quiet.
+            let chosen_line = match (&chosen, has_recipes) {
+                (Some((recipe_id, values)), true) => {
+                    match state.auth.store.recipe(recipe_id).await {
+                        Ok(Some(row)) => crate::persona::chosen_recipe_line(&row.name, values),
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            };
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}",
+                    "{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -1934,6 +1951,7 @@ pub async fn run(
                         user_machine_label.as_deref(),
                     ),
                     crate::persona::preferred_tools_line(&preferred),
+                    chosen_line,
                 )),
             );
             if text.is_empty() { None } else { Some(text) }
