@@ -17,6 +17,7 @@ pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
 pub mod grpc;
+pub mod jev;
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;
@@ -49,6 +50,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
         .merge(artifacts::router(state.clone()))
+        .merge(jev::routes::router(state.clone()))
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))

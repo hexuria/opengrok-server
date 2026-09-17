@@ -47,6 +47,19 @@ literals), and a variable that exists in code but not here is a documentation bu
 turn should say `reason=Passthrough` with your coworker's own pin. `reason=Classified` means the
 model never arrived and the gateway is guessing — which is a door problem, not a routing one.
 
+## Jev, the classifier
+
+Not a model door. `POST /jev/ask` puts named questions to TypeSafe AI's Jev and returns typed
+answers with a calibrated probability for each option — see `crates/opengrok-server/src/jev`.
+
+| Variable | Default | What it is |
+|---|---|---|
+| `OG_JEV_API_KEY` | unset (refused) | TypeSafe's API key. Unset is a valid deployment: the route answers 503 with a sentence naming this variable rather than guessing an answer. Deliberately NOT the SDK's own `TYPESAFE_API_KEY` — every knob this server reads is `OG_`-prefixed, and two names for one setting means a server configured by a variable that is not in its own documentation. It is a **provider** key, the one place this server holds one; it never reaches a coworker's row, a client payload or a log line |
+| `OG_JEV_BASE_URL` | `https://api.typesafe.ai` | where the questions go. Always sent explicitly, so `TYPESAFE_BASE_URL` in the environment cannot retarget a deployment's classifier. **Point it at open-ai-gateway once the gateway hosts Jev** (open-ai-gateway#83): a Jev call made straight to TypeSafe never enters the gateway's ledger, and that is the only way its tokens can be accounted for the way model tokens are |
+| `OG_JEV_MODEL` | `jev-latest` | the Jev model a question is asked of when the request names none |
+| `OG_JEV_TIMEOUT_MS` | `10000` | what ONE attempt may take |
+| `OG_JEV_BUDGET_MS` | `30000` | the total budget across retries. The retrying is the SDK's own — two retries after the first attempt, 0.5 s to 5 s of backoff with jitter, honouring a `retry-after`; these two knobs change its numbers rather than wrapping a second loop around it. Zero is refused in both, not read as "off" |
+
 ## Computers
 
 | Variable | Default | What it is |
