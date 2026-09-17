@@ -40,7 +40,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 # The connect-only client for a grok-box guest (hexuria/box): exec, files and computer use over
 # the box's own HTTP API. Pinned to a commit so a box-side change is a deliberate bump here.
-grok-box = { git = "https://github.com/hexuria/box", rev = "2dea0d4" }
+grok-box = { git = "https://github.com/hexuria/box", rev = "6af8ae6" }
 # The TXT lookup behind domain-ownership proof (12.later). rustls to match reqwest's TLS stack.
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio", "system-config"] }
 anyhow = "1"
