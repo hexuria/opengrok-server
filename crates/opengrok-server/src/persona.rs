@@ -47,6 +47,43 @@ pub fn validate_role(role: Option<&str>) -> Result<Option<String>, String> {
     Ok(Some(trimmed.to_string()))
 }
 
+/// A name as the person wrote it, or the sentence to refuse it with.
+///
+/// Trimmed, because a name of spaces is the same lie as an empty one. Unlike a role, blank
+/// cannot mean "clear it": `system_message` writes no identity line without a name, so a
+/// coworker stored nameless would lose the one thing every persona is built on — it would stop
+/// being able to say what it is called.
+pub fn validate_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("name: a coworker needs a name to answer to".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The decoration the client keeps in the seam-B profile blob, as opposed to the fields the
+/// aggregate owns. One list, because three doors write it — the desktop client's
+/// `UpdateGrokBotAgent` (`seamb.rs`), the gateway's `updateAgent` (`gateway/lifecycle.rs`) and
+/// the app's `PATCH /coworkers/{id}` (`agui/routes.rs`) — and a key one door forgot is an edit
+/// the person watched succeed and lost.
+pub const PROFILE_TEXT_KEYS: [&str; 4] = ["description", "title", "avatarShape", "avatarColor"];
+
+/// Merge the string-valued decoration out of `edits` into `profile`, in place.
+///
+/// A key absent leaves what is stored alone, so a partial update stays partial. An empty string
+/// is written as one rather than removing the key: `Persona::compose` reads blank and absent
+/// alike, so a cleared title is a coworker with no title and not one called "".
+pub fn merge_profile_text(profile: &mut Value, edits: &Value) {
+    let Some(map) = profile.as_object_mut() else {
+        return;
+    };
+    for key in PROFILE_TEXT_KEYS {
+        if let Some(value) = edits.get(key).and_then(Value::as_str) {
+            map.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+}
+
 /// What the profile says this coworker is and is for. Absent, blank and whitespace all read as
 /// nothing, so a cleared field behaves the same as one never set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

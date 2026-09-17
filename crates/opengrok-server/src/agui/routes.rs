@@ -695,11 +695,21 @@ pub struct RepinRequest {
     pub model: String,
 }
 
-/// `PATCH /coworkers/{id}` — change this coworker's route, its standing role, or both.
+/// `PATCH /coworkers/{id}` — change this coworker's name, its route, its standing role, its
+/// decoration, or several at once.
+///
+/// EVERY FIELD THE CLIENT SENDS IS READ HERE. The app's Save button puts the whole card in one
+/// body — name, title and role together — so a field this route quietly skipped was an edit the
+/// person watched succeed and lost: a rename to "Greendale" was dropped on the floor while the
+/// role beside it was stored, and the coworker went on introducing itself as "New Bot".
+///
+/// The fields land in two different homes, as `persona.rs` explains: the name, model, role and
+/// visibility are the aggregate's, and the title, avatar shape and colour are the client's
+/// decoration in the seam-B profile blob. `notifyOnUpdates` has no home at all — see below.
 ///
 /// Ownership answers 404, like every other per-coworker route here: an id that is not yours must
-/// not be distinguishable from one that does not exist. A body naming neither field is a 400
-/// rather than a silent no-op, because a caller who sent one meant something.
+/// not be distinguishable from one that does not exist. A body naming no field is a 400 rather
+/// than a silent no-op, because a caller who sent one meant something.
 pub async fn repin_coworker(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -728,6 +738,17 @@ pub async fn repin_coworker(
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     }
 
+    // A name is trimmed and must survive it. Null is a wrong type here rather than "clear it":
+    // the role is nullable and a name is not, because `persona::system_message` has no identity
+    // line to write without one and the coworker would stop knowing what it is called.
+    let name = match body.get("name") {
+        None => None,
+        Some(serde_json::Value::String(name)) => match crate::persona::validate_name(name) {
+            Ok(name) => Some(name),
+            Err(sentence) => return refuse(sentence),
+        },
+        Some(_) => return refuse("name: expected a string".to_string()),
+    };
     let model = match body.get("model") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(model)) => Some(model.clone()),
@@ -767,9 +788,40 @@ pub async fn repin_coworker(
         Some(serde_json::Value::Bool(hidden)) => Some(*hidden),
         Some(_) => return refuse("hiddenFromSidebar: expected a boolean".to_string()),
     };
-    if model.is_none() && role.is_none() && visibility.is_none() && hidden.is_none() {
+    // The decoration, type-checked at the door and merged into the profile blob below. A key
+    // absent leaves the stored value alone; an empty string is stored as one, which is how the
+    // client clears a field and how the desktop's own update already behaves.
+    //
+    // `description` is in the blob too but no client sends it here, so this door does not read
+    // it — the key list itself lives in `persona.rs`, where the blob's shape is decided.
+    let mut decoration = serde_json::Map::new();
+    for key in ["title", "avatarShape", "avatarColor"] {
+        match body.get(key) {
+            None => {}
+            Some(serde_json::Value::String(text)) => {
+                decoration.insert(key.to_string(), serde_json::Value::String(text.clone()));
+            }
+            Some(_) => return refuse(format!("{key}: expected a string")),
+        }
+    }
+    // `notifyOnUpdates` arrives from the app and is READ NOWHERE, deliberately. Nothing on this
+    // server stores it: the seam-B roster answers a constant `true` (`gateway/summaries.rs`) and
+    // the desktop client keeps the real answer in its own settings file
+    // (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
+    // inventing one to make a toggle look persistent is worse than the toggle not persisting.
+    //
+    // So a body naming nothing this route can change — including one carrying only that toggle —
+    // is a 400 rather than a silent no-op, and the sentence lists what it could have named.
+    if name.is_none()
+        && model.is_none()
+        && role.is_none()
+        && visibility.is_none()
+        && hidden.is_none()
+        && decoration.is_empty()
+    {
         return refuse(
-            "nothing to change: name a model, a role, a visibility, hiddenFromSidebar, or several"
+            "nothing to change: send a name, a model, a role, a title, an avatar shape or \
+             colour, a visibility, hiddenFromSidebar, or several"
                 .to_string(),
         );
     }
@@ -779,8 +831,14 @@ pub async fn repin_coworker(
     };
     let at_ms = now_ms();
     let mut events = Vec::new();
-    // One command per decision, as the aggregate defines them: repinning and describing are
-    // different things and a caller that meant one must not do the other.
+    // One command per decision, as the aggregate defines them: renaming, repinning and describing
+    // are different things and a caller that meant one must not do the other.
+    if let Some(name) = name {
+        match loaded.decide(CoworkerCommand::Rename { name, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
     if let Some(model) = model {
         match loaded.decide(CoworkerCommand::Repin { model, at_ms }) {
             Ok(more) => events.extend(more),
@@ -844,12 +902,58 @@ pub async fn repin_coworker(
             .ok()
             .is_some_and(|ids| ids.contains(coworker_id.as_str()))
     };
+    // The blob is read even when nothing in it changed, because the reply below has to be the
+    // whole post-patch truth: the app overwrites its row from what comes back, and a title left
+    // out of the answer is a title the next roster read has to go and fetch again.
+    let mut profile = state
+        .auth
+        .store
+        .seamb_profile(&coworker_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !decoration.is_empty() {
+        crate::persona::merge_profile_text(&mut profile, &serde_json::Value::Object(decoration));
+        // A 500 rather than the seam-B path's silent `let _`: this door exists because an edit
+        // that is accepted and not stored is the bug being fixed, and a reply saying the title
+        // changed when the write failed would be that bug again.
+        if state
+            .auth
+            .store
+            .put_seamb_profile(&coworker_id, &profile, at_ms)
+            .await
+            .is_err()
+        {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+        }
+    }
+    // Blank reads as absent, the way `Persona::compose` reads the same blob: a cleared title is
+    // a coworker with no title, not one called "".
+    let decorated = |key: &str| {
+        profile
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    // camelCase throughout, because that is what the app's `Coworker` deserialises — a
+    // snake_case key here is a field it silently reads as absent, which is how #27 lost a whole
+    // reply. `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant
+    // would overwrite the toggle the person just moved.
     Json(serde_json::json!({
         "id": coworker_id.as_str(),
+        "name": after.name,
         "model": after.model,
         "role": after.role,
+        "title": decorated("title"),
+        "avatarShape": decorated("avatarShape"),
+        "avatarColor": decorated("avatarColor"),
         "visibility": after.visibility.as_str(),
         "hiddenFromSidebar": hidden_from_sidebar,
+        "updatedAtMs": at_ms,
+        "boxId": after.box_id.as_ref().map(|id| id.as_str()),
     }))
     .into_response()
 }

@@ -420,13 +420,7 @@ async fn grok_bot(
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| json!({}));
-            if let Some(map) = profile.as_object_mut() {
-                for key in ["description", "title", "avatarShape", "avatarColor"] {
-                    if let Some(value) = args.get(key).and_then(Value::as_str) {
-                        map.insert(key.to_string(), json!(value));
-                    }
-                }
-            }
+            crate::persona::merge_profile_text(&mut profile, &args);
             let _ = store
                 .put_seamb_profile(&coworker_id, &profile, now_ms())
                 .await;
