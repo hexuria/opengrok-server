@@ -130,6 +130,40 @@ pub fn preferred_tools_line(preferred: &[String]) -> String {
     )
 }
 
+/// The recipe the person picked in the composer, and what they typed into its fields.
+///
+/// THE TOOL ALREADY HAS THE VALUES; THE MODEL DOES NOT. `run_recipe` is handed the person's
+/// values whatever the model passes, so a turn was already runnable — but the model, told
+/// nothing, read a bare "run the youtube recipe" as a request missing its subject and asked for
+/// a search term the person had already typed into a field named after it. Asking for what you
+/// have been given is worse than guessing: it tells the person their answer did not arrive.
+///
+/// So the values are named here in the same breath as the recipe. Nothing is asserted about what
+/// the tool will do with them — that is the executor's business and it wins either way.
+#[must_use]
+pub fn chosen_recipe_line(
+    name: &str,
+    values: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    if values.is_empty() {
+        return format!(
+            " For THIS message the person chose the recipe `{name}`. Run it with `run_recipe`          rather than working the screen step by step, and say that you used it."
+        );
+    }
+    let filled = values
+        .iter()
+        .map(|(field, value)| format!("{field} = {value:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        " For THIS message the person chose the recipe `{name}` and filled it in: {filled}. Those          values are already on their way to the recipe, so run it with `run_recipe` rather than          asking for them again or working the screen step by step, and say that you used it."
+    )
+}
+
 pub fn computer_system_prompt(
     has_computer: bool,
     has_screen: bool,
@@ -473,5 +507,38 @@ mod tests {
             with_role.ends_with("whatever they ask about."),
             "{with_role}"
         );
+    }
+
+    /// The bug this line exists for: the person typed the search term into a field named after
+    /// it and the model asked for it anyway, because nothing in the prompt said it had arrived.
+    #[test]
+    fn a_chosen_recipe_names_itself_and_what_was_filled_in() {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("search_term".to_string(), "mundo".to_string());
+        let line = chosen_recipe_line("youtube", &values);
+        assert!(line.contains("`youtube`"), "{line}");
+        assert!(line.contains("search_term"), "{line}");
+        assert!(line.contains("mundo"), "{line}");
+        assert!(line.contains("run_recipe"), "{line}");
+    }
+
+    /// A recipe that needs nothing told is still worth naming: the person picked it, so the turn
+    /// is a request to run it, not a request to work the screen.
+    #[test]
+    fn a_chosen_recipe_with_nothing_filled_in_is_still_named() {
+        let line = chosen_recipe_line("youtube", &std::collections::BTreeMap::new());
+        assert!(line.contains("`youtube`"), "{line}");
+        assert!(line.contains("run_recipe"), "{line}");
+        assert!(!line.contains("filled it in"), "{line}");
+    }
+
+    /// Nothing chosen, nothing said. An empty name is what a store miss looks like, and a prompt
+    /// that cites a recipe the person cannot see is worse than one that stays quiet.
+    #[test]
+    fn no_recipe_adds_no_sentence() {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("search_term".to_string(), "mundo".to_string());
+        assert!(chosen_recipe_line("", &values).is_empty());
+        assert!(chosen_recipe_line("   ", &values).is_empty());
     }
 }
