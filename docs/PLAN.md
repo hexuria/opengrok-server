@@ -86,7 +86,7 @@ crates/
   opengrok    the binary; wires the server and embeds the gateway
   opengrok-core     ids, errors, domain types. No I/O.
   opengrok-wire     the client contract: commands, transcript entries, activity
-  opengrok-harness  the agent loop (Rig): turns, tool calls, streaming
+  opengrok-harness  the agent loop: turns, tool calls, streaming
   opengrok-box      the coworker's computer (trait; box.ascii.dev first)
   opengrok-tools    tool definitions and the executor
   opengrok-policy   what a principal may make a coworker do
@@ -141,11 +141,19 @@ transcript alone. Unknown entry kinds round-trip untouched.
 
 ### 4.2 The harness — `opengrok-harness`
 
-**Rig** for provider abstraction; **our own loop** for durability. No Rust framework offers a loop
+**Our own loop** for durability, and **our own door** for providers. No Rust framework offers a loop
 that survives the process — the 2026 ecosystem surveys say checkpointing and crash recovery are
 "still on the user to implement" — and that suspension *is* the product. The loop is ~400 lines
 either way; what a framework really sells is integrations, and those are the thinnest part of the
 Rust ecosystem. (That tension is why `opengrok-tools` is its own seam.)
+
+This section said **Rig** for provider abstraction until 17 Sep 2026, and a `rig-core` door shipped
+behind `OG_MODEL_DOOR=rig`. That door is gone: rig did not put the model on the wire, so the gateway
+saw a modelless request and answered on whatever rung its classifier picked — every coworker's pin
+silently ignored, which cost a night on 8 Sep 2026. `GatewayDoor` speaks the gateway's
+OpenAI-compatible route in about eighty lines and is now the only real door. `ModelDoor` stays, so a
+second door is a file rather than a rewrite if one is ever earned. The argument above — that owning
+the loop is the point — was always the load-bearing half, and it is unchanged.
 
 Every model call exits through open-ai-gateway, so a coworker's pin means exactly what it means
 today.
@@ -251,7 +259,7 @@ Watch for Trap 2: an *empty success* is the dangerous reply. `listAgents` return
 paints an empty sidebar, and reads as a broken app rather than a protocol mistake — seed one
 coworker.
 
-**P2 — A turn.** `sendPrompt` → `opengrok-harness` runs a turn through Rig → OAG → a real model; text
+**P2 — A turn.** `sendPrompt` → `opengrok-harness` runs a turn through `GatewayDoor` → OAG → a real model; text
 streams back as activity; the transcript persists. The durability test is the point: kill the server
 mid-run and the run resumes.
 

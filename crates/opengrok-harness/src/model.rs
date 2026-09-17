@@ -6,8 +6,13 @@
 //! secret, and `ModelRequest` deliberately has nowhere to put one.
 //!
 //! `ModelDelta` is provider-neutral on purpose. It is the vocabulary the projection consumes, so a
-//! second door — Rig's abstraction over many providers, a recorded fixture in a test — plugs in
+//! second door — a recorded fixture in a test, or a provider the gateway does not route — plugs in
 //! without the AG-UI projection knowing anything changed.
+//!
+//! There was such a second door, over `rig-core`, and it was retired on 17 Sep 2026: rig did not
+//! put the model on the wire, so the gateway saw a modelless request and answered on whatever rung
+//! its classifier picked. The trait earned its keep anyway — removing that door touched this file
+//! not at all, which is the property it exists to provide.
 
 use std::pin::Pin;
 

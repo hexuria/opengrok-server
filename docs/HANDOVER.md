@@ -45,7 +45,7 @@ by drift.
 | Decision | Where |
 |---|---|
 | Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
-| Rig for providers, our own loop for durability — the suspension is the product | `PLAN.md` §4.2 |
+| Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2 |
 | The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, `LEGAL.md` |
 | Every model call exits through open-ai-gateway; a pin is a route, not a key | `CLAUDE.md` #4 |
 | Port from the client's own mock (2 services, 18 methods), never the proto inventory | `PORT-PRIORITY.md` §3 |

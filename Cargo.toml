@@ -10,7 +10,7 @@ members = [
   "crates/opengrok-core",    # domain types, ids, errors. No I/O.
   "crates/opengrok-wire",    # the client contract: gateway commands, transcript entries, activity
   "crates/opengrok-proto",   # seam B transcribed: Connect-over-HTTP/1.1 messages (prost), never vendored stubs
-  "crates/opengrok-harness", # the agent loop (Rig): turns, tools, streaming
+  "crates/opengrok-harness", # the agent loop: turns, tools, streaming
   "crates/opengrok-box",     # the coworker's computer
   "crates/opengrok-plugins",# Agent Plugins: the bundle of skills + MCP servers a coworker is given
   "crates/opengrok-tools",   # tool definitions and the executor
@@ -52,9 +52,15 @@ futures = "0.3"
 async-trait = "0.1"
 
 # The agent stack, pinned here so the versions are a recorded decision rather than drift.
-# rig-core: provider abstraction only — the durable loop stays ours (docs/PLAN.md §4.2). It reaches
-#   models through open-ai-gateway's OpenAI-compatible routes (/v1/chat/completions) with an
-#   oag_live_ key; provider credentials never appear here (CLAUDE.md #4).
+# rig-core: PINNED BUT UNCLAIMED — no member crate declares it, so nothing here compiles it.
+#   It was a second `ModelDoor` (`OG_MODEL_DOOR=rig`), retired because rig did not put the model
+#   on the wire: the gateway saw a modelless request, classified it by policy, and answered on
+#   whatever rung the classifier picked, so every coworker's pin was silently ignored. That cost a
+#   night on 8 Sep 2026. `GatewayDoor` is now the only way out, and it is the one whose failure
+#   modes we have read line by line.
+#   The pin stays because the half of rig we never used is the half worth having — embeddings,
+#   vector_store, rerank, loaders. When searchable memory lands, `rig-core.workspace = true` in
+#   whichever crate wants it is the whole re-adoption, and it belongs nowhere near the harness.
 rig-core = "0.42"
 # rmcp: the official MCP SDK. Client-side first: mem0/OpenMemory and cua integrate as MCP servers
 #   we connect to, not as code we write.

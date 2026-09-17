@@ -15,7 +15,6 @@ pub mod mock;
 pub mod model;
 pub mod projection;
 pub mod review;
-pub mod rig_door;
 pub mod tools;
 
 pub use gateway::GatewayDoor;
@@ -27,7 +26,6 @@ pub use model::{
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
-pub use rig_door::RigDoor;
 pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
 use futures::StreamExt;
