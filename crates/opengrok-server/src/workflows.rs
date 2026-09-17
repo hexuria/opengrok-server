@@ -488,6 +488,9 @@ async fn run(
         allowed: &allowed,
         judging,
         name: &name,
+        // The deployment's level, read once at boot rather than per walk; a `run` step that needs
+        // the page as well says so in the body and overrides this for itself.
+        observe: opengrok_tools::observe::wanted(),
     };
     let walk = walker.walk(&workflow, &bound).await;
 

@@ -1024,6 +1024,12 @@ async fn run(
     // Setting `artifact_dir` also makes the box write the pictures to disk INSTEAD of inlining
     // them, so the receipt comes back without `png_base64`. That is the trade: the page gets its
     // images from the artifact routes rather than out of this response.
+    //
+    // AND IT ASKS THE BOX FOR NO OBSERVATION, unlike a run played for a bot. A person watching
+    // gets a picture of every step and a recording of the whole thing, which is strictly more
+    // than "which window was under step three" — and the one place an observation could be kept
+    // for them to read later, the run history, is the one place it must not be kept (`write_run`).
+    // Paying for a reading that is thrown away is not a trade worth making.
     if let Some(object) = body.as_object_mut() {
         object.insert("screenshot".to_string(), json!("each"));
         object.insert("record".to_string(), json!(true));
@@ -1184,6 +1190,12 @@ impl StoreRecipes {
         if let Some(object) = receipt_json.as_object_mut() {
             object.remove("screenshot");
         }
+        // And without what the box saw. Every run of a recipe is handed back to everyone who may
+        // read that recipe (`detail_body`), but a run happens on the box of whoever played it —
+        // and a recipient may run a recipe they were shared. Keeping the window titles and page
+        // URLs would make sharing a recipe a way to read a colleague's screen back to its author.
+        // What it cost to look is kept; what it saw is not.
+        opengrok_tools::observe::strip_observations(&mut receipt_json);
         let _ = self
             .store
             .record_recipe_run(
