@@ -69,6 +69,24 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// Carry through what the person chose in the composer: a recipe, and the values they typed.
+    ///
+    /// Applied after the runner is built rather than threaded through its constructor, because
+    /// the constructor is shared with the scheduler and the MCP door, and neither of those has a
+    /// composer or a person in front of it.
+    pub fn with_chosen_recipe(
+        mut self,
+        recipe_id: impl Into<String>,
+        // The map itself rather than the recipes crate's alias for it: the harness has no other
+        // reason to depend on that crate, and a dependency edge for a type alias is not one.
+        values: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        if let Some((executor, context)) = self.executor.take() {
+            self.executor = Some((executor.with_chosen_recipe(recipe_id, values), context));
+        }
+        self
+    }
+
     /// Whether this runner offers `run_recipe`: a screen plus at least one granted recipe.
     pub fn has_recipes(&self) -> bool {
         self.executor

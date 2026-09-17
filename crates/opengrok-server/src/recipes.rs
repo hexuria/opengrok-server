@@ -182,7 +182,31 @@ fn relation_word(relation: Relation) -> &'static str {
     }
 }
 
-fn summary(recipe: &RecipeRow, relation: Relation, share_state: Option<&str>) -> Value {
+/// What the version a run would actually play asks for.
+///
+/// Read from the runnable version rather than the newest, because that is the one a run binds
+/// against: a draft edit that declares a third parameter must not make a client ask for
+/// something the run will not use.
+async fn declared_parameters(state: &AgUiState, recipe_id: &str) -> Vec<Parameter> {
+    let Ok(Some(version)) = state.auth.store.recipe_runnable_version(recipe_id).await else {
+        return Vec::new();
+    };
+    serde_json::from_value(
+        version
+            .body
+            .get("parameters")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .unwrap_or_default()
+}
+
+fn summary(
+    recipe: &RecipeRow,
+    relation: Relation,
+    share_state: Option<&str>,
+    parameters: &[Parameter],
+) -> Value {
     json!({
         "id": recipe.id,
         "ownerId": recipe.owner_id,
@@ -196,6 +220,10 @@ fn summary(recipe: &RecipeRow, relation: Relation, share_state: Option<&str>) ->
         "latestVersion": recipe.latest_version,
         "relation": relation_word(relation),
         "shareState": share_state,
+        // On the listing, not only the detail: a composer that has just been handed a recipe has
+        // to know what it needs before it can ask for it, and a second fetch per row to find out
+        // is a round trip per recipe on every open.
+        "parameters": parameters,
     })
 }
 
@@ -220,7 +248,12 @@ async fn list(
     let mut out = Vec::new();
     if matches!(filter, "mine" | "all") {
         match store.recipes_owned_by(account.as_str()).await {
-            Ok(rows) => out.extend(rows.iter().map(|row| summary(row, Relation::Owner, None))),
+            Ok(rows) => {
+                for row in &rows {
+                    let params = declared_parameters(&state, &row.id).await;
+                    out.push(summary(row, Relation::Owner, None, &params));
+                }
+            }
             Err(error) => {
                 return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
             }
@@ -256,7 +289,8 @@ async fn list(
                     } else {
                         (Relation::Invited, "pending")
                     };
-                    out.push(summary(&row, relation, Some(share_state)));
+                    let params = declared_parameters(&state, &row.id).await;
+                    out.push(summary(&row, relation, Some(share_state), &params));
                 }
             }
             Err(error) => {
@@ -414,7 +448,7 @@ async fn detail_body(
     }
 
     Json(json!({
-        "recipe": summary(&recipe, relation, None),
+        "recipe": summary(&recipe, relation, None, &declared_parameters(state, id).await),
         "versions": versions.iter().map(|version| json!({
             "version": version.version,
             "kind": version.kind,
@@ -1058,18 +1092,7 @@ pub async fn offers_for(
         .await
         .unwrap_or_default()
     {
-        let params = if let Ok(Some(version)) = store.recipe_runnable_version(&recipe.id).await {
-            serde_json::from_value(
-                version
-                    .body
-                    .get("parameters")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            )
-            .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let params = declared_parameters(state, &recipe.id).await;
         offers.push(opengrok_tools::RecipeOffer {
             id: recipe.id,
             name: recipe.name,

@@ -442,6 +442,9 @@ pub struct Executor {
     /// The taught recipes this bot may run; `run_recipe` is offered only when there are any.
     recipes: Vec<RecipeOffer>,
     recipe_source: Option<Arc<dyn RecipeSource>>,
+    /// The recipe the PERSON chose in the composer this turn, and the values they typed for it.
+    /// Kept apart from whatever the model passes, because when the two disagree the person wins.
+    chosen_recipe: Option<(String, opengrok_recipes::Values)>,
 }
 
 /// The built-ins that need a display.
@@ -501,6 +504,7 @@ impl Executor {
             group_box_name: None,
             recipes: Vec::new(),
             recipe_source: None,
+            chosen_recipe: None,
         }
     }
 
@@ -519,6 +523,7 @@ impl Executor {
             group_box_name: None,
             recipes: Vec::new(),
             recipe_source: None,
+            chosen_recipe: None,
         }
     }
 
@@ -536,6 +541,20 @@ impl Executor {
 
     /// The recipes this bot was granted, and where their steps come from.
     #[must_use]
+    /// What the person picked in the composer: a recipe, and the values they filled in for it.
+    ///
+    /// A model that is told a recipe was chosen still has to call it, and it may supply values of
+    /// its own — read off the sentence, or guessed. These are neither: they were typed into named
+    /// fields, so they override.
+    pub fn with_chosen_recipe(
+        mut self,
+        recipe_id: impl Into<String>,
+        values: opengrok_recipes::Values,
+    ) -> Self {
+        self.chosen_recipe = Some((recipe_id.into(), values));
+        self
+    }
+
     pub fn with_recipes(
         mut self,
         recipes: Vec<RecipeOffer>,
@@ -1030,6 +1049,19 @@ impl Executor {
                 format!("no recipe `{recipe_id}` is granted to this coworker"),
             );
         };
+        // What the person typed beats what the model inferred. The model may have read a value
+        // off the sentence, or invented one; a value typed into a named field is the only one
+        // that was actually stated. Anything the person left blank, the model may still fill.
+        let mut values = values.clone();
+        if let Some((chosen, typed)) = &self.chosen_recipe
+            && chosen == recipe_id
+        {
+            for (name, value) in typed {
+                values.insert(name.clone(), value.clone());
+            }
+        }
+        let values = &values;
+
         // Bind parameter values against the recipe's declaration. A refusal from binding is a
         // refusal in words the model can act on.
         if let Err(why) = opengrok_recipes::bind(&offer.parameters, values) {
@@ -2602,6 +2634,8 @@ mod tests {
     #[derive(Default)]
     struct SpyRecipes {
         runs: Mutex<Vec<(String, i32, bool)>>,
+        /// Which recipe was asked for, and with which values — the point of the precedence test.
+        asked: Mutex<Vec<(String, opengrok_recipes::Values)>>,
     }
 
     #[async_trait]
@@ -2609,8 +2643,11 @@ mod tests {
         async fn recipe_request(
             &self,
             recipe_id: &str,
-            _values: &opengrok_recipes::Values,
+            values: &opengrok_recipes::Values,
         ) -> Result<(i32, Value), String> {
+            if let Ok(mut asked) = self.asked.lock() {
+                asked.push((recipe_id.to_string(), values.clone()));
+            }
             match recipe_id {
                 "rcp_gmail" => Ok((
                     2,
@@ -2729,6 +2766,64 @@ mod tests {
             recipes.runs.lock().unwrap().as_slice(),
             &[("rcp_gmail".to_string(), 2, true)],
             "the run is written down"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_the_person_typed_beats_what_the_model_guessed() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes.clone())
+            // The person picked this recipe and typed "mundo" into its field.
+            .with_chosen_recipe(
+                "rcp_gmail",
+                opengrok_recipes::Values::from([("q".to_string(), "mundo".to_string())]),
+            );
+        let context = context_with_box("box_mine");
+
+        // The model calls it with a term of its own — read off the sentence, or invented. The
+        // person's beats it: theirs was typed into a named field, the model's was inferred.
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    RUN_RECIPE,
+                    json!({"recipe": "rcp_gmail", "values": {"q": "kabisado"}}),
+                ),
+            )
+            .await;
+        assert!(result.ok, "{result:?}");
+        let asked = recipes.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked
+                .last()
+                .and_then(|(_, values)| values.get("q"))
+                .map(String::as_str),
+            Some("mundo"),
+            "the value that reached the recipe is the one the person typed"
+        );
+
+        // A recipe the person did NOT choose is untouched by their values.
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    RUN_RECIPE,
+                    json!({"recipe": "rcp_stops", "values": {"q": "kabisado"}}),
+                ),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        let asked = recipes.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked
+                .last()
+                .and_then(|(_, values)| values.get("q"))
+                .map(String::as_str),
+            Some("kabisado"),
+            "another recipe keeps the model's own values"
         );
     }
 
