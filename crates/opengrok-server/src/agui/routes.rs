@@ -1930,6 +1930,27 @@ pub async fn run(
     // An explicit forwardedProps still wins: a client that says what it means is believed.
     let run_coworker = coworker_id_from(&input).or(key_coworker);
 
+    // A COWORKER NAMED BY A CALLER WE CANNOT NAME BACK IS REFUSED HERE, NOT LATER. `coworker_id_from`
+    // reads `forwardedProps`, which anyone can send, so this pair is reachable from outside: a turn
+    // that names a coworker and carries no credential.
+    //
+    // It could only ever fail, and it failed late and in the wrong words. Every gate below is keyed
+    // on having BOTH — the policy check, the coworker's own model and role, its tools and its
+    // persona are all skipped — and the turn then reached the spend guard carrying a scope with no
+    // payer, which held it with "This turn does not say whose spend it is … This is a server bug".
+    // The guard was right, and the sentence was ours to prevent: it named our defect in a place the
+    // person could only read as a limit they had hit.
+    //
+    // Anonymous turns stay allowed. What is refused is naming somebody else's coworker while
+    // declining to say who you are.
+    if run_coworker.is_some() && account_id.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "that turn names a coworker, so it needs a signed-in caller; sign in and send it again",
+        )
+            .into_response();
+    }
+
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
     let mut coworker_name = String::new();
