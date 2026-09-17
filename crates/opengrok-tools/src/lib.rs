@@ -23,6 +23,8 @@ pub use review::{
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
+pub mod observe;
+pub use observe::{Observe, Seen};
 pub mod workflow;
 pub use workflow::Workflow;
 
@@ -449,6 +451,10 @@ pub struct Executor {
     /// The recipe the PERSON chose in the composer this turn, and the values they typed for it.
     /// Kept apart from whatever the model passes, because when the two disagree the person wins.
     chosen_recipe: Option<(String, opengrok_recipes::Values)>,
+    /// How much of the desktop a recipe run asks the box to report back. Held here rather than
+    /// read at the call, so the level a turn runs at is decided once when the turn is built and
+    /// cannot change between two calls of the same conversation.
+    observe: crate::observe::Observe,
 }
 
 /// The built-ins that need a display.
@@ -509,6 +515,7 @@ impl Executor {
             recipes: Vec::new(),
             recipe_source: None,
             chosen_recipe: None,
+            observe: crate::observe::wanted(),
         }
     }
 
@@ -528,6 +535,7 @@ impl Executor {
             recipes: Vec::new(),
             recipe_source: None,
             chosen_recipe: None,
+            observe: crate::observe::wanted(),
         }
     }
 
@@ -541,6 +549,15 @@ impl Executor {
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.screen
+    }
+
+    /// How much of the desktop a recipe run asks the box to report back, when it should not be
+    /// the deployment's own setting. The level is a cost paid in playback time, so it is
+    /// settable rather than fixed.
+    #[must_use]
+    pub fn with_observe(mut self, observe: crate::observe::Observe) -> Self {
+        self.observe = observe;
+        self
     }
 
     /// The recipes this bot was granted, and where their steps come from.
@@ -1039,6 +1056,11 @@ impl Executor {
 
     /// A taught recipe, run as one box call. The receipt's end screenshot rides the result so
     /// the model sees where the screen ended up; a stopped run is a refusal with the step.
+    ///
+    /// The run also asks the box to say what it saw while it played, and that reading goes into
+    /// the result's words. It is the only channel there is: a `ToolResult` carries text and one
+    /// image, so a structured observation the model never sees would be a fact recorded for
+    /// nobody. `crate::observe` has the level, what it costs, and why none of it is a verdict.
     async fn run_recipe(
         &self,
         box_id: &BoxId,
@@ -1074,10 +1096,15 @@ impl Executor {
         let Some(source) = self.recipe_source.as_ref() else {
             return ToolResult::refused(call_id, "recipes are not available on this server");
         };
-        let (version, request) = match source.recipe_request(recipe_id, values).await {
+        let (version, mut request) = match source.recipe_request(recipe_id, values).await {
             Ok(found) => found,
             Err(why) => return ToolResult::refused(call_id, why),
         };
+        // ASK THE BOX WHAT IT SAW. A receipt on its own answers "did any step throw", and a model
+        // that gets `ok` back for the twenty-fifth identical replay has been told the truth and
+        // learnt nothing. The observation is what lets it tell a run that landed where the tape
+        // was taped from one that did not. See `crate::observe` for the level and its cost.
+        crate::observe::ask(&mut request, self.observe);
         let receipt = match self.computer.run_recipe(box_id.as_str(), &request).await {
             Ok(raw) => RecipeReceipt::from_value(raw),
             Err(error) => return ToolResult::refused(call_id, describe(error)),
@@ -1085,24 +1112,31 @@ impl Executor {
         let _ = source
             .record_run(recipe_id, version, &context.coworker_id, &receipt)
             .await;
-        let mut result = if receipt.ok {
-            ToolResult::ok(
-                call_id,
-                format!(
-                    "ran recipe \"{}\" (v{version}): {} steps; screenshot of the screen afterwards attached",
-                    offer.name, receipt.ran
-                ),
+        let mut said = if receipt.ok {
+            format!(
+                "ran recipe \"{}\" (v{version}): {} steps; screenshot of the screen afterwards attached",
+                offer.name, receipt.ran
             )
         } else {
-            ToolResult::refused(
-                call_id,
-                format!(
-                    "recipe \"{}\" (v{version}) stopped at step {}: {}",
-                    offer.name,
-                    receipt.stopped_at.unwrap_or(receipt.ran),
-                    receipt.error.as_deref().unwrap_or("a step failed")
-                ),
+            format!(
+                "recipe \"{}\" (v{version}) stopped at step {}: {}",
+                offer.name,
+                receipt.stopped_at.unwrap_or(receipt.ran),
+                receipt.error.as_deref().unwrap_or("a step failed")
             )
+        };
+        // APPENDED, NOT WOVEN IN. A receipt that carries no observation — an old box, or a
+        // deployment that asked for none — leaves these words exactly as a model has been reading
+        // them since before any of this existed. It goes on the stopped result too: where a tape
+        // stopped is most of the story, and what was under it is the rest.
+        if let Some(seen) = crate::observe::Seen::read(&receipt.raw) {
+            said.push_str(". ");
+            said.push_str(&seen.sentence());
+        }
+        let mut result = if receipt.ok {
+            ToolResult::ok(call_id, said)
+        } else {
+            ToolResult::refused(call_id, said)
         };
         if let Some(image) = receipt.image.clone() {
             result = result.with_image(image);
@@ -1440,16 +1474,42 @@ mod tests {
                 calls.push((box_id.to_string(), format!("recipe:{request}")));
             }
             let name = request.get("name").and_then(Value::as_str).unwrap_or("");
+            // The box answers the level it was asked for, and answers nothing about observation
+            // when it was not asked — which is what a box that predates the field also does.
+            let observed = request.get("observe").and_then(Value::as_str).is_some();
             if name == "stops" {
-                return Ok(json!({
+                let mut receipt = json!({
                     "ok": false, "ran": 1, "stopped_at": 1,
-                    "steps": [{"ok": true}, {"ok": false, "error": "nothing at (5, 5)"}],
-                }));
+                    "steps": [{"index": 0, "op": "click", "ok": true},
+                              {"index": 1, "op": "click", "ok": false, "error": "nothing at (5, 5)"}],
+                });
+                if observed && let Some(object) = receipt.as_object_mut() {
+                    object.insert("observe".to_string(), request["observe"].clone());
+                    object["steps"][0]["observed"] = json!({
+                        "target": {"id": "0x1", "class": "chromium.Chromium", "title": "Inbox"},
+                        "observe_ms": 8,
+                    });
+                    object["steps"][1]["observed"] = json!({ "observe_ms": 7 });
+                }
+                return Ok(receipt);
             }
-            Ok(json!({
-                "ok": true, "ran": 2, "stopped_at": null, "steps": [{"ok": true}, {"ok": true}],
+            let mut receipt = json!({
+                "ok": true, "ran": 2, "stopped_at": null,
+                "steps": [{"index": 0, "op": "click", "ok": true},
+                          {"index": 1, "op": "type", "ok": true}],
                 "screenshot": {"mime": "image/png", "png_base64": "iVBORw0KGgo=", "width": 1280, "height": 800},
-            }))
+            });
+            if observed && let Some(object) = receipt.as_object_mut() {
+                object.insert("observe".to_string(), request["observe"].clone());
+                object["steps"][0]["observed"] = json!({
+                    "target": {"id": "0x1", "class": "xterm.XTerm", "title": "Terminal"},
+                    "observe_ms": 9,
+                });
+                object["steps"][1]["observed"] = json!({
+                    "focus": {"state": "none"}, "observe_ms": 5,
+                });
+            }
+            Ok(receipt)
         }
         async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
             unimplemented!("not used by these tests")
@@ -2753,6 +2813,9 @@ mod tests {
         let recipes = Arc::new(SpyRecipes::default());
         let executor = allowing(spy.clone())
             .with_screen(true)
+            // Nobody asked the box to watch, so this is the result a model has been reading since
+            // before observation existed, and it must not have grown a word.
+            .with_observe(Observe::Off)
             .with_recipes(offers(), recipes.clone());
         let context = context_with_box("box_mine");
 
@@ -2762,6 +2825,7 @@ mod tests {
         assert!(result.ok, "{result:?}");
         assert!(result.content.contains("Open Gmail"), "{result:?}");
         assert!(result.content.contains("v2"), "{result:?}");
+        assert!(!result.content.contains("the box"), "{result:?}");
         assert!(
             result.image.is_some(),
             "the end screenshot rides the result"
@@ -2780,6 +2844,7 @@ mod tests {
         let recipes = Arc::new(SpyRecipes::default());
         let executor = allowing(spy.clone())
             .with_screen(true)
+            .with_observe(Observe::Off)
             .with_recipes(offers(), recipes.clone())
             // The person picked this recipe and typed "mundo" into its field.
             .with_chosen_recipe(
@@ -2838,6 +2903,7 @@ mod tests {
         let recipes = Arc::new(SpyRecipes::default());
         let executor = allowing(spy)
             .with_screen(true)
+            .with_observe(Observe::Input)
             .with_recipes(offers(), recipes.clone());
         let context = context_with_box("box_mine");
 
@@ -2847,6 +2913,21 @@ mod tests {
         assert!(!result.ok, "{result:?}");
         assert!(result.content.contains("stopped at step 1"), "{result:?}");
         assert!(result.content.contains("nothing at (5, 5)"), "{result:?}");
+        // WHERE IT STOPPED IS MOST OF THE STORY AND WHAT WAS UNDER IT IS THE REST. A step that
+        // failed at a coordinate is far easier to act on when the result also says which window,
+        // if any, was there.
+        assert!(
+            result
+                .content
+                .contains("pointer steps landed on chromium.Chromium \"Inbox\""),
+            "{result:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("no window the box could name was under the pointer (at step 1)"),
+            "{result:?}"
+        );
         assert_eq!(
             recipes.runs.lock().unwrap().last().map(|r| r.2),
             Some(false)
@@ -2860,6 +2941,72 @@ mod tests {
         assert!(
             result.content.contains("not granted") || result.content.contains("no recipe"),
             "{result:?}"
+        );
+    }
+
+    /// THE RESULT THE TWENTY-FIVE-RUN INCIDENT DID NOT HAVE. A model that gets back "8 steps, ok"
+    /// has been told that nothing threw, which was true on all twenty-five of them. This is the
+    /// same result with what the box saw appended: which window each click landed on, and a
+    /// `type` whose keys reached nothing at all.
+    ///
+    /// The server still says none of what that MEANS. It cannot: it does not know what the recipe
+    /// was for. The words are readings a model can act on, and every one of them is a reading.
+    #[tokio::test]
+    async fn a_run_that_was_watched_says_what_the_box_saw_and_judges_none_of_it() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_observe(Observe::Input)
+            .with_recipes(offers(), recipes.clone());
+        let context = context_with_box("box_mine");
+
+        let result = executor
+            .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})))
+            .await;
+        // A run that played every step is still a success. The observation is what the model
+        // reads next, not a reason to refuse.
+        assert!(result.ok, "{result:?}");
+        assert!(
+            result.content.contains("ran recipe \"Open Gmail\""),
+            "{result:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("pointer steps landed on xterm.XTerm \"Terminal\" (at step 0)"),
+            "{result:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("keys had nowhere to go: no window held the focus (at step 1)"),
+            "{result:?}"
+        );
+        assert!(
+            result.content.contains("the looking cost 14ms"),
+            "{result:?}"
+        );
+        for verdict in ["failed", "did not work", "wrong window", "should"] {
+            assert!(
+                !result.content.contains(verdict),
+                "the server reports, it does not judge: {result:?}"
+            );
+        }
+        // And the level actually reached the box, rather than being a summary of nothing.
+        let asked = spy
+            .ran_on
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, what)| what.starts_with("recipe:"))
+            .map(|(_, what)| what.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            asked
+                .last()
+                .is_some_and(|body| body.contains("\"observe\":\"input\"")),
+            "{asked:?}"
         );
     }
 

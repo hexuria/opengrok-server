@@ -78,15 +78,21 @@
 //!   called" and "does this file exist" are all answerable now.
 //! - **The last recipe's receipt.** `ok`, how many steps ran, which step stopped it and the error
 //!   the box reported, kept as the facts `last.ok`, `last.ran`, `last.stopped_at`, `last.error`.
+//! - **What the box saw while that recipe played.** Box PR #29 made a receipt carry the window
+//!   under each pointer step, where the keystrokes were about to go, and — when asked for it —
+//!   the page URL either side of a step. Those arrive as four more facts, `last.observe`,
+//!   `last.targets`, `last.focus` and `last.urls`, and no step kind had to change for them:
+//!   `when` tests them like any other. `crate::observe` has what they mean and what they cost.
 //!
 //! And nothing else. In particular the engine CANNOT see the screen: `Computer::screenshot`
 //! returns a PNG, Jev judges text and objects, and there is no vision model on this path — so a
 //! question phrased as "does the search box look wrong" is answered from the facts a probe
-//! gathered, never from the picture. Box PR #29 makes a recipe receipt carry what was observed
-//! while it played — the window under each click, where the keystrokes went, the page URL either
-//! side of a step — behind an `observe` request field. This server pins the box nine commits
-//! before that (#130), so none of it is reachable yet. When it is, those observations become more
-//! `last.*` facts and no step kind has to change.
+//! gathered, never from the picture.
+//!
+//! WHAT THE BOX SAW IS NOT WRITTEN INTO THE TRAIL, for the same reason a probe's output is not:
+//! see the `observe` step below. The trail says the level the box ran at and how many steps it
+//! looked at, which is enough to debug a tree that is deciding on nothing, and says none of what
+//! was on the screen.
 //!
 //! # Termination
 //!
@@ -102,7 +108,10 @@
 //!    had last time means the loop has nothing new to go on. That is not proof the world is
 //!    unchanged — the twenty-five-run bug had identical receipts and a worsening screen every
 //!    time, which is precisely the point — so it is allowed a few repeats before the walk is cut,
-//!    rather than firing the first time round.
+//!    rather than firing the first time round. The observation facts narrow that blind spot
+//!    without closing it: two replays onto two different windows are now two different places
+//!    even where the receipts match, but a screen that got worse in a way nothing was looking at
+//!    still reads as standing still, and the bound is what catches it.
 //!
 //! The lint adds a static guard on top: a tree from which no `stop` step is reachable is refused
 //! at write time. That cannot prove a tree terminates, which is why the runtime bounds exist; it
@@ -148,7 +157,8 @@ const PROBE_SECONDS_MAX: u32 = 120;
 /// How many times a step may be re-entered with the facts it already had before the walk is cut
 /// for standing still. Not one, because identical facts are not identical world — see the module
 /// doc — and a couple of retries against a flaky screen is a thing an author may legitimately
-/// write.
+/// write. The facts now include what the box saw, so two replays that landed on different windows
+/// no longer count as the same place; that makes the bound bite later, not never.
 const SAME_PLACE_ALLOWED: usize = 3;
 
 // -------------------------------------------------------------------------------------------
@@ -349,6 +359,17 @@ pub enum Act {
         /// happened.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         otherwise: Option<String>,
+        /// How much of the desktop this one run asks the box to report back, when the walk's own
+        /// level is not enough. Absent means the walk's level, which is what every body written
+        /// before this field existed carries — and those bodies are immutable, so absent has to
+        /// keep meaning "whatever this deployment does".
+        ///
+        /// THIS IS WHERE `page` IS AFFORDABLE. It costs two loopback reads either side of every
+        /// navigating step, so it is not what a bot's every run pays; a tree that has to know
+        /// whether a page actually moved is asking a question nothing cheaper answers, and it is
+        /// asking it of one step rather than of every recipe on the deployment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe: Option<crate::observe::Observe>,
     },
     /// Look at the box and keep what was seen as a named fact.
     Observe {
@@ -954,6 +975,10 @@ pub struct Walker<'a> {
     pub judging: Judging<'a>,
     /// The workflow's name, for the state Jev judges.
     pub name: &'a str,
+    /// How much of the desktop this walk's recipe runs ask the box to report back, unless a `run`
+    /// step asks for something else. Decided by the caller, not read here, so a walk runs at one
+    /// level from start to finish however long it takes.
+    pub observe: crate::observe::Observe,
 }
 
 impl Walker<'_> {
@@ -1088,6 +1113,7 @@ impl Walker<'_> {
                     values,
                     then,
                     otherwise,
+                    observe,
                 } => {
                     if !self.allowed.contains(recipe) {
                         break Ending::Broken {
@@ -1113,11 +1139,13 @@ impl Walker<'_> {
                     if let Some(why) = bad {
                         break Ending::Broken { at, why };
                     }
-                    let (version, request) =
+                    let (version, mut request) =
                         match self.recipes.recipe_request(recipe, &filled).await {
                             Ok(found) => found,
                             Err(why) => break Ending::Broken { at, why },
                         };
+                    let level = observe.unwrap_or(self.observe);
+                    crate::observe::ask(&mut request, level);
                     let raw = match self.computer.run_recipe(self.box_id, &request).await {
                         Ok(raw) => raw,
                         Err(error) => {
@@ -1150,6 +1178,56 @@ impl Walker<'_> {
                         "last.error".to_string(),
                         clip(receipt.error.as_deref().unwrap_or(""), FACT_CHARS),
                     );
+                    // WHAT THE BOX SAW, AS FACTS A `when` CAN TEST. `last.ok` is the fact that
+                    // lied through twenty-five runs: it says no step threw, and a tape whose
+                    // coordinates have drifted onto another window throws nothing at all. These
+                    // four say what was actually under the pointer, where the keys went and which
+                    // pages were on screen, so a tree can branch on the desktop rather than on the
+                    // absence of an exception.
+                    //
+                    // ALWAYS WRITTEN, EVEN EMPTY. A fact left over from the previous `run` step
+                    // would have this branch deciding on the last recipe but one. `last.observe`
+                    // is what separates "the box looked and saw nothing" from "the box was never
+                    // asked, or is too old to know how": empty there means nobody looked, and a
+                    // tree that cares can test it before it trusts the other three.
+                    let seen = crate::observe::Seen::read(&receipt.raw);
+                    facts.insert(
+                        "last.observe".to_string(),
+                        seen.as_ref()
+                            .map(|seen| seen.mode.word())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    facts.insert(
+                        "last.targets".to_string(),
+                        clip(
+                            &seen
+                                .as_ref()
+                                .map(crate::observe::Seen::target_fact)
+                                .unwrap_or_default(),
+                            FACT_CHARS,
+                        ),
+                    );
+                    facts.insert(
+                        "last.focus".to_string(),
+                        clip(
+                            &seen
+                                .as_ref()
+                                .map(crate::observe::Seen::focus_fact)
+                                .unwrap_or_default(),
+                            FACT_CHARS,
+                        ),
+                    );
+                    facts.insert(
+                        "last.urls".to_string(),
+                        clip(
+                            &seen
+                                .as_ref()
+                                .map(crate::observe::Seen::page_fact)
+                                .unwrap_or_default(),
+                            FACT_CHARS,
+                        ),
+                    );
                     let went = if receipt.ok {
                         Some(then.clone())
                     } else {
@@ -1166,6 +1244,13 @@ impl Walker<'_> {
                             "stoppedAt": receipt.stopped_at,
                             "error": receipt.error,
                             "runId": run_id,
+                            // The level and the count, never the reading: a walk's trail is
+                            // stored and read back by everyone the workflow was shared to, and
+                            // window titles are somebody's screen. Same rule as the `observe`
+                            // step's output, and enough to tell a tree that decided on nothing
+                            // from one that decided on something.
+                            "observe": level.word(),
+                            "observed": seen.as_ref().map(|seen| seen.looked_at).unwrap_or(0),
                             "went": went,
                         }),
                     );
@@ -1413,6 +1498,9 @@ mod tests {
         /// Every probe takes this long. Virtual under a paused clock.
         slow_ms: u64,
         commands: Mutex<Vec<String>>,
+        /// Every recipe body the walk sent, whole — what the walk ASKED the box, as against what
+        /// the box answered.
+        recipe_requests: Mutex<Vec<Value>>,
         calls: Mutex<usize>,
     }
 
@@ -1431,6 +1519,10 @@ mod tests {
 
         fn ran(&self) -> Vec<String> {
             self.commands.lock().unwrap().clone()
+        }
+
+        fn recipe_requests(&self) -> Vec<Value> {
+            self.recipe_requests.lock().unwrap().clone()
         }
     }
 
@@ -1512,6 +1604,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("recipe {}", request["name"]));
+            self.recipe_requests.lock().unwrap().push(request.clone());
             if self.refuses {
                 return Err(BoxError::Unreachable("no route to the box".to_string()));
             }
@@ -1623,6 +1716,9 @@ mod tests {
             allowed: &allowed,
             judging,
             name: "Search once",
+            // Named rather than taken from the deployment, so the suite says what it runs at
+            // instead of inheriting whatever `OG_RECIPE_OBSERVE` happens to hold.
+            observe: crate::observe::Observe::Input,
         };
         walker.walk(&workflow(body), &Values::new()).await
     }
@@ -1957,6 +2053,166 @@ mod tests {
         assert_eq!(receipt["trail"][0]["ran"], 4);
         // The inner run is pointed at, so a branch can be opened from the workflow's history.
         assert_eq!(receipt["trail"][0]["runId"], "rrun_rcp_search");
+    }
+
+    /// A receipt shaped the way the box writes one when it was asked to look.
+    fn observed_receipt(steps: Value) -> Value {
+        json!({ "ok": true, "ran": 2, "stopped_at": null, "observe": "input", "steps": steps })
+    }
+
+    /// THE FACT `last.ok` COULD NOT CARRY. A tape whose coordinates have drifted onto another
+    /// window plays every step without error, so `ok` is true and the tree has nothing to branch
+    /// on. What the box saw is a different fact, and a `when` reads it like any other.
+    #[tokio::test]
+    async fn what_the_box_saw_is_a_fact_the_next_branch_can_read() {
+        let body = json!({
+            "workflow": 1, "start": "play",
+            "steps": {
+                "play": { "do": "run", "recipe": "rcp_search", "then": "where", "otherwise": "sad" },
+                "where": { "do": "when", "fact": "last.targets", "test": { "contains": "xterm" },
+                           "yes": "wrong-window", "no": "done" },
+                "done": { "do": "stop", "outcome": "done" },
+                "wrong-window": { "do": "stop", "outcome": "gave-up" },
+                "sad": { "do": "stop", "outcome": "gave-up" }
+            }
+        });
+        let computer = StubBox::default().with_receipts(vec![observed_receipt(json!([
+            { "index": 0, "op": "click", "ok": true, "observed": {
+                "target": { "id": "0x1", "class": "xterm.XTerm", "title": "Terminal" },
+                "observe_ms": 9 } },
+            { "index": 1, "op": "type", "ok": true, "observed": {
+                "focus": { "state": "none" }, "observe_ms": 4 } },
+        ]))]);
+        let recipes = StubRecipes::default();
+        let walk = walk_with(
+            body,
+            &computer,
+            &recipes,
+            &["rcp_search"],
+            Judging::Off("no judge in this test".to_string()),
+        )
+        .await;
+        // Every step played and nothing threw, and the tree still declined to call it done —
+        // which is the whole of what this wire is for.
+        assert_eq!(
+            walk.ending,
+            Ending::Stopped {
+                outcome: "gave-up".to_string(),
+                say: String::new()
+            }
+        );
+        // And the walk asked for it: a level the box never received reports nothing.
+        assert_eq!(
+            computer
+                .recipe_requests()
+                .first()
+                .and_then(|body| body.get("observe").cloned()),
+            Some(json!("input"))
+        );
+    }
+
+    /// `page` is the level that scales badly, so a body pays for it one step at a time rather
+    /// than the deployment paying for it on every run of every recipe.
+    #[tokio::test]
+    async fn one_run_step_can_pay_for_the_page_without_the_rest_of_the_walk_paying() {
+        let body = json!({
+            "workflow": 1, "start": "first",
+            "steps": {
+                "first": { "do": "run", "recipe": "rcp_search", "then": "second" },
+                "second": { "do": "run", "recipe": "rcp_search", "observe": "page",
+                            "then": "done" },
+                "done": { "do": "stop", "outcome": "done" }
+            }
+        });
+        let computer = StubBox::default().with_receipts(vec![
+            json!({"ok": true, "ran": 1}),
+            json!({"ok": true, "ran": 1}),
+        ]);
+        let recipes = StubRecipes::default();
+        let walk = walk_with(
+            body,
+            &computer,
+            &recipes,
+            &["rcp_search"],
+            Judging::Off("no judge in this test".to_string()),
+        )
+        .await;
+        assert!(matches!(walk.ending, Ending::Stopped { .. }), "{walk:?}");
+        let asked: Vec<Value> = computer
+            .recipe_requests()
+            .iter()
+            .map(|body| body["observe"].clone())
+            .collect();
+        assert_eq!(asked, vec![json!("input"), json!("page")]);
+    }
+
+    /// A shared workflow's runs are read by whoever shared it, and a run happens on somebody
+    /// else's box. The record says the box looked and how much of the run it looked at; what was
+    /// on the screen stays in the walk that asked for it.
+    #[tokio::test]
+    async fn what_the_box_saw_is_not_written_into_the_walks_record() {
+        let body = json!({
+            "workflow": 1, "start": "play",
+            "steps": {
+                "play": { "do": "run", "recipe": "rcp_search", "then": "done" },
+                "done": { "do": "stop", "outcome": "done" }
+            }
+        });
+        let computer = StubBox::default().with_receipts(vec![observed_receipt(json!([
+            { "index": 0, "op": "click", "ok": true, "observed": {
+                "target": { "id": "0x1", "class": "chromium.Chromium",
+                            "title": "quarterly-plan — Docs" },
+                "observe_ms": 9 } },
+        ]))]);
+        let recipes = StubRecipes::default();
+        let walk = walk_with(
+            body,
+            &computer,
+            &recipes,
+            &["rcp_search"],
+            Judging::Off("no judge in this test".to_string()),
+        )
+        .await;
+        let receipt = walk.receipt();
+        let whole = serde_json::to_string(&receipt).unwrap();
+        assert!(!whole.contains("quarterly-plan"), "{whole}");
+        assert_eq!(receipt["trail"][0]["observe"], "input");
+        assert_eq!(receipt["trail"][0]["observed"], 1);
+    }
+
+    /// A box too old to know the field answers without one, and the facts say so rather than
+    /// reading as "it looked and the desktop was empty". A tree that cares can test `last.observe`
+    /// before it trusts the other three.
+    #[tokio::test]
+    async fn a_box_that_never_looked_leaves_the_facts_empty_and_says_which() {
+        let body = json!({
+            "workflow": 1, "start": "play",
+            "steps": {
+                "play": { "do": "run", "recipe": "rcp_search", "then": "asked" },
+                "asked": { "do": "when", "fact": "last.observe", "test": "empty",
+                           "yes": "blind", "no": "done" },
+                "done": { "do": "stop", "outcome": "done" },
+                "blind": { "do": "stop", "outcome": "nobody-looked" }
+            }
+        });
+        let computer = StubBox::default()
+            .with_receipts(vec![json!({"ok": true, "ran": 1, "steps": [{"ok": true}]})]);
+        let recipes = StubRecipes::default();
+        let walk = walk_with(
+            body,
+            &computer,
+            &recipes,
+            &["rcp_search"],
+            Judging::Off("no judge in this test".to_string()),
+        )
+        .await;
+        assert_eq!(
+            walk.ending,
+            Ending::Stopped {
+                outcome: "nobody-looked".to_string(),
+                say: String::new()
+            }
+        );
     }
 
     #[tokio::test]
