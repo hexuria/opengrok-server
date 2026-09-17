@@ -444,7 +444,7 @@ pub fn overall_resolution(outcomes: &[FieldOutcome]) -> FormResolution {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
