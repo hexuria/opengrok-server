@@ -336,6 +336,27 @@ pub async fn resume_conversation(
     all
 }
 
+/// End a run because a person stopped it, from wherever in the round the loop noticed.
+///
+/// ONE JOURNAL WRITE, CARRYING BOTH. `round_events` is whatever the turn had produced in the round
+/// it was in the middle of — the model's words, the tool call it was about to make — and it has not
+/// been recorded yet, because the loop records a whole round at a time. Writing it together with
+/// the ending is what makes the transcript end at the moment the button was pressed instead of one
+/// step before it.
+async fn stop_here(
+    journal: &dyn RunJournal,
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    run_id: &str,
+    mut round_events: Vec<Event>,
+) -> Vec<Event> {
+    let ending = projection.stopped();
+    emit_live(sink, &ending).await;
+    round_events.extend(ending);
+    let _ = journal.record(run_id, &round_events).await;
+    round_events
+}
+
 /// Forward a batch to a live watcher. Empty batches are skipped so a no-op `finish` after
 /// `fail` does not wake the sink.
 async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
@@ -397,6 +418,13 @@ async fn converse(
     for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
         let mut round_events = Vec::new();
 
+        // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
+        // going to ask next is not asked, and nothing more is spent on it.
+        if journal.stopped(run_id).await {
+            all.extend(stop_here(journal, &mut projection, sink, run_id, round_events).await);
+            return all;
+        }
+
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
@@ -452,6 +480,23 @@ async fn converse(
                     calls.push(ui);
                 }
                 if let (Some(runner), false) = (tools, calls.is_empty()) {
+                    // WHERE A STOP LANDS, THE SECOND AND MORE USEFUL PLACE. The model has just
+                    // asked to do something to the world — play the recipe again, type into the
+                    // search field again — and this is the last moment before it happens. Checking
+                    // only at the top of the round would let one more of them through, which is one
+                    // more than the person who pressed the button asked for.
+                    //
+                    // WHAT THIS DOES NOT DO, SAID PLAINLY: a call already in flight is not reached
+                    // from here. `run_all` is one await, a recipe playing on the box is a single
+                    // request inside it, and neither this loop nor the box's API on the pinned
+                    // revision can take it back. So a recipe that has started finishes, and the
+                    // stop takes hold before the next one.
+                    if journal.stopped(run_id).await {
+                        all.extend(
+                            stop_here(journal, &mut projection, sink, run_id, round_events).await,
+                        );
+                        return all;
+                    }
                     let results = runner.run_all(&calls).await;
 
                     for result in &results {
@@ -1037,6 +1082,178 @@ mod tests {
         assert_eq!(
             events.last().unwrap().event_type,
             opengrok_wire::agui::EventType::RunFinished
+        );
+    }
+
+    /// A journal that reports the run stopped from the `stop_after`-th question onwards, and keeps
+    /// what it was asked to record so the ordering can be asserted.
+    struct StoppingJournal {
+        stop_after: usize,
+        asked: Mutex<usize>,
+        batches: Mutex<Vec<Vec<Event>>>,
+    }
+
+    impl StoppingJournal {
+        fn saying_stop_after(questions: usize) -> Self {
+            Self {
+                stop_after: questions,
+                asked: Mutex::new(0),
+                batches: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn batches(&self) -> Vec<Vec<Event>> {
+            self.batches.lock().map(|b| b.clone()).unwrap_or_default()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RunJournal for StoppingJournal {
+        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            if let Ok(mut batches) = self.batches.lock() {
+                batches.push(events.to_vec());
+            }
+            Ok(())
+        }
+
+        async fn stopped(&self, _run_id: &str) -> bool {
+            let Ok(mut asked) = self.asked.lock() else {
+                return false;
+            };
+            *asked += 1;
+            *asked > self.stop_after
+        }
+    }
+
+    /// Asks for a tool on every call, and counts how many times it was called.
+    struct CountingToolDoor(Arc<Mutex<usize>>);
+
+    #[async_trait::async_trait]
+    impl ModelDoor for CountingToolDoor {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            if let Ok(mut calls) = self.0.lock() {
+                *calls += 1;
+            }
+            let script = vec![
+                ModelDelta::Text("playing it again".to_string()),
+                ModelDelta::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: "c1".to_string(),
+                    delta: r#"{"command":"play the recipe"}"#.to_string(),
+                },
+                ModelDelta::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+            ];
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    /// A STOP IS THE ONLY WAY OUT OF A BOT IN A LOOP, so the first thing it has to buy is that the
+    /// model is not asked again. The run ends as a stop — `run-stopped` and then `RUN_FINISHED`,
+    /// never `RUN_ERROR` — because a person changing their mind is not a coworker failing.
+    #[tokio::test]
+    async fn a_stopped_run_asks_the_model_nothing_further_and_ends_as_a_stop() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let door = CountingToolDoor(calls.clone());
+        let journal = StoppingJournal::saying_stop_after(0);
+        let runner = tool_runner();
+
+        let events =
+            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            0,
+            "a run stopped before its first round must not spend a model call"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|name| name.as_str())
+                        == Some("run-stopped")),
+            "the reason travels as its own frame, or a client cannot tell a stop from a finish: \
+             {events:?}"
+        );
+        assert_eq!(
+            events.last().unwrap().event_type,
+            EventType::RunFinished,
+            "the stream still closes, or the client holds its spinner open forever"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == EventType::RunError),
+            "a stop is not a failure: {events:?}"
+        );
+    }
+
+    /// THE PLACE THAT ACTUALLY STOPS THE YOUTUBE SEARCH HAPPENING ONE MORE TIME. The model has
+    /// answered and asked to play the recipe again; the check sits between that ask and the doing,
+    /// so the tool never runs. And the frames of the round it was in the middle of are journaled
+    /// WITH the ending, so the transcript shows what the coworker was about to do rather than
+    /// ending a step short of it.
+    #[tokio::test]
+    async fn a_stop_lands_between_the_model_asking_for_a_tool_and_the_tool_running() {
+        let calls = Arc::new(Mutex::new(0usize));
+        let door = CountingToolDoor(calls.clone());
+        // Not stopped when the round opens; stopped by the time the tool is about to run.
+        let journal = StoppingJournal::saying_stop_after(1);
+        let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+        let runner = tool_runner_on(computer.clone(), |executor| executor);
+
+        let events =
+            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "the round that was already open still gets its answer; nothing after it is asked"
+        );
+        assert_eq!(
+            computer.last_box(),
+            None,
+            "the tool the model asked for must not run: that is the repetition the person pressed \
+             stop to end"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallResult),
+            "and no result is invented for a call that never happened: {events:?}"
+        );
+
+        // WHAT WAS SPENT IS ACCOUNTED FOR, AND THIS IS WHERE THAT IS VISIBLE. The model call that
+        // was already open is read to its last delta rather than dropped — `TOOL_CALL_END` is the
+        // final thing the door yields, so seeing it means the stream was drained. The gateway
+        // records a call's usage when the call completes; abandoning a half-read stream would
+        // leave tokens spent at the provider and missing from the meter, which is exactly the
+        // spend landing on the floor.
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallEnd),
+            "the model call already in flight is drained, not abandoned: {events:?}"
+        );
+
+        // The round's own frames and the ending in one write: the transcript keeps what the model
+        // said and the call it asked for, then the stop.
+        let last = journal.batches().pop().expect("a final journal batch");
+        assert!(
+            last.iter()
+                .any(|event| event.event_type == EventType::TextMessageContent),
+            "the words of the round in progress go down with the stop: {last:?}"
+        );
+        assert!(
+            last.iter()
+                .any(|event| event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|name| name.as_str())
+                        == Some("run-stopped")),
+            "{last:?}"
         );
     }
 

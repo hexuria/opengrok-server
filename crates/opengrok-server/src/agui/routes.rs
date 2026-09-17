@@ -552,6 +552,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
@@ -2176,6 +2177,24 @@ impl opengrok_harness::RunJournal for StoreJournal {
         .await
         .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
     }
+
+    /// The log's own answer to "has somebody stopped this run". One primary-key read of the
+    /// projection, not a replay: the loop asks this at every step boundary.
+    ///
+    /// A READ THAT FAILS SAYS NO. The turn is already running and already spending; stopping it
+    /// because the database blinked would turn a hiccup into a cancelled turn, and the person who
+    /// really did press stop still has a durable `Stopped` in the log for the next boundary to
+    /// find.
+    async fn stopped(&self, run_id: &str) -> bool {
+        let run_id = RunId::from_stored(run_id.to_string());
+        match self.state.auth.store.run_status(&run_id).await {
+            Ok(status) => status == Some(RunStatus::Stopped),
+            Err(error) => {
+                tracing::warn!(%error, run = %run_id, "could not read whether a run was stopped");
+                false
+            }
+        }
+    }
 }
 
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
@@ -2370,12 +2389,7 @@ pub async fn replay_run(
     Json(serde_json::json!({
         "runId": run_id.as_str(),
         "threadId": run.thread_id,
-        "status": match run.status {
-            RunStatus::Running => "running",
-            RunStatus::AwaitingApproval => "awaiting-approval",
-            RunStatus::Finished => "finished",
-            RunStatus::Failed => "failed",
-        },
+        "status": run.status.as_str(),
         "failure": run.failure,
         "pending": run.pending,
         "events": run.emitted,
@@ -2510,12 +2524,7 @@ pub async fn replay_thread(
             run_id: summary.id.as_str().to_string(),
             // The aggregate's status, not the projection's, for the same reason `replay_run` uses
             // it: the log is the truth and the view is derived from it.
-            status: match run.status {
-                RunStatus::Running => "running",
-                RunStatus::AwaitingApproval => "awaiting-approval",
-                RunStatus::Finished => "finished",
-                RunStatus::Failed => "failed",
-            },
+            status: run.status.as_str(),
             started_at_ms: summary.started_at_ms,
             updated_at_ms: summary.updated_at_ms,
             failure: run.failure,
@@ -2651,6 +2660,179 @@ pub async fn answer_run(
         "continuing": request.approved,
     }))
     .into_response()
+}
+
+/// How many times a stop will re-read and try again when somebody else wrote first.
+///
+/// The thing most likely to collide with this write is the turn itself, journaling the round it is
+/// in the middle of — which is exactly the moment a person presses stop. Losing that race once is
+/// ordinary; reporting a failure because of it would leave a run going after its owner was told it
+/// was not.
+const STOP_ATTEMPTS: usize = 5;
+
+/// Stop a run — `POST /ag-ui/runs/{run_id}/stop`.
+///
+/// THE ONLY WAY OUT OF A LOOP, AND UNTIL THIS EXISTED THERE WAS NONE. A taught recipe ran, and the
+/// bot ran it again, and again, opening the browser and typing the search term each time; the
+/// person typed "stop it" into the chat, which reached nothing, because that is one more message to
+/// a model that is mid-turn. A stop has to be a command against the run, not a sentence to the
+/// coworker.
+///
+/// WHAT IT DOES: records `Stopped` in the run's log, which is the one place every reader of this
+/// run already looks. The turn asks the log at each step boundary and ends when it sees it; the
+/// recovery sweep skips a run that is not `running`; `replay_run` reports the status and keeps
+/// every frame from before the stop. Nothing here reaches into a task, so a stop works the same
+/// whether the turn is in this process, in another replica, or in a process that has since died.
+///
+/// WHAT IT DOES NOT DO, AND THE ANSWER SAYS SO: it does not take back a step already under way. See
+/// `stopped_answer`.
+///
+/// WHAT IT COSTS. A turn that is stopped keeps whatever it has already spent, and that is the
+/// correct outcome rather than an oversight: the model calls really happened and the gateway
+/// metered each one against the coworker's own key as it completed. Nothing here aborts a task or
+/// drops a response mid-stream, and that is deliberate — a half-read model stream would leave
+/// tokens spent at the provider and absent from the meter, which is the only way a stop could
+/// actually lose money. The frames that spend bought are journaled too, including the round the
+/// turn was in the middle of, so `replay_run` still shows what was paid for.
+pub async fn stop_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let run_id = RunId::from_stored(run_id);
+
+    // `replay_run`'s check, byte for byte, and for the same reason: a run holds a whole
+    // conversation, so without it a run id is a password — and run ids travel in client URLs and
+    // logs. `NOT_FOUND` rather than `FORBIDDEN` for "no such run", "not yours" and "not signed in"
+    // alike, so probing ids reveals nothing about which runs exist. The two answers have to be
+    // indistinguishable down to the bytes, which is why this says the same words.
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    match state.auth.store.run_owned_by(&run_id, &account_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+
+    for _ in 0..STOP_ATTEMPTS {
+        let (mut run, seq) = match state.auth.store.load_run(&run_id).await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        };
+        // A run the log has no start for never took a turn, so there is nothing to stop and
+        // nothing to say about it — the same answer `replay_run` gives, for the same reason.
+        if !run.started {
+            return (StatusCode::NOT_FOUND, "no such run").into_response();
+        }
+
+        // Read BEFORE the stop is applied: what the run was doing is what decides how honest the
+        // answer can be about when the stop takes hold.
+        let was = run.status;
+
+        let at_ms = now_ms();
+        let events = match run.decide(RunCommand::Stop {
+            by: account_id.to_string(),
+            at_ms,
+        }) {
+            Ok(events) => events,
+            // The only refusal `Stop` produces is `AlreadyEnded`, and it is a SUCCESS. The person
+            // pressed a button asking for this run not to be running; whether they won the race
+            // with the model is not their problem, and an error here would make a retry — a second
+            // press, a client resending — look like a fault.
+            Err(_) => return stopped_answer(&run_id, was),
+        };
+
+        for event in &events {
+            run.apply(event);
+        }
+        let view = RunView {
+            id: run_id.clone(),
+            thread_id: run.thread_id.clone(),
+            status: run.status,
+            event_count: run.emitted.len() as i64,
+            updated_at_ms: at_ms,
+        };
+        match state
+            .auth
+            .store
+            .append_run(&run_id, seq, &events, &view, Some(&account_id))
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
+                return stopped_answer(&run_id, was);
+            }
+            // Somebody wrote to this run between the read and the write. Re-read and decide again
+            // against what is actually there: either the run is now ended, and the next pass
+            // answers with that, or the turn simply journaled a round and this stop still stands.
+            Err(opengrok_store::StoreError::Conflict) => continue,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        }
+    }
+
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "that run is being written to faster than it can be stopped; try again",
+    )
+        .into_response()
+}
+
+/// The answer to a stop, and how honest it can be about when the stop takes hold.
+///
+/// `202`, NOT `200`, AND THE DIFFERENCE IS THE POINT. The stop is durable by the time this is
+/// written — nothing will start again — but a step already under way is not taken back, and
+/// pretending otherwise would promise an instant stop that does not exist. `takesEffect` says which
+/// of the three cases this was, and `note` is the sentence a client can put in front of a person
+/// instead of inventing its own.
+///
+/// `status` is always `stopped`, including for a run that had already finished, because it is the
+/// outcome of the REQUEST and not the run's own status — the run's status is unchanged and
+/// `GET /ag-ui/runs/{id}` still reports it. `takesEffect: already-ended` is what distinguishes the
+/// two for a client that cares.
+fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
+    let (takes_effect, note) = match was {
+        // Nothing was running, and saying "stopped" is still the right answer: the person asked
+        // for this run not to be running, and it is not.
+        RunStatus::Finished | RunStatus::Failed | RunStatus::Stopped => (
+            "already-ended",
+            "That run had already ended, so there was nothing left to stop.",
+        ),
+        // Waiting on a person is not working. No model call is in flight and no tool is running,
+        // so the run is over the moment the log says so.
+        RunStatus::AwaitingApproval => (
+            "immediately",
+            "That run was waiting on an approval, and the card it was waiting on is closed.",
+        ),
+        // THE HONEST ONE. The turn asks the log whether it has been stopped between steps: before
+        // each model call, and again after the model has answered and before its tools are run. A
+        // call already in flight is not reached from there — a taught recipe playing on the box is
+        // a single request that takes many seconds, and the box's API on the revision this server
+        // is pinned to (`grok-box` rev 2dea0d4: `POST /v1/exec`, `GET /v1/exec/{id}`, no delete)
+        // offers no way to take one back. So the step in progress finishes and nothing after it
+        // begins.
+        RunStatus::Running => (
+            "next-step",
+            "That run is stopped. A step already under way — a model call, or a recipe playing on \
+             the computer — finishes first; nothing after it will be started.",
+        ),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "runId": run_id.as_str(),
+            "status": "stopped",
+            "takesEffect": takes_effect,
+            "note": note,
+        })),
+    )
+        .into_response()
 }
 
 /// Rebuild the conversation from what a run already emitted.
