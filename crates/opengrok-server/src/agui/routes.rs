@@ -2662,14 +2662,27 @@ pub async fn answer_run(
 
     // The answer is durable; now carry the run on. In the background, because a model call can
     // take minutes and the person clicking "approve" should not hold a socket open for it.
-    if request.approved
-        && let Some(pending) = pending
-    {
+    //
+    // A NO CARRIES ON TOO, AND THAT IS THE WHOLE POINT OF THIS BRANCH. `Answered` puts the run
+    // back to `Running` whether the answer was yes or no, because the refusal still has to reach
+    // the model so it can say something else — the aggregate says so where it applies the event.
+    // This route used to resume only on yes, so a denied run was left `Running` with nobody
+    // advancing it: the person saw a stop button over a turn nothing was doing, the model was
+    // never told it had been refused, and the recovery sweep eventually claimed the run as one a
+    // restart had abandoned and ended it with "we do not know whether it ran" — which is a lie
+    // about a refusal somebody made on purpose. Worse, the tool call was left with no result at
+    // all, so the next turn in that thread replayed a call nothing answered.
+    //
+    // The gateway's own answer path has done this from the start (`gateway::conversation`); the
+    // two doors on to the same run disagreed, and this is the one that was wrong.
+    let continuing = pending.is_some();
+    if let Some(pending) = pending {
+        let outcome = resume_outcome(request.approved, &pending);
         let state = state.clone();
         let account_id = account_id.clone();
         let run_id = run_id.clone();
         tokio::spawn(async move {
-            continue_run(state, account_id, run_id, pending, resumed_seq).await;
+            continue_run(state, account_id, run_id, pending, resumed_seq, outcome).await;
         });
     }
 
@@ -2678,9 +2691,49 @@ pub async fn answer_run(
         "callId": request.call_id,
         "approved": request.approved,
         "alreadyAnswered": false,
-        "continuing": request.approved,
+        // Whether anything is still going to happen on this run — which is what a client uses to
+        // decide whether to keep watching. A no is still something happening: the model is being
+        // told, and it answers. The one case where nothing follows is an answer that arrived with
+        // no pending call to answer.
+        "continuing": continuing,
     }))
     .into_response()
+}
+
+/// What the model is told about the card the person just answered.
+///
+/// A refusal names what was refused rather than saying "declined" alone, so the model can choose
+/// something else instead of proposing the same call again, and so the transcript says why. The
+/// words follow the gateway's, which has been saying them to the other door's runs all along.
+fn resume_outcome(
+    approved: bool,
+    pending: &opengrok_core::run::PendingApproval,
+) -> opengrok_harness::ResumeOutcome {
+    if approved {
+        return opengrok_harness::ResumeOutcome::Approved;
+    }
+    match pending.reason {
+        opengrok_core::run::SuspendReason::AutoReview => opengrok_harness::ResumeOutcome::Refused(
+            "the user declined this on the auto-review card".to_string(),
+        ),
+        opengrok_core::run::SuspendReason::PolicyApproval => {
+            opengrok_harness::ResumeOutcome::Refused(format!(
+                "the user declined this on the approval card: the coworker's policy needs a \
+                 person's yes before it may run {}",
+                pending.tool
+            ))
+        }
+        // Named rather than caught by a wildcard, so a fourth kind of card has to decide here
+        // what its refusal says instead of quietly borrowing this one's words.
+        opengrok_core::run::SuspendReason::ExecConsent => {
+            opengrok_harness::ResumeOutcome::Refused(format!(
+                "the user declined this on the approval card, so {} did not run. do not ask \
+                 for it again in this turn; say what you can do without it, or ask what to do \
+                 instead",
+                pending.tool
+            ))
+        }
+    }
 }
 
 /// How many times a stop will re-read and try again when somebody else wrote first.
@@ -2911,8 +2964,9 @@ async fn continue_run(
     state: AgUiState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
-    approved: opengrok_core::run::PendingApproval,
+    answered: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
+    outcome: opengrok_harness::ResumeOutcome,
 ) {
     let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
@@ -2928,15 +2982,21 @@ async fn continue_run(
         return;
     };
 
-    // The approved call, and only it — carried on the SAME runner every other path builds
+    // The answered call, and only it — carried on the SAME runner every other path builds
     // (plugins, the user's machine, auto-review). This path once built a bare executor of its
     // own and so resumed with no plugins and no review: a resumed call slipped every gate but the
     // grant's. Which yes it was decides which gate it releases.
-    let (gate_yes, review_yes): (&[String], &[String]) = match approved.reason {
+    //
+    // A refusal releases a gate it will not walk through, which is deliberate and is what the
+    // gateway's resume does too: `resume_conversation` never dispatches a refused call, it writes
+    // the refusal where the tool's result would have gone. Gating on the outcome here as well
+    // would be a second place to keep the same rule, and the place that already keeps it is the
+    // one that runs the call.
+    let (gate_yes, review_yes): (&[String], &[String]) = match answered.reason {
         opengrok_core::run::SuspendReason::AutoReview => {
-            (&[], std::slice::from_ref(&approved.call_id))
+            (&[], std::slice::from_ref(&answered.call_id))
         }
-        _ => (std::slice::from_ref(&approved.call_id), &[]),
+        _ => (std::slice::from_ref(&answered.call_id), &[]),
     };
     let Some(runner) = tools_for_coworker(
         &state,
@@ -2998,12 +3058,12 @@ async fn continue_run(
         opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
         opengrok_harness::Resumption {
             approved: opengrok_tools::ToolCall {
-                id: approved.call_id,
-                name: approved.tool,
-                arguments: approved.arguments,
+                id: answered.call_id,
+                name: answered.tool,
+                arguments: answered.arguments,
             },
             message_seq: resumed_seq,
-            outcome: opengrok_harness::ResumeOutcome::Approved,
+            outcome,
         },
     )
     .await;
@@ -3258,6 +3318,59 @@ mod tests {
             chosen_recipe_from(&bare).is_none(),
             "a blank id is not an id"
         );
+    }
+
+    #[test]
+    fn a_refusal_names_the_tool_and_the_card_that_refused_it() {
+        let pending = |reason| opengrok_core::run::PendingApproval {
+            call_id: "call-1".to_string(),
+            tool: "shell".to_string(),
+            arguments: json!({}),
+            reason,
+        };
+
+        // A yes is a yes whatever asked.
+        assert!(matches!(
+            resume_outcome(
+                true,
+                &pending(opengrok_core::run::SuspendReason::ExecConsent)
+            ),
+            opengrok_harness::ResumeOutcome::Approved
+        ));
+
+        // A no says which card, because the three cards mean different things and the model can
+        // only choose something else if it knows what it ran into.
+        // An approval coming back from a no would leave this empty, which every assertion below
+        // then fails on — said that way round because this module may not panic.
+        let said = |reason| match resume_outcome(false, &pending(reason)) {
+            opengrok_harness::ResumeOutcome::Refused(why) => why,
+            opengrok_harness::ResumeOutcome::Approved => String::new(),
+        };
+        let consent = said(opengrok_core::run::SuspendReason::ExecConsent);
+        assert!(!consent.is_empty(), "a no is not an approval");
+        assert!(consent.contains("shell"), "{consent}");
+        assert!(
+            consent.contains("did not run"),
+            "the model is told the call did not happen, not merely that somebody said no: \
+             {consent}"
+        );
+        let policy = said(opengrok_core::run::SuspendReason::PolicyApproval);
+        assert!(policy.contains("policy"), "{policy}");
+        assert!(policy.contains("shell"), "{policy}");
+        let review = said(opengrok_core::run::SuspendReason::AutoReview);
+        assert!(review.contains("auto-review"), "{review}");
+
+        // None of them blames the model or reads as an error. A refusal is a decision somebody
+        // made, and a sentence that sounds like a fault invites an apology and a retry.
+        for why in [consent, policy, review] {
+            let lower = why.to_ascii_lowercase();
+            for word in ["error", "failed", "sorry", "invalid"] {
+                assert!(
+                    !lower.contains(word),
+                    "a refusal must not read as a fault ({word}): {why}"
+                );
+            }
+        }
     }
 
     #[test]
