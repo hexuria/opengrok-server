@@ -1072,8 +1072,9 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 /// Append a suspension's card and pause the agent. `true` when a card went out; the caller then
 /// returns without finalising the turn as an answer.
 ///
-/// Also the AG-UI door (`POST /ag-ui`): NativeChat never calls `sendPrompt`, so the same helper
-/// has to run after that turn's streamed events or `POST /ag-ui/user-form/submit` has no `entryId`.
+/// Also the AG-UI door (`POST /ag-ui`): NativeChat never calls `sendPrompt` and never watches
+/// the gateway transcript live stream, so `AgUiSink` mints this card **before** the CUSTOM
+/// frame and stamps `entryId` on it. `POST /ag-ui/user-form/submit` uses that same id.
 pub(crate) async fn emit_suspension(
     state: &GatewayState,
     coworker_id: &CoworkerId,
@@ -1104,30 +1105,60 @@ pub(crate) async fn emit_suspension(
     true
 }
 
-/// After an AG-UI turn streamed a UserForm suspension, append the same gateway card `sendPrompt`
-/// would have. CUSTOM `run-awaiting-approval` already went out on the SSE; this does not replace
-/// it. Other suspension kinds stay AG-UI-only (`/ag-ui/runs/answer`) so a policy or exec card is
-/// not duplicated onto the transcript from this door.
-pub(crate) async fn emit_user_form_from_agui(
+/// NativeChat is AG-UI-first and never watches the gateway transcript live stream. When this
+/// CUSTOM is `run-awaiting-approval` / `reason: user-form`, mint the gateway card **first** so
+/// the id is stable, stamp `extra.entryId` (and `formRequest`, the sanitised schema the card
+/// already carries) onto the event, then append + live-emit the card. The SSE frame NativeChat
+/// receives therefore has the same id `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
+/// are left untouched. Idempotent if `entryId` is already present.
+pub(crate) async fn stamp_user_form_entry_id(
     state: &GatewayState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
-    events: &[opengrok_wire::agui::Event],
-) {
-    let Some(suspension) = find_suspension(events) else {
-        return;
-    };
-    if suspension.reason != opengrok_core::run::SuspendReason::UserForm {
-        return;
+    event: &mut opengrok_wire::agui::Event,
+) -> Option<String> {
+    if event.event_type != opengrok_wire::agui::EventType::Custom {
+        return None;
     }
-    let _ = emit_suspension(
-        state,
-        coworker_id,
-        account,
-        coworker_id.as_str(),
-        &suspension,
-    )
-    .await;
+    if event.extra.get("name").and_then(Value::as_str) != Some("run-awaiting-approval") {
+        return None;
+    }
+    if event.extra.get("reason").and_then(Value::as_str) != Some("user-form") {
+        return None;
+    }
+    if let Some(existing) = event
+        .extra
+        .get("entryId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(existing.to_string());
+    }
+    let suspension = find_suspension(std::slice::from_ref(event))?;
+    let card = card_for(&suspension)?;
+    let entry_id = card.get("id").and_then(Value::as_str)?.to_string();
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_gateway_entry(coworker_id, account, &card, now_ms())
+        .await
+    {
+        tracing::error!(%error, "could not append the suspension card entry");
+    }
+    live::emit_transcript(state, coworker_id.as_str(), account, "appended", card);
+    live::set_running(state, coworker_id.as_str(), false, json!({})).await;
+    event
+        .extra
+        .insert("entryId".to_string(), json!(entry_id.clone()));
+    // Same sanitised schema the card stores as `message.formRequest`. CUSTOM already has it
+    // as `arguments`; this alias is the field name TurnAssembler / the card already use.
+    if event.extra.get("formRequest").is_none()
+        && let Some(schema) = event.extra.get("arguments").cloned()
+    {
+        event.extra.insert("formRequest".to_string(), schema);
+    }
+    Some(entry_id)
 }
 
 /// The sentence a failed run leaves for the person, from the run's own failure event: the

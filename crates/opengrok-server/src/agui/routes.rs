@@ -558,11 +558,9 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
-/// `POST /ag-ui` lives on `GatewayState` so a UserForm suspension can append the same
-/// transcript card `sendPrompt` does. NativeChat never calls `sendPrompt`; without this
-/// there is no `entryId` for `POST /ag-ui/user-form/submit`. Other AG-UI routes stay on
-/// `AgUiState` — they do not write gateway cards. The SSE still forwards CUSTOM
-/// `run-awaiting-approval`; the card is additive.
+/// `POST /ag-ui` lives on `GatewayState` so a UserForm CUSTOM can mint the gateway card and
+/// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
+/// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
 pub fn run_router(state: crate::gateway::GatewayState) -> Router {
     Router::new().route("/ag-ui", post(run)).with_state(state)
 }
@@ -1933,8 +1931,9 @@ pub async fn run(
     Json(input): Json<RunAgentInput>,
 ) -> Response {
     // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
-    // `GatewayState` so a UserForm suspension can call `emit_suspension`; the rest of the turn
-    // still reads `agui` the same way every other AG-UI path does.
+    // `GatewayState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
+    // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
+    // AG-UI path does.
     let state = gateway.agui.clone();
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
@@ -2157,8 +2156,15 @@ pub async fn run(
     // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
     tokio::spawn(async move {
         let _lease = lease;
-        let sink = AgUiSink { tx };
-        let events = run_conversation_streaming(
+        // Card mint + `entryId` stamp happen inside the sink, **before** the CUSTOM frame
+        // is forwarded, so NativeChat sees the id on the AG-UI stream.
+        let sink = AgUiSink {
+            tx,
+            gateway,
+            coworker_id: journal.coworker_id.clone(),
+            account_id: journal.account_id.clone(),
+        };
+        let _ = run_conversation_streaming(
             door.as_ref(),
             tools.as_ref(),
             &journal,
@@ -2169,17 +2175,6 @@ pub async fn run(
             &sink,
         )
         .await;
-        // After CUSTOM `run-awaiting-approval` has been forwarded. The card is a gateway
-        // transcript entry, not an AG-UI frame — NativeChat keeps both.
-        if let (Some(account_id), Some(coworker_id)) = (&journal.account_id, &journal.coworker_id) {
-            crate::gateway::conversation::emit_user_form_from_agui(
-                &gateway,
-                coworker_id,
-                account_id,
-                &events,
-            )
-            .await;
-        }
     });
     sse(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
@@ -3255,18 +3250,32 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 /// Live AG-UI frames, forwarded as they are produced. Dropping the HTTP body closes the
 /// channel; the spawned turn still runs so a disconnect does not abandon the journal.
 ///
-/// This sink does not write gateway transcript cards. A UserForm suspension still streams
-/// CUSTOM `run-awaiting-approval` here; `emit_user_form_from_agui` appends the `user-form`
-/// entry after the turn, so `POST /ag-ui/user-form/submit` has an `entryId`.
+/// A UserForm CUSTOM is stamped with `entryId` here, **before** the frame is sent: mint the
+/// gateway card first (same `user_form_card` / sanitize as `sendPrompt`), then forward
+/// `name: run-awaiting-approval` + `reason: user-form` + that id. NativeChat never watches
+/// the transcript live stream, so an after-the-fact append does not unblock them.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    gateway: crate::gateway::GatewayState,
+    coworker_id: Option<CoworkerId>,
+    account_id: Option<opengrok_core::id::AccountId>,
 }
 
 #[async_trait::async_trait]
 impl EventSink for AgUiSink {
     async fn emit(&self, events: &[Event]) {
         for event in events {
-            if self.tx.send(event.clone()).is_err() {
+            let mut event = event.clone();
+            if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id) {
+                crate::gateway::conversation::stamp_user_form_entry_id(
+                    &self.gateway,
+                    coworker_id,
+                    account_id,
+                    &mut event,
+                )
+                .await;
+            }
+            if self.tx.send(event).is_err() {
                 break;
             }
         }
@@ -3613,5 +3622,58 @@ mod tests {
             assert!(frame.starts_with("data: "));
             assert_eq!(frame.matches("\n\n").count(), 1, "{frame:?}");
         }
+    }
+
+    /// NativeChat mounts CUSTOM `run-awaiting-approval` + `reason: user-form`. `entryId` is a
+    /// flattened extra field (same envelope as `callId` / `reason`), not a nested object.
+    #[test]
+    fn a_user_form_custom_frame_carries_entry_id_at_the_top_level() {
+        let event = Event::new(EventType::Custom, 42)
+            .with("name", "run-awaiting-approval")
+            .with("threadId", "thr-1")
+            .with("runId", "run-1")
+            .with("callId", "mock-form-1")
+            .with("tool", "request_user_form")
+            .with("reason", "user-form")
+            .with("why", "Waiting for you")
+            .with("entryId", "e_form")
+            .with(
+                "arguments",
+                json!({
+                    "title": "Google account",
+                    "instruction": "Enter the address and password.",
+                    "liveHost": "accounts.google.com",
+                    "fields": [{
+                        "id": "email",
+                        "label": "Email",
+                        "type": "email",
+                        "required": true,
+                        "secret": false
+                    }]
+                }),
+            )
+            .with(
+                "formRequest",
+                json!({
+                    "title": "Google account",
+                    "instruction": "Enter the address and password.",
+                    "liveHost": "accounts.google.com",
+                    "fields": [{
+                        "id": "email",
+                        "label": "Email",
+                        "type": "email",
+                        "required": true,
+                        "secret": false
+                    }]
+                }),
+            );
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "CUSTOM");
+        assert_eq!(wire["name"], "run-awaiting-approval");
+        assert_eq!(wire["reason"], "user-form");
+        assert_eq!(wire["entryId"], "e_form");
+        assert_eq!(wire["formRequest"]["title"], "Google account");
+        assert_eq!(wire["arguments"]["title"], "Google account");
+        assert!(wire.get("values").is_none());
     }
 }

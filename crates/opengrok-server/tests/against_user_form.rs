@@ -5,7 +5,7 @@
 //! settles `formResolution`, and the secret is absent from the entry, the transcript, and
 //! history. `submitSecret` still drops its value and does not type. The AG-UI REST twin
 //! authenticates with an account bearer. A turn that starts on `POST /ag-ui` (no `sendPrompt`)
-//! still appends a gateway `user-form` entry so submit has an `entryId`.
+//! stamps `entryId` on CUSTOM `run-awaiting-approval` so NativeChat can submit from the SSE.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -581,10 +581,10 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
         .expect("post ag-ui");
     assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
     let sse = res.text().await.expect("sse");
-    // CUSTOM stays on the AG-UI SSE; the gateway card is a separate transcript entry.
-    // TOOL_CALL_ARGS is the model's raw delta (the mock smuggles `values` there on purpose);
-    // sanitise is on collect / CUSTOM arguments / the card, not the token stream.
-    let mut saw_custom = false;
+    // NativeChat mounts this CUSTOM frame. `entryId` must be on the SSE, not only on the
+    // gateway transcript: they never watch `transcript:{agentId}`. TOOL_CALL_ARGS is the
+    // model's raw delta (the mock smuggles `values` there on purpose).
+    let mut custom_entry_id = None;
     for chunk in sse.split("\n\n") {
         let Some(payload) = chunk.lines().find_map(|line| line.strip_prefix("data: ")) else {
             continue;
@@ -593,7 +593,6 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
             continue;
         };
         if event["type"] == "CUSTOM" && event["name"] == "run-awaiting-approval" {
-            saw_custom = true;
             assert_eq!(event["reason"], "user-form", "{event}");
             let dump = event.to_string();
             assert!(
@@ -607,19 +606,34 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
                     .is_none(),
                 "values must not sit on CUSTOM: {event}"
             );
+            assert_eq!(
+                event.get("formRequest"),
+                event.get("arguments"),
+                "formRequest is the same sanitised schema: {event}"
+            );
+            let id = event["entryId"]
+                .as_str()
+                .expect("CUSTOM extra.entryId")
+                .to_string();
+            assert!(id.starts_with("e_"), "entryId is a gateway entry id: {id}");
+            custom_entry_id = Some(id);
         }
     }
-    assert!(saw_custom, "CUSTOM must still stream: {sse}");
+    let entry_id = custom_entry_id.expect("CUSTOM must still stream with entryId");
 
     let card = h.wait_for_form(&agent).await;
     assert_eq!(card["kind"], "send-message");
     assert_eq!(card["message"]["type"], "user-form");
+    assert_eq!(
+        card["id"].as_str().expect("card id"),
+        entry_id.as_str(),
+        "SSE entryId is the gateway card id"
+    );
     let pending_dump = card.to_string();
     assert!(
         !pending_dump.contains("s3cret-should-never-land"),
         "the model's smuggled values must not sit on the entry: {pending_dump}"
     );
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
 
     let res = h
         .client
