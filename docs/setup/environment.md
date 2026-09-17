@@ -26,7 +26,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_MODEL_DOOR` | gateway | **which door every model call leaves by — see the table below.** `mock` scripts a stream (CI, no spend); `mock-cards` serves the fixture catalogue; `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); `rig` goes through rig-core; anything else — including unset — is the direct `GatewayDoor` |
+| `OG_MODEL_DOOR` | gateway | **which door every model call leaves by — see the table below.** `mock` scripts a stream (CI, no spend); `mock-cards` serves the fixture catalogue; `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); anything else — including unset — is the direct `GatewayDoor` |
 | `OG_GATEWAY_URL` | `http://127.0.0.1:29080` | open-ai-gateway's inference listener |
 | `OG_GATEWAY_TOKEN` | — | an `oag_live_…` key. **Never a provider key** — a pin is a route, not a credential (CLAUDE.md #4) |
 | `OG_MODEL` | `gpt-5.6-luna` | the route a NEW coworker is hired on when none is named. Each coworker then keeps its own pin (changeable in the console at `/console/coworkers`), so changing this retargets nothing existing. Dialect: `provider/model` (`openai/gpt-5.5`), `@api`/`@sub`, or a ladder id (`oag/auto`); a bare name works on a passthrough route. **Servable and advertised are independent, in both directions.** An advertised id is not necessarily servable — `oag/auto` is refused on a route with no credential for the rung it picks; `POST /models/probe` proves a pin before it is saved. And the reverse: a **servable id need not be advertised** — `/v1/models` is built from each provider's own model listing, and xAI's returns quota with no model list, so `xai/grok-4.6` serves perfectly while never appearing in the picker. Do not "fix" a working default because the picker does not list it |
@@ -40,7 +40,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 | `OG_MODEL_DOOR` | Real models? | Use it for |
 |---|---|---|
 | unset / `gateway` | yes | **the default, and the one to use.** Speaks the gateway's OpenAI-compatible route directly and sends `"model": request.model`, so a coworker's pin is honoured and the gateway logs `reason=Passthrough` |
-| `rig` | yes | **avoid.** Goes through rig-core and does NOT transmit the model, so the gateway sees a modelless request, classifies it by policy, and answers on whatever rung the classifier picks. Every pin is silently ignored. It cost a night on 8 Sep 2026: turns "worked" while a coworker pinned to xAI was being answered by whatever tier the prompt happened to classify into |
+| `rig` | — | **gone.** It went through rig-core and did NOT transmit the model, so the gateway saw a modelless request, classified it by policy, and answered on whatever rung the classifier picked. Every pin was silently ignored, which cost a night on 8 Sep 2026: turns "worked" while a coworker pinned to xAI was being answered by whatever tier the prompt happened to classify into. The door was removed rather than left behind a warning, because a footgun with a note next to it is still a footgun. `rig` now falls through to `gateway` like any other unrecognised value |
 | `mock-cards` | no | UI and card-rendering work. Serves the fixture catalogue (`help` lists it). Needs the `mock-fixtures` feature or it refuses to boot |
 | `mock` / `mock-tools` | no | CI, and the consent-card path with no spend |
 
