@@ -112,6 +112,44 @@ fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<
         .collect()
 }
 
+/// The recipe the person picked in the composer this turn, and the values they typed for it.
+///
+/// A person who chose a recipe and filled in its fields has said something more definite than a
+/// sentence: they named the task and its inputs. Carrying that through means the model does not
+/// have to infer a search term from prose — which is exactly how one turn came to search a word
+/// lifted from the conversation instead of the one that was asked for.
+fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String, String>)> {
+    let recipe = input
+        .forwarded_props
+        .get("recipe")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?
+        .to_string();
+    let values = input
+        .forwarded_props
+        .get("recipeValues")
+        .and_then(|value| value.as_object())
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(name, value)| {
+                    // A value is text by the time it reaches a step, but a client may send a
+                    // number or a boolean as itself rather than as a string.
+                    let text = match value {
+                        serde_json::Value::String(text) => text.clone(),
+                        serde_json::Value::Number(number) => number.to_string(),
+                        serde_json::Value::Bool(flag) => flag.to_string(),
+                        _ => return None,
+                    };
+                    Some((name.clone(), text))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((recipe, values))
+}
+
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
     input
         .forwarded_props
@@ -1830,7 +1868,7 @@ pub async fn run(
     let tools = match &account_id {
         Some(account_id) => match &run_coworker {
             Some(coworker_id) => {
-                tools_for_coworker(
+                let runner = tools_for_coworker(
                     &state,
                     account_id,
                     coworker_id,
@@ -1838,7 +1876,13 @@ pub async fn run(
                     &[],
                     TURN_WAKE_PATIENCE,
                 )
-                .await
+                .await;
+                match (runner, chosen_recipe_from(&input)) {
+                    (Some(runner), Some((recipe, values))) => {
+                        Some(runner.with_chosen_recipe(recipe, values))
+                    }
+                    (runner, _) => runner,
+                }
             }
             None => None,
         },
@@ -2703,6 +2747,45 @@ mod tests {
             forwarded_props: json!(null),
             extra: Default::default(),
         }
+    }
+
+    #[test]
+    fn the_recipe_a_person_chose_is_read_off_the_request() {
+        let mut bare = input(Vec::new());
+        assert!(
+            chosen_recipe_from(&bare).is_none(),
+            "no props, nothing chosen"
+        );
+
+        bare.forwarded_props = json!({ "coworkerId": "cw_1" });
+        assert!(chosen_recipe_from(&bare).is_none(), "no recipe key");
+
+        // No values is a chosen recipe all the same: a recipe may declare nothing, and one that
+        // declares something still refuses later by name rather than being ignored here.
+        bare.forwarded_props = json!({ "recipe": "rcp_1" });
+        let (recipe, values) = chosen_recipe_from(&bare).unwrap();
+        assert_eq!(recipe, "rcp_1");
+        assert!(values.is_empty());
+
+        // A client may send a number or a boolean as itself; a step types text either way.
+        bare.forwarded_props = json!({
+            "recipe": "rcp_1",
+            "recipeValues": { "q": "mundo", "count": 3, "loud": true, "junk": ["no"] }
+        });
+        let (_, values) = chosen_recipe_from(&bare).unwrap();
+        assert_eq!(values.get("q").map(String::as_str), Some("mundo"));
+        assert_eq!(values.get("count").map(String::as_str), Some("3"));
+        assert_eq!(values.get("loud").map(String::as_str), Some("true"));
+        assert!(
+            !values.contains_key("junk"),
+            "a list is not a value for a field"
+        );
+
+        bare.forwarded_props = json!({ "recipe": "   " });
+        assert!(
+            chosen_recipe_from(&bare).is_none(),
+            "a blank id is not an id"
+        );
     }
 
     #[test]
