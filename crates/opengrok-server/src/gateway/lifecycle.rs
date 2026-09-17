@@ -920,12 +920,26 @@ async fn automation_json(
         .unwrap_or_default()
         .into_iter()
         .map(|run| {
-            let (status, finished_at) = match run.status.as_str() {
-                "finished" => ("ok", Some(run.updated_at_ms)),
-                "failed" => ("error", Some(run.updated_at_ms)),
+            let (status, finished_at, detail) = match run.status.as_str() {
+                "finished" => ("ok", Some(run.updated_at_ms), None),
+                "failed" => (
+                    "error",
+                    Some(run.updated_at_ms),
+                    Some("The run failed. Its run log has the reason."),
+                ),
+                // SOMEBODY STOPPED IT, AND THE PANE HAS THREE WORDS. This run ENDED and did not do
+                // its work, so "running" would spin forever and "ok" would claim it succeeded;
+                // "error" is the nearest of the three and the detail line is what keeps it from
+                // reading as a failure the coworker committed. The run's own log says `stopped`,
+                // which is where the distinction actually lives.
+                "stopped" => (
+                    "error",
+                    Some(run.updated_at_ms),
+                    Some("This run was stopped."),
+                ),
                 // Running, or paused on a card — the pane has no word for "waiting", and
                 // "running" is the one that keeps it from reading as done.
-                _ => ("running", None),
+                _ => ("running", None, None),
             };
             let trigger = if webhook_runs.contains(run.id.as_str()) {
                 "webhook"
@@ -941,8 +955,8 @@ async fn automation_json(
                 "finishedAt": finished_at,
                 "status": status,
             });
-            if status == "error" {
-                entry["detail"] = json!("The run failed. Its run log has the reason.");
+            if let Some(detail) = detail {
+                entry["detail"] = json!(detail);
             }
             entry
         })

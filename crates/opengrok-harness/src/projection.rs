@@ -289,6 +289,35 @@ impl Projection {
         events
     }
 
+    /// End the run because a person stopped it.
+    ///
+    /// TWO FRAMES, AND BOTH ARE NEEDED. AG-UI has no `RUN_STOPPED`, and the two endings it does
+    /// have both say the wrong thing on their own: `RUN_ERROR` paints a failure the coworker did
+    /// not commit, and a bare `RUN_FINISHED` claims the turn ran to completion. So the reason
+    /// travels as a `CUSTOM` frame — the same way `run-awaiting-approval` does — and `RUN_FINISHED`
+    /// follows it to close the stream, because a consumer holds its spinner open on that promise
+    /// and a stop that leaves the dots turning is not a stop anybody can see.
+    pub fn stopped(&mut self) -> Vec<Event> {
+        let mut events = self.start();
+        if self.finished {
+            return Vec::new();
+        }
+        events.extend(self.close_open());
+        self.finished = true;
+        events.push(
+            self.event(EventType::Custom)
+                .with("name", "run-stopped")
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone()),
+        );
+        events.push(
+            self.event(EventType::RunFinished)
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone()),
+        );
+        events
+    }
+
     /// End the run badly. Still closes what is open first: a consumer that never receives the end
     /// of a message it was told about renders a bubble that streams forever.
     pub fn fail(&mut self, message: impl Into<String>) -> Vec<Event> {

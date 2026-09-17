@@ -356,12 +356,7 @@ impl PgStore {
         )
         .bind(view.id.as_str())
         .bind(&view.thread_id)
-        .bind(match view.status {
-            RunStatus::Running => "running",
-            RunStatus::AwaitingApproval => "awaiting-approval",
-            RunStatus::Finished => "finished",
-            RunStatus::Failed => "failed",
-        })
+        .bind(view.status.as_str())
         .bind(view.event_count)
         .bind(view.updated_at_ms)
         .bind(account_id.map(|id| id.as_str()))
@@ -370,6 +365,25 @@ impl PgStore {
 
         tx.commit().await?;
         Ok(seq)
+    }
+
+    /// What the projection says this run's status is, without replaying its log.
+    ///
+    /// A primary-key lookup rather than `load_run`, because this is asked at every step boundary of
+    /// a running turn to find out whether somebody has stopped it: replaying the whole event stream
+    /// to read one word would grow with the length of the conversation and be paid for on the hot
+    /// path. `None` means the projection has never heard of this run.
+    pub async fn run_status(&self, id: &RunId) -> StoreResult<Option<RunStatus>> {
+        let row = sqlx::query("select status from run_view where id = $1")
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(row) => Ok(Some(RunStatus::from_stored(
+                &row.try_get::<String, _>("status")?,
+            ))),
+            None => Ok(None),
+        }
     }
 
     /// Is this run readable by this account?

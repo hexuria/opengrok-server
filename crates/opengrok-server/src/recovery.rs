@@ -87,7 +87,13 @@ async fn resolve(state: &AgUiState, run_id: &RunId) -> Result<(), opengrok_store
     let (run, seq) = state.auth.store.load_run(run_id).await?;
 
     // Already settled by somebody else between the claim and now.
-    if matches!(run.status, RunStatus::Finished | RunStatus::Failed) {
+    //
+    // A STOPPED RUN COUNTS AS SETTLED, and this line is what makes a stop a stop. The projection
+    // already keeps stopped runs out of `claim_abandoned_runs` (it claims `status = 'running'`
+    // only), so reaching here with one means the claim and the stop crossed — and failing it now
+    // would rewrite somebody's deliberate stop as "interrupted by a restart", which is both untrue
+    // and exactly the answer the person was trying not to get.
+    if run.status.is_terminal() {
         return Ok(());
     }
     // Waiting on a person is not abandonment — it is the run doing exactly what it should.

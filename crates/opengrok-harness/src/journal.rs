@@ -26,6 +26,22 @@ pub trait RunJournal: Send + Sync {
     /// Record events for `run_id`. Must not return until they are durable: the loop treats a
     /// return as permission to continue, and continuing on a lie is how work is lost.
     async fn record(&self, run_id: &str, events: &[Event]) -> Result<(), JournalError>;
+
+    /// Has somebody stopped this run?
+    ///
+    /// ASKED OF THE JOURNAL BECAUSE THE JOURNAL IS WHERE A STOP IS WRITTEN DOWN. A stop is not a
+    /// message passed between two tasks that happen to be in the same process: it is a person
+    /// pressing a button, recorded in the run's log before anything is said back to them. Reading
+    /// it from the same place the run's events go means a stop reaches the turn whether the turn is
+    /// in the process that took the request, in another replica, or in a process that has since
+    /// restarted — and it means there is no second copy of "is this run still going" to disagree
+    /// with the log.
+    ///
+    /// Asked at step boundaries, so it must be cheap — a primary-key read, never a replay. A
+    /// journal that cannot answer says `false`: a database hiccup must stop nothing.
+    async fn stopped(&self, _run_id: &str) -> bool {
+        false
+    }
 }
 
 /// Keeps events in memory. For tests, and for a caller that has chosen not to persist.

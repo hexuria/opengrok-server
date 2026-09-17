@@ -33,6 +33,46 @@ pub enum RunStatus {
     AwaitingApproval,
     Finished,
     Failed,
+    /// A person changed their mind and stopped it. Terminal, and DELIBERATELY NOT `Failed`: a stop
+    /// is somebody pressing a button, not the run going wrong. Flattening the two would make every
+    /// later answer to "why did this run fail" name a failure that never happened, and would leave
+    /// the one number that matters — how often a coworker actually breaks — unreadable.
+    Stopped,
+}
+
+impl RunStatus {
+    /// Has this run ended for good? A terminal run accepts no further ending: it cannot be
+    /// finished, failed or stopped again, whatever arrives late.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished | Self::Failed | Self::Stopped)
+    }
+
+    /// The word the wire and the projection use. One place, because three readers spelling a
+    /// status differently is how a client comes to believe a run is still going.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::AwaitingApproval => "awaiting-approval",
+            Self::Finished => "finished",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// From the stored word. Anything unrecognised reads as `Running`, which is the open reading:
+    /// a status we cannot understand must not be mistaken for an ending that lets work be dropped.
+    #[must_use]
+    pub fn from_stored(word: &str) -> Self {
+        match word {
+            "awaiting-approval" => Self::AwaitingApproval,
+            "finished" => Self::Finished,
+            "failed" => Self::Failed,
+            "stopped" => Self::Stopped,
+            _ => Self::Running,
+        }
+    }
 }
 
 /// WHY a run is waiting. Two different cards can now come from the same tool — the machine owner's
@@ -125,6 +165,15 @@ pub enum RunEvent {
         reason: String,
         at_ms: i64,
     },
+    /// A person stopped it. Its own event rather than a `Failed` with a special reason, because a
+    /// reason string is not a status: everything that counts failures — the routines pane, a
+    /// future reliability number, whoever is asked why a coworker keeps breaking — reads the
+    /// status and would count this one. `by` is recorded for the same reason `Answered` records
+    /// it: a decision nobody is attached to cannot be audited.
+    Stopped {
+        by: String,
+        at_ms: i64,
+    },
 }
 
 impl RunEvent {
@@ -136,6 +185,7 @@ impl RunEvent {
             Self::Answered { .. } => "run-answered",
             Self::Finished { .. } => "run-finished",
             Self::Failed { .. } => "run-failed",
+            Self::Stopped { .. } => "run-stopped",
         }
     }
 }
@@ -153,6 +203,9 @@ pub struct Run {
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
     pub failure: Option<String>,
+    /// Who stopped it, when somebody did. `None` on every other run, which is how a reader tells
+    /// "nobody stopped this" from "stopped by somebody we did not write down".
+    pub stopped_by: Option<String>,
     /// The call waiting on a person, if any.
     pub pending: Option<PendingApproval>,
     /// Calls that have already been answered.
@@ -174,6 +227,7 @@ impl Default for Run {
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
+            stopped_by: None,
             pending: None,
             answered: BTreeSet::new(),
         }
@@ -230,6 +284,12 @@ pub enum RunCommand {
         tool: String,
         arguments: Value,
         reason: SuspendReason,
+        at_ms: i64,
+    },
+    /// A person changed their mind. Ends the run without calling it a failure.
+    Stop {
+        /// Who pressed the button.
+        by: String,
         at_ms: i64,
     },
     /// A person answered. Refused if that call was already answered — the exactly-once check.
@@ -296,6 +356,14 @@ impl Run {
                 self.status = RunStatus::Failed;
                 self.failure = Some(reason.clone());
             }
+            RunEvent::Stopped { by, .. } => {
+                self.status = RunStatus::Stopped;
+                self.stopped_by = Some(by.clone());
+                // The card is moot. A person who stopped the run is not going to answer the
+                // question it was waiting on, and leaving it pending would keep the run in the
+                // approvals list of somebody who has already said no to the whole thing.
+                self.pending = None;
+            }
         }
     }
 
@@ -344,6 +412,15 @@ impl Run {
                 // Appending to a finished run would let a late frame arrive after the ending a
                 // client already acted on. A SUSPENDED run may still be appended to — that is the
                 // whole point of suspending rather than ending.
+                //
+                // A STOPPED RUN MAY STILL BE APPENDED TO, and the asymmetry with `Finished` is
+                // deliberate. `Finished` and `Failed` are the run declaring its OWN ending: by the
+                // time either is in the log, nothing is still producing frames. A stop is declared
+                // from outside, by a person, while the turn is mid-step — and the turn is journaled
+                // a whole round at a time, so the round it was in the middle of arrives *after* the
+                // stop lands. Refusing it would drop exactly the frames the person was looking at
+                // when they pressed the button. What a stopped run refuses is another ENDING, which
+                // is what makes it terminal.
                 if matches!(self.status, RunStatus::Finished | RunStatus::Failed) {
                     return Err(RunError::AlreadyEnded);
                 }
@@ -355,17 +432,28 @@ impl Run {
             }
 
             RunCommand::Finish { at_ms } => {
-                if matches!(self.status, RunStatus::Finished | RunStatus::Failed) {
+                if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
                 Ok(vec![RunEvent::Finished { at_ms }])
             }
 
             RunCommand::Fail { reason, at_ms } => {
-                if matches!(self.status, RunStatus::Finished | RunStatus::Failed) {
+                if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
                 Ok(vec![RunEvent::Failed { reason, at_ms }])
+            }
+
+            // THE PERSON PRESSED THE BUTTON; WHETHER THEY WON THE RACE WITH THE MODEL IS NOT THEIR
+            // PROBLEM. `AlreadyEnded` on a run that has already ended is what the caller turns into
+            // a success, so stopping twice, stopping a run that finished a moment ago, and stopping
+            // one a restart failed all mean the same thing to whoever asked: it is not running.
+            RunCommand::Stop { by, at_ms } => {
+                if self.status.is_terminal() {
+                    return Err(RunError::AlreadyEnded);
+                }
+                Ok(vec![RunEvent::Stopped { by, at_ms }])
             }
 
             RunCommand::Suspend {
@@ -375,7 +463,9 @@ impl Run {
                 reason,
                 at_ms,
             } => {
-                if matches!(self.status, RunStatus::Finished | RunStatus::Failed) {
+                // A stopped run counts here too: a run nobody is going to carry on must not open a
+                // card asking somebody to decide whether to carry it on.
+                if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
                 Ok(vec![RunEvent::Suspended {
@@ -785,6 +875,209 @@ mod tests {
             }),
             Err(RunError::AlreadyAnswered),
             "a restarted process must not accept a second answer"
+        );
+    }
+
+    /// A STOP IS NOT A FAILURE. The status says stopped and nothing is recorded as a failure
+    /// reason, so "why did this run fail" never has to answer for somebody changing their mind.
+    #[test]
+    fn stopping_is_its_own_ending_and_not_a_failure() {
+        let mut run = started();
+        for event in run
+            .decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 20,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert_eq!(run.status, RunStatus::Stopped);
+        assert_eq!(run.failure, None, "a stop has no failure to report");
+        assert_eq!(run.stopped_by.as_deref(), Some("acct_1"));
+        assert!(run.status.is_terminal());
+    }
+
+    /// Idempotence, from the aggregate's side: every attempt after the first says the run has
+    /// already ended, which is what the route turns into a success.
+    #[test]
+    fn a_stopped_run_refuses_every_further_ending() {
+        let mut run = started();
+        for event in run
+            .decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 20,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        for attempt in [
+            RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 21,
+            },
+            RunCommand::Finish { at_ms: 22 },
+            RunCommand::Fail {
+                reason: "late".to_string(),
+                at_ms: 23,
+            },
+        ] {
+            assert_eq!(run.decide(attempt), Err(RunError::AlreadyEnded));
+        }
+        assert_eq!(
+            run.status,
+            RunStatus::Stopped,
+            "and the outcome is unchanged"
+        );
+    }
+
+    /// Stopping a run that already ended must not rewrite what happened to it.
+    #[test]
+    fn stopping_a_finished_run_leaves_its_outcome_alone() {
+        let mut run = started();
+        for event in run.decide(RunCommand::Finish { at_ms: 20 }).unwrap() {
+            run.apply(&event);
+        }
+        assert_eq!(
+            run.decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 21,
+            }),
+            Err(RunError::AlreadyEnded)
+        );
+        assert_eq!(run.status, RunStatus::Finished);
+
+        let mut failed = started();
+        for event in failed
+            .decide(RunCommand::Fail {
+                reason: "upstream hung up".to_string(),
+                at_ms: 20,
+            })
+            .unwrap()
+        {
+            failed.apply(&event);
+        }
+        assert_eq!(
+            failed.decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 21,
+            }),
+            Err(RunError::AlreadyEnded)
+        );
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.failure.as_deref(), Some("upstream hung up"));
+    }
+
+    /// THE FRAMES THE TURN WAS MID-ROUND ON ARE STILL THE RECORD. The loop journals a whole round
+    /// at a time, so the round in progress when somebody pressed stop lands after the stop does;
+    /// refusing it would end the transcript one step before the moment the person was watching.
+    #[test]
+    fn frames_still_in_flight_when_the_stop_landed_are_kept() {
+        let mut run = started();
+        for event in run
+            .decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 20,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        let events = run
+            .decide(RunCommand::Emit {
+                payload: json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "half a sentence"}),
+                at_ms: 21,
+            })
+            .unwrap();
+        for event in &events {
+            run.apply(event);
+        }
+        assert_eq!(run.emitted.len(), 1);
+        assert_eq!(
+            run.status,
+            RunStatus::Stopped,
+            "a late frame does not un-stop the run"
+        );
+    }
+
+    /// Stopping while a card is open is the case the button exists for as much as any other, and
+    /// the card must not outlive the run it was asking about.
+    #[test]
+    fn stopping_a_run_that_was_waiting_closes_its_card() {
+        let mut run = suspended();
+        for event in run
+            .decide(RunCommand::Stop {
+                by: "acct_1".to_string(),
+                at_ms: 20,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert_eq!(run.status, RunStatus::Stopped);
+        assert!(run.pending.is_none(), "the question is moot");
+        assert_eq!(
+            run.decide(RunCommand::Answer {
+                call_id: "c1".to_string(),
+                approved: true,
+                by: "acct_1".to_string(),
+                at_ms: 21,
+            }),
+            Err(RunError::NotAwaiting),
+            "and answering it cannot restart the run"
+        );
+    }
+
+    /// The whole point of the log: a process that comes back must reach the same conclusion, or a
+    /// stop is undone by a restart.
+    #[test]
+    fn a_stop_survives_a_replay() {
+        let log = vec![
+            RunEvent::Started {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: None,
+                system: None,
+                at_ms: 1,
+            },
+            RunEvent::Emitted {
+                seq: 0,
+                payload: json!({ "type": "RUN_STARTED" }),
+                at_ms: 2,
+            },
+            RunEvent::Stopped {
+                by: "acct_1".to_string(),
+                at_ms: 3,
+            },
+        ];
+        let run = Run::replay(&log);
+        assert_eq!(run.status, RunStatus::Stopped);
+        assert_eq!(run.emitted.len(), 1, "and nothing it emitted was lost");
+        assert_eq!(
+            run.decide(RunCommand::Finish { at_ms: 4 }),
+            Err(RunError::AlreadyEnded),
+            "a restarted process must not finish a run somebody stopped"
+        );
+    }
+
+    /// The stored word round-trips, because the projection is read back as a status and a
+    /// misreading would put a stopped run back in front of the recovery sweep.
+    #[test]
+    fn the_stored_status_word_round_trips() {
+        for status in [
+            RunStatus::Running,
+            RunStatus::AwaitingApproval,
+            RunStatus::Finished,
+            RunStatus::Failed,
+            RunStatus::Stopped,
+        ] {
+            assert_eq!(RunStatus::from_stored(status.as_str()), status);
+        }
+        assert_eq!(
+            RunStatus::from_stored("something we have never heard of"),
+            RunStatus::Running,
+            "an unreadable status must not be mistaken for an ending"
         );
     }
 
