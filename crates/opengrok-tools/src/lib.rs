@@ -23,6 +23,8 @@ pub use review::{
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
+pub mod workflow;
+pub use workflow::Workflow;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -298,14 +300,16 @@ pub trait RecipeSource: Send + Sync {
         recipe_id: &str,
         values: &opengrok_recipes::Values,
     ) -> Result<(i32, Value), String>;
-    /// Write the run down.
+    /// Write the run down, and say what id it was written under — what a workflow's trail points
+    /// at, so a person reading a branch can open the recipe run that branch actually made.
+    /// `None` from an implementation that keeps no history to point at.
     async fn record_run(
         &self,
         recipe_id: &str,
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
-    );
+    ) -> Option<String>;
 }
 
 /// The arguments `run_recipe` accepts.
@@ -1078,7 +1082,7 @@ impl Executor {
             Ok(raw) => RecipeReceipt::from_value(raw),
             Err(error) => return ToolResult::refused(call_id, describe(error)),
         };
-        source
+        let _ = source
             .record_run(recipe_id, version, &context.coworker_id, &receipt)
             .await;
         let mut result = if receipt.ok {
@@ -2670,10 +2674,11 @@ mod tests {
             version: i32,
             _by: &CoworkerId,
             receipt: &RecipeReceipt,
-        ) {
+        ) -> Option<String> {
             if let Ok(mut runs) = self.runs.lock() {
                 runs.push((recipe_id.to_string(), version, receipt.ok));
             }
+            Some(format!("rrun_spy_{recipe_id}"))
         }
     }
 
