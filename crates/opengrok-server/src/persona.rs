@@ -230,7 +230,14 @@ pub fn computer_system_prompt(
                  coordinates (click, right_click, double_click, move, drag, type, key, scroll) and \
                  returns a fresh screenshot. Take a screenshot before you act, do one step at a \
                  time, and read each screenshot before the next step. The user can watch your \
-                 screen, so say what you see and what you are doing.",
+                 screen, so say what you see and what you are doing. DO WHAT WAS ASKED, THEN \
+                 STOP. Finishing is a step: when the thing you were asked for is on the screen, \
+                 say so and stop, rather than looking for the next thing that could be done. \
+                 Opening what you found, dismissing what appeared, or tidying up afterwards are \
+                 new requests, and they are the user's to make. If an action did not do what you \
+                 expected, do NOT repeat it unchanged — the same action on the same screen gives \
+                 the same result. Say what you see instead, and either try something different \
+                 or ask.",
             );
         }
         if has_screen && has_recipes {
@@ -241,7 +248,12 @@ pub fn computer_system_prompt(
                  step. When a request matches a recipe's description, run it with `run_recipe` \
                  (one call, the whole task) instead of clicking through it yourself, then read \
                  the screenshot it returns and say which recipe you used. If it stops part way, \
-                 say at which step and finish by hand with `computer`.",
+                 say at which step and finish by hand with `computer`. RUN A GIVEN RECIPE AT \
+                 MOST ONCE PER REQUEST. A recipe replays a fixed sequence, so running it again \
+                 repeats what it already did rather than correcting it: a second run types the \
+                 same words into a field that already holds them. If the screenshot does not \
+                 show what you expected, say what you actually see and either finish by hand or \
+                 ask — never play the recipe again.",
             );
         }
         if reaches_user_machine {
@@ -577,5 +589,39 @@ mod tests {
         values.insert("search_term".to_string(), "mundo".to_string());
         assert!(chosen_recipe_line("", &values).is_empty());
         assert!(chosen_recipe_line("   ", &values).is_empty());
+    }
+
+    /// THE BUG THIS EXISTS FOR. A bot ran one taught recipe 25 times in a row, each run
+    /// reporting success, until the box's search field read the search term twice over. Nothing
+    /// in the prompt said when to stop, and nothing said that replaying a fixed sequence repeats
+    /// it rather than correcting it.
+    #[test]
+    fn a_screen_comes_with_a_reason_to_stop() {
+        let prompt = computer_system_prompt(true, true, false, false, None);
+        assert!(prompt.contains("DO WHAT WAS ASKED, THEN STOP"), "{prompt}");
+        assert!(prompt.contains("do NOT repeat it unchanged"), "{prompt}");
+    }
+
+    /// A recipe is a fixed replay, so a second run is not a second attempt. The rule is stated
+    /// only where recipes are offered, because a bot with no grant has no recipe to replay.
+    #[test]
+    fn recipes_are_offered_once_per_request() {
+        let with_recipes = computer_system_prompt(true, true, true, false, None);
+        assert!(
+            with_recipes.contains("AT MOST ONCE PER REQUEST"),
+            "{with_recipes}"
+        );
+        let without = computer_system_prompt(true, true, false, false, None);
+        assert!(!without.contains("AT MOST ONCE PER REQUEST"), "{without}");
+    }
+
+    /// A bot with no screen is told none of it: there is nothing to overshoot on, and a prompt
+    /// that describes actions the model cannot take is the same lie as one that omits actions
+    /// it can.
+    #[test]
+    fn no_screen_means_no_stopping_rules_about_one() {
+        let prompt = computer_system_prompt(true, false, false, false, None);
+        assert!(!prompt.contains("DO WHAT WAS ASKED, THEN STOP"), "{prompt}");
+        assert!(!prompt.contains("AT MOST ONCE PER REQUEST"), "{prompt}");
     }
 }
