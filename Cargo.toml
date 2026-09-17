@@ -102,6 +102,17 @@ base64 = "0.23"
 # The credential vault. An AEAD so a tampered ciphertext fails to open rather than decrypting to
 # something else; pure Rust, so no C toolchain enters the build for it.
 chacha20poly1305 = "0.11"
+# Jev, TypeSafe AI's classifier — the owner's own SDK (codeitlikemiley/typesafe-sdk-rust), not a
+# hand-rolled client: it types the three answer kinds and their calibrated probabilities, and a
+# hand-rolled one would have to re-derive that decoding from the wire every time it changed.
+#
+# IT BRINGS A SECOND HTTP STACK, and that is a known cost rather than an oversight. The pin above
+# says reqwest 0.13 so the binary carries ONE client and one TLS stack; this crate pins
+# `reqwest =0.11.27` internally, so hyper 0.14 and a second rustls enter the dependency graph with
+# it. Nothing can be done from this side — its `http_client()` seam takes a 0.11 `Client`, so our
+# own cannot be lent to it — and the alternative the issue rules out is writing the client
+# ourselves. Worth revisiting if the SDK ever moves forward a major version.
+typesafe-sdk = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

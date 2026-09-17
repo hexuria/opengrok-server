@@ -64,6 +64,12 @@ pub struct AuthState {
     /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
     /// there is no gateway to ask and the picker says so.
     pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
+    /// Jev, the classifier (`crate::jev`). Resolved ONCE at boot beside the two doors above, for
+    /// the reason they are: the environment is not a per-request input, and a client rebuilt per
+    /// request would rebuild a connection pool per request. `None` ⇒ this deployment has no
+    /// `OG_JEV_API_KEY`, which is a legitimate deployment — the route says so in a sentence
+    /// rather than guessing at an answer.
+    pub jev: Option<crate::jev::SharedJev>,
     /// The hit table behind every door that takes no credential (`budget.rs`): reset mail,
     /// client registration, wrong passwords, domain lookups. Per replica by design.
     pub budgets: Arc<super::budget::Budgets>,
@@ -103,6 +109,7 @@ impl AuthState {
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
+            jev: crate::jev::from_env(),
             dns: Arc::new(crate::domain_proof::NoResolver),
             budgets: Arc::new(super::budget::Budgets::default()),
             cimd_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -147,6 +154,14 @@ impl AuthState {
     #[must_use]
     pub fn with_gateway_admin(mut self, admin: Option<crate::gateway_admin::GatewayAdmin>) -> Self {
         self.gateway_admin = admin;
+        self
+    }
+
+    /// Point Jev somewhere explicit — what a test uses to answer deterministically with no key,
+    /// no spend and no network, the way `MockDoor` stands in for the model door.
+    #[must_use]
+    pub fn with_jev(mut self, jev: Option<crate::jev::SharedJev>) -> Self {
+        self.jev = jev;
         self
     }
 }

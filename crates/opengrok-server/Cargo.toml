@@ -54,3 +54,4 @@ tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+typesafe-sdk.workspace = true
