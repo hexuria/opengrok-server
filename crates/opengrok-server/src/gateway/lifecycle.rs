@@ -397,13 +397,7 @@ pub async fn update_agent(state: &GatewayState, args: &Value, caller: &str) -> (
         .ok()
         .flatten()
         .unwrap_or_else(|| json!({}));
-    if let Some(map) = profile.as_object_mut() {
-        for key in ["description", "title", "avatarShape", "avatarColor"] {
-            if let Some(value) = profile_args.get(key).and_then(Value::as_str) {
-                map.insert(key.to_string(), json!(value));
-            }
-        }
-    }
+    crate::persona::merge_profile_text(&mut profile, &profile_args);
     let _ = state
         .agui
         .auth

@@ -351,7 +351,7 @@ async fn a_standing_role_reaches_the_model_on_every_run_and_the_roster_carries_i
         refused["error"]
             .as_str()
             .unwrap_or("")
-            .contains("name a model, a role, a visibility, hiddenFromSidebar, or several"),
+            .starts_with("nothing to change: send a name, a model, a role, a title,"),
         "{refused}"
     );
     // The refused writes changed nothing.
