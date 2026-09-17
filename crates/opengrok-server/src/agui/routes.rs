@@ -558,9 +558,17 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
+/// `POST /ag-ui` lives on `GatewayState` so a UserForm suspension can append the same
+/// transcript card `sendPrompt` does. NativeChat never calls `sendPrompt`; without this
+/// there is no `entryId` for `POST /ag-ui/user-form/submit`. Other AG-UI routes stay on
+/// `AgUiState` — they do not write gateway cards. The SSE still forwards CUSTOM
+/// `run-awaiting-approval`; the card is additive.
+pub fn run_router(state: crate::gateway::GatewayState) -> Router {
+    Router::new().route("/ag-ui", post(run)).with_state(state)
+}
+
 pub fn router(state: AgUiState) -> Router {
     Router::new()
-        .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
@@ -1920,10 +1928,14 @@ pub(crate) async fn principal_from_bearer(
 
 /// Start a run and stream its events.
 pub async fn run(
-    State(state): State<AgUiState>,
+    State(gateway): State<crate::gateway::GatewayState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
+    // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
+    // `GatewayState` so a UserForm suspension can call `emit_suspension`; the rest of the turn
+    // still reads `agui` the same way every other AG-UI path does.
+    let state = gateway.agui.clone();
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
     //
@@ -2146,7 +2158,7 @@ pub async fn run(
     tokio::spawn(async move {
         let _lease = lease;
         let sink = AgUiSink { tx };
-        let _ = run_conversation_streaming(
+        let events = run_conversation_streaming(
             door.as_ref(),
             tools.as_ref(),
             &journal,
@@ -2157,6 +2169,17 @@ pub async fn run(
             &sink,
         )
         .await;
+        // After CUSTOM `run-awaiting-approval` has been forwarded. The card is a gateway
+        // transcript entry, not an AG-UI frame — NativeChat keeps both.
+        if let (Some(account_id), Some(coworker_id)) = (&journal.account_id, &journal.coworker_id) {
+            crate::gateway::conversation::emit_user_form_from_agui(
+                &gateway,
+                coworker_id,
+                account_id,
+                &events,
+            )
+            .await;
+        }
     });
     sse(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv()
@@ -3231,6 +3254,10 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 
 /// Live AG-UI frames, forwarded as they are produced. Dropping the HTTP body closes the
 /// channel; the spawned turn still runs so a disconnect does not abandon the journal.
+///
+/// This sink does not write gateway transcript cards. A UserForm suspension still streams
+/// CUSTOM `run-awaiting-approval` here; `emit_user_form_from_agui` appends the `user-form`
+/// entry after the turn, so `POST /ag-ui/user-form/submit` has an `entryId`.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
 }

@@ -44,6 +44,9 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
         .merge(gateway::user_form::agui_router(gateway.clone()))
+        // `POST /ag-ui` needs `GatewayState` so a UserForm suspension can append the same
+        // transcript card `sendPrompt` does. Other AG-UI routes stay on `AgUiState`.
+        .merge(agui::run_router(gateway.clone()))
         .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))

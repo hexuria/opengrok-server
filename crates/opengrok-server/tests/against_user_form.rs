@@ -4,7 +4,8 @@
 //! asks for `request_user_form`. Submit types email then Tab then password, never screenshots,
 //! settles `formResolution`, and the secret is absent from the entry, the transcript, and
 //! history. `submitSecret` still drops its value and does not type. The AG-UI REST twin
-//! authenticates with an account bearer.
+//! authenticates with an account bearer. A turn that starts on `POST /ag-ui` (no `sendPrompt`)
+//! still appends a gateway `user-form` entry so submit has an `entryId`.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -552,4 +553,94 @@ async fn dismiss_settles_without_typing() {
     assert!(h.stub.acts().is_empty(), "dismiss must not Type");
     assert_eq!(h.stub.shots(), 0);
     assert!(!body.to_string().contains(SECRET), "{body}");
+}
+
+#[tokio::test]
+async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-agui-only-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Dot").await;
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "threadId": format!("thr-{}", uuid::Uuid::now_v7()),
+            "runId": uuid::Uuid::now_v7().to_string(),
+            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+            "forwardedProps": { "coworkerId": agent },
+        }))
+        .send()
+        .await
+        .expect("post ag-ui");
+    assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+    let sse = res.text().await.expect("sse");
+    assert!(
+        sse.contains("run-awaiting-approval"),
+        "CUSTOM must still stream: {sse}"
+    );
+    assert!(
+        sse.contains("user-form"),
+        "CUSTOM reason is user-form: {sse}"
+    );
+    assert!(
+        !sse.contains("s3cret-should-never-land"),
+        "smuggled values must not land on the SSE: {sse}"
+    );
+
+    let card = h.wait_for_form(&agent).await;
+    assert_eq!(card["kind"], "send-message");
+    assert_eq!(card["message"]["type"], "user-form");
+    let pending_dump = card.to_string();
+    assert!(
+        !pending_dump.contains("s3cret-should-never-land"),
+        "the model's smuggled values must not sit on the entry: {pending_dump}"
+    );
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui/user-form/submit", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "entryId": entry_id,
+            "agentId": agent,
+            "values": { "email": EMAIL, "password": SECRET }
+        }))
+        .send()
+        .await
+        .expect("agui submit");
+    assert_eq!(res.status().as_u16(), 200, "agui submit status");
+    let body: Value = res.json().await.expect("agui json");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert!(!body.to_string().contains(SECRET), "{body}");
+
+    for _ in 0..50 {
+        if h.stub.acts().len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        h.stub.acts(),
+        vec![
+            CuaAction::Type {
+                text: EMAIL.to_string()
+            },
+            CuaAction::Key {
+                key: "Tab".to_string()
+            },
+            CuaAction::Type {
+                text: SECRET.to_string()
+            },
+        ],
+        "fill is Type, Tab, Type"
+    );
+    assert_eq!(h.stub.shots(), 0, "fill must not screenshot");
 }

@@ -1071,7 +1071,10 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 
 /// Append a suspension's card and pause the agent. `true` when a card went out; the caller then
 /// returns without finalising the turn as an answer.
-async fn emit_suspension(
+///
+/// Also the AG-UI door (`POST /ag-ui`): NativeChat never calls `sendPrompt`, so the same helper
+/// has to run after that turn's streamed events or `POST /ag-ui/user-form/submit` has no `entryId`.
+pub(crate) async fn emit_suspension(
     state: &GatewayState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
@@ -1099,6 +1102,32 @@ async fn emit_suspension(
     // The turn is paused, not running. It resumes when the card is answered.
     live::set_running(state, agent_id, false, json!({})).await;
     true
+}
+
+/// After an AG-UI turn streamed a UserForm suspension, append the same gateway card `sendPrompt`
+/// would have. CUSTOM `run-awaiting-approval` already went out on the SSE; this does not replace
+/// it. Other suspension kinds stay AG-UI-only (`/ag-ui/runs/answer`) so a policy or exec card is
+/// not duplicated onto the transcript from this door.
+pub(crate) async fn emit_user_form_from_agui(
+    state: &GatewayState,
+    coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+    events: &[opengrok_wire::agui::Event],
+) {
+    let Some(suspension) = find_suspension(events) else {
+        return;
+    };
+    if suspension.reason != opengrok_core::run::SuspendReason::UserForm {
+        return;
+    }
+    let _ = emit_suspension(
+        state,
+        coworker_id,
+        account,
+        coworker_id.as_str(),
+        &suspension,
+    )
+    .await;
 }
 
 /// The sentence a failed run leaves for the person, from the run's own failure event: the
