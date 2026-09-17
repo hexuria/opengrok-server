@@ -930,6 +930,13 @@ pub(crate) async fn history_for(
                 })
             }
             Some("send-message") => {
+                if let Some(line) = opengrok_tools::user_form::history_line(entry) {
+                    return Some(ChatMessage {
+                        images: Vec::new(),
+                        role: "assistant".to_string(),
+                        content: line,
+                    });
+                }
                 let content = entry
                     .pointer("/message/content")
                     .and_then(Value::as_str)
@@ -1050,6 +1057,11 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             &suspension.tool,
             &suspension.arguments,
             suspension.why.as_deref(),
+            now_ms(),
+        )),
+        SuspendReason::UserForm => Some(super::cards::user_form_card(
+            &entry_id(),
+            &suspension.arguments,
             now_ms(),
         )),
         // Reverse-exec consent on anything but user_machine_shell: nothing renders it.
@@ -2084,7 +2096,7 @@ pub async fn resolve_auto_review_approval(
 /// Whether a run is this agent's to answer: its own, or a member's run inside this ROOM. A
 /// member's turn in a group runs on the room's thread (`gateway-{group}`) under the member's own
 /// id, and its card sits in the room's transcript, so the desktop answers it naming the group.
-fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
     run.coworker_id
         .as_ref()
         .is_some_and(|owner| owner.as_str() == agent.as_str())
@@ -2092,7 +2104,7 @@ fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
 }
 
 /// A run answered under an agent that is not its owner is a member's run inside that room.
-fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
     run.coworker_id
         .as_ref()
         .is_some_and(|owner| owner.as_str() != agent.as_str())
@@ -2101,7 +2113,7 @@ fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
 /// A resumed run continues where it lives: a coworker's own turn lands in its transcript; a
 /// member's turn goes back to the room, which then finishes its round (`group.rs`).
 #[allow(clippy::too_many_arguments)]
-async fn resume_where_it_lives(
+pub(crate) async fn resume_where_it_lives(
     in_a_room: bool,
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,

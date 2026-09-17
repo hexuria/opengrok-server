@@ -321,6 +321,54 @@ impl MockDoor {
         }
     }
 
+    /// A door that raises an in-chat `user-form`, then stops until the person answers.
+    pub fn asking_for_user_form() -> Self {
+        Self {
+            script: Self::user_form_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    fn user_form_script() -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::Text("I need you to sign in".to_string()),
+            ModelDelta::ToolCallStart {
+                id: "mock-form-1".to_string(),
+                name: opengrok_tools::REQUEST_USER_FORM.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "mock-form-1".to_string(),
+                // `values` is smuggled the way a model might; the card and the run log
+                // must drop it so a password never sits on the entry.
+                delta: serde_json::json!({
+                    "title": "Google account",
+                    "instruction": "Enter the address and password.",
+                    "fields": [
+                        {
+                            "id": "email",
+                            "label": "Email",
+                            "type": "email",
+                            "required": true
+                        },
+                        {
+                            "id": "password",
+                            "label": "Password",
+                            "type": "password",
+                            "required": true
+                        }
+                    ],
+                    "liveHost": "accounts.google.com",
+                    "values": { "password": "s3cret-should-never-land" }
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "mock-form-1".to_string(),
+            },
+        ]
+    }
+
     /// A door whose every turn hands the person's own words to the `mock_fixture` tool and then
     /// says back what it answered. `OG_MODEL_DOOR=mock-cards` selects it.
     pub fn serving_fixtures() -> Self {

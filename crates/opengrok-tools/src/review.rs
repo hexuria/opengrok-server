@@ -62,6 +62,8 @@ pub enum AwaitingReason {
     PolicyApproval,
     /// The auto-review judge said "ask".
     AutoReview,
+    /// The bot raised an in-chat `user-form` and is waiting for the person (`request_user_form`).
+    UserForm,
 }
 
 impl AwaitingReason {
@@ -70,6 +72,7 @@ impl AwaitingReason {
             Self::ExecConsent => "exec-consent",
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
+            Self::UserForm => "user-form",
         }
     }
 }

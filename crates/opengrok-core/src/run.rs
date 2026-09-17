@@ -90,6 +90,10 @@ pub enum SuspendReason {
     PolicyApproval,
     /// The auto-review judge said "ask" (the `auto-review-approval` card).
     AutoReview,
+    /// The bot asked the person to fill an in-chat `user-form` (`request_user_form`). Not an
+    /// approval of a tool that will then run: submit types into the box outside `computer_use`,
+    /// and the tool result is synthesised so a secret never re-enters the executor.
+    UserForm,
 }
 
 impl SuspendReason {
@@ -98,15 +102,17 @@ impl SuspendReason {
             Self::ExecConsent => "exec-consent",
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
+            Self::UserForm => "user-form",
         }
     }
 
     /// From the wire word; anything unrecognised is the default, which is the closed reading
-    /// (an exec-consent card asks the machine owner, the strictest of the three).
+    /// (an exec-consent card asks the machine owner, the strictest of the four).
     pub fn from_stored(word: &str) -> Self {
         match word {
             "policy-approval" => Self::PolicyApproval,
             "auto-review" => Self::AutoReview,
+            "user-form" => Self::UserForm,
             _ => Self::ExecConsent,
         }
     }

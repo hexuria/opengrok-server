@@ -21,6 +21,7 @@ pub mod group;
 pub mod hooks;
 pub mod lifecycle;
 pub mod live;
+pub mod user_form;
 // THE MOCK CATALOGUE IS A BUILD-TIME CHOICE, not just a runtime one. `mock_fixtures` carries
 // ~65 KB of embedded fixture files and a filesystem read verb; both are development surface and
 // neither belongs in a production binary, where the only thing standing between them and a caller

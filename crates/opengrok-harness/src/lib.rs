@@ -231,6 +231,10 @@ pub enum ResumeOutcome {
     Approved,
     /// Refused, with the text the model reads — the rule that stopped it.
     Refused(String),
+    /// The card was answered by something other than yes/no of a tool that should then run.
+    /// The call is NOT re-executed; this text is the tool result. User-form submit fills
+    /// outside `computer_use` and must not re-raise `request_user_form`.
+    Settled(String),
 }
 
 /// What a resumed run already knows: the call that was answered, how, and where the first half
@@ -262,6 +266,18 @@ impl Resumption {
             approved: call,
             message_seq,
             outcome: ResumeOutcome::Refused(why.into()),
+        }
+    }
+
+    pub fn settled(
+        call: opengrok_tools::ToolCall,
+        message_seq: u32,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            approved: call,
+            message_seq,
+            outcome: ResumeOutcome::Settled(content.into()),
         }
     }
 }
@@ -300,6 +316,9 @@ pub async fn resume_conversation(
     let results = match outcome {
         ResumeOutcome::Approved => tools.run_all(std::slice::from_ref(&approved)).await,
         ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
+        ResumeOutcome::Settled(content) => {
+            vec![opengrok_tools::ToolResult::ok(&approved.id, content)]
+        }
     };
     for result in &results {
         all.extend(projection.push_tool_result(result));

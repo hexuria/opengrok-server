@@ -76,6 +76,7 @@ async fn a_grant_of_the_old_builtin_set_follows_the_builtins_and_a_chosen_list_d
         "computer",
         "open_url",
         "read_file",
+        "request_user_form",
         "run_recipe",
         "shell",
         "write_file",

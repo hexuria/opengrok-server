@@ -269,6 +269,17 @@ pub(crate) async fn tools_for_coworker(
     // never told about them, so it cannot be sent down a dead end.
     let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
+    context.screen_hold = match state
+        .auth
+        .store
+        .gateway_transcript(&coworker_id, account_id)
+        .await
+    {
+        Ok(entries) => entries.iter().any(opengrok_tools::user_form::is_unresolved),
+        // A transcript we cannot read must not freeze every screen tool; the form's own
+        // submit path still refuses to log secrets.
+        Err(_) => false,
+    };
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -2709,10 +2720,17 @@ fn resume_outcome(
     approved: bool,
     pending: &opengrok_core::run::PendingApproval,
 ) -> opengrok_harness::ResumeOutcome {
-    if approved {
-        return opengrok_harness::ResumeOutcome::Approved;
-    }
     match pending.reason {
+        // Re-running `request_user_form` would raise the card again. Submit/dismiss synthesise
+        // the tool result; `/answer` is the fallback and must do the same.
+        opengrok_core::run::SuspendReason::UserForm => {
+            opengrok_harness::ResumeOutcome::Settled(if approved {
+                "The person submitted the form. It was filled into the page. Secret field values were typed into the page and never shown to you.".to_string()
+            } else {
+                "The person dismissed the form without filling anything. Continue without those credentials; do not type secrets with `computer`.".to_string()
+            })
+        }
+        _ if approved => opengrok_harness::ResumeOutcome::Approved,
         opengrok_core::run::SuspendReason::AutoReview => opengrok_harness::ResumeOutcome::Refused(
             "the user declined this on the auto-review card".to_string(),
         ),
@@ -2723,7 +2741,7 @@ fn resume_outcome(
                 pending.tool
             ))
         }
-        // Named rather than caught by a wildcard, so a fourth kind of card has to decide here
+        // Named rather than caught by a wildcard, so a fifth kind of card has to decide here
         // what its refusal says instead of quietly borrowing this one's words.
         opengrok_core::run::SuspendReason::ExecConsent => {
             opengrok_harness::ResumeOutcome::Refused(format!(
@@ -3345,6 +3363,7 @@ mod tests {
         let said = |reason| match resume_outcome(false, &pending(reason)) {
             opengrok_harness::ResumeOutcome::Refused(why) => why,
             opengrok_harness::ResumeOutcome::Approved => String::new(),
+            opengrok_harness::ResumeOutcome::Settled(why) => why,
         };
         let consent = said(opengrok_core::run::SuspendReason::ExecConsent);
         assert!(!consent.is_empty(), "a no is not an approval");
@@ -3359,6 +3378,18 @@ mod tests {
         assert!(policy.contains("shell"), "{policy}");
         let review = said(opengrok_core::run::SuspendReason::AutoReview);
         assert!(review.contains("auto-review"), "{review}");
+        let form = said(opengrok_core::run::SuspendReason::UserForm);
+        assert!(
+            form.contains("dismissed") || form.contains("without filling"),
+            "{form}"
+        );
+        assert!(
+            matches!(
+                resume_outcome(true, &pending(opengrok_core::run::SuspendReason::UserForm)),
+                opengrok_harness::ResumeOutcome::Settled(_)
+            ),
+            "a yes on a user-form must not re-run request_user_form"
+        );
 
         // None of them blames the model or reads as an error. A refusal is a decision somebody
         // made, and a sentence that sounds like a fault invites an apology and a retry.

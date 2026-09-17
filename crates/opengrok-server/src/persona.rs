@@ -218,7 +218,11 @@ pub fn computer_system_prompt(
          write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
-         Never describe work done on your box as done on the user's computer."
+         Never describe work done on your box as done on the user's computer. When a page or a \
+         question asks the person to type a password, one-time code, or other secret, call \
+         `request_user_form` and wait. Never type secrets with `computer` — that attaches a \
+         screenshot of what was typed. The person fills in chat; the server types into the focused \
+         field and does not show you the secret."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -535,6 +539,14 @@ mod tests {
         assert!(
             !none.contains("user_machine_shell"),
             "no box ⇒ the reverse channel is not offered either: {none}"
+        );
+        assert!(
+            !none.contains("request_user_form"),
+            "no box ⇒ the form tool is not offered: {none}"
+        );
+        assert!(
+            box_only.contains("`request_user_form`"),
+            "the form tool is a built-in on a box: {box_only}"
         );
     }
 

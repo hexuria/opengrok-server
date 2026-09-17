@@ -263,7 +263,16 @@ impl Projection {
                 // name its call cannot be exactly-once.
                 .with("callId", waiting.id.clone())
                 .with("tool", waiting.name.clone())
-                .with("arguments", waiting.arguments.clone())
+                .with(
+                    "arguments",
+                    // A model that smuggled `values` onto `request_user_form` must not have
+                    // those secrets sit on the run log waiting for submit.
+                    if reason == opengrok_tools::AwaitingReason::UserForm {
+                        opengrok_tools::user_form::sanitize_arguments(&waiting.arguments)
+                    } else {
+                        waiting.arguments.clone()
+                    },
+                )
                 // WHY: which card the gateway raises and which verb may answer it. Absent on rows
                 // written before reasons existed, which the reader treats as exec-consent.
                 .with("reason", reason.as_str())
@@ -556,6 +565,38 @@ mod tests {
             finished.last().unwrap().event_type,
             EventType::RunFinished,
             "a suspended run must still be finishable"
+        );
+    }
+
+    #[test]
+    fn awaiting_a_user_form_drops_smuggled_values_from_the_run_log() {
+        let mut projection = Projection::new("t1", "r1", 100);
+        let waiting = projection.awaiting_approval(
+            &opengrok_tools::ToolCall {
+                id: "c1".to_string(),
+                name: opengrok_tools::REQUEST_USER_FORM.to_string(),
+                arguments: serde_json::json!({
+                    "title": "Sign in",
+                    "fields": [{ "id": "password", "label": "Password", "type": "password" }],
+                    "values": { "password": "s3cret-should-never-land" }
+                }),
+            },
+            opengrok_tools::AwaitingReason::UserForm,
+            Some("Waiting for you"),
+        );
+        let last = waiting.last().unwrap();
+        let dumped = format!("{:?}", last.extra);
+        assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
+        assert_eq!(
+            last.extra.get("reason").and_then(|v| v.as_str()),
+            Some("user-form")
+        );
+        assert!(
+            last.extra
+                .get("arguments")
+                .and_then(|v| v.get("values"))
+                .is_none(),
+            "{dumped}"
         );
     }
 

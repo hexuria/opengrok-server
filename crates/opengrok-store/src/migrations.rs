@@ -875,6 +875,14 @@ update grant_view
 update ceiling_view
    set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
  where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
+-- `request_user_form` joined the built-ins the same way: a row that is exactly today's
+-- previous set follows; a narrower list was chosen on purpose and is left alone.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

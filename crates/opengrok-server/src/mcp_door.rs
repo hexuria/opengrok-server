@@ -749,8 +749,8 @@ pub async fn reply_to_ask(
     let reason = match result.awaiting_reason {
         Some(AwaitingReason::AutoReview) => SuspendReason::AutoReview,
         Some(AwaitingReason::PolicyApproval) => SuspendReason::PolicyApproval,
-        // ExecConsent is reverse-exec, which is refused by name before execute. Do not promise
-        // a card that does not exist.
+        // ExecConsent is reverse-exec, which is refused by name before execute. UserForm
+        // fill is not available over MCP: there is no in-chat card to type into.
         _ => {
             return format!(
                 "{} — approval is not available over MCP; grant this tool to the coworker in the \

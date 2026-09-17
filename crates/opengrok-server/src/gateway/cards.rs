@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 use opengrok_tools::USER_MACHINE_SHELL;
+use opengrok_tools::user_form::sanitize_arguments;
 
 /// The `auto-review-approval` card for the judge's ask. Re-emit with the SAME `entry_id` and a
 /// new `status` to settle it — the renderer dedups on `auto-review-approval:${requestId}:${status}`.
@@ -62,6 +63,22 @@ pub fn policy_approval_card(
 /// What the card says when the grant gave no reason of its own.
 pub const POLICY_ASK_REASON: &str =
     "This coworker's policy needs a person to say yes before it may run this tool.";
+
+/// The in-chat `user-form` card. Transcribed from official 0.29/0.30 `user-form/view.tsx`:
+/// `message.type` is `user-form`, `formRequest` is the field schema, and `formResolution` is a
+/// sibling of `message` (not inside it). Identity keys and any `values` the model smuggled are
+/// dropped so a password cannot sit on the entry waiting for submit.
+pub fn user_form_card(entry_id: &str, arguments: &Value, timestamp_ms: i64) -> Value {
+    json!({
+        "kind": "send-message",
+        "id": entry_id,
+        "timestampMs": timestamp_ms,
+        "message": {
+            "type": "user-form",
+            "formRequest": sanitize_arguments(arguments),
+        },
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 fn approval_card(
@@ -297,5 +314,41 @@ mod tests {
             unexplained["message"]["approval"]["reason"],
             POLICY_ASK_REASON
         );
+    }
+
+    #[test]
+    fn a_user_form_card_is_the_transcribed_shape_and_drops_secrets() {
+        let raw = json!({
+            "title": "Google account",
+            "instruction": "Sign in.",
+            "fields": [{
+                "id": "password",
+                "label": "Password",
+                "type": "password",
+                "required": true
+            }],
+            "values": { "password": "s3cret-pass" },
+            "coworker_id": "cw_x",
+            "liveHost": "accounts.google.com"
+        });
+        let card = user_form_card("e_form", &raw, 11);
+        assert_eq!(card["kind"], "send-message");
+        assert_eq!(card["id"], "e_form");
+        assert_eq!(card["timestampMs"], 11);
+        assert_eq!(card["message"]["type"], "user-form");
+        assert_eq!(card["message"]["formRequest"]["title"], "Google account");
+        assert_eq!(
+            card["message"]["formRequest"]["liveHost"],
+            "accounts.google.com"
+        );
+        assert_eq!(
+            card["message"]["formRequest"]["fields"][0]["id"],
+            "password"
+        );
+        assert!(card.get("formResolution").is_none(), "{card}");
+        let dumped = card.to_string();
+        assert!(!dumped.contains("s3cret-pass"), "{dumped}");
+        assert!(!dumped.contains("cw_x"), "{dumped}");
+        assert!(card["message"]["formRequest"].get("values").is_none());
     }
 }

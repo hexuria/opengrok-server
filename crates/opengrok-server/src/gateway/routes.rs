@@ -675,6 +675,20 @@ async fn command(
                 body,
             )
         }
+        "submitUserForm" => {
+            let (code, body) = super::user_form::submit_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "dismissUserForm" => {
+            let (code, body) = super::user_form::dismiss_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "stopAgentTurn" => {
             let (code, body) = super::conversation::stop_agent_turn(&state, &args, &caller).await;
             reply(
@@ -1291,7 +1305,9 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "setAgentUnread"
         | "discardDraft"
         | "sendDraft"
-        | "submitSecret" => (200, Value::Null),
+        | "submitSecret"
+        | "submitUserForm"
+        | "dismissUserForm" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
     }

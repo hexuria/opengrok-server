@@ -20,6 +20,8 @@ pub use review::{
     AwaitingReason, Gate, Outcome, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy,
     ReviewVerdict, ask_first_reason, combine, redact_arguments,
 };
+pub mod user_form;
+pub use user_form::{FormRequest, FormResolution, REQUEST_USER_FORM};
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
@@ -49,6 +51,10 @@ pub struct ToolContext {
     /// A room's shared computer, when this turn is spoken in a group that has one. Reached by
     /// passing `machine: "group"`; without it every call goes to the coworker's own box.
     pub group_box: Option<GroupBox>,
+    /// An unresolved `user-form` is open on this conversation. Screen tools must not run: typing
+    /// or clicking would race the person filling the page (and `computer` type would PNG the
+    /// secret). `request_user_form` itself is not a screen action and is not held.
+    pub screen_hold: bool,
 }
 
 /// The shared computer of the group a turn is spoken in.
@@ -68,6 +74,7 @@ impl ToolContext {
             coworker_id: id,
             box_id: coworker.computer().cloned(),
             group_box: None,
+            screen_hold: false,
         }
     }
 }
@@ -551,6 +558,12 @@ impl Executor {
         self.screen
     }
 
+    /// The box this executor talks to. Fill (`user-form`) types here outside `computer_use`.
+    #[must_use]
+    pub fn computer(&self) -> Arc<dyn Computer> {
+        self.computer.clone()
+    }
+
     /// How much of the desktop a recipe run asks the box to report back, when it should not be
     /// the deployment's own setting. The level is a cost paid in playback time, so it is
     /// settable rather than fixed.
@@ -560,13 +573,12 @@ impl Executor {
         self
     }
 
-    /// The recipes this bot was granted, and where their steps come from.
-    #[must_use]
     /// What the person picked in the composer: a recipe, and the values they filled in for it.
     ///
     /// A model that is told a recipe was chosen still has to call it, and it may supply values of
     /// its own — read off the sentence, or guessed. These are neither: they were typed into named
     /// fields, so they override.
+    #[must_use]
     pub fn with_chosen_recipe(
         mut self,
         recipe_id: impl Into<String>,
@@ -576,6 +588,8 @@ impl Executor {
         self
     }
 
+    /// The recipes this bot was granted, and where their steps come from.
+    #[must_use]
     pub fn with_recipes(
         mut self,
         recipes: Vec<RecipeOffer>,
@@ -652,6 +666,7 @@ impl Executor {
             "write_file",
             "open_url",
             "computer",
+            REQUEST_USER_FORM,
             RUN_RECIPE,
         ]
     }
@@ -942,6 +957,31 @@ impl Executor {
                 Gate::Allow
             }
         };
+
+        // HITL wait, not approve-then-run — and BEFORE the judge. A form is not a tool that
+        // then executes, so auto-review must not steal the card; a `computer` type while a
+        // form is open must not send the secret to another model. Policy Deny still refuses.
+        if call.name == REQUEST_USER_FORM {
+            if let Gate::Deny(why) = &gate {
+                return ToolResult::refused(&call.id, why.as_str());
+            }
+            if context.screen_hold {
+                return ToolResult::refused(
+                    &call.id,
+                    "a form is already open on this conversation; wait for the person to answer it",
+                );
+            }
+            return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
+        }
+
+        if context.screen_hold && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+        {
+            return ToolResult::refused(
+                &call.id,
+                "a form is open on this conversation; do not type, click, or open pages until \
+                 the person has answered it. Secrets must not be typed with `computer`",
+            );
+        }
 
         // ONE judge call site, for every tool.
         let review = match (&gate, review_approved, self.auto_review.as_ref()) {
@@ -1343,6 +1383,37 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["action"],
             }),
         )),
+        REQUEST_USER_FORM => Some((
+            "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
+             Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
+             attaches a screenshot of what was typed. Raise this instead and wait. The person \
+             fills in chat; the server types into the focused field on the page and never shows \
+             you the secret.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short title shown on the card." },
+                    "instruction": { "type": "string", "description": "What the person should do." },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "label": { "type": "string" },
+                                "type": { "type": "string", "description": "text, email, password, otp, …" },
+                                "required": { "type": "boolean" },
+                                "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "domain": { "type": "string" },
+                    "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
+                },
+                "required": ["title", "fields"],
+            }),
+        )),
         USER_MACHINE_SHELL => Some((
             "Run a shell command on the USER'S OWN machine — the real computer they enrolled,              NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
             serde_json::json!({
@@ -1732,6 +1803,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         };
         let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
         assert!(
@@ -1748,6 +1820,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         };
         let result = executor
             .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -2108,6 +2181,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         }
     }
 
@@ -2592,6 +2666,10 @@ mod tests {
         let names = headless.tool_names();
         assert!(!names.iter().any(|name| name == "computer"), "{names:?}");
         assert!(!names.iter().any(|name| name == "open_url"), "{names:?}");
+        assert!(
+            names.iter().any(|name| name == REQUEST_USER_FORM),
+            "the form tool does not need a display: {names:?}"
+        );
         assert!(!headless.has_screen());
 
         let with_screen = allowing(spy).with_screen(true);
@@ -3114,5 +3192,55 @@ mod tests {
             "should mention recipe name"
         );
         assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn request_user_form_awaits_and_does_not_type() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    REQUEST_USER_FORM,
+                    json!({
+                        "title": "Sign in",
+                        "fields": [{
+                            "id": "password",
+                            "label": "Password",
+                            "type": "password",
+                            "required": true
+                        }],
+                        "values": { "password": "s3cret" }
+                    }),
+                ),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::UserForm));
+        assert!(result.content.contains("Waiting for you"), "{result:?}");
+        assert!(result.image.is_none(), "{result:?}");
+        assert_eq!(spy.last_box(), None, "await must not type");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_form_open_refuses_computer_type_without_a_png() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone()).with_screen(true);
+        let mut context = context_with_box("box_mine");
+        context.screen_hold = true;
+        let result = executor
+            .execute(
+                &context,
+                &call("computer", json!({ "action": "type", "text": "s3cret" })),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("form is open"), "{result:?}");
+        assert!(result.image.is_none(), "must not PNG a secret: {result:?}");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
     }
 }
