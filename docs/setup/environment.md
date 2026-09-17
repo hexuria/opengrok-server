@@ -40,7 +40,6 @@ literals), and a variable that exists in code but not here is a documentation bu
 | `OG_MODEL_DOOR` | Real models? | Use it for |
 |---|---|---|
 | unset / `gateway` | yes | **the default, and the one to use.** Speaks the gateway's OpenAI-compatible route directly and sends `"model": request.model`, so a coworker's pin is honoured and the gateway logs `reason=Passthrough` |
-| `rig` | — | **gone.** It went through rig-core and did NOT transmit the model, so the gateway saw a modelless request, classified it by policy, and answered on whatever rung the classifier picked. Every pin was silently ignored, which cost a night on 8 Sep 2026: turns "worked" while a coworker pinned to xAI was being answered by whatever tier the prompt happened to classify into. The door was removed rather than left behind a warning, because a footgun with a note next to it is still a footgun. `rig` now falls through to `gateway` like any other unrecognised value |
 | `mock-cards` | no | UI and card-rendering work. Serves the fixture catalogue (`help` lists it). Needs the `mock-fixtures` feature or it refuses to boot |
 | `mock` / `mock-tools` | no | CI, and the consent-card path with no spend |
 
