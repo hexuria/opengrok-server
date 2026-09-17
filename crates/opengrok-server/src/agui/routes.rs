@@ -26,7 +26,7 @@ use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{
     ChatMessage, EventSink, ModelDoor, ModelRequest, ToolRunner, run_conversation_streaming,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -552,6 +552,7 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/models", get(list_models))
@@ -2380,6 +2381,152 @@ pub async fn replay_run(
         "events": run.emitted,
     }))
     .into_response()
+}
+
+/// How many runs a thread answers with when the caller does not ask for a number.
+///
+/// Twenty, which is what `gateway/lifecycle.rs` already asks `runs_for_thread` for when it builds
+/// a routine's run list. Two readers of the same history disagreeing about how much of it is
+/// "recent" gets reported as "the app shows fewer turns than the pane does", and the cheapest way
+/// not to have that conversation is to pick the number once. Twenty turns is also more than a
+/// screenful, which is what a client reopening a conversation actually has to draw.
+const THREAD_RUNS_DEFAULT: i64 = 20;
+
+/// The most runs one request may ask for.
+///
+/// A run carries EVERY frame it emitted, and a streamed answer is hundreds of text deltas, so the
+/// response grows with the size of the conversation and not with the number of runs in it — an
+/// uncapped `?limit=` is a way to ask this server to send megabytes. A hundred turns bounds that
+/// at something a client can still render, and a client that wants a deeper history than this is
+/// not drawing a conversation: `?events=false` is the cheap way to ask which runs exist, and
+/// `GET /ag-ui/runs/{id}` fetches the few whose frames are actually missing.
+const THREAD_RUNS_MAX: i64 = 100;
+
+#[derive(Debug, Deserialize)]
+pub struct ThreadHistoryQuery {
+    /// How many runs, counted from the newest end and clamped to `THREAD_RUNS_MAX`. Counting from
+    /// the newest end is what makes a limit useful on a long thread: the turns a person is coming
+    /// back to are the last ones, and they are still handed back oldest-first.
+    pub limit: Option<i64>,
+    /// `false` keeps every run and drops its frames, for a client that only wants to know which
+    /// runs exist — the desktop working out which transcripts it is missing before it fetches
+    /// them one at a time. Defaults to true, because the whole point of this route is the frames.
+    pub events: Option<bool>,
+}
+
+/// One run as a thread's history lists it. `events` is the only optional part: everything else
+/// costs a handful of bytes and a client that has to branch on which fields arrived is a client
+/// that will get the branch wrong.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadRunReplay {
+    run_id: String,
+    status: &'static str,
+    started_at_ms: i64,
+    updated_at_ms: i64,
+    failure: Option<String>,
+    /// ABSENT, not empty, when `?events=false` asked for the list without the bodies. An empty
+    /// array would say this run emitted nothing, which is a different claim and a false one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events: Option<Vec<serde_json::Value>>,
+}
+
+/// Replay a whole thread from the log — `GET /ag-ui/threads/{thread_id}?limit=&events=`.
+///
+/// THE SAME PROMISE AS `replay_run`, ASKED THE WAY A PERSON REMEMBERS THINGS. A reconnecting
+/// stream knows its run id and asks for that one run; somebody who closed the app, or switched to
+/// another coworker and came back, knows only who they were talking to. Without a way to ask for
+/// the conversation, a client has to keep its own copy of the transcript and trust it over ours —
+/// and a local copy that is authoritative is exactly the arrangement that loses the messages a
+/// turn produced after the app stopped watching.
+///
+/// HALF A CONVERSATION, AND SAYING SO IS THE POINT. A run's log holds the events it EMITTED, which
+/// is the coworker's side of the turn: its text, its tool calls, their results. The person's own
+/// message arrives in `RunAgentInput.messages`, is spent on the model call and is never journaled
+/// — `RunEvent::Started` captures the thread, the coworker, the pin and the system message, and
+/// nothing about what was asked. So a client rendering a transcript from this has to interleave
+/// the person's side from somewhere else: the seam-B entries (`seamb_send.rs`) for a turn that
+/// came through the gateway's send, and its own records for a turn that came through `POST /ag-ui`
+/// directly, where the server keeps no copy of the question at all. Closing that means journaling
+/// the turn's own prompt on the run, which changes the aggregate and belongs to its own change.
+pub async fn replay_thread(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(thread_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ThreadHistoryQuery>,
+) -> Response {
+    // LAYER 4 (`docs/PLAN.md` §4.5), and the reasoning is `replay_run`'s: a thread holds a whole
+    // conversation — more of one than a run does — so without this check a thread id is a
+    // password, and thread ids travel in client URLs and logs. `NOT_FOUND` rather than `FORBIDDEN`
+    // for "no such thread", "not yours" and "not signed in" alike, so probing ids reveals nothing
+    // about which threads exist or who they belong to.
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such thread").into_response();
+    };
+    let limit = query
+        .limit
+        .unwrap_or(THREAD_RUNS_DEFAULT)
+        .clamp(1, THREAD_RUNS_MAX);
+    let with_events = query.events.unwrap_or(true);
+
+    // Owner-filtered in the query, so "not yours" and "no such thread" arrive here as the same
+    // empty answer and cannot be told apart even by accident.
+    let newest_first = match state
+        .auth
+        .store
+        .runs_for_thread_owned_by(&thread_id, &account_id, limit)
+        .await
+    {
+        Ok(runs) => runs,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+    if newest_first.is_empty() {
+        return (StatusCode::NOT_FOUND, "no such thread").into_response();
+    }
+
+    let mut runs = Vec::with_capacity(newest_first.len());
+    // OLDEST FIRST, which is the other way round from the store. `runs_for_thread_owned_by` hands
+    // back the newest runs because that is how a limit has to be counted on a long thread; a
+    // transcript is read in the order it happened. Reversing once here, rather than leaving it to
+    // each caller, is what stops two clients from disagreeing about which end a conversation
+    // starts at — and a disagreement like that shows up as messages in the wrong order, which
+    // reads as lost work.
+    for summary in newest_first.into_iter().rev() {
+        let (run, _) = match state.auth.store.load_run(&summary.id).await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        };
+        // A run the log has no start for never took its turn, so it has nothing to contribute to a
+        // transcript. `replay_run` answers `404` when one is asked about by id; a history simply
+        // leaves it out, because the question here is what happened and nothing did.
+        if !run.started {
+            continue;
+        }
+        runs.push(ThreadRunReplay {
+            run_id: summary.id.as_str().to_string(),
+            // The aggregate's status, not the projection's, for the same reason `replay_run` uses
+            // it: the log is the truth and the view is derived from it.
+            status: match run.status {
+                RunStatus::Running => "running",
+                RunStatus::AwaitingApproval => "awaiting-approval",
+                RunStatus::Finished => "finished",
+                RunStatus::Failed => "failed",
+            },
+            started_at_ms: summary.started_at_ms,
+            updated_at_ms: summary.updated_at_ms,
+            failure: run.failure,
+            // The frames are loaded either way: whether a run started and why it failed are only
+            // knowable from its log, and answering those two from the projection would mean
+            // guessing. `events=false` saves the client the megabytes, not the server the read.
+            events: with_events.then_some(run.emitted),
+        });
+    }
+
+    Json(serde_json::json!({ "threadId": thread_id, "runs": runs })).into_response()
 }
 
 #[derive(Debug, Deserialize)]

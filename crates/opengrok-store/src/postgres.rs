@@ -36,6 +36,21 @@ pub struct ThreadRun {
     pub updated_at_ms: i64,
 }
 
+/// One `run_view` row as a `ThreadRun`, shared by the two readers of a thread's history so they
+/// cannot drift in what they make of a row. `started_at_ms` is absent on runs projected before
+/// that column existed, and the last time the run moved is the closest honest answer for those.
+fn thread_run_from_row(row: sqlx::postgres::PgRow) -> StoreResult<ThreadRun> {
+    let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
+    Ok(ThreadRun {
+        id: RunId::from_stored(row.try_get::<String, _>("id")?),
+        status: row.try_get("status")?,
+        started_at_ms: row
+            .try_get::<Option<i64>, _>("started_at_ms")?
+            .unwrap_or(updated_at_ms),
+        updated_at_ms,
+    })
+}
+
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -378,19 +393,42 @@ impl PgStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                let updated_at_ms: i64 = row.try_get("updated_at_ms")?;
-                Ok(ThreadRun {
-                    id: RunId::from_stored(row.try_get::<String, _>("id")?),
-                    status: row.try_get("status")?,
-                    started_at_ms: row
-                        .try_get::<Option<i64>, _>("started_at_ms")?
-                        .unwrap_or(updated_at_ms),
-                    updated_at_ms,
-                })
-            })
-            .collect()
+        rows.into_iter().map(thread_run_from_row).collect()
+    }
+
+    /// The runs of one thread that THIS ACCOUNT may read, newest first.
+    ///
+    /// LAYER 4 (`docs/PLAN.md` §4.5) in the shape a thread needs it: the owner is a condition of
+    /// the query rather than a check made after it, so a thread that does not exist and a thread
+    /// that belongs to somebody else both come back empty and are not distinguishable here. That
+    /// is what lets `GET /ag-ui/threads/{id}` answer `404` to both without first learning which it
+    /// was — the same rule `run_owned_by` applies to a single run, for the same reason: a thread
+    /// holds a whole conversation, and thread ids travel in client URLs and logs. A run with no
+    /// owner is readable by nobody, so `account_id is null` fails this test rather than passing it.
+    ///
+    /// Ordered by when each run BEGAN, unlike `runs_for_thread` above, which orders by when a run
+    /// last moved because the routines pane wants the latest firing at the top. A transcript is
+    /// the order the turns were taken in: a long run still emitting frames would otherwise sort
+    /// ahead of turns taken after it started, and the conversation would rearrange itself as it
+    /// streamed. Run ids are UUIDv7 and therefore already in start order, which makes them the
+    /// tie-break when two runs began in the same millisecond.
+    pub async fn runs_for_thread_owned_by(
+        &self,
+        thread_id: &str,
+        account: &AccountId,
+        limit: i64,
+    ) -> StoreResult<Vec<ThreadRun>> {
+        let rows = sqlx::query(
+            "select id, status, started_at_ms, updated_at_ms from run_view
+             where thread_id = $1 and account_id = $2
+             order by coalesce(started_at_ms, updated_at_ms) desc, id desc limit $3",
+        )
+        .bind(thread_id)
+        .bind(account.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(thread_run_from_row).collect()
     }
 
     /// Whose run this is, if the projection knows. Recovery needs it: a run's aggregate carries
