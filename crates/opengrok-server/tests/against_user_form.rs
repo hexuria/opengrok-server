@@ -581,18 +581,35 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
         .expect("post ag-ui");
     assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
     let sse = res.text().await.expect("sse");
-    assert!(
-        sse.contains("run-awaiting-approval"),
-        "CUSTOM must still stream: {sse}"
-    );
-    assert!(
-        sse.contains("user-form"),
-        "CUSTOM reason is user-form: {sse}"
-    );
-    assert!(
-        !sse.contains("s3cret-should-never-land"),
-        "smuggled values must not land on the SSE: {sse}"
-    );
+    // CUSTOM stays on the AG-UI SSE; the gateway card is a separate transcript entry.
+    // TOOL_CALL_ARGS is the model's raw delta (the mock smuggles `values` there on purpose);
+    // sanitise is on collect / CUSTOM arguments / the card, not the token stream.
+    let mut saw_custom = false;
+    for chunk in sse.split("\n\n") {
+        let Some(payload) = chunk.lines().find_map(|line| line.strip_prefix("data: ")) else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if event["type"] == "CUSTOM" && event["name"] == "run-awaiting-approval" {
+            saw_custom = true;
+            assert_eq!(event["reason"], "user-form", "{event}");
+            let dump = event.to_string();
+            assert!(
+                !dump.contains("s3cret-should-never-land"),
+                "CUSTOM arguments are sanitised: {dump}"
+            );
+            assert!(
+                event
+                    .get("arguments")
+                    .and_then(|args| args.get("values"))
+                    .is_none(),
+                "values must not sit on CUSTOM: {event}"
+            );
+        }
+    }
+    assert!(saw_custom, "CUSTOM must still stream: {sse}");
 
     let card = h.wait_for_form(&agent).await;
     assert_eq!(card["kind"], "send-message");
