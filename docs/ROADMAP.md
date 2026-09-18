@@ -584,7 +584,8 @@ as the record of what was built.
 - [x] **Seam A.** `gateway/` (55 verbs, the live bus, the fixture catalogue), the
   `ACCOUNT_HEADER` middleware, `GatewayState`, the three smokes that spoke only seam A
   (slice11, slice12, slice15) and 24 `against_*.rs` files that drove the door.
-  `against_spend_caps.rs` drives its turns through `/ag-ui` instead. (`9e7387c`)
+  `against_spend_caps.rs` drives its turns through `/ag-ui` instead. (`9e7387c`) The no-on-the-card
+  test from #137 came back the same way, as `against_a_no_on_the_card.rs`. *(this commit)*
 - [x] **`mock-fixtures` and `OG_MODEL_DOOR=mock-cards`.** The feature, the door, the two fixture
   generators; `gate.sh`, `serve.sh` and `ci.yml` build one configuration. `mock-cards` refuses to
   boot rather than falling through to a billed door. (`22ae970`)
