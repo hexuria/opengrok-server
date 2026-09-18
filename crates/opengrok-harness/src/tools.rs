@@ -69,6 +69,16 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// The live box to type into outside `computer_use`. `None` when this runner has no computer.
+    #[must_use]
+    pub fn fill_target(&self) -> Option<(std::sync::Arc<dyn opengrok_box::Computer>, String)> {
+        let (executor, context) = self.executor.as_ref()?;
+        Some((
+            executor.computer(),
+            context.box_id.as_ref()?.as_str().to_string(),
+        ))
+    }
+
     /// Carry through what the person chose in the composer: a recipe, and the values they typed.
     ///
     /// Applied after the runner is built rather than threaded through its constructor, because
@@ -191,6 +201,20 @@ pub fn collect_tool_calls(events: &[Event]) -> Vec<ToolCall> {
                     // silently would leave it waiting for a result that never comes.
                     let arguments =
                         serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null);
+                    // A model that smuggled `values` onto `request_user_form` must not have
+                    // those secrets reach execute, the pending row, or a later resume.
+                    let arguments = if name == opengrok_tools::REQUEST_USER_FORM {
+                        opengrok_tools::user_form::sanitize_arguments(&arguments)
+                    } else if name == opengrok_tools::REQUEST_CREDENTIAL
+                        || name
+                            == opengrok_tools::openai_safe_tool_name(
+                                opengrok_tools::REQUEST_CREDENTIAL,
+                            )
+                    {
+                        opengrok_tools::credential::sanitize_request(&arguments)
+                    } else {
+                        arguments
+                    };
                     done.push(ToolCall {
                         id,
                         name,
@@ -395,5 +419,68 @@ mod tests {
     fn a_run_with_no_tool_calls_yields_none() {
         let events = events_for(vec![ModelDelta::Text("just talking".to_string())]);
         assert!(collect_tool_calls(&events).is_empty());
+    }
+
+    #[test]
+    fn request_user_form_arguments_drop_smuggled_values() {
+        let events = events_for(vec![
+            ModelDelta::ToolCallStart {
+                id: "c1".to_string(),
+                name: opengrok_tools::REQUEST_USER_FORM.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "c1".to_string(),
+                delta: serde_json::json!({
+                    "title": "Sign in",
+                    "fields": [{ "id": "password", "label": "Password", "type": "password" }],
+                    "values": { "password": "s3cret-should-never-land" }
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+        ]);
+        let calls = collect_tool_calls(&events);
+        assert_eq!(calls.len(), 1);
+        let dumped = calls[0].arguments.to_string();
+        assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
+        assert!(calls[0].arguments.get("values").is_none(), "{dumped}");
+        assert_eq!(calls[0].arguments["title"], "Sign in");
+    }
+
+    #[test]
+    fn credential_request_arguments_drop_a_smuggled_password() {
+        for tool_name in [opengrok_tools::REQUEST_CREDENTIAL, "credential_request"] {
+            let events = events_for(vec![
+                ModelDelta::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: tool_name.to_string(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: "c1".to_string(),
+                    delta: serde_json::json!({
+                        "origin": "accounts.google.com",
+                        "password": "s3cret-should-never-land"
+                    })
+                    .to_string(),
+                },
+                ModelDelta::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+            ]);
+            let calls = collect_tool_calls(&events);
+            assert_eq!(calls.len(), 1, "{tool_name}");
+            let dumped = calls[0].arguments.to_string();
+            assert!(
+                !dumped.contains("s3cret-should-never-land"),
+                "{tool_name}: {dumped}"
+            );
+            assert_eq!(calls[0].arguments["origin"], "accounts.google.com");
+            assert!(
+                calls[0].arguments.get("password").is_none(),
+                "{tool_name}: {dumped}"
+            );
+        }
     }
 }

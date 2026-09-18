@@ -30,13 +30,16 @@ create table if not exists events (
 create index if not exists events_stream_idx on events (stream_id, stream_seq);
 
 -- The lookup index for "whose refresh token is this". A projection like any other: derivable by
--- replaying `events`, and maintained in the same transaction as the append. A row exists only
--- while the token it names is live, so a rotated or revoked token simply has no row.
+-- replaying `events`, and maintained in the same transaction as the append. The current hash
+-- has grace_until_ms NULL (live until rotated). The just-rotated-away hash is kept until
+-- grace_until_ms so a concurrent refresh with the old cookie can still find the session;
+-- after that the lookup ignores it, and the next rotate deletes it. Never a history of hashes.
 create table if not exists session_view (
     refresh_token_hash text   primary key,
     account_id         text   not null,
     session_id         text   not null
 );
+alter table session_view add column if not exists grace_until_ms bigint;
 
 create index if not exists session_view_session_idx on session_view (session_id);
 
@@ -875,6 +878,33 @@ update grant_view
 update ceiling_view
    set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
  where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
+-- `request_user_form` joined the built-ins the same way: a row that is exactly today's
+-- previous set follows; a narrower list was chosen on purpose and is left alone.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` joined the built-ins the same way. Site passwords are NOT stored;
+-- this tool only asks the client to fill a saved login.
+update grant_view
+   set profile = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+
+-- Site-login matching metadata only. NEVER a password. Vault stays connector/API secrets.
+create table if not exists credential_hint (
+    account_id     text   not null,
+    coworker_id    text   not null,
+    origin         text   not null,
+    username       text   not null default '',
+    credential_id  text   not null,
+    updated_at_ms  bigint not null,
+    primary key (account_id, coworker_id, origin)
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

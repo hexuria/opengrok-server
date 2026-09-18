@@ -11,6 +11,10 @@
 //! run spends. `OG_GATEWAY_ADMIN_TOKEN` is an *admin* key (`oag admin key create --admin`) and is
 //! only ever used here. Unset means this whole surface is off, which is the right default for a
 //! deployment that has not wired the two together; it is never a boot failure.
+//!
+//! The gateway has **no GET list** of principals (`GET /admin/api/principals` is 405 by design).
+//! Upsert is `POST /admin/api/principals`; usage is `GET /admin/api/principals/{email}/usage`.
+//! A 405 is an answer from a live gateway (`Refused`), never `Unreachable`.
 
 use serde::Deserialize;
 
@@ -240,36 +244,40 @@ impl GatewayAdmin {
             .map_err(|error| AdminError::Unreachable(error.to_string()))?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            // The gateway's own message, which names the actual problem ("no principal with that
-            // email"), beats a status code we would have to guess a sentence for.
-            let detail = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|body| {
-                    body.get("error")
-                        .and_then(|e| e.as_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| format!("HTTP {status}"));
-            return Err(AdminError::Refused(detail));
-        }
-        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
+        classify_admin_reply(path, status, &text)
     }
 
     /// Bind the org to its principal, optionally setting the org's monthly budget. Idempotent, so
     /// it is safe (and correct) to call before every mint rather than tracking whether we have.
+    ///
+    /// The gateway has **no GET list** of principals: `GET /admin/api/principals` is 405 by
+    /// design. Upsert is `POST` with `{email, role?, monthly_budget_usd?}`. `role` is optional
+    /// there (default `member`; only `member` is accepted via the API) — we send it so a default
+    /// change cannot silently promote an org principal. Omit `monthly_budget_usd` to leave the
+    /// budget (COALESCE).
     pub async fn ensure_org_principal(
         &self,
         org_id: &str,
         monthly_budget_usd: Option<&str>,
     ) -> Result<(), AdminError> {
-        let mut body = serde_json::json!({ "email": Self::org_principal_email(org_id) });
+        let mut body = serde_json::json!({
+            "email": Self::org_principal_email(org_id),
+            "role": "member",
+        });
         if let Some(budget) = monthly_budget_usd {
             body["monthly_budget_usd"] = serde_json::Value::String(budget.to_string());
         }
         self.send(reqwest::Method::POST, "/admin/api/principals", Some(body))
             .await
             .map(|_| ())
+    }
+
+    /// The method OAG does not serve. GET of the collection is 405 by design; this exists so
+    /// the contract test can prove that 405 is `Refused`, never `Unreachable`.
+    #[cfg(test)]
+    async fn get_principals_collection(&self) -> Result<serde_json::Value, AdminError> {
+        self.send(reqwest::Method::GET, "/admin/api/principals", None)
+            .await
     }
 
     /// Mint one member's key on the org's principal. `label` is what the console shows; the
@@ -326,7 +334,7 @@ impl GatewayAdmin {
         org_id: &str,
         monthly_budget_usd: Option<&str>,
     ) -> Result<(), AdminError> {
-        let email = Self::org_principal_email(org_id);
+        let email = encode_path_segment(&Self::org_principal_email(org_id));
         self.send(
             reqwest::Method::PATCH,
             &format!("/admin/api/principals/{email}/budget"),
@@ -491,7 +499,7 @@ impl GatewayAdmin {
     /// The org's budget and month-to-date spend. `None` when the org has no principal yet — which
     /// is not an error, it just means nobody has been given a key.
     pub async fn org_usage(&self, org_id: &str) -> Result<Option<PrincipalUsage>, AdminError> {
-        let email = Self::org_principal_email(org_id);
+        let email = encode_path_segment(&Self::org_principal_email(org_id));
         match self
             .send(
                 reqwest::Method::GET,
@@ -510,10 +518,153 @@ impl GatewayAdmin {
     }
 }
 
+/// RFC 3986 unreserved stays; `@` in the derived principal address must not collapse a
+/// per-email path into `GET /admin/api/principals` (the collection, which is 405).
+fn encode_path_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for byte in segment.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            _ => {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+fn classify_admin_reply(
+    path: &str,
+    status: reqwest::StatusCode,
+    text: &str,
+) -> Result<serde_json::Value, AdminError> {
+    if status.is_success() {
+        return Ok(serde_json::from_str(text).unwrap_or(serde_json::Value::Null));
+    }
+    // The gateway's own message, which names the actual problem ("no principal with that
+    // email"), beats a status code we would have to guess a sentence for.
+    let detail = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|body| {
+            body.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    // METHOD NOT ALLOWED IS AN ANSWER. GET /admin/api/principals is 405 by design (no list).
+    // Transport failure is Unreachable; this is Refused, so the console cannot read
+    // "gateway down" for a wrong method.
+    if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+        let collection = path
+            .split_once('?')
+            .map_or(path, |(p, _)| p)
+            .trim_end_matches('/');
+        let detail = if collection == "/admin/api/principals" {
+            format!("{detail}; no GET list of principals — upsert with POST /admin/api/principals")
+        } else {
+            detail
+        };
+        return Err(AdminError::Refused(detail));
+    }
+    Err(AdminError::Refused(detail))
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::routing::{get, patch, post};
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
+
+    #[derive(Default)]
+    struct PrincipalLog {
+        /// `(method, path, body)` for every principals call. GET of the collection must stay empty.
+        calls: Vec<(String, String, Option<Value>)>,
+    }
+
+    type SharedLog = Arc<Mutex<PrincipalLog>>;
+
+    /// OAG's principals surface: no GET list (405), POST upsert, PATCH budget, GET usage by email.
+    async fn spawn_oag_principals(log: SharedLog) -> String {
+        let app = Router::new()
+            .route(
+                "/admin/api/principals",
+                post(
+                    |State(log): State<SharedLog>, Json(body): Json<Value>| async move {
+                        log.lock().unwrap().calls.push((
+                            "POST".into(),
+                            "/admin/api/principals".into(),
+                            Some(body.clone()),
+                        ));
+                        (StatusCode::OK, Json(body))
+                    },
+                )
+                .get(|State(log): State<SharedLog>| async move {
+                    log.lock().unwrap().calls.push((
+                        "GET".into(),
+                        "/admin/api/principals".into(),
+                        None,
+                    ));
+                    (
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        Json(json!({"error": "method not allowed"})),
+                    )
+                }),
+            )
+            .route(
+                "/admin/api/principals/{email}/budget",
+                patch(
+                    |State(log): State<SharedLog>,
+                     Path(email): Path<String>,
+                     Json(body): Json<Value>| async move {
+                        log.lock().unwrap().calls.push((
+                            "PATCH".into(),
+                            format!("/admin/api/principals/{email}/budget"),
+                            Some(body.clone()),
+                        ));
+                        (StatusCode::OK, Json(json!({ "email": email })))
+                    },
+                ),
+            )
+            .route(
+                "/admin/api/principals/{email}/usage",
+                get(
+                    |State(log): State<SharedLog>, Path(email): Path<String>| async move {
+                        log.lock().unwrap().calls.push((
+                            "GET".into(),
+                            format!("/admin/api/principals/{email}/usage"),
+                            None,
+                        ));
+                        (
+                            StatusCode::OK,
+                            Json(json!({
+                                "email": email,
+                                "monthly_budget_usd": "100.000000",
+                                "month_to_date_usd": "1.250000",
+                                "requests": 3,
+                            })),
+                        )
+                    },
+                ),
+            )
+            .with_state(log);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    }
 
     #[test]
     fn the_org_principal_address_is_derived_not_stored() {
@@ -535,5 +686,169 @@ mod tests {
         let rendered = format!("{admin:?}");
         assert!(!rendered.contains("supersecret"), "{rendered}");
         assert!(rendered.contains("«redacted»"), "{rendered}");
+    }
+
+    #[test]
+    fn the_principal_email_is_encoded_in_the_path() {
+        assert_eq!(
+            encode_path_segment("org-org_01a05@gateway.local"),
+            "org-org_01a05%40gateway.local"
+        );
+    }
+
+    #[test]
+    fn a_405_on_the_principals_collection_is_refused_not_unreachable() {
+        let error = classify_admin_reply(
+            "/admin/api/principals",
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            r#"{"error":"method not allowed"}"#,
+        )
+        .expect_err("405 is not success");
+        match error {
+            AdminError::Refused(detail) => {
+                assert!(detail.contains("POST /admin/api/principals"), "{detail}");
+                assert!(!detail.to_lowercase().contains("unreachable"), "{detail}");
+            }
+            AdminError::Unreachable(detail) => {
+                panic!("405 must not mean unreachable: {detail}");
+            }
+        }
+        let rendered = format!(
+            "{}",
+            classify_admin_reply(
+                "/admin/api/principals",
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                "",
+            )
+            .expect_err("empty 405")
+        );
+        assert!(rendered.starts_with("the gateway refused:"), "{rendered}");
+        assert!(
+            !rendered.contains("the gateway is unreachable"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_org_principal_posts_upsert_and_never_gets_the_collection() {
+        let log: SharedLog = Arc::new(Mutex::new(PrincipalLog::default()));
+        let base = spawn_oag_principals(log.clone()).await;
+        let admin = GatewayAdmin::new(&base, "admin-token");
+
+        admin
+            .ensure_org_principal("org_01a05", None)
+            .await
+            .expect("upsert");
+
+        let calls = log.lock().unwrap().calls.clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, "POST");
+        assert_eq!(calls[0].1, "/admin/api/principals");
+        let body = calls[0].2.as_ref().expect("json body");
+        assert_eq!(body["email"], json!("org-org_01a05@gateway.local"));
+        assert_eq!(body["role"], json!("member"));
+        assert!(
+            body.get("monthly_budget_usd").is_none(),
+            "omit the budget to leave it (COALESCE): {body}"
+        );
+        assert!(
+            calls.iter().all(|(method, path, _)| {
+                !(method == "GET" && path.trim_end_matches('/') == "/admin/api/principals")
+            }),
+            "never GET the collection: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_org_principal_sends_the_budget_when_set() {
+        let log: SharedLog = Arc::new(Mutex::new(PrincipalLog::default()));
+        let base = spawn_oag_principals(log.clone()).await;
+        let admin = GatewayAdmin::new(&base, "admin-token");
+
+        admin
+            .ensure_org_principal("org_01a05", Some("100"))
+            .await
+            .expect("upsert");
+
+        let body = log.lock().unwrap().calls[0].2.clone().expect("body");
+        assert_eq!(body["monthly_budget_usd"], json!("100"));
+        assert_eq!(body["role"], json!("member"));
+    }
+
+    #[tokio::test]
+    async fn org_usage_and_budget_are_by_email_not_the_collection() {
+        let log: SharedLog = Arc::new(Mutex::new(PrincipalLog::default()));
+        let base = spawn_oag_principals(log.clone()).await;
+        let admin = GatewayAdmin::new(&base, "admin-token");
+
+        let usage = admin.org_usage("org_01a05").await.expect("usage");
+        let usage = usage.expect("provisioned");
+        assert_eq!(usage.email, "org-org_01a05@gateway.local");
+        assert_eq!(usage.month_to_date_usd, "1.250000");
+
+        admin
+            .set_org_budget("org_01a05", Some("50"))
+            .await
+            .expect("budget");
+
+        let calls = log.lock().unwrap().calls.clone();
+        assert_eq!(calls[0].0, "GET");
+        assert_eq!(
+            calls[0].1,
+            "/admin/api/principals/org-org_01a05@gateway.local/usage"
+        );
+        assert_eq!(calls[1].0, "PATCH");
+        assert_eq!(
+            calls[1].1,
+            "/admin/api/principals/org-org_01a05@gateway.local/budget"
+        );
+        assert!(
+            calls.iter().all(|(method, path, _)| {
+                !(method == "GET" && path.trim_end_matches('/') == "/admin/api/principals")
+            }),
+            "never GET the collection: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_of_the_principals_collection_is_refused_not_unreachable() {
+        let log: SharedLog = Arc::new(Mutex::new(PrincipalLog::default()));
+        let base = spawn_oag_principals(log.clone()).await;
+        let admin = GatewayAdmin::new(&base, "admin-token");
+
+        let error = admin
+            .get_principals_collection()
+            .await
+            .expect_err("GET collection is 405");
+        let rendered = format!("{error}");
+        match error {
+            AdminError::Refused(detail) => {
+                assert!(detail.contains("POST /admin/api/principals"), "{detail}");
+            }
+            AdminError::Unreachable(detail) => {
+                panic!("405 must not mean unreachable: {detail}");
+            }
+        }
+        assert!(rendered.starts_with("the gateway refused:"), "{rendered}");
+        assert!(
+            !rendered.contains("the gateway is unreachable"),
+            "{rendered}"
+        );
+        assert_eq!(log.lock().unwrap().calls[0].0, "GET");
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_is_unreachable() {
+        let admin = GatewayAdmin::new("http://127.0.0.1:1", "admin-token");
+        let error = admin
+            .ensure_org_principal("org_01a05", None)
+            .await
+            .expect_err("nothing listens on :1");
+        assert!(matches!(error, AdminError::Unreachable(_)), "{error:?}");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.starts_with("the gateway is unreachable:"),
+            "{rendered}"
+        );
     }
 }

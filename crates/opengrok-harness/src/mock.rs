@@ -85,6 +85,9 @@ pub struct MockDoor {
     /// state for two floors — which, for the purpose of watching a coworker think, is a feature.
     /// `None` by default and in every test; a dev server opts in through `OG_MOCK_MIN_TURN_MS`.
     turn_floor: Option<std::time::Duration>,
+    /// When set with a user-form script: a later turn whose last user message is not a
+    /// sign-in ask is echoed as steer instead of raising the form again.
+    echo_steer: bool,
     /// The most time the PACING may add to one model call, however many deltas it has.
     ///
     /// A FLOOR AND A CEILING ANSWER DIFFERENT QUESTIONS. The floor exists because a short answer
@@ -321,6 +324,151 @@ impl MockDoor {
         }
     }
 
+    /// A door that raises an in-chat `user-form`, then stops until the person answers.
+    pub fn asking_for_user_form() -> Self {
+        Self {
+            script: Self::user_form_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    /// Same form card, but a later turn whose last user text is not a sign-in ask is
+    /// echoed as steer — what a new `sendPrompt` / AG-UI message while Waiting must do.
+    pub fn asking_for_user_form_until_steered() -> Self {
+        Self {
+            script: Self::user_form_script(),
+            once_then_answer: true,
+            echo_steer: true,
+            ..Self::default()
+        }
+    }
+
+    /// Three `request_user_form` TOOL_CALLs in one completion — NativeChat stacked
+    /// Website login cards. Each must get its own gateway `entryId`.
+    pub fn asking_for_stacked_user_forms() -> Self {
+        Self {
+            script: Self::stacked_user_form_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    /// Two same-title Website logins with provider-style parallel ids (`call-…` / `call-…-1`).
+    /// NativeChat painted the second card with the raw tool-call id when live TOOL_CALL
+    /// frames streamed before the gateway `e_*` stamp.
+    pub fn asking_for_two_website_logins() -> Self {
+        Self {
+            script: Self::two_website_login_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    /// A door that asks NativeChat to broker a saved login (`credential.request`).
+    pub fn asking_for_credential() -> Self {
+        Self {
+            script: Self::credential_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    fn credential_script() -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::Text("I'll use a saved login".to_string()),
+            ModelDelta::ToolCallStart {
+                id: "mock-cred-1".to_string(),
+                name: opengrok_tools::REQUEST_CREDENTIAL.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "mock-cred-1".to_string(),
+                delta: serde_json::json!({
+                    "origin": "accounts.google.com",
+                    "username": "ada@example.com",
+                    "password": "s3cret-should-never-land"
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "mock-cred-1".to_string(),
+            },
+        ]
+    }
+
+    fn user_form_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        script.extend(Self::user_form_call(
+            "mock-form-1",
+            "Google account",
+            "Enter the address and password.",
+        ));
+        script
+    }
+
+    fn stacked_user_form_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        for index in 1..=3 {
+            script.extend(Self::user_form_call(
+                &format!("mock-form-{index}"),
+                "Website login",
+                "Enter the address and password.",
+            ));
+        }
+        script
+    }
+
+    fn two_website_login_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        script.extend(Self::user_form_call(
+            "call-42628be6",
+            "Website login",
+            "Enter the address and password.",
+        ));
+        script.extend(Self::user_form_call(
+            "call-42628be6-1",
+            "Website login",
+            "Enter the address and password.",
+        ));
+        script
+    }
+
+    fn user_form_call(id: &str, title: &str, instruction: &str) -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::ToolCallStart {
+                id: id.to_string(),
+                name: opengrok_tools::REQUEST_USER_FORM.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: id.to_string(),
+                // `values` is smuggled the way a model might; the card and the run log
+                // must drop it so a password never sits on the entry.
+                delta: serde_json::json!({
+                    "title": title,
+                    "instruction": instruction,
+                    "fields": [
+                        {
+                            "id": "email",
+                            "label": "Email",
+                            "type": "email",
+                            "required": true
+                        },
+                        {
+                            "id": "password",
+                            "label": "Password",
+                            "type": "password",
+                            "required": true
+                        }
+                    ],
+                    "liveHost": "accounts.google.com",
+                    "values": { "password": "s3cret-should-never-land" }
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd { id: id.to_string() },
+        ]
+    }
+
     /// A door whose every turn hands the person's own words to the `mock_fixture` tool and then
     /// says back what it answered. `OG_MODEL_DOOR=mock-cards` selects it.
     pub fn serving_fixtures() -> Self {
@@ -489,7 +637,12 @@ impl ModelDoor for MockDoor {
                     ModelDelta::ToolCallEnd { id: send_id },
                 ]
             }
-        } else if self.script.is_empty() {
+        } else if self.script.is_empty()
+            || (self.echo_steer
+                && !Self::last_user_message(&request)
+                    .to_ascii_lowercase()
+                    .contains("sign in"))
+        {
             Self::echo_script(&request)
         } else if self.once_then_answer && already_ran {
             // The second round reads the tool result and replies, which is what ends the run.

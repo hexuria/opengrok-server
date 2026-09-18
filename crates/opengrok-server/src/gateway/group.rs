@@ -691,7 +691,8 @@ async fn pause_room(
     suspension: &super::conversation::Suspension,
     cursor: &RoundCursor,
 ) -> bool {
-    let Some(mut card) = super::conversation::card_for(suspension) else {
+    let card = super::conversation::card_for(suspension);
+    if card.is_none() && suspension.reason != opengrok_core::run::SuspendReason::Credential {
         tracing::warn!(
             member = %member.id.as_str(),
             group = %room.id.as_str(),
@@ -700,18 +701,20 @@ async fn pause_room(
             "group: a member's run suspended for a reason that has no card yet; its turn ends with nothing said"
         );
         return false;
-    };
-    card["author"] = json!({ "id": member.id.as_str(), "name": member.name });
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .append_gateway_entry(room.id, account_id, &card, now_ms())
-        .await
-    {
-        tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
     }
-    live::emit_transcript(state, room.id.as_str(), account_id, "appended", card);
+    if let Some(mut card) = card {
+        card["author"] = json!({ "id": member.id.as_str(), "name": member.name });
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(room.id, account_id, &card, now_ms())
+            .await
+        {
+            tracing::error!(%error, group = %room.id.as_str(), "group: a member's card could not be appended");
+        }
+        live::emit_transcript(state, room.id.as_str(), account_id, "appended", card);
+    }
     if let Err(error) = state
         .agui
         .auth

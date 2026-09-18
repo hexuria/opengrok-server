@@ -16,6 +16,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{AccountId, SessionId};
 
+/// How long the just-rotated-away refresh hash still identifies the session.
+///
+/// NativeChat (and the console) can fire concurrent `POST /auth/refresh` with the same cookie.
+/// The first request rotates; a loser that presents the old hash inside this window must reuse
+/// the already-minted current pair (fresh access, same current refresh) instead of 401. After
+/// this, the old hash is dead — a leaked refresh token must not be immortal. 45s covers a burst
+/// of retries without stretching the stolen-token window.
+pub const REFRESH_GRACE_MS: i64 = 45_000;
+
 /// The plans the client can ask for, spelled as it spells them on the wire.
 ///
 /// The client sends a *tier* (`"ProTrial"`) and maps it to a plan + trial flag before the request
@@ -73,10 +82,15 @@ pub enum AccountEvent {
         refresh_token_hash: String,
         at_ms: i64,
     },
-    /// A refresh rotated the pair. The old hash stops being accepted at this moment.
+    /// A refresh rotated the pair. `refresh_token_hash` is the new current hash.
+    /// `previous_refresh_token_hash` is the one just rotated away: it remains acceptable for
+    /// [`REFRESH_GRACE_MS`] after `at_ms` so a concurrent refresh with the old cookie reuses
+    /// this rotation instead of 401. Absent on events written before the grace existed.
     SessionRefreshed {
         session_id: SessionId,
         refresh_token_hash: String,
+        #[serde(default)]
+        previous_refresh_token_hash: Option<String>,
         at_ms: i64,
     },
     SessionRevoked {
@@ -147,6 +161,10 @@ impl AccountEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub refresh_token_hash: String,
+    /// The hash `SessionRefreshed` just replaced. Acceptable only inside [`REFRESH_GRACE_MS`]
+    /// of `refreshed_at_ms`; never kept as a second live token.
+    pub previous_refresh_token_hash: Option<String>,
+    pub refreshed_at_ms: i64,
     pub revoked: bool,
 }
 
@@ -167,6 +185,12 @@ pub struct Account {
     pub verified: bool,
     pub enabled: bool,
     pub avatar_url: Option<String>,
+}
+
+/// Current hash vs just-rotated-away hash inside [`REFRESH_GRACE_MS`].
+enum RefreshMatch<'a> {
+    Current(&'a SessionId),
+    Previous(&'a SessionId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -198,7 +222,9 @@ pub enum AccountCommand {
         refresh_token_hash: String,
         at_ms: i64,
     },
-    /// Rotate a session's refresh token. The presented hash must match a live session.
+    /// Rotate a session's refresh token. The presented hash must match a live session's current
+    /// hash, or — inside [`REFRESH_GRACE_MS`] of the last rotation — the hash just rotated away
+    /// (that path emits no event; the HTTP layer reuses the current pair).
     Refresh {
         presented_hash: String,
         new_hash: String,
@@ -269,12 +295,15 @@ impl Account {
             AccountEvent::SessionIssued {
                 session_id,
                 refresh_token_hash,
+                at_ms,
                 ..
             } => {
                 self.sessions.insert(
                     session_id.clone(),
                     Session {
                         refresh_token_hash: refresh_token_hash.clone(),
+                        previous_refresh_token_hash: None,
+                        refreshed_at_ms: *at_ms,
                         revoked: false,
                     },
                 );
@@ -282,10 +311,16 @@ impl Account {
             AccountEvent::SessionRefreshed {
                 session_id,
                 refresh_token_hash,
+                previous_refresh_token_hash,
+                at_ms,
                 ..
             } => {
                 if let Some(session) = self.sessions.get_mut(session_id) {
+                    session.previous_refresh_token_hash = previous_refresh_token_hash
+                        .clone()
+                        .or_else(|| Some(session.refresh_token_hash.clone()));
                     session.refresh_token_hash = refresh_token_hash.clone();
+                    session.refreshed_at_ms = *at_ms;
                 }
             }
             AccountEvent::SessionRevoked { session_id, .. } => {
@@ -321,6 +356,54 @@ impl Account {
             }
             AccountEvent::PasswordChanged { password_hash, .. } => {
                 self.password_hash = Some(password_hash.clone());
+            }
+        }
+    }
+
+    /// Which live session the presented refresh hash belongs to: the current hash, or the
+    /// just-rotated-away hash inside [`REFRESH_GRACE_MS`].
+    fn match_refresh(
+        &self,
+        presented_hash: &str,
+        at_ms: i64,
+    ) -> Result<RefreshMatch<'_>, AccountError> {
+        if !self.registered {
+            return Err(AccountError::NotRegistered);
+        }
+        if let Some((session_id, session)) = self
+            .sessions
+            .iter()
+            .find(|(_, session)| session.refresh_token_hash == presented_hash)
+        {
+            if session.revoked {
+                return Err(AccountError::SessionRevoked);
+            }
+            return Ok(RefreshMatch::Current(session_id));
+        }
+        if let Some((session_id, session)) = self.sessions.iter().find(|(_, session)| {
+            session.previous_refresh_token_hash.as_deref() == Some(presented_hash)
+        }) {
+            if session.revoked {
+                return Err(AccountError::SessionRevoked);
+            }
+            if at_ms.saturating_sub(session.refreshed_at_ms) <= REFRESH_GRACE_MS {
+                return Ok(RefreshMatch::Previous(session_id));
+            }
+            return Err(AccountError::UnknownRefreshToken);
+        }
+        Err(AccountError::UnknownRefreshToken)
+    }
+
+    /// The session a presented refresh hash currently names, including grace reuse.
+    /// The HTTP rotation path uses this to mint a fresh access token without a new event.
+    pub fn session_id_for_refresh(
+        &self,
+        presented_hash: &str,
+        at_ms: i64,
+    ) -> Result<&SessionId, AccountError> {
+        match self.match_refresh(presented_hash, at_ms)? {
+            RefreshMatch::Current(session_id) | RefreshMatch::Previous(session_id) => {
+                Ok(session_id)
             }
         }
     }
@@ -361,22 +444,17 @@ impl Account {
                 new_hash,
                 at_ms,
             } => {
-                if !self.registered {
-                    return Err(AccountError::NotRegistered);
+                match self.match_refresh(&presented_hash, at_ms)? {
+                    RefreshMatch::Current(session_id) => Ok(vec![AccountEvent::SessionRefreshed {
+                        session_id: session_id.clone(),
+                        refresh_token_hash: new_hash,
+                        previous_refresh_token_hash: Some(presented_hash),
+                        at_ms,
+                    }]),
+                    // Within grace: no second rotation. The HTTP layer returns the already-minted
+                    // current refresh (and a fresh access token). `new_hash` is discarded.
+                    RefreshMatch::Previous(_) => Ok(vec![]),
                 }
-                let (session_id, session) = self
-                    .sessions
-                    .iter()
-                    .find(|(_, session)| session.refresh_token_hash == presented_hash)
-                    .ok_or(AccountError::UnknownRefreshToken)?;
-                if session.revoked {
-                    return Err(AccountError::SessionRevoked);
-                }
-                Ok(vec![AccountEvent::SessionRefreshed {
-                    session_id: session_id.clone(),
-                    refresh_token_hash: new_hash,
-                    at_ms,
-                }])
             }
 
             AccountCommand::SignOut { session_id, at_ms } => {
@@ -629,9 +707,15 @@ mod tests {
             .get(&SessionId::from_stored("sess_1"))
             .unwrap();
         assert_eq!(session.refresh_token_hash, "hash-2");
+        assert_eq!(
+            session.previous_refresh_token_hash.as_deref(),
+            Some("hash-1")
+        );
+        assert_eq!(session.refreshed_at_ms, 30);
     }
 
-    /// A rotated-away token must stop working — otherwise a leaked refresh token is immortal.
+    /// Inside the grace window the rotated-away hash reuses this rotation: no new event, current
+    /// hash stays. After the window it is dead — a leaked refresh token must not be immortal.
     #[test]
     fn the_previous_refresh_token_stops_being_accepted() {
         let mut account = Account::default();
@@ -651,11 +735,32 @@ mod tests {
         for event in &events {
             account.apply(event);
         }
+
+        let reuse = account
+            .decide(AccountCommand::Refresh {
+                presented_hash: "hash-1".to_string(),
+                new_hash: "hash-3".to_string(),
+                at_ms: 30 + REFRESH_GRACE_MS,
+            })
+            .unwrap();
+        assert!(
+            reuse.is_empty(),
+            "within grace, reuse emits no second rotation: {reuse:?}"
+        );
+        let session = account
+            .sessions
+            .get(&SessionId::from_stored("sess_1"))
+            .unwrap();
+        assert_eq!(
+            session.refresh_token_hash, "hash-2",
+            "grace reuse must not mint another rotation"
+        );
+
         assert_eq!(
             account.decide(AccountCommand::Refresh {
                 presented_hash: "hash-1".to_string(),
                 new_hash: "hash-3".to_string(),
-                at_ms: 40,
+                at_ms: 30 + REFRESH_GRACE_MS + 1,
             }),
             Err(AccountError::UnknownRefreshToken)
         );

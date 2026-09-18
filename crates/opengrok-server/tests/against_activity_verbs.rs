@@ -141,6 +141,7 @@ async fn the_activity_label_says_what_the_coworker_is_doing() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

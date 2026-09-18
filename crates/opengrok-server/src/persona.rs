@@ -218,7 +218,25 @@ pub fn computer_system_prompt(
          write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
-         Never describe work done on your box as done on the user's computer."
+         Never describe work done on your box as done on the user's computer. When a page asks \
+         for a site login, prefer `credential.request` (origin = the page host, username if you \
+         know it) when a saved login is likely and wait. NativeChat brokers the login out of \
+         your view. On filled, the authenticated session is ready: cookies and profile were \
+         applied to the box. You did not receive a password and must not type one with \
+         `computer` — a screenshot of an observable fill would leak it. Screenshot and confirm \
+         the page. On denied, missing, or error, call `request_user_form` and wait. The person \
+         fills in chat; the server types into the focused field and does not show you the secret. \
+         After a user-form settles, screenshot and confirm what the page shows; filling is not a \
+         successful login. Auth is one challenge per form: raise email, then after it settles \
+         screenshot; if a password page is next, prefer `credential.request` when a saved login \
+         is likely, otherwise call `request_user_form` with a password-only form (new entryId, \
+         challengeKind \"password\"). \
+         Do not put email and password on the same card unless they share a page (`samePage`). \
+         If another in-sandbox challenge appears (OTP, a phone code on the same page), call \
+         `request_user_form` again with otp fields and challengeKind \"otp\" — never re-raise a \
+         form that already settled. Captcha, passkey, or a page outside this box is not another \
+         password form: the person finishes on the computer (Open the screen). If they dismiss or \
+         decline, continue without those credentials and do not loop."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -535,6 +553,51 @@ mod tests {
         assert!(
             !none.contains("user_machine_shell"),
             "no box ⇒ the reverse channel is not offered either: {none}"
+        );
+        assert!(
+            !none.contains("request_user_form"),
+            "no box ⇒ the form tool is not offered: {none}"
+        );
+        assert!(
+            !none.contains("credential.request"),
+            "no box ⇒ saved-login session is not offered: {none}"
+        );
+        assert!(
+            box_only.contains("`request_user_form`"),
+            "the form tool is a built-in on a box: {box_only}"
+        );
+        assert!(
+            box_only.contains("`credential.request`"),
+            "prefer a brokered saved-login session before a password form: {box_only}"
+        );
+        assert!(
+            box_only.contains("authenticated session is ready")
+                && box_only.contains("You did not receive a password"),
+            "filled = authenticated session ready, never a typed password: {box_only}"
+        );
+        assert!(
+            box_only.contains("one challenge per form"),
+            "stepped login contract: {box_only}"
+        );
+        assert!(
+            box_only.contains("password-only"),
+            "password follow-up is a new form: {box_only}"
+        );
+        assert!(
+            box_only.contains("challengeKind"),
+            "OTP follow-up contract: {box_only}"
+        );
+        assert!(
+            box_only.contains("Captcha"),
+            "captcha/passkey is handoff, not another password form: {box_only}"
+        );
+        assert!(
+            !box_only.to_lowercase().contains("take over"),
+            "not OpenGrok Take over chrome: {box_only}"
+        );
+        assert!(
+            !box_only.to_lowercase().contains("i'm done"),
+            "not OpenGrok I'm done chrome: {box_only}"
         );
     }
 

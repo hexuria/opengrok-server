@@ -36,6 +36,13 @@ pub enum EventType {
     ToolCallArgs,
     ToolCallEnd,
     ToolCallChunk,
+    /// Tool output. A computer screenshot rides `extra.image`:
+    /// `{mime, base64, width, height, visibility}` where `visibility` is
+    /// `agent` | `transcript` | `failure` | `end`. Computer-step shots are
+    /// `agent` (model + Computer pane, not a chat event to persist). Promote
+    /// to `transcript` / `failure` / `end` when the PNG should survive replay.
+    /// Absent `visibility` on older frames means `transcript` — those PNGs
+    /// were already first-class events.
     ToolCallResult,
     /// Deprecated in 0.0.57; use `ReasoningStart`.
     ThinkingStart,
