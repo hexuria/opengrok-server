@@ -316,15 +316,6 @@ async fn main() -> anyhow::Result<()> {
         gateway.clone(),
     ));
 
-    // The tonic listener — internal gRPC on the transcribed seam-B contract. Opt-in: absent
-    // means no listener, because nothing internal dials it yet and an unused open port is a
-    // liability, not a feature.
-    if let Ok(bind) = std::env::var("OG_GRPC_BIND")
-        && let Ok(addr) = bind.parse()
-    {
-        tokio::spawn(opengrok_server::grpc::serve(gateway.clone(), addr));
-    }
-
     let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)
         .await

@@ -16,7 +16,6 @@ pub mod connections;
 pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
-pub mod grpc;
 pub mod jev;
 pub mod local_exec;
 pub mod mcp_door;
@@ -25,8 +24,6 @@ pub mod persona;
 pub mod points;
 pub mod recipes;
 pub mod recovery;
-pub mod seamb;
-pub mod seamb_send;
 pub mod spend;
 pub mod templates;
 pub mod workflows;
@@ -43,7 +40,6 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
-        .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
