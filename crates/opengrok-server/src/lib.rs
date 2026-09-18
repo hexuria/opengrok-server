@@ -11,11 +11,13 @@ pub mod artifacts;
 pub mod auth;
 pub mod auto_review;
 pub mod autonomy;
+pub mod cards;
 pub mod computers;
 pub mod connections;
 pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
+pub mod health;
 pub mod jev;
 pub mod local_exec;
 pub mod mcp_door;
@@ -32,12 +34,9 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-///
-/// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
-/// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
-/// smoke script was already checking.
 pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
     let app = Router::new()
+        .merge(health::router(state.clone()))
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))

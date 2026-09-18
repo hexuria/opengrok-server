@@ -3106,8 +3106,34 @@ pub async fn list_awaiting(
     }
 }
 
-/// The message a reply points at, as the one bracketed line `reply_context` writes for the
-/// desktop's own transcript — so a reply reads the same whichever door the turn came through.
+/// How much of a quoted message the model is shown; a reply to a long answer names the answer,
+/// it does not replay it.
+const REPLY_QUOTE_CHARS: usize = 1_000;
+
+/// How every quote line opens. A client that spells the quote into the message itself (NativeChat
+/// does, because that is all a server without this field would read) is recognised by it, so the
+/// context is not said twice.
+pub(crate) const REPLY_QUOTE_OPENING: &str = "[Replying to";
+
+/// The one sentence a quote is written as, so a message that carries the sentence already can be
+/// told apart from one that does not.
+///
+/// `None` when the quoted message had no words to quote.
+pub(crate) fn reply_quote_line(who: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
+        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
+        format!("{head}…")
+    } else {
+        text.to_string()
+    };
+    Some(format!("{REPLY_QUOTE_OPENING} {who}: \"{clipped}\"]"))
+}
+
+/// The message a reply points at, as one bracketed line the model reads ahead of the prompt.
 ///
 /// `replyTo` is either the quoted message's id or NativeChat's object (`messageId`, `preview`,
 /// `isMe`). The quoted message itself is preferred, with all of its words; the preview is what is
@@ -3143,7 +3169,7 @@ fn reply_quote(
     } else {
         "your earlier message"
     };
-    crate::gateway::conversation::reply_quote_line(who, text)
+    reply_quote_line(who, text)
 }
 
 /// A user message with the quote it answers ahead of it.
@@ -3156,10 +3182,7 @@ fn with_reply_context(
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],
 ) -> String {
-    if content
-        .trim_start()
-        .starts_with(crate::gateway::conversation::REPLY_QUOTE_OPENING)
-    {
+    if content.trim_start().starts_with(REPLY_QUOTE_OPENING) {
         return content.to_string();
     }
     match reply_quote(message, sent) {

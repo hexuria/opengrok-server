@@ -15,6 +15,7 @@ pub mod sweep;
 
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
+use serde_json::Value;
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 
@@ -176,7 +177,7 @@ async fn announce_finished(
     }
     let head: String = text.trim().chars().take(200).collect();
     let content = if head.is_empty() {
-        match crate::gateway::conversation::failure_sentence(events) {
+        match failure_sentence(events) {
             Some(why) => format!("Routine {} failed: {why}", announce.name),
             None => format!(
                 "Routine {} ran and produced no answer. Its run log has the reason.",
@@ -226,4 +227,46 @@ async fn announce_finished(
     // The firing's own account: a routine acting on its schedule acts for whoever set it,
     // and that is whose Routines pane this frame refreshes.
     crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str(), account_id).await;
+}
+
+/// The sentence a failed run leaves for the person, from the run's own failure event: the
+/// gateway's words when it refused (the `error.message` inside its JSON body, when it carries
+/// one — "no subscription credential for xai on this route" rather than the whole body), the
+/// harness's otherwise; capped. `None` when the run did not fail.
+pub(crate) fn failure_sentence(events: &[opengrok_wire::agui::Event]) -> Option<String> {
+    let message = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == opengrok_wire::agui::EventType::RunError)?
+        .extra
+        .get("message")
+        .and_then(Value::as_str)?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    let said = match message.find('{') {
+        Some(at) => {
+            let inner = serde_json::from_str::<Value>(&message[at..])
+                .ok()
+                .and_then(|body| {
+                    body.pointer("/error/message")
+                        .or_else(|| body.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            match inner {
+                Some(inner) => format!("{} {inner}", message[..at].trim_end()),
+                None => message.to_string(),
+            }
+        }
+        None => message.to_string(),
+    };
+    let said = said.trim().trim_end_matches('.');
+    let capped: String = said.chars().take(300).collect();
+    Some(if capped.chars().count() < said.chars().count() {
+        format!("{capped}…")
+    } else {
+        capped
+    })
 }

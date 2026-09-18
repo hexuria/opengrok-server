@@ -24,7 +24,6 @@ use super::{GatewayState, refuse};
 
 pub fn router(state: GatewayState) -> Router {
     Router::new()
-        .route("/health", get(health))
         .route("/events", get(events))
         .route("/api/{method}", post(command))
         .route("/avatars/{id}", get(avatar_bytes))
@@ -143,62 +142,6 @@ fn identity_refusal(code: &str) -> Response {
     reply(
         StatusCode::UNAUTHORIZED,
         json!({ "error": message, "code": code }),
-    )
-}
-
-/// `GET /health` — the supervisor probes this on a 1500 ms deadline and only accepts
-/// `ok === true`. The busy flag is real: it reports whether any run is live right now, and so is
-/// `ok` — a host whose event store is unreachable answers 503, not a cheerful 200.
-///
-/// UNAUTHENTICATED, on purpose. The client's reachability probe (`host-supervisor.ts`
-/// `fetchHealth`) sends no Authorization header — upstream's gateway serves health openly, and a
-/// liveness endpoint whose whole job is to answer "I am up" must be probeable without a token, or a
-/// bearered host looks permanently unreachable the instant the SSE stream drops. It reveals only
-/// that the server is up (plus pid/busy/startedAt — nothing secret), so it sits OUTSIDE `refuse`
-/// while every driving surface (`/api`, `/events`) stays behind it.
-///
-/// Token-free is not origin-free. The supervisor sends no Authorization AND no Origin (it is
-/// Electron main, not a page); a browser page that learned this host still gets nothing — not
-/// even "up" — which is the rule the gateway smoke asserts for every path. Dropping `refuse` for
-/// the bearer took the Origin block with it by accident; this keeps only the half that was meant.
-async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
-    if headers.get(axum::http::header::ORIGIN).is_some() {
-        return refusal(403, "browser origins are not served");
-    }
-    // A store that cannot answer means this host cannot serve a single verb, so `/health` must not
-    // report that it can. This was `.unwrap_or(false)`, which folded a TOTAL database outage into
-    // "not busy" and still replied `ok: true` — on the one endpoint the supervisor probes to decide
-    // whether to keep using this host. Failing closed is cheap here and the client already handles
-    // it: `fetchHealth` treats a non-2xx and an `ok !== true` body identically, and its only
-    // reaction is to re-resolve the connection (`host-supervisor.ts` `ensureConnection`) — it never
-    // restarts us, so there is no outage-driven restart loop to worry about.
-    let busy = match state.agui.auth.store.running_runs().await {
-        Ok(live) => live > 0,
-        Err(error) => {
-            tracing::error!(%error, "health: the event store is not answering");
-            return reply(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({
-                    "ok": false,
-                    // The store's own sentence can carry a connection string, and this endpoint is
-                    // unauthenticated. The log gets the error; the reply gets a fixed sentence.
-                    "reason": "the event store is not answering",
-                    "pid": std::process::id(),
-                    "startedAt": state.started_at_ms,
-                }),
-            );
-        }
-    };
-    reply(
-        StatusCode::OK,
-        json!({
-            "ok": true,
-            "pid": std::process::id(),
-            "isBusy": busy,
-            "activeAgentId": null,
-            "startedAt": state.started_at_ms,
-            "lastBusyAtMs": state.started_at_ms,
-        }),
     )
 }
 

@@ -860,7 +860,7 @@ async fn persist_mcp_ask(
 
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let card = match reason {
-        SuspendReason::PolicyApproval => crate::gateway::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => crate::cards::policy_approval_card(
             &entry_id,
             &call.id,
             "pending",
@@ -869,7 +869,7 @@ async fn persist_mcp_ask(
             why,
             at_ms,
         ),
-        _ => crate::gateway::cards::auto_review_card(
+        _ => crate::cards::auto_review_card(
             &entry_id,
             &call.id,
             "pending",

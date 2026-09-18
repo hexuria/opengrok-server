@@ -604,33 +604,7 @@ pub(crate) async fn reprovision(
     crate::agui::provision::reprovision_coworker(&state.agui, account_id, coworker_id).await
 }
 
-/// How much of a quoted message the model is shown; a reply to a long answer names the answer,
-/// it does not replay it.
-const REPLY_QUOTE_CHARS: usize = 1_000;
-
-/// How every quote line opens. A client that spells the quote into the message itself — NativeChat
-/// does, because that is all a server without this field would read — is recognised by it, so the
-/// context is not said twice.
-pub(crate) const REPLY_QUOTE_OPENING: &str = "[Replying to";
-
-/// The one sentence a quote is written as, wherever the reply came from: the desktop's transcript
-/// or an AG-UI message with a `replyTo` on it. Shared so the two cannot drift, and so a message
-/// that carries the sentence already can be told apart from one that does not.
-///
-/// `None` when the quoted message had no words to quote.
-pub(crate) fn reply_quote_line(who: &str, text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
-        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
-        format!("{head}…")
-    } else {
-        text.to_string()
-    };
-    Some(format!("{REPLY_QUOTE_OPENING} {who}: \"{clipped}\"]"))
-}
+use crate::agui::routes::reply_quote_line;
 
 /// The message a reply points at, as one bracketed line the model reads ahead of the prompt —
 /// who said it and what, capped — or nothing when there is no link or it names an entry that is
@@ -1031,7 +1005,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
                 },
             }))
         }
-        SuspendReason::AutoReview => Some(super::cards::auto_review_card(
+        SuspendReason::AutoReview => Some(crate::cards::auto_review_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -1043,7 +1017,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
         // reason and no proposed rule. Answered by `resolveAutoReviewApproval`, which routes the
         // yes to the GATE (not the judge) by this reason.
-        SuspendReason::PolicyApproval => Some(super::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => Some(crate::cards::policy_approval_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -1089,47 +1063,7 @@ async fn emit_suspension(
     true
 }
 
-/// The sentence a failed run leaves for the person, from the run's own failure event: the
-/// gateway's words when it refused (the `error.message` inside its JSON body, when it carries
-/// one — "no subscription credential for xai on this route" rather than the whole body), the
-/// harness's otherwise; capped. `None` when the run did not fail.
-pub(crate) fn failure_sentence(events: &[opengrok_wire::agui::Event]) -> Option<String> {
-    let message = events
-        .iter()
-        .rev()
-        .find(|event| event.event_type == opengrok_wire::agui::EventType::RunError)?
-        .extra
-        .get("message")
-        .and_then(Value::as_str)?
-        .trim();
-    if message.is_empty() {
-        return None;
-    }
-    let said = match message.find('{') {
-        Some(at) => {
-            let inner = serde_json::from_str::<Value>(&message[at..])
-                .ok()
-                .and_then(|body| {
-                    body.pointer("/error/message")
-                        .or_else(|| body.get("message"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-            match inner {
-                Some(inner) => format!("{} {inner}", message[..at].trim_end()),
-                None => message.to_string(),
-            }
-        }
-        None => message.to_string(),
-    };
-    let said = said.trim().trim_end_matches('.');
-    let capped: String = said.chars().take(300).collect();
-    Some(if capped.chars().count() < said.chars().count() {
-        format!("{capped}…")
-    } else {
-        capped
-    })
-}
+use crate::autonomy::failure_sentence;
 
 /// The answer entry a turn grows into: appended as a streaming placeholder before the turn
 /// starts, updated in place as it ends. `reply_to` is the turn's reply link, carried by every
