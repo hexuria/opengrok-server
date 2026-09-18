@@ -47,7 +47,7 @@ impl FormField {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormRequest {
     #[serde(default)]
     pub title: String,
@@ -59,7 +59,28 @@ pub struct FormRequest {
     pub domain: Option<String>,
     #[serde(default, rename = "liveHost", skip_serializing_if = "Option::is_none")]
     pub live_host: Option<String>,
+    /// Hint for the next challenge: `password`, `otp`, `captcha`, `passkey`, `outside_sandbox`.
+    /// Optional; the model may omit it. Captcha / passkey / outside-sandbox must not be another
+    /// password form — those go to box handoff.
+    #[serde(
+        default,
+        rename = "challengeKind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub challenge_kind: Option<String>,
 }
+
+/// What the model reads when the person hands the computer back after Open-the-screen.
+/// Observe; do not claim login. A second `request_user_form` is for an in-sandbox OTP, not a
+/// replay of the settled card.
+pub const HAND_BACK_TOOL_RESULT: &str = "Person finished on computer. Screenshot and confirm login; if another challenge, call request_user_form.";
+
+/// Person closed the handoff without finishing. Short-circuit: do not loop the form.
+pub const HANDOFF_DECLINED_TOOL_RESULT: &str = "The person declined to finish on the computer. Continue without those credentials; do not type secrets with `computer`, and do not raise the same form again.";
+
+/// Form or handoff wait ran out so the turn cannot hang (Facebook after password when phone
+/// verify hits).
+pub const HOLD_TIMED_OUT_TOOL_RESULT: &str = "The wait timed out. Continue without those credentials; do not type secrets with `computer`, and do not raise the same form again.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FieldOutcome {
@@ -155,6 +176,11 @@ pub fn form_request_from(value: &Value) -> FormRequest {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        challenge_kind: source
+            .get("challengeKind")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -173,6 +199,9 @@ pub fn sanitize_arguments(arguments: &Value) -> Value {
     }
     if let Some(host) = form.live_host {
         body["liveHost"] = json!(host);
+    }
+    if let Some(kind) = form.challenge_kind {
+        body["challengeKind"] = json!(kind);
     }
     body
 }
@@ -196,6 +225,33 @@ pub fn is_unresolved(entry: &Value) -> bool {
         return false;
     }
     entry.get("widgetDismissed").and_then(Value::as_bool) != Some(true)
+}
+
+/// Live Grok Bot box handoff: `boxRequestId` present and `boxResolution` **absent**
+/// (null/empty also count as live — the locked wire omits the key until resolve).
+/// A stray `boxRequestId` on any other card converts that card into a handoff, so user-form
+/// must never carry one — escalate emits a **separate** `sand://box` attachment.
+#[must_use]
+pub fn is_live_handoff(entry: &Value) -> bool {
+    let Some(id) = entry.get("boxRequestId").and_then(Value::as_str) else {
+        return false;
+    };
+    if id.is_empty() {
+        return false;
+    }
+    match entry.get("boxResolution") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(word)) if word.is_empty() => true,
+        Some(_) => false,
+    }
+}
+
+/// Screen tools must not race the person: unresolved user-form **or** a live box handoff.
+/// Escalating the form settles `formResolution` but must **keep** this hold until hand-back
+/// or decline — clearing it on `escalated` is the bug vs Grok Bot.
+#[must_use]
+pub fn holds_the_screen(entry: &Value) -> bool {
+    is_unresolved(entry) || is_live_handoff(entry)
 }
 
 /// Pull submit values for THIS form's fields only. Extra keys (a smuggled password on a
@@ -269,12 +325,14 @@ pub fn contains_secret_value(
     })
 }
 
-/// What the model reads after the person answers. Secrets never appear here.
+/// What the model reads after the person answers. Secrets never appear here. Filling is not
+/// login: the model must screenshot after settle and must not re-raise a settled entry.
 #[must_use]
 pub fn tool_result_content(
     form: &FormRequest,
     resolution: FormResolution,
     shared: &BTreeMap<String, String>,
+    timed_out: bool,
 ) -> String {
     let title = if form.title.is_empty() {
         "a form"
@@ -282,6 +340,7 @@ pub fn tool_result_content(
         form.title.as_str()
     };
     let secret_note = "Secret field values were typed into the page and never shown to you.";
+    let observe = "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form.";
     match resolution {
         FormResolution::Submitted => {
             let shared_line = if shared.is_empty() {
@@ -295,24 +354,40 @@ pub fn tool_result_content(
                 format!("Shared fields: {listed}.")
             };
             format!(
-                "The person submitted the form \"{title}\". It was filled into the page. {shared_line} {secret_note}"
+                "The person submitted the form \"{title}\". It was filled into the page. {observe} {shared_line} {secret_note}"
             )
         }
         FormResolution::FillFailed => {
             format!(
-                "The person submitted the form \"{title}\" but it could not be filled into the page — the page may have moved or changed. {secret_note} Do not type secrets with `computer`."
+                "The person submitted the form \"{title}\" but it could not be filled into the page — the page may have moved or changed. {observe} {secret_note} Do not type secrets with `computer`."
             )
         }
+        FormResolution::Dismissed if timed_out => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
         FormResolution::Dismissed => {
             format!(
-                "The person dismissed the form \"{title}\" without filling anything. Continue without those credentials; do not type secrets with `computer`."
+                "The person dismissed the form \"{title}\" without filling anything. Continue without those credentials; do not type secrets with `computer`, and do not raise the same form again."
             )
         }
         FormResolution::Escalated => {
             format!(
-                "The person chose to do the form \"{title}\" on the screen instead. Do not type secrets. Wait, or continue without those credentials."
+                "The person chose to finish the form \"{title}\" on the computer. Wait for them to hand it back. Do not type secrets. Do not claim the form is done."
             )
         }
+    }
+}
+
+/// Instruction shown on the separate `sand://box` attachment when the person opens the screen.
+#[must_use]
+pub fn handoff_instruction(form: &FormRequest) -> String {
+    let title = if form.title.is_empty() {
+        "this form"
+    } else {
+        form.title.as_str()
+    };
+    if form.instruction.is_empty() {
+        format!("Finish {title} on the computer.")
+    } else {
+        format!("{title}: {}", form.instruction)
     }
 }
 
@@ -332,6 +407,7 @@ pub fn history_line(entry: &Value) -> Option<String> {
         "escalated" => FormResolution::Escalated,
         _ => return None,
     };
+    let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
     let shared = entry
         .get("sharedValues")
         .and_then(Value::as_object)
@@ -342,14 +418,21 @@ pub fn history_line(entry: &Value) -> Option<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let line = tool_result_content(&form, resolution, &shared);
+    let line = tool_result_content(&form, resolution, &shared, timed_out);
     if contains_secret_value(&line, &form, &shared) {
-        return Some(tool_result_content(&form, resolution, &BTreeMap::new()));
+        return Some(tool_result_content(
+            &form,
+            resolution,
+            &BTreeMap::new(),
+            timed_out,
+        ));
     }
     Some(line)
 }
 
-/// Type each value into the currently focused field, Tab between fields. No screenshot.
+/// Type each value into the currently focused field, Tab between fields. After a successful
+/// fill, press Return so the page actually submits (Facebook hang: fill reported submitted
+/// with no post-fill submit). No screenshot — the model observes after settle.
 pub async fn fill_into_focus(
     computer: &dyn Computer,
     box_id: &str,
@@ -358,6 +441,7 @@ pub async fn fill_into_focus(
 ) -> Vec<FieldOutcome> {
     let mut outcomes = Vec::new();
     let mut previous_typed = false;
+    let mut typed_any = false;
     for field in &form.fields {
         let value = values.get(&field.id).cloned().unwrap_or_default();
         if field.required && value.is_empty() {
@@ -419,6 +503,7 @@ pub async fn fill_into_focus(
                     fill_failed: false,
                 });
                 previous_typed = true;
+                typed_any = true;
             }
             Err(error) => {
                 tracing::warn!(field = %field.label, %error, "user-form: Type failed");
@@ -429,6 +514,21 @@ pub async fn fill_into_focus(
                 });
                 previous_typed = false;
             }
+        }
+    }
+    if overall_resolution(&outcomes) == FormResolution::Submitted && typed_any {
+        // Fields were typed; Return submits the page. A failed Return does not rewrite
+        // fill_failed — the values are on the page; the model screenshots after settle.
+        if let Err(error) = computer
+            .act(
+                box_id,
+                &CuaAction::Key {
+                    key: "Return".to_string(),
+                },
+            )
+            .await
+        {
+            tracing::warn!(%error, "user-form: post-fill Return failed; fields were typed");
         }
     }
     outcomes
@@ -510,6 +610,20 @@ mod tests {
     }
 
     #[test]
+    fn challenge_kind_round_trips_on_sanitize() {
+        let raw = json!({
+            "title": "Enter code",
+            "fields": [{ "id": "otp", "label": "Code", "type": "otp", "required": true }],
+            "challengeKind": "otp",
+            "values": { "otp": "123456" }
+        });
+        let cleaned = sanitize_arguments(&raw);
+        assert_eq!(cleaned["challengeKind"], "otp");
+        assert!(cleaned.get("values").is_none());
+        assert!(!cleaned.to_string().contains("123456"));
+    }
+
+    #[test]
     fn shared_values_omit_secrets() {
         let form = FormRequest {
             title: "Sign in".into(),
@@ -532,6 +646,7 @@ mod tests {
             ],
             domain: None,
             live_host: None,
+            challenge_kind: None,
         };
         let values = BTreeMap::from([
             ("email".into(), "ada@example.com".into()),
@@ -543,8 +658,11 @@ mod tests {
             Some("ada@example.com")
         );
         assert!(!shared.contains_key("password"));
-        let content = tool_result_content(&form, FormResolution::Submitted, &shared);
+        let content = tool_result_content(&form, FormResolution::Submitted, &shared, false);
         assert!(content.contains("ada@example.com"));
+        assert!(content.contains("filled into the page"));
+        assert!(content.contains("Screenshot"));
+        assert!(!content.contains("logged in"));
         assert!(!content.contains("s3cret-pass"));
         assert!(!contains_secret_value(&content, &form, &values));
     }
@@ -587,6 +705,7 @@ mod tests {
     struct FillSpy {
         acts: Mutex<Vec<CuaAction>>,
         shots: Mutex<u32>,
+        fail_type: bool,
     }
 
     #[async_trait]
@@ -630,6 +749,9 @@ mod tests {
         }
         async fn act(&self, _b: &str, action: &CuaAction) -> BoxResult<()> {
             self.acts.lock().unwrap().push(action.clone());
+            if self.fail_type && matches!(action, CuaAction::Type { .. }) {
+                return Err(opengrok_box::BoxError::NoSuchBox);
+            }
             Ok(())
         }
     }
@@ -658,6 +780,7 @@ mod tests {
             ],
             domain: None,
             live_host: None,
+            challenge_kind: None,
         };
         let values = BTreeMap::from([
             ("email".into(), "ada@example.com".into()),
@@ -678,6 +801,9 @@ mod tests {
                 CuaAction::Type {
                     text: "s3cret-pass".into()
                 },
+                CuaAction::Key {
+                    key: "Return".into()
+                },
             ]
         );
         assert_eq!(*spy.shots.lock().unwrap(), 0, "fill must not screenshot");
@@ -697,6 +823,7 @@ mod tests {
             }],
             domain: None,
             live_host: None,
+            challenge_kind: None,
         };
         let raw = json!({
             "email": "ada@example.com",
@@ -710,5 +837,125 @@ mod tests {
         );
         assert!(!values.contains_key("password"));
         assert!(!values.contains_key("coworker_id"));
+    }
+
+    #[test]
+    fn field_outcomes_are_the_recovery_card_shape() {
+        let outcomes = vec![
+            FieldOutcome {
+                id: "email".into(),
+                filled: true,
+                fill_failed: false,
+            },
+            FieldOutcome {
+                id: "password".into(),
+                filled: false,
+                fill_failed: true,
+            },
+        ];
+        assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
+        let dumped = serde_json::to_value(&outcomes).expect("outcomes json");
+        assert_eq!(dumped[0]["id"], "email");
+        assert_eq!(dumped[0]["filled"], true);
+        assert_eq!(dumped[0]["fillFailed"], false);
+        assert_eq!(dumped[1]["fillFailed"], true);
+    }
+
+    #[test]
+    fn live_handoff_holds_the_screen_after_the_form_settles() {
+        let form = json!({
+            "kind": "send-message",
+            "id": "e_form",
+            "formResolution": "escalated",
+            "widgetDismissed": true,
+            "message": { "type": "user-form", "formRequest": { "title": "x", "fields": [] } }
+        });
+        assert!(!is_unresolved(&form));
+        assert!(
+            !holds_the_screen(&form),
+            "escalated form alone must not hold"
+        );
+        let live = json!({
+            "kind": "send-message",
+            "id": "e_hand",
+            "message": { "type": "attachment", "url": "sand://box" },
+            "boxRequestId": "req_1",
+            "boxInstruction": "Finish this form on the computer."
+        });
+        assert!(is_live_handoff(&live));
+        assert!(holds_the_screen(&live));
+        let handed_back = json!({
+            "kind": "send-message",
+            "id": "e_hand",
+            "message": { "type": "attachment", "url": "sand://box" },
+            "boxRequestId": "req_1",
+            "boxResolution": "handed_back"
+        });
+        assert!(!is_live_handoff(&handed_back));
+        assert!(!holds_the_screen(&handed_back));
+        let declined = json!({
+            "kind": "send-message",
+            "id": "e_hand",
+            "message": { "type": "attachment", "url": "sand://box" },
+            "boxRequestId": "req_1",
+            "boxResolution": "declined"
+        });
+        assert!(!is_live_handoff(&declined));
+        assert!(HAND_BACK_TOOL_RESULT.contains("Screenshot"));
+        assert!(!HAND_BACK_TOOL_RESULT.to_lowercase().contains("logged in"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_type_is_fill_failed_and_does_not_press_return() {
+        let spy = FillSpy {
+            fail_type: true,
+            ..FillSpy::default()
+        };
+        let form = FormRequest {
+            title: "Sign in".into(),
+            instruction: String::new(),
+            fields: vec![FormField {
+                id: "password".into(),
+                label: "Password".into(),
+                r#type: "password".into(),
+                required: true,
+                secret: false,
+            }],
+            domain: None,
+            live_host: None,
+            challenge_kind: None,
+        };
+        let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
+        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+        assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
+        assert_eq!(outcomes[0].id, "password");
+        assert!(outcomes[0].fill_failed);
+        let acts = spy.acts.lock().unwrap().clone();
+        assert!(
+            !acts
+                .iter()
+                .any(|act| matches!(act, CuaAction::Key { key } if key == "Return")),
+            "partial fill must not submit the page: {acts:?}"
+        );
+        assert_eq!(*spy.shots.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn timed_out_dismiss_short_circuits() {
+        let form = FormRequest {
+            title: "Sign in".into(),
+            ..FormRequest::default()
+        };
+        let line = tool_result_content(&form, FormResolution::Dismissed, &BTreeMap::new(), true);
+        assert_eq!(line, HOLD_TIMED_OUT_TOOL_RESULT);
+        let settled = json!({
+            "kind": "send-message",
+            "id": "e_1",
+            "formResolution": "dismissed",
+            "timedOut": true,
+            "message": { "type": "user-form", "formRequest": { "title": "Sign in", "fields": [] } }
+        });
+        let history = history_line(&settled).expect("timed out history");
+        assert_eq!(history, HOLD_TIMED_OUT_TOOL_RESULT);
     }
 }

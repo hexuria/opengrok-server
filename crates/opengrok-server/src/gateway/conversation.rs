@@ -1102,6 +1102,14 @@ pub(crate) async fn emit_suspension(
     live::emit_transcript(state, agent_id, account, "appended", card);
     // The turn is paused, not running. It resumes when the card is answered.
     live::set_running(state, agent_id, false, json!({})).await;
+    if suspension.reason == opengrok_core::run::SuspendReason::UserForm {
+        super::user_form::spawn_form_hold_timeout(
+            state.clone(),
+            account.clone(),
+            coworker_id.clone(),
+            agent_id.to_string(),
+        );
+    }
     true
 }
 
@@ -1148,6 +1156,12 @@ pub(crate) async fn stamp_user_form_entry_id(
     }
     live::emit_transcript(state, coworker_id.as_str(), account, "appended", card);
     live::set_running(state, coworker_id.as_str(), false, json!({})).await;
+    super::user_form::spawn_form_hold_timeout(
+        state.clone(),
+        account.clone(),
+        coworker_id.clone(),
+        coworker_id.as_str().to_string(),
+    );
     event
         .extra
         .insert("entryId".to_string(), json!(entry_id.clone()));

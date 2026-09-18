@@ -21,7 +21,7 @@ pub use review::{
     ReviewVerdict, ask_first_reason, combine, redact_arguments,
 };
 pub mod user_form;
-pub use user_form::{FormRequest, FormResolution, REQUEST_USER_FORM};
+pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
@@ -51,9 +51,11 @@ pub struct ToolContext {
     /// A room's shared computer, when this turn is spoken in a group that has one. Reached by
     /// passing `machine: "group"`; without it every call goes to the coworker's own box.
     pub group_box: Option<GroupBox>,
-    /// An unresolved `user-form` is open on this conversation. Screen tools must not run: typing
-    /// or clicking would race the person filling the page (and `computer` type would PNG the
-    /// secret). `request_user_form` itself is not a screen action and is not held.
+    /// An unresolved `user-form` **or** a live box handoff is open on this conversation. Screen
+    /// tools must not run: typing or clicking would race the person (and `computer` type would
+    /// PNG a secret). Escalate settles the form but must **keep** this hold until hand-back or
+    /// decline. `request_user_form` itself is not a screen action and is not held — except a
+    /// second raise while this is still true, which would stack cards.
     pub screen_hold: bool,
 }
 
@@ -968,7 +970,7 @@ impl Executor {
             if context.screen_hold {
                 return ToolResult::refused(
                     &call.id,
-                    "a form is already open on this conversation; wait for the person to answer it",
+                    "a form or computer handoff is already open on this conversation; wait for the person to finish it",
                 );
             }
             return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
@@ -978,8 +980,8 @@ impl Executor {
         {
             return ToolResult::refused(
                 &call.id,
-                "a form is open on this conversation; do not type, click, or open pages until \
-                 the person has answered it. Secrets must not be typed with `computer`",
+                "a form or computer handoff is open on this conversation; do not type, click, or \
+                 open pages until the person has finished. Secrets must not be typed with `computer`",
             );
         }
 
@@ -1388,12 +1390,22 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server types into the focused field on the page and never shows \
-             you the secret.",
+             you the secret. After it settles, screenshot and confirm what the page shows — \
+             filling is not login. If another in-sandbox challenge appears (OTP, phone \
+             verification on the same page), call this again with otp fields and \
+             challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
+             passkey, or a page outside this box is not another password form: the person \
+             finishes on the computer (Open the screen). If they dismiss or decline, continue \
+             without those credentials and do not loop.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Short title shown on the card." },
                     "instruction": { "type": "string", "description": "What the person should do." },
+                    "challengeKind": {
+                        "type": "string",
+                        "description": "Optional hint: password, otp, captcha, passkey, outside_sandbox. Captcha/passkey/outside-sandbox must not be another password form."
+                    },
                     "fields": {
                         "type": "array",
                         "items": {
@@ -3238,7 +3250,7 @@ mod tests {
             )
             .await;
         assert!(!result.ok, "{result:?}");
-        assert!(result.content.contains("form is open"), "{result:?}");
+        assert!(result.content.contains("is open"), "{result:?}");
         assert!(result.image.is_none(), "must not PNG a secret: {result:?}");
         assert!(!result.content.contains("s3cret"), "{result:?}");
         assert_eq!(spy.last_box(), None);

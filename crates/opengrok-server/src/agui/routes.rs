@@ -275,7 +275,9 @@ pub(crate) async fn tools_for_coworker(
         .gateway_transcript(&coworker_id, account_id)
         .await
     {
-        Ok(entries) => entries.iter().any(opengrok_tools::user_form::is_unresolved),
+        Ok(entries) => entries
+            .iter()
+            .any(opengrok_tools::user_form::holds_the_screen),
         // A transcript we cannot read must not freeze every screen tool; the form's own
         // submit path still refuses to log secrets.
         Err(_) => false,

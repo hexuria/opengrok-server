@@ -179,6 +179,7 @@ struct Harness {
     account: AccountId,
     stub: Arc<FillStub>,
     client: reqwest::Client,
+    gateway: GatewayState,
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
@@ -218,7 +219,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         Some("http://opengrok.lan:1447".to_string()),
     )
     .allowing_identity_fallback();
-    let app = opengrok_server::router(agui.clone(), gateway);
+    let app = opengrok_server::router(agui.clone(), gateway.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -233,6 +234,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         account,
         stub,
         client: reqwest::Client::new(),
+        gateway,
     }
 }
 
@@ -312,6 +314,41 @@ impl Harness {
         panic!("no pending user-form card appeared in 10s");
     }
 
+    async fn wait_for_handoff(&self, agent: &str) -> Value {
+        for _ in 0..100 {
+            let tail = self.tail(agent).await;
+            if let Some(card) = tail["entries"].as_array().and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry["message"]["type"] == "attachment"
+                            && entry["message"]["url"] == "sand://box"
+                            && entry
+                                .get("boxRequestId")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| !id.is_empty())
+                            && entry
+                                .get("boxResolution")
+                                .and_then(Value::as_str)
+                                .is_none_or(str::is_empty)
+                    })
+                    .cloned()
+            }) {
+                return card;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no live box handoff appeared in 10s");
+    }
+
+    async fn pending_user_form_runs(&self) -> usize {
+        self.store
+            .awaiting_approval(&self.account)
+            .await
+            .expect("awaiting")
+            .len()
+    }
+
     async fn tail(&self, agent: &str) -> Value {
         let (_, tail) = self
             .api(
@@ -370,6 +407,16 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "submitted", "{body}");
     assert_eq!(body["sharedValues"]["email"], EMAIL, "{body}");
+    assert_eq!(body["formFieldOutcomes"][0]["id"], "email", "{body}");
+    assert_eq!(body["formFieldOutcomes"][0]["filled"], true, "{body}");
+    assert_eq!(body["formFieldOutcomes"][0]["fillFailed"], false, "{body}");
+    assert_eq!(body["formFieldOutcomes"][1]["id"], "password", "{body}");
+    assert_eq!(body["formFieldOutcomes"][1]["filled"], true, "{body}");
+    assert_eq!(body["formFieldOutcomes"][1]["fillFailed"], false, "{body}");
+    assert!(
+        body.get("boxRequestId").is_none(),
+        "user-form must not carry boxRequestId: {body}"
+    );
     assert!(
         body.get("sharedValues")
             .and_then(|v| v.get("password"))
@@ -382,7 +429,7 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     let mut acts = Vec::new();
     for _ in 0..50 {
         acts = h.stub.acts();
-        if acts.len() >= 3 {
+        if acts.len() >= 4 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -399,8 +446,11 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
             CuaAction::Type {
                 text: SECRET.to_string()
             },
+            CuaAction::Key {
+                key: "Return".to_string()
+            },
         ],
-        "fill is Type, Tab, Type"
+        "fill is Type, Tab, Type, Return"
     );
     assert_eq!(h.stub.shots(), 0, "fill must not screenshot");
 
@@ -487,7 +537,7 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
     assert!(!body.to_string().contains(SECRET), "{body}");
 
     for _ in 0..50 {
-        if h.stub.acts().len() >= 3 {
+        if h.stub.acts().len() >= 4 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -498,6 +548,14 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
             .iter()
             .any(|act| matches!(act, CuaAction::Type { text } if text == SECRET)),
         "AG-UI submit still types: {:?}",
+        h.stub.acts()
+    );
+    assert!(
+        h.stub
+            .acts()
+            .iter()
+            .any(|act| matches!(act, CuaAction::Key { key } if key == "Return")),
+        "post-fill Return: {:?}",
         h.stub.acts()
     );
     assert_eq!(h.stub.shots(), 0);
@@ -536,6 +594,7 @@ async fn dismiss_settles_without_typing() {
     assert_eq!(status, 200);
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
+    assert!(h.pending_user_form_runs().await >= 1);
 
     let (status, body) = h
         .api(
@@ -550,9 +609,83 @@ async fn dismiss_settles_without_typing() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "escalated", "{body}");
     assert_eq!(body["widgetDismissed"], true, "{body}");
+    assert!(
+        body.get("boxRequestId").is_none(),
+        "escalate must not put boxRequestId on the user-form: {body}"
+    );
+    let handoff_id = body["handoffEntryId"]
+        .as_str()
+        .expect("handoffEntryId on escalate response")
+        .to_string();
     assert!(h.stub.acts().is_empty(), "dismiss must not Type");
     assert_eq!(h.stub.shots(), 0);
     assert!(!body.to_string().contains(SECRET), "{body}");
+
+    let handoff = h.wait_for_handoff(&agent).await;
+    assert_eq!(handoff["id"], handoff_id);
+    assert_eq!(handoff["message"]["type"], "attachment");
+    assert_eq!(handoff["message"]["url"], "sand://box");
+    assert!(
+        handoff["boxRequestId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{handoff}"
+    );
+    assert!(
+        handoff.get("boxResolution").is_none(),
+        "boxResolution absent while live: {handoff}"
+    );
+    let dumped = handoff.to_string().to_lowercase();
+    assert!(!dumped.contains("take over"), "{dumped}");
+    assert!(!dumped.contains("i'm done"), "{dumped}");
+    assert!(!dumped.contains("skip"), "{dumped}");
+
+    // Escalated must KEEP hold: the user-form run is still awaiting hand-back.
+    assert!(
+        h.pending_user_form_runs().await >= 1,
+        "escalate must not resume the run"
+    );
+
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    let (status, resolved) = h
+        .api(
+            "resolveBoxHandoff",
+            json!({
+                "entryId": handoff_id,
+                "agentId": agent,
+                "resolution": "handed_back"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{resolved}");
+    assert_eq!(resolved["boxResolution"], "handed_back", "{resolved}");
+    assert!(
+        resolved.get("formResolution").is_none(),
+        "handoff is not a user-form: {resolved}"
+    );
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        h.pending_user_form_runs().await,
+        0,
+        "hand-back resumes the waiting run"
+    );
+    assert!(h.stub.acts().is_empty(), "hand-back must not Type");
+    assert_eq!(h.stub.shots(), 0, "hand-back must not screenshot");
+    // handBackForeverBox would stop the box; this path only stamps boxResolution.
+    let still = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &handoff_id)
+        .await
+        .expect("load handoff")
+        .expect("handoff row")
+        .1;
+    assert_eq!(still["boxResolution"], "handed_back");
 }
 
 #[tokio::test]
@@ -653,7 +786,7 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
     assert!(!body.to_string().contains(SECRET), "{body}");
 
     for _ in 0..50 {
-        if h.stub.acts().len() >= 3 {
+        if h.stub.acts().len() >= 4 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -670,8 +803,174 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
             CuaAction::Type {
                 text: SECRET.to_string()
             },
+            CuaAction::Key {
+                key: "Return".to_string()
+            },
         ],
-        "fill is Type, Tab, Type"
+        "fill is Type, Tab, Type, Return"
     );
     assert_eq!(h.stub.shots(), 0, "fill must not screenshot");
+}
+
+#[tokio::test]
+async fn dismissed_resumes_without_a_handoff() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-skip-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Eve").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-dismissed" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, body) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": entry_id,
+                "agentId": agent,
+                "mode": "dismissed"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "dismissed", "{body}");
+    assert!(body.get("handoffEntryId").is_none(), "{body}");
+    assert!(h.stub.acts().is_empty());
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.pending_user_form_runs().await, 0);
+    let tail = h.tail(&agent).await;
+    let has_handoff = tail["entries"].as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry
+                .get("boxRequestId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        })
+    });
+    assert!(
+        !has_handoff,
+        "dismissed must not start a box handoff: {tail}"
+    );
+}
+
+#[tokio::test]
+async fn an_unanswered_form_times_out_and_resumes() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-to-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Fay").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-timeout" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    assert!(h.pending_user_form_runs().await >= 1);
+
+    let settled = opengrok_server::gateway::user_form::timeout_unresolved_form(
+        &h.gateway, &h.account, &coworker, &agent,
+    )
+    .await;
+    assert!(settled, "timeout should settle the open form");
+
+    let stored = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("load")
+        .expect("row")
+        .1;
+    assert_eq!(stored["formResolution"], "dismissed", "{stored}");
+    assert_eq!(stored["timedOut"], true, "{stored}");
+    assert_eq!(stored["widgetDismissed"], true, "{stored}");
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.pending_user_form_runs().await, 0);
+    assert!(h.stub.acts().is_empty());
+}
+
+#[tokio::test]
+async fn agui_handoff_resolve_declines_without_stopping_the_box() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-hb-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Gia").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-decline" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, body) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": entry_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff_id = body["handoffEntryId"]
+        .as_str()
+        .expect("handoff id")
+        .to_string();
+    assert!(h.pending_user_form_runs().await >= 1);
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui/box-handoff/resolve", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "entryId": handoff_id,
+            "agentId": agent,
+            "resolution": "declined"
+        }))
+        .send()
+        .await
+        .expect("agui resolve");
+    assert_eq!(res.status().as_u16(), 200, "agui resolve status");
+    let resolved: Value = res.json().await.expect("agui json");
+    assert_eq!(resolved["boxResolution"], "declined", "{resolved}");
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.pending_user_form_runs().await, 0);
+    assert!(h.stub.acts().is_empty());
 }

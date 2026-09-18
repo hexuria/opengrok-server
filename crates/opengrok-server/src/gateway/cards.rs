@@ -80,6 +80,35 @@ pub fn user_form_card(entry_id: &str, arguments: &Value, timestamp_ms: i64) -> V
     })
 }
 
+/// Grok Bot computer-handoff chrome — transcribed from the recovered renderer:
+/// attachment at `sand://box`, box fields on the **entry** (`boxRequestId`,
+/// `boxInstruction`, `boxResolution`). There is no `computer-handoff` message type
+/// in the shipped contract. A stray `boxRequestId` on any other card (including
+/// user-form) converts that card into a handoff, so escalate MUST emit this as a
+/// **separate** entry. This is not OpenGrok Take over / I'm done / Skip.
+///
+/// `boxResolution` is ABSENT while live (locked NativeChat wire). A string
+/// (`handed_back` | `declined` | `timed_out`) is stamped only on resolve.
+pub fn computer_handoff_card(
+    entry_id: &str,
+    box_request_id: &str,
+    instruction: &str,
+    timestamp_ms: i64,
+) -> Value {
+    json!({
+        "kind": "send-message",
+        "id": entry_id,
+        "timestampMs": timestamp_ms,
+        "message": {
+            "type": "attachment",
+            "url": "sand://box",
+            "alt": "Handed to the computer",
+        },
+        "boxRequestId": box_request_id,
+        "boxInstruction": instruction,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn approval_card(
     entry_id: &str,
@@ -350,5 +379,36 @@ mod tests {
         assert!(!dumped.contains("s3cret-pass"), "{dumped}");
         assert!(!dumped.contains("cw_x"), "{dumped}");
         assert!(card["message"]["formRequest"].get("values").is_none());
+    }
+
+    #[test]
+    fn a_computer_handoff_card_is_a_separate_sand_box_attachment() {
+        let card = computer_handoff_card(
+            "e_hand",
+            "req_abc",
+            "Google account: Enter the address and password.",
+            12,
+        );
+        assert_eq!(card["kind"], "send-message");
+        assert_eq!(card["id"], "e_hand");
+        assert_eq!(card["message"]["type"], "attachment");
+        assert_eq!(card["message"]["url"], "sand://box");
+        assert_eq!(card["boxRequestId"], "req_abc");
+        assert_eq!(
+            card["boxInstruction"],
+            "Google account: Enter the address and password."
+        );
+        assert!(
+            card.get("boxResolution").is_none(),
+            "boxResolution is absent while live: {card}"
+        );
+        assert!(
+            card.get("formResolution").is_none(),
+            "handoff is not a user-form: {card}"
+        );
+        let dumped = card.to_string();
+        assert!(!dumped.to_lowercase().contains("take over"), "{dumped}");
+        assert!(!dumped.to_lowercase().contains("i'm done"), "{dumped}");
+        assert!(!dumped.to_lowercase().contains("skip"), "{dumped}");
     }
 }

@@ -222,7 +222,13 @@ pub fn computer_system_prompt(
          question asks the person to type a password, one-time code, or other secret, call \
          `request_user_form` and wait. Never type secrets with `computer` — that attaches a \
          screenshot of what was typed. The person fills in chat; the server types into the focused \
-         field and does not show you the secret."
+         field and does not show you the secret. After the form settles, screenshot and confirm \
+         what the page shows; filling is not a successful login. If another in-sandbox challenge \
+         appears (OTP, a phone code on the same page), call `request_user_form` again with otp \
+         fields and challengeKind \"otp\" — never re-raise a form that already settled. Captcha, \
+         passkey, or a page outside this box is not another password form: the person finishes on \
+         the computer (Open the screen). If they dismiss or decline, continue without those \
+         credentials and do not loop."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -547,6 +553,26 @@ mod tests {
         assert!(
             box_only.contains("`request_user_form`"),
             "the form tool is a built-in on a box: {box_only}"
+        );
+        assert!(
+            box_only.contains("filling is not a successful login"),
+            "observe after settle: {box_only}"
+        );
+        assert!(
+            box_only.contains("challengeKind"),
+            "OTP follow-up contract: {box_only}"
+        );
+        assert!(
+            box_only.contains("Captcha"),
+            "captcha/passkey is handoff, not another password form: {box_only}"
+        );
+        assert!(
+            !box_only.to_lowercase().contains("take over"),
+            "not OpenGrok Take over chrome: {box_only}"
+        );
+        assert!(
+            !box_only.to_lowercase().contains("i'm done"),
+            "not OpenGrok I'm done chrome: {box_only}"
         );
     }
 
