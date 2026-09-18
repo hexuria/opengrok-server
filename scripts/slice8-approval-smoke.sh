@@ -50,11 +50,14 @@ JSON
 [ -n "$events" ] || fail "no events"
 
 last=$(echo "$events" | tail -1 | jq -r '.type')
-name=$(echo "$events" | tail -1 | jq -r '.name // empty')
-# NOT finished and NOT failed: the run is waiting, and the client is told so in a way it can render.
-[ "$last" = "CUSTOM" ] && [ "$name" = "run-awaiting-approval" ] \
-  || fail "expected a suspended run, got $last ($name)"
-ok "the run suspended: $name"
+# NativeChat keys Waiting chrome off RUN_FINISHED. HITL park therefore closes
+# the SSE with that event after CUSTOM `run-awaiting-approval`. The stream
+# closer is not the aggregate ending — step 5 still requires awaiting-approval.
+[ "$last" = "RUN_FINISHED" ] \
+  || fail "HITL park must close Waiting with RUN_FINISHED, got $last"
+echo "$events" | jq -e 'select(.type == "CUSTOM" and .name == "run-awaiting-approval")' >/dev/null \
+  || fail "expected CUSTOM run-awaiting-approval in the stream"
+ok "the run suspended, and the stream closed"
 
 echo "4. the tool result says waiting, not success"
 # A pending approval that read as success is how a model concludes its command already worked.
