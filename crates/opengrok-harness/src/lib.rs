@@ -332,8 +332,8 @@ pub async fn resume_conversation(
         let reason = still_waiting
             .awaiting_reason
             .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-        let mut waiting =
-            projection.awaiting_approval(&approved, reason, awaiting_why(&still_waiting.content));
+        let parked = (&approved, reason, still_waiting.content.as_str());
+        let mut waiting = park_awaiting(&mut projection, std::slice::from_ref(&parked));
         let _ = record_round(journal, &run_id, &waiting).await;
         all.append(&mut waiting);
         return all;
@@ -569,23 +569,36 @@ async fn converse(
                         request.messages.push(tool_result_message(result));
                     }
 
-                    if let Some((waiting, reason, why)) = results
+                    let waiting: Vec<(
+                        &opengrok_tools::ToolCall,
+                        opengrok_tools::AwaitingReason,
+                        &str,
+                    )> = results
                         .iter()
-                        .position(|result| result.awaiting_approval)
-                        .and_then(|index| {
-                            let reason = results[index]
-                                .awaiting_reason
-                                .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-                            calls
-                                .get(index)
-                                .map(|call| (call, reason, results[index].content.clone()))
+                        .zip(calls.iter())
+                        .filter(|(result, _)| result.awaiting_approval)
+                        .map(|(result, call)| {
+                            (
+                                call,
+                                result
+                                    .awaiting_reason
+                                    .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent),
+                                result.content.as_str(),
+                            )
                         })
-                    {
-                        // Ended as a readable state, not a silent stop and not a failure. The run
-                        // stays `running` in the log, which is exactly what `interrupted_runs`
-                        // looks for — resumption and approval share the same machinery.
-                        let mut waiting_events =
-                            projection.awaiting_approval(waiting, reason, awaiting_why(&why));
+                        .collect();
+                    if !waiting.is_empty() {
+                        // One CUSTOM per awaiting call in this completion — NativeChat paints a
+                        // Website login card per TOOL_CALL, and only a matching
+                        // `run-awaiting-approval` CUSTOM gets a gateway `entryId` / Continue.
+                        // Parking on the first leftover left stacked cards without an id.
+                        //
+                        // Then `RUN_FINISHED`: AG-UI/NativeChat hold Waiting on that closer.
+                        // The HTTP stream used to drop after CUSTOM with no ending, which is a
+                        // forever spinner. The aggregate stays `awaiting-approval` (the journal
+                        // does not Finish a suspended run) so Continue can still resume. A new
+                        // user message interrupts instead of leaving a zombie parked run.
+                        let mut waiting_events = park_awaiting(&mut projection, &waiting);
                         let _ = record_round(journal, run_id, &round_events).await;
                         let _ = record_round(journal, run_id, &waiting_events).await;
                         emit_live(sink, &waiting_events).await;
@@ -927,6 +940,26 @@ fn keep_recent_images(messages: &mut [ChatMessage], keep: usize) {
             message.images.clear();
         }
     }
+}
+
+/// CUSTOM per waiting call, then `RUN_FINISHED` so the HTTP/SSE turn can close.
+///
+/// NativeChat keys Waiting chrome off `RUN_FINISHED`. The run aggregate still
+/// stays `awaiting-approval` because the journal does not Finish a suspended run.
+fn park_awaiting(
+    projection: &mut Projection,
+    waiting: &[(
+        &opengrok_tools::ToolCall,
+        opengrok_tools::AwaitingReason,
+        &str,
+    )],
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    for (call, reason, why) in waiting {
+        events.extend(projection.awaiting_approval(call, *reason, awaiting_why(why)));
+    }
+    events.extend(projection.finish());
+    events
 }
 
 /// The gate's sentence out of an awaiting result. `ToolResult::awaiting` writes
@@ -2113,6 +2146,55 @@ mod tests {
                 .unwrap_or_default()
                 .contains("s3cret-should-never-land"),
             "{custom:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_user_form_in_one_completion_gets_an_awaiting_custom_and_the_stream_closes() {
+        let journal = MemoryJournal::new();
+        let events = run_conversation(
+            &MockDoor::asking_for_stacked_user_forms(),
+            Some(&tool_runner()),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let forms: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str())
+                        == Some("run-awaiting-approval")
+                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
+            })
+            .collect();
+        assert_eq!(
+            forms.len(),
+            3,
+            "one CUSTOM per stacked request_user_form: {events:?}"
+        );
+        let call_ids: Vec<_> = forms
+            .iter()
+            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            call_ids,
+            vec!["mock-form-1", "mock-form-2", "mock-form-3"],
+            "{call_ids:?}"
+        );
+        assert_eq!(
+            events.last().map(|event| event.event_type),
+            Some(EventType::RunFinished),
+            "HITL park must close the SSE or Waiting spins forever: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::RunStarted),
+            "{events:?}"
         );
     }
 

@@ -68,8 +68,13 @@ pub const POLICY_ASK_REASON: &str =
 /// `message.type` is `user-form`, `formRequest` is the field schema, and `formResolution` is a
 /// sibling of `message` (not inside it). Identity keys and any `values` the model smuggled are
 /// dropped so a password cannot sit on the entry waiting for submit.
-pub fn user_form_card(entry_id: &str, arguments: &Value, timestamp_ms: i64) -> Value {
-    json!({
+pub fn user_form_card(
+    entry_id: &str,
+    arguments: &Value,
+    timestamp_ms: i64,
+    call_id: &str,
+) -> Value {
+    let mut card = json!({
         "kind": "send-message",
         "id": entry_id,
         "timestampMs": timestamp_ms,
@@ -77,7 +82,15 @@ pub fn user_form_card(entry_id: &str, arguments: &Value, timestamp_ms: i64) -> V
             "type": "user-form",
             "formRequest": sanitize_arguments(arguments),
         },
-    })
+    });
+    // Join to the TOOL_CALL / CUSTOM `callId` so stacked same-completion cards
+    // submit independently (only the matching pending call resumes).
+    if !call_id.is_empty()
+        && let Some(map) = card.as_object_mut()
+    {
+        map.insert("callId".to_string(), json!(call_id));
+    }
+    card
 }
 
 /// Grok Bot computer-handoff chrome — transcribed from the recovered renderer:
@@ -360,9 +373,10 @@ mod tests {
             "coworker_id": "cw_x",
             "liveHost": "accounts.google.com"
         });
-        let card = user_form_card("e_form", &raw, 11);
+        let card = user_form_card("e_form", &raw, 11, "mock-form-1");
         assert_eq!(card["kind"], "send-message");
         assert_eq!(card["id"], "e_form");
+        assert_eq!(card["callId"], "mock-form-1");
         assert_eq!(card["timestampMs"], 11);
         assert_eq!(card["message"]["type"], "user-form");
         assert_eq!(card["message"]["formRequest"]["title"], "Google account");

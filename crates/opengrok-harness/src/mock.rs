@@ -85,6 +85,9 @@ pub struct MockDoor {
     /// state for two floors — which, for the purpose of watching a coworker think, is a feature.
     /// `None` by default and in every test; a dev server opts in through `OG_MOCK_MIN_TURN_MS`.
     turn_floor: Option<std::time::Duration>,
+    /// When set with a user-form script: a later turn whose last user message is not a
+    /// sign-in ask is echoed as steer instead of raising the form again.
+    echo_steer: bool,
     /// The most time the PACING may add to one model call, however many deltas it has.
     ///
     /// A FLOOR AND A CEILING ANSWER DIFFERENT QUESTIONS. The floor exists because a short answer
@@ -330,6 +333,27 @@ impl MockDoor {
         }
     }
 
+    /// Same form card, but a later turn whose last user text is not a sign-in ask is
+    /// echoed as steer — what a new `sendPrompt` / AG-UI message while Waiting must do.
+    pub fn asking_for_user_form_until_steered() -> Self {
+        Self {
+            script: Self::user_form_script(),
+            once_then_answer: true,
+            echo_steer: true,
+            ..Self::default()
+        }
+    }
+
+    /// Three `request_user_form` TOOL_CALLs in one completion — NativeChat stacked
+    /// Website login cards. Each must get its own gateway `entryId`.
+    pub fn asking_for_stacked_user_forms() -> Self {
+        Self {
+            script: Self::stacked_user_form_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
     /// A door that asks NativeChat to broker a saved login (`credential.request`).
     pub fn asking_for_credential() -> Self {
         Self {
@@ -362,19 +386,40 @@ impl MockDoor {
     }
 
     fn user_form_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        script.extend(Self::user_form_call(
+            "mock-form-1",
+            "Google account",
+            "Enter the address and password.",
+        ));
+        script
+    }
+
+    fn stacked_user_form_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        for index in 1..=3 {
+            script.extend(Self::user_form_call(
+                &format!("mock-form-{index}"),
+                "Website login",
+                "Enter the address and password.",
+            ));
+        }
+        script
+    }
+
+    fn user_form_call(id: &str, title: &str, instruction: &str) -> Vec<ModelDelta> {
         vec![
-            ModelDelta::Text("I need you to sign in".to_string()),
             ModelDelta::ToolCallStart {
-                id: "mock-form-1".to_string(),
+                id: id.to_string(),
                 name: opengrok_tools::REQUEST_USER_FORM.to_string(),
             },
             ModelDelta::ToolCallArgs {
-                id: "mock-form-1".to_string(),
+                id: id.to_string(),
                 // `values` is smuggled the way a model might; the card and the run log
                 // must drop it so a password never sits on the entry.
                 delta: serde_json::json!({
-                    "title": "Google account",
-                    "instruction": "Enter the address and password.",
+                    "title": title,
+                    "instruction": instruction,
                     "fields": [
                         {
                             "id": "email",
@@ -394,9 +439,7 @@ impl MockDoor {
                 })
                 .to_string(),
             },
-            ModelDelta::ToolCallEnd {
-                id: "mock-form-1".to_string(),
-            },
+            ModelDelta::ToolCallEnd { id: id.to_string() },
         ]
     }
 
@@ -568,7 +611,12 @@ impl ModelDoor for MockDoor {
                     ModelDelta::ToolCallEnd { id: send_id },
                 ]
             }
-        } else if self.script.is_empty() {
+        } else if self.script.is_empty()
+            || (self.echo_steer
+                && !Self::last_user_message(&request)
+                    .to_ascii_lowercase()
+                    .contains("sign in"))
+        {
             Self::echo_script(&request)
         } else if self.once_then_answer && already_ran {
             // The second round reads the tool result and replies, which is what ends the run.

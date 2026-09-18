@@ -2104,6 +2104,13 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
+        crate::gateway::conversation::interrupt_parked_hitl(
+            &gateway,
+            account_id,
+            &coworker_id,
+            account_id.as_str(),
+        )
+        .await;
     }
 
     // Read once. The tool runner needs it to bind the run, and the system prompt needs it to say
@@ -2452,10 +2459,19 @@ async fn append_events(
         }
 
         // The run's own ending, recorded once, from the event that carries it.
+        //
+        // HITL park emits `RUN_FINISHED` after CUSTOM `run-awaiting-approval` so NativeChat
+        // Waiting chrome can treat the HTTP turn as not running. That closer is a stream
+        // fact, not an aggregate ending: a suspended run must stay `awaiting-approval` so
+        // Continue can resume. Skip Finish while we are waiting; a later resume answers
+        // first (status Running) and then a real `RUN_FINISHED` Finishes.
         let closing = match event.event_type {
-            opengrok_wire::agui::EventType::RunFinished => {
+            opengrok_wire::agui::EventType::RunFinished
+                if run.status != RunStatus::AwaitingApproval =>
+            {
                 Some(run.decide(RunCommand::Finish { at_ms }))
             }
+            opengrok_wire::agui::EventType::RunFinished => None,
             opengrok_wire::agui::EventType::RunError => Some(
                 run.decide(RunCommand::Fail {
                     reason: event

@@ -354,6 +354,35 @@ impl Harness {
         panic!("no pending user-form card appeared in 10s");
     }
 
+    async fn wait_for_forms(&self, agent: &str, n: usize) -> Vec<Value> {
+        for _ in 0..100 {
+            let (_, tail) = self
+                .api(
+                    "getAgentTranscriptTail",
+                    json!({ "id": agent, "limit": 100 }),
+                )
+                .await;
+            let cards: Vec<Value> = tail["entries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|entry| {
+                    entry["message"]["type"] == "user-form"
+                        && entry
+                            .get("formResolution")
+                            .and_then(Value::as_str)
+                            .is_none()
+                })
+                .cloned()
+                .collect();
+            if cards.len() >= n {
+                return cards;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("expected {n} pending user-form cards in 10s");
+    }
+
     async fn wait_for_handoff(&self, agent: &str) -> Value {
         for _ in 0..100 {
             let tail = self.tail(agent).await;
@@ -1643,4 +1672,345 @@ async fn credential_request_round_trips_a_status_and_never_stores_a_password() {
     assert_eq!(hints[0].origin, "accounts.google.com");
     assert_eq!(hints[0].credential_id, "cred_nativechat_1");
     assert!(!format!("{hints:?}").contains(SECRET), "{hints:?}");
+}
+
+fn sse_events(sse: &str) -> Vec<Value> {
+    sse.split("\n\n")
+        .filter_map(|chunk| {
+            chunk
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .and_then(|payload| serde_json::from_str(payload).ok())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stacked_user_forms_in_one_completion_each_get_an_entry_id() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-stacked-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_stacked_user_forms()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Stack").await;
+    let thread_id = format!("thr-{}", uuid::Uuid::now_v7());
+    let run_id = uuid::Uuid::now_v7().to_string();
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "threadId": thread_id,
+            "runId": run_id,
+            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+            "forwardedProps": { "coworkerId": agent },
+        }))
+        .send()
+        .await
+        .expect("post ag-ui");
+    assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+    let sse = res.text().await.expect("sse");
+    let events = sse_events(&sse);
+    assert_eq!(
+        events.last().and_then(|event| event["type"].as_str()),
+        Some("RUN_FINISHED"),
+        "HITL park must close Waiting: {sse}"
+    );
+    let customs: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "CUSTOM"
+                && event["name"] == "run-awaiting-approval"
+                && event["reason"] == "user-form"
+        })
+        .collect();
+    assert_eq!(customs.len(), 3, "one CUSTOM per stacked form: {sse}");
+    let mut entry_ids = Vec::new();
+    for custom in &customs {
+        let id = custom["entryId"]
+            .as_str()
+            .expect("CUSTOM extra.entryId")
+            .to_string();
+        assert!(id.starts_with("e_"), "entryId is a gateway entry id: {id}");
+        assert!(
+            !entry_ids.contains(&id),
+            "stacked forms must not share an entryId: {entry_ids:?} {id}"
+        );
+        entry_ids.push(id);
+        let dump = custom.to_string();
+        assert!(
+            !dump.contains("s3cret-should-never-land"),
+            "CUSTOM arguments are sanitised: {dump}"
+        );
+    }
+
+    let replay = h
+        .client
+        .get(format!("{}/ag-ui/runs/{run_id}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay run");
+    assert_eq!(replay.status().as_u16(), 200);
+    let replayed: Value = replay.json().await.expect("replay json");
+    assert_eq!(
+        replayed["status"].as_str(),
+        Some("awaiting-approval"),
+        "RUN_FINISHED on the stream must not Finish the parked run: {replayed}"
+    );
+    let replay_events = replayed["events"].as_array().cloned().unwrap_or_default();
+    assert!(
+        replay_events
+            .iter()
+            .any(|event| event["type"] == "RUN_FINISHED"),
+        "replay must keep the SSE closer: {replayed}"
+    );
+    for id in &entry_ids {
+        assert!(
+            replay_events.iter().any(|event| {
+                event["toolCallId"].as_str().is_some() && event["entryId"].as_str() == Some(id)
+            }),
+            "TOOL_CALL replay must carry entryId {id}: {replayed}"
+        );
+    }
+
+    let cards = h.wait_for_forms(&agent, 3).await;
+    assert_eq!(cards.len(), 3, "{cards:?}");
+    for (card, id) in cards.iter().zip(entry_ids.iter()) {
+        assert_eq!(card["id"].as_str(), Some(id.as_str()), "{card}");
+        assert!(
+            card.get("callId")
+                .and_then(Value::as_str)
+                .is_some_and(|call| !call.is_empty()),
+            "callId joins Continue to the parked TOOL_CALL: {card}"
+        );
+    }
+
+    for (index, entry_id) in entry_ids.iter().enumerate() {
+        let res = h
+            .client
+            .post(format!("{}/ag-ui/user-form/submit", h.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "entryId": entry_id,
+                "agentId": agent,
+                "values": { "email": EMAIL, "password": SECRET }
+            }))
+            .send()
+            .await
+            .expect("agui submit");
+        assert_eq!(res.status().as_u16(), 200, "submit {index} status");
+        let body: Value = res.json().await.expect("agui json");
+        assert_eq!(
+            body["formResolution"], "submitted",
+            "submit {index}: {body}"
+        );
+        assert!(!body.to_string().contains(SECRET), "{body}");
+        if index < 2 {
+            assert!(
+                h.pending_user_form_runs().await >= 1,
+                "extra stacked Continues must not consume the parked call"
+            );
+        }
+    }
+    h.wait_user_form_idle().await;
+    assert_eq!(h.pending_user_form_runs().await, 0);
+}
+
+#[tokio::test]
+async fn a_new_prompt_while_waiting_interrupts_the_parked_run_as_steer() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-steer-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_user_form_until_steered()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Steer").await;
+
+    let (status, sent) = h
+        .api(
+            "sendPrompt",
+            json!({
+                "agentId": agent,
+                "prompt": "sign in",
+                "clientNonce": "n-park"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{sent}");
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    assert!(h.pending_user_form_runs().await >= 1);
+
+    let (status, sent) = h
+        .api(
+            "sendPrompt",
+            json!({
+                "agentId": agent,
+                "prompt": "forget the form and list the open tabs instead",
+                "clientNonce": "n-steer"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{sent}");
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        h.pending_user_form_runs().await,
+        0,
+        "parked HITL must not remain beside the new turn"
+    );
+
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    let form = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("load form")
+        .expect("form row")
+        .1;
+    assert_eq!(
+        form["formResolution"], "dismissed",
+        "interrupt settles leftover cards without filling: {form}"
+    );
+    assert!(
+        h.stub.acts().is_empty(),
+        "steer must not Type into the form"
+    );
+
+    let tail = h.tail(&agent).await;
+    let entries = tail["entries"].as_array().cloned().unwrap_or_default();
+    assert!(
+        entries.iter().any(|entry| {
+            entry["role"] == "user"
+                && entry["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("list the open tabs"))
+        }),
+        "new user text is in the transcript: {tail}"
+    );
+    for _ in 0..50 {
+        let tail = h.tail(&agent).await;
+        let dump = tail.to_string();
+        if dump.contains("list the open tabs")
+            && dump.contains("You said:")
+            && dump.contains("mock door")
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!(
+        "steer must reach the model as a new turn: {}",
+        h.tail(&agent).await
+    );
+}
+
+#[tokio::test]
+async fn interrupt_agent_run_stops_a_parked_form_without_a_new_prompt() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-interrupt-verb-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Irma").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({
+                "agentId": agent,
+                "prompt": "sign in",
+                "clientNonce": "n-interrupt-verb"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    assert!(h.pending_user_form_runs().await >= 1);
+
+    let (status, body) = h
+        .api("interruptAgentRun", json!({ "agentId": agent }))
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isRunning"], false, "{body}");
+
+    for _ in 0..50 {
+        if h.pending_user_form_runs().await == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(h.pending_user_form_runs().await, 0);
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent);
+    let form = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("load form")
+        .expect("form row")
+        .1;
+    assert_eq!(form["formResolution"], "dismissed", "{form}");
+}
+
+#[tokio::test]
+async fn escalate_still_holds_until_hand_back_and_is_not_an_interrupt() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-escalate-hold-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Hold").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({
+                "agentId": agent,
+                "prompt": "sign in",
+                "clientNonce": "n-escalate-hold"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let form_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, body) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let _ = h.wait_for_handoff(&agent).await;
+    assert!(
+        h.pending_user_form_runs().await >= 1,
+        "escalate must not resume or interrupt"
+    );
 }

@@ -717,6 +717,14 @@ async fn command(
                 body,
             )
         }
+        "interruptAgentRun" => {
+            let (code, body) =
+                super::conversation::interrupt_agent_run(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "promptAcceptanceStatus" => {
             let (code, body) = super::conversation::acceptance_status(&state, &args, &caller).await;
             reply(

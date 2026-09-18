@@ -202,7 +202,15 @@ pub async fn submit_user_form(
         .await;
     }
 
-    resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
+    resume_user_form(
+        state,
+        account_id,
+        &coworker_id,
+        &agent_id,
+        content,
+        call_id_of(&settled),
+    )
+    .await;
     (200, settled)
 }
 
@@ -275,7 +283,15 @@ pub async fn dismiss_user_form(
     }
 
     let content = tool_result_content(&form, resolution, &BTreeMap::new(), false);
-    resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
+    resume_user_form(
+        state,
+        account_id,
+        &coworker_id,
+        &agent_id,
+        content,
+        call_id_of(&settled),
+    )
+    .await;
     (200, settled)
 }
 
@@ -323,7 +339,7 @@ pub async fn resolve_box_handoff(
 
     let settled_siblings =
         settle_live_handoffs(state, account_id, &coworker_id, &agent_id, word, timed_out).await;
-    resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
+    resume_user_form(state, account_id, &coworker_id, &agent_id, content, None).await;
 
     if posted_live {
         if let Some(card) = settled_siblings
@@ -437,7 +453,7 @@ pub async fn timeout_unresolved_form(
             }
             None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
         };
-        resume_user_form(state, account_id, coworker_id, agent_id, content).await;
+        resume_user_form(state, account_id, coworker_id, agent_id, content, None).await;
     }
     settled_any
 }
@@ -504,6 +520,74 @@ async fn start_box_handoff(
         agent_id.to_string(),
     );
     Some(card)
+}
+
+/// A new user message interrupted the parked HITL run. Settle leftover form / live
+/// handoff chrome without resuming — the new text is steer, not a card answer.
+/// Escalate itself never calls this.
+pub(crate) async fn dismiss_unresolved_on_interrupt(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    agent_id: &str,
+) {
+    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    let Ok(entries) = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(coworker_id, account_id)
+        .await
+    else {
+        return;
+    };
+    for entry in entries {
+        if !is_unresolved(&entry) {
+            continue;
+        }
+        let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(Some((seq, current))) = state
+            .agui
+            .auth
+            .store
+            .find_gateway_entry(coworker_id, account_id, entry_id)
+            .await
+        else {
+            continue;
+        };
+        if !is_unresolved(&current) {
+            continue;
+        }
+        let settled = settle_entry(
+            current,
+            FormResolution::Dismissed,
+            &BTreeMap::new(),
+            true,
+            &[],
+            false,
+        );
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .update_gateway_entry(coworker_id, account_id, seq, &settled)
+            .await
+        {
+            tracing::error!(%error, "could not dismiss a form on interrupt");
+            continue;
+        }
+        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
+        journal_settled_form(state, account_id, coworker_id, &settled).await;
+    }
+}
+
+fn call_id_of(entry: &Value) -> Option<&str> {
+    entry
+        .get("callId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
 }
 
 fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
@@ -687,6 +771,7 @@ async fn abandon_escalated_form(
         coworker_id,
         agent_id,
         HANDOFF_DECLINED_TOOL_RESULT.to_string(),
+        None,
     )
     .await;
     (200, entry)
@@ -759,7 +844,7 @@ async fn heal_or_already(
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
     let content = tool_result_content(&form, resolution, &shared, timed_out);
-    if resume_user_form(state, account_id, coworker_id, agent_id, content).await {
+    if resume_user_form(state, account_id, coworker_id, agent_id, content, None).await {
         return (200, entry.clone());
     }
     (200, json!({ "alreadyAnswered": true }))
@@ -774,6 +859,7 @@ async fn resume_user_form(
     coworker_id: &CoworkerId,
     agent_id: &str,
     content: String,
+    call_id: Option<&str>,
 ) -> bool {
     resume_settled(
         state,
@@ -782,6 +868,7 @@ async fn resume_user_form(
         agent_id,
         opengrok_core::run::SuspendReason::UserForm,
         content,
+        call_id,
     )
     .await
 }
@@ -793,12 +880,19 @@ pub(crate) async fn resume_settled(
     agent_id: &str,
     reason: opengrok_core::run::SuspendReason,
     content: String,
+    call_id: Option<&str>,
 ) -> bool {
     let Some((run_id, mut run, seq, pending)) =
         pending_suspended(state, account_id, coworker_id, reason).await
     else {
         return false;
     };
+    if let Some(want) = call_id.filter(|id| !id.is_empty())
+        && pending.call_id != want
+    {
+        // Another stacked same-completion form: settle the card, leave the parked call.
+        return false;
+    }
     let resumed_seq = run.emitted.len() as u32;
     let at_ms = now_ms();
     let events = match run.decide(RunCommand::Answer {
@@ -937,7 +1031,13 @@ pub(crate) async fn journal_agui_custom(
     if let Some(map) = frame.as_object_mut() {
         map.insert("threadId".to_string(), json!(run.thread_id.clone()));
         map.insert("runId".to_string(), json!(run_id.as_str()));
-        map.insert("callId".to_string(), json!(pending.call_id.clone()));
+        let has_call = map
+            .get("callId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        if !has_call {
+            map.insert("callId".to_string(), json!(pending.call_id.clone()));
+        }
         map.insert("timestamp".to_string(), json!(at_ms));
     }
     let Ok(events) = run.decide(RunCommand::Emit {
@@ -976,10 +1076,12 @@ pub(crate) fn agui_user_form_frame(entry: &Value) -> Value {
         .unwrap_or_else(|| json!({ "type": "user-form" }));
     let form_request = message.get("formRequest").cloned().unwrap_or(Value::Null);
     let resolution = entry.get("formResolution").cloned().unwrap_or(Value::Null);
+    let call_id = entry.get("callId").cloned().unwrap_or(Value::Null);
     json!({
         "type": "CUSTOM",
         "name": "user-form",
         "entryId": entry_id,
+        "callId": call_id,
         "formRequest": form_request,
         "formResolution": resolution,
         "message": message,
@@ -1124,7 +1226,44 @@ pub(crate) fn hydrate_agui_events(
         events.push(agui_user_form_frame(form));
         used.insert(id.to_string());
     }
+    stamp_tool_calls(&mut events);
     events
+}
+
+/// NativeChat paints TOOL_CALL frames as Website login cards. Live HITL stamps
+/// `entryId` on the CUSTOM; replay overlays the same id onto matching TOOL_CALLs
+/// so stacked cards stay Continue-able after a reconnect.
+fn stamp_tool_calls(events: &mut [Value]) {
+    let mut by_call: BTreeMap<String, String> = BTreeMap::new();
+    for event in events.iter() {
+        if !is_user_form_agui(event) {
+            continue;
+        }
+        let Some(call_id) = event.get("callId").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(entry_id) = user_form_event_id(event) {
+            by_call.insert(call_id.to_string(), entry_id.to_string());
+        }
+    }
+    if by_call.is_empty() {
+        return;
+    }
+    for event in events.iter_mut() {
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "TOOL_CALL_START" && kind != "TOOL_CALL_ARGS" && kind != "TOOL_CALL_END" {
+            continue;
+        }
+        let Some(call_id) = event.get("toolCallId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(entry_id) = by_call.get(call_id) else {
+            continue;
+        };
+        if let Some(map) = event.as_object_mut() {
+            map.insert("entryId".to_string(), json!(entry_id));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1200,6 +1339,34 @@ mod tests {
         let out = hydrate_agui_events(events, std::slice::from_ref(&other), 0, 100);
         assert_eq!(out.len(), 1);
         assert!(out.iter().all(|event| event["name"] != "user-form"));
+    }
+
+    #[test]
+    fn hydrate_stamps_entry_id_onto_matching_tool_calls() {
+        let form = email_form("e_form", None, 50);
+        let mut form = form;
+        form["callId"] = json!("c1");
+        let events = vec![
+            json!({
+                "type": "TOOL_CALL_START",
+                "toolCallId": "c1",
+                "toolCallName": "request_user_form"
+            }),
+            json!({
+                "type": "CUSTOM",
+                "name": "run-awaiting-approval",
+                "reason": "user-form",
+                "callId": "c1",
+                "entryId": "e_form",
+                "arguments": {
+                    "title": "Sign in",
+                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
+                }
+            }),
+        ];
+        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
+        assert_eq!(out[0]["entryId"], "e_form");
+        assert_eq!(out[1]["entryId"], "e_form");
     }
 
     #[test]

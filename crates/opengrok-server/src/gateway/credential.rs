@@ -146,6 +146,7 @@ pub async fn submit_credential_result(
         &agent_id,
         opengrok_core::run::SuspendReason::Credential,
         content,
+        Some(pending.call_id.as_str()),
     )
     .await;
     if !resumed {
@@ -226,6 +227,7 @@ async fn timeout_credential_request(
         agent_id,
         opengrok_core::run::SuspendReason::Credential,
         tool_result_content(CredentialStatus::Missing),
+        None,
     )
     .await
 }
