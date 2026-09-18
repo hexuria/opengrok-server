@@ -2,7 +2,9 @@
 
 The server the AI coworkers live on. One Rust service that owns the harness, the tools, the
 computers and the policy — shipped together with **open-ai-gateway** as a single AI infrastructure.
-Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
+Clients (AG-UI clients, the web console, MCP clients, a CLI later) are windows onto it. The two
+doors that booted the reconstructed desktop app were deleted on 18 Sep 2026; `docs/LEGAL.md` says
+what went and what stays.
 
 **Picking this up cold? Start with [`docs/HANDOVER.md`](docs/HANDOVER.md)** — the state of play,
 what is already decided, and your first task.
@@ -17,20 +19,19 @@ in `docs/research/`.
 
 ## Three facts that each cost a day if you learn them the hard way
 
-1. **The client refuses a loopback gateway, and the env-var repoint is dead.** The desktop app
-   connects through its own OpenGrok server mode (`boxRuntime: "opengrok"` + the
-   `openGrokGatewayUrl` setting); launching it with `SAND_HOST_GATEWAY_URL` deadlocks it before
-   the window opens. Either way it **throws if the gateway host starts with `127.0.0.1` or
-   `localhost`** — serve on a non-loopback address. `docs/setup/desktop-client.md`.
-2. **The gateway is embeddable — `oag_server::public_router()` returns a wired Axum router.** But if
-   you skip `oag_server::serve()` you must spawn the catalogue refresh yourself, or a replica
-   serves a **stale catalogue while reporting healthy**. `docs/research/gateway-open-ai-gateway.md` §8.
-3. **An empty success is the dangerous reply.** `listAgents` returning `[]` is *valid* — the client
-   paints an empty sidebar and the person blames the app. Reply shapes matter as much as replies:
-   `countAgents` must be a number, `getTrays` an array, or the renderer diverts or throws.
-   And if the roster silently stops updating, check the client's `inferenceProvider` setting —
-   and its persisted gateway address against the machine's current LAN address — before
-   suspecting us. `docs/setup/desktop-client.md`.
+1. **`OG_MODEL_DOOR=mock` is the whole stack with no provider, no key and no spend.** CI and
+   every smoke run on it. `mock-tools` asks for one shell call per turn, which is how the consent
+   cards are driven deterministically. Anything else exits through open-ai-gateway and needs
+   `OG_GATEWAY_TOKEN`. `mock-cards` was removed with the desktop client and refuses to boot rather
+   than falling through to a billed door. `crates/opengrok/src/main.rs`.
+2. **The gate is `scripts/gate.sh --smoke`, and CI runs that same script.** It needs Postgres and
+   `OG_DATABASE_URL`; without them the Postgres-backed tests skip loudly and the smokes cannot
+   run, so a green local `cargo test` is not a green gate. The gate refuses to share a database
+   with a running server, because the autonomy sweeps would race it. `docs/setup/gate.md`.
+3. **An empty success is the dangerous reply.** `GET /coworkers` returning `[]` is *valid*, and
+   an AG-UI client paints an empty roster and the person blames the client. A KEK, credential or
+   database failure must be a non-2xx with a sentence, never an empty list; the MCP door's empty
+   toolbox rule (`mcp_door.rs`) is the same fact. Reply shapes matter as much as replies.
 
 ---
 
@@ -69,14 +70,13 @@ in `docs/research/`.
 crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
-  opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
+  opengrok-wire     transcribed shapes with provenance: transcript entries, AG-UI events; the harness, store and AG-UI door read them
   opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
   opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
-  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint
+  opengrok-server   Axum: the host API (/coworkers, /account, /admin), the AG-UI endpoint (SSE), the MCP door, /console
 ```
 
 Mirrors open-ai-gateway's crate-per-concern layout on purpose — the two ship together and a reader
@@ -86,7 +86,7 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 
 | What | Where |
 |---|---|
-| The client we serve | `/Volumes/goldcoders/OSS/opengrok` — reference: `docs/research/client-grok-bot.md` |
+| The desktop client we used to serve | `/Volumes/goldcoders/OSS/opengrok` — reference: `docs/research/client-grok-bot.md` (history since 18 Sep 2026) |
 | The model door | `/Volumes/goldcoders/OSS/open-ai-gateway` — reference: `docs/research/gateway-open-ai-gateway.md` |
 | The prior product's lessons | `/Volumes/goldcoders/projects/opensesame/opensesame` — reference: `docs/research/lessons-opensesame.md` |
 | The coworker's computer | `docs/research/sandbox-box-ascii-dev.md` (our notes); vendor API pages in `docs/box/` |
@@ -96,21 +96,17 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 ## Commands
 
 ```sh
-cargo check --workspace          # must stay clean — this is the DEFAULT build, the one that ships
-cargo clippy --workspace --all-targets
-cargo test --workspace --features opengrok-server/mock-fixtures   # see below
+cargo check --workspace          # must stay clean
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace           # Postgres-backed tests skip loudly without OG_DATABASE_URL
 scripts/serve.sh                 # build + (re)start the dev server from .env
-scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/setup/gate.md
+scripts/gate.sh --smoke          # the merge gate; CI runs the same script. docs/setup/gate.md
 ```
 
-**`mock-fixtures` is a cargo feature, off by default.** It carries the mock transcript catalogue —
-~65 KB of embedded sample documents and a filesystem read verb — which is development surface and
-must not reach a production binary, so a release cannot ship it by forgetting to switch something
-off. Turn it on for local dev, tests and CI; `scripts/serve.sh` and `scripts/gate.sh` already do.
-Without it `cargo test --workspace` silently skips the catalogue's own tests, and a binary built
-without it REFUSES TO START under `OG_MODEL_DOOR=mock-cards` rather than quietly falling back to
-a real, billed door. `enabled()` additionally refuses when `OG_HOSTED=1`, the same way
-`provision::local_docker_allowed` does.
+**There is one build configuration.** The workspace has no cargo features. The `mock-fixtures`
+feature and its catalogue left with the desktop client's doors on 18 Sep 2026; the mock doors
+that remain (`OG_MODEL_DOOR=mock`, `mock-tools`) live in `opengrok-harness` and need nothing
+compiled in.
 
 ## Writing style in this repo
 
