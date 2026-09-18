@@ -103,10 +103,10 @@ scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate; CI runs the same script. docs/setup/gate.md
 ```
 
-**There is one build configuration.** The workspace has no cargo features. The `mock-fixtures`
-feature and its catalogue left with the desktop client's doors on 18 Sep 2026; the mock doors
-that remain (`OG_MODEL_DOOR=mock`, `mock-tools`) live in `opengrok-harness` and need nothing
-compiled in.
+**The mock doors need nothing compiled in.** The `mock-fixtures` feature and its catalogue left
+with the desktop client's doors on 18 Sep 2026, so the gate builds and tests the default
+configuration; the mock doors that remain (`OG_MODEL_DOOR=mock`, `mock-tools`) live in
+`opengrok-harness`.
 
 ## Writing style in this repo
 
