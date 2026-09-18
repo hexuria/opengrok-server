@@ -1,7 +1,6 @@
 //! Every response carries an `X-Request-Id`: the caller's when it sent one, a fresh UUID when it
-//! did not. This is what lets a desktop-client log line and a server log line for the same call
-//! be joined by one key — the observability plan's first brick. Also opens and drops an `/events`
-//! stream so the open/close logging path runs under test (the lines themselves go to tracing).
+//! did not. This is what lets a client log line and a server log line for the same call be joined
+//! by one key — the observability plan's first brick.
 //!
 //! Needs Postgres (the state carries the store), so it skips — loudly — when OG_DATABASE_URL is
 //! absent, the same bargain the other integration tests make.
@@ -15,7 +14,6 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 
 macro_rules! database_or_skip {
@@ -57,17 +55,7 @@ async fn app(database_url: &str) -> axum::Router {
         },
         plugins: Arc::new(BTreeMap::new()),
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it is about the request id riding every response, including an SSE
-    // open. Since 5 Sep 2026 a stream must be asked for by an identified caller, and this one
-    // speaks as the deployment account.
-    .allowing_identity_fallback();
-    opengrok_server::router(agui, gateway)
+    opengrok_server::router(agui)
 }
 
 async fn spawn(app: axum::Router) -> String {
@@ -102,7 +90,7 @@ async fn every_response_carries_a_request_id_the_callers_or_a_fresh_one() {
         .to_string();
     uuid::Uuid::parse_str(&minted).expect("a minted id is a UUID");
 
-    // The caller's id wins, verbatim — the desktop client's log and ours must share it.
+    // The caller's id wins, verbatim — the client's log and ours must share it.
     let res = client
         .get(format!("{base}/health"))
         .header("x-request-id", "desk-0x1f")
@@ -150,11 +138,11 @@ async fn every_response_carries_a_request_id_the_callers_or_a_fresh_one() {
 
     // A refused request still answers with the id: the refusal is what you want to find.
     let res = client
-        .get(format!("{base}/events"))
+        .get(format!("{base}/coworkers"))
         .header("x-request-id", "desk-refused")
         .send()
         .await
-        .expect("events without bearer");
+        .expect("coworkers without bearer");
     assert_eq!(res.status(), 401);
     assert_eq!(
         res.headers()
@@ -162,25 +150,4 @@ async fn every_response_carries_a_request_id_the_callers_or_a_fresh_one() {
             .and_then(|value| value.to_str().ok()),
         Some("desk-refused")
     );
-
-    // An SSE connect carries the id too, and dropping the body runs the close path.
-    let mut res = client
-        .get(format!("{base}/events?channels=agents"))
-        .header("authorization", "Bearer test-bearer")
-        .header("x-request-id", "desk-sse")
-        .send()
-        .await
-        .expect("events");
-    assert_eq!(res.status(), 200);
-    assert_eq!(
-        res.headers()
-            .get("x-request-id")
-            .and_then(|value| value.to_str().ok()),
-        Some("desk-sse")
-    );
-    let first = res.chunk().await.expect("first chunk").expect("some bytes");
-    assert!(String::from_utf8_lossy(&first).starts_with("retry: 1000"));
-    drop(res);
-    // Give the server a beat to drop the body and log the close; no panic is the assertion.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 }

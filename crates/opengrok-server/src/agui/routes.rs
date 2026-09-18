@@ -807,8 +807,7 @@ pub async fn repin_coworker(
         }
     }
     // `notifyOnUpdates` arrives from the app and is READ NOWHERE, deliberately. Nothing on this
-    // server stores it: the seam-B roster answers a constant `true` (`gateway/summaries.rs`) and
-    // the desktop client keeps the real answer in its own settings file
+    // server stores it: the desktop client kept the real answer in its own settings file
     // (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
     // inventing one to make a toggle look persistent is worse than the toggle not persisting.
     //
@@ -2420,8 +2419,8 @@ pub async fn replay_run(
 
 /// How many runs a thread answers with when the caller does not ask for a number.
 ///
-/// Twenty, which is what `gateway/lifecycle.rs` already asks `runs_for_thread` for when it builds
-/// a routine's run list. Two readers of the same history disagreeing about how much of it is
+/// Twenty, which is what the desktop's routine pane asked `runs_for_thread` for while it was
+/// served here. Two readers of the same history disagreeing about how much of it is
 /// "recent" gets reported as "the app shows fewer turns than the pane does", and the cheapest way
 /// not to have that conversation is to pick the number once. Twenty turns is also more than a
 /// screenful, which is what a client reopening a conversation actually has to draw.
@@ -2480,10 +2479,9 @@ struct ThreadRunReplay {
 /// message arrives in `RunAgentInput.messages`, is spent on the model call and is never journaled
 /// — `RunEvent::Started` captures the thread, the coworker, the pin and the system message, and
 /// nothing about what was asked. So a client rendering a transcript from this has to interleave
-/// the person's side from somewhere else: the seam-B entries (`seamb_send.rs`) for a turn that
-/// came through the gateway's send, and its own records for a turn that came through `POST /ag-ui`
-/// directly, where the server keeps no copy of the question at all. Closing that means journaling
-/// the turn's own prompt on the run, which changes the aggregate and belongs to its own change.
+/// the person's side from its own records, because the server keeps no copy of the question at
+/// all. Closing that means journaling the turn's own prompt on the run, which changes the
+/// aggregate and belongs to its own change.
 pub async fn replay_thread(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2673,8 +2671,8 @@ pub async fn answer_run(
     // about a refusal somebody made on purpose. Worse, the tool call was left with no result at
     // all, so the next turn in that thread replayed a call nothing answered.
     //
-    // The gateway's own answer path has done this from the start (`gateway::conversation`); the
-    // two doors on to the same run disagreed, and this is the one that was wrong.
+    // The desktop's own answer path (seam A, since deleted) did this from the start; the two
+    // doors on to the same run disagreed, and this is the one that was wrong.
     let continuing = pending.is_some();
     if let Some(pending) = pending {
         let outcome = resume_outcome(request.approved, &pending);
@@ -3106,8 +3104,34 @@ pub async fn list_awaiting(
     }
 }
 
-/// The message a reply points at, as the one bracketed line `reply_context` writes for the
-/// desktop's own transcript — so a reply reads the same whichever door the turn came through.
+/// How much of a quoted message the model is shown; a reply to a long answer names the answer,
+/// it does not replay it.
+const REPLY_QUOTE_CHARS: usize = 1_000;
+
+/// How every quote line opens. A client that spells the quote into the message itself (NativeChat
+/// does, because that is all a server without this field would read) is recognised by it, so the
+/// context is not said twice.
+pub(crate) const REPLY_QUOTE_OPENING: &str = "[Replying to";
+
+/// The one sentence a quote is written as, so a message that carries the sentence already can be
+/// told apart from one that does not.
+///
+/// `None` when the quoted message had no words to quote.
+pub(crate) fn reply_quote_line(who: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let clipped = if text.chars().count() > REPLY_QUOTE_CHARS {
+        let head: String = text.chars().take(REPLY_QUOTE_CHARS).collect();
+        format!("{head}…")
+    } else {
+        text.to_string()
+    };
+    Some(format!("{REPLY_QUOTE_OPENING} {who}: \"{clipped}\"]"))
+}
+
+/// The message a reply points at, as one bracketed line the model reads ahead of the prompt.
 ///
 /// `replyTo` is either the quoted message's id or NativeChat's object (`messageId`, `preview`,
 /// `isMe`). The quoted message itself is preferred, with all of its words; the preview is what is
@@ -3143,7 +3167,7 @@ fn reply_quote(
     } else {
         "your earlier message"
     };
-    crate::gateway::conversation::reply_quote_line(who, text)
+    reply_quote_line(who, text)
 }
 
 /// A user message with the quote it answers ahead of it.
@@ -3156,10 +3180,7 @@ fn with_reply_context(
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],
 ) -> String {
-    if content
-        .trim_start()
-        .starts_with(crate::gateway::conversation::REPLY_QUOTE_OPENING)
-    {
+    if content.trim_start().starts_with(REPLY_QUOTE_OPENING) {
         return content.to_string();
     }
     match reply_quote(message, sent) {

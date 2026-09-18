@@ -14,15 +14,13 @@ use std::sync::Arc;
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId};
-use opengrok_core::run::RunStatus;
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
-use opengrok_tools::{AwaitingReason, ToolCall, ToolResult, USER_MACHINE_SHELL};
+use opengrok_tools::USER_MACHINE_SHELL;
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
@@ -124,7 +122,7 @@ async fn seed_computerless_coworker(store: &PgStore, account: &AccountId) -> Cow
     id
 }
 
-fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, GatewayState) {
+fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState) {
     let auth = AuthState::new(
         store,
         Arc::new(TokenMinter::new(b"mcp-door-test-secret-mcp-door-test!!")),
@@ -143,20 +141,7 @@ fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, Gatew
         },
         plugins: Arc::new(BTreeMap::new()),
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
-    (
-        opengrok_server::router(agui.clone(), gateway.clone()),
-        agui,
-        gateway,
-    )
+    (opengrok_server::router(agui.clone()), agui)
 }
 
 async fn spawn(app: axum::Router) -> String {
@@ -258,7 +243,7 @@ async fn a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolb
     let host_email = format!("host-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_computerless_coworker(&store, &account).await;
-    let (app, state, _) = app_with(store.clone(), &host_email);
+    let (app, state) = app_with(store.clone(), &host_email);
     let base = spawn(app).await;
     let access = mint_access_for(&state, &account, &host_email);
     let (bot_key, _) = mint_bot_key(&base, &access, &coworker).await;
@@ -380,7 +365,7 @@ async fn only_a_live_bot_key_opens_the_door() {
     let host_email = format!("host-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_computerless_coworker(&store, &account).await;
-    let (app, state, _) = app_with(store.clone(), &host_email);
+    let (app, state) = app_with(store.clone(), &host_email);
     let base = spawn(app).await;
     let access = mint_access_for(&state, &account, &host_email);
 
@@ -433,307 +418,5 @@ async fn only_a_live_bot_key_opens_the_door() {
     assert!(
         message_of(&revoked).contains("revoked"),
         "a revoked key is named revoked: {revoked}"
-    );
-}
-
-/// An MCP Ask has no in-flight run. The door synthesizes one and a real auto-review card;
-/// the desktop verb that already answers conversation Asks settles it. Driven through
-/// `reply_to_ask` (the shipped Ask path), not `tools/call`: that only Asks after the
-/// toolbox is Ready (a computer).
-#[tokio::test]
-async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
-    let database_url = database_or_skip!();
-    let store = store_from(&database_url).await;
-    let host_email = format!("mcp-ask-{}@og.local", uuid::Uuid::now_v7().simple());
-    let account = seed_account(&store, &host_email).await;
-    let coworker = seed_computerless_coworker(&store, &account).await;
-    let (app, state, gateway) = app_with(store.clone(), &host_email);
-    let base = spawn(app).await;
-
-    let call = ToolCall {
-        id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
-        name: "write_file".to_string(),
-        arguments: json!({ "path": "/tmp/from-mcp", "content": "hi" }),
-    };
-    let result = ToolResult::awaiting(&call.id, AwaitingReason::AutoReview, "why");
-    let error =
-        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
-            .await;
-    assert!(
-        error.contains(&format!("requestId: {}", call.id)),
-        "the MCP error names the card's requestId: {error}"
-    );
-    assert!(
-        !error.contains("approval is not available over MCP"),
-        "must not claim no card exists once one was raised: {error}"
-    );
-
-    let error_again =
-        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
-            .await;
-    assert!(
-        error_again.contains(&format!("requestId: {}", call.id)),
-        "a retry before answer reuses the same requestId: {error_again}"
-    );
-
-    // The same call through the door itself, while the card is up: the door finds the pending
-    // Ask before it reaches the toolbox, answers "waiting", and the audit says so.
-    let access = mint_access_for(&state, &account, &host_email);
-    let (bot_key, _) = mint_bot_key(&base, &access, &coworker).await;
-    let (_, waiting) = rpc(
-        &base,
-        Some(&bot_key),
-        7,
-        "tools/call",
-        json!({ "name": call.name, "arguments": call.arguments }),
-    )
-    .await;
-    assert_eq!(waiting["result"]["isError"], json!(true), "{waiting}");
-    assert!(
-        waiting["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .contains(&format!("requestId: {}", call.id)),
-        "the door names the same card: {waiting}"
-    );
-    let rows: Value = mcp_calls(&base, &access, &coworker)
-        .await
-        .json()
-        .await
-        .expect("calls json");
-    assert_eq!(rows[0]["tool"], json!("write_file"), "{rows}");
-    assert_eq!(rows[0]["outcome"], json!("awaiting"), "{rows}");
-    assert_eq!(
-        rows[0]["arguments"]["path"],
-        json!("/tmp/from-mcp"),
-        "{rows}"
-    );
-
-    let awaiting = store.awaiting_approval(&account).await.expect("awaiting");
-    assert_eq!(
-        awaiting.len(),
-        1,
-        "the MCP Ask left exactly one suspended run"
-    );
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(run.status, RunStatus::AwaitingApproval);
-    assert_eq!(
-        run.pending.as_ref().map(|p| p.call_id.as_str()),
-        Some(call.id.as_str())
-    );
-    assert_eq!(
-        run.pending.as_ref().map(|p| p.reason),
-        Some(opengrok_core::run::SuspendReason::AutoReview)
-    );
-    assert!(
-        run.thread_id.starts_with("mcp-"),
-        "an MCP Ask is its own thread, not a conversation turn: {}",
-        run.thread_id
-    );
-    assert_eq!(run.model.as_deref(), Some("oag/cheap"));
-
-    let transcript = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript");
-    let card = transcript
-        .iter()
-        .find(|entry| entry["message"]["type"] == "auto-review-approval")
-        .cloned()
-        .expect("an auto-review card was appended");
-    assert_eq!(card["message"]["approval"]["requestId"], call.id);
-    assert_eq!(card["message"]["approval"]["status"], "pending");
-    assert_eq!(card["message"]["approval"]["surface"], "box_shell");
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-
-    let res = reqwest::Client::new()
-        .post(format!("{base}/api/resolveAutoReviewApproval"))
-        .header("Authorization", "Bearer test-bearer")
-        .json(&json!({
-            "entryId": entry_id,
-            "requestId": call.id,
-            "resolution": "approved",
-            "agentId": coworker.as_str(),
-        }))
-        .send()
-        .await
-        .expect("resolve");
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "the desktop verb answers the MCP card"
-    );
-    let body: Value = res.json().await.expect("body");
-    assert_eq!(body["ok"], true, "{body}");
-
-    let flipped = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript")
-        .into_iter()
-        .find(|entry| entry["id"] == entry_id)
-        .expect("card still present");
-    assert_eq!(flipped["message"]["approval"]["status"], "approved");
-
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(
-        run.status,
-        RunStatus::Finished,
-        "an MCP run is finished on the card, not resumed as a conversation"
-    );
-    assert!(run.answered.contains(&call.id));
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &json!({ "path": "/tmp/other", "content": "nope" }),
-        )
-        .await,
-        None,
-        "a different command of the same tool cannot spend this yes"
-    );
-    // Arguments round-tripped through jsonb (key order not preserved). Take with the
-    // other key order so a string-hash of to_string would miss and Value equality hits.
-    let reordered = json!({ "content": "hi", "path": "/tmp/from-mcp" });
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &reordered
-        )
-        .await,
-        Some((call.id.clone(), false)),
-        "allow-once matches by Value equality, not key insertion order; a judge yes is not a gate yes"
-    );
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &call.arguments
-        )
-        .await,
-        None,
-        "the yes is one-shot"
-    );
-}
-
-/// A policy grant's "needs a human yes" over MCP raises the SAME card as the judge's ask, with
-/// the grant's reason and no proposed rule; the desktop's verb answers it, and the remembered
-/// yes is a GATE yes for the retry — not a judge skip.
-#[tokio::test]
-async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
-    let database_url = database_or_skip!();
-    let store = store_from(&database_url).await;
-    let host_email = format!("mcp-policy-{}@og.local", uuid::Uuid::now_v7().simple());
-    let account = seed_account(&store, &host_email).await;
-    let coworker = seed_computerless_coworker(&store, &account).await;
-    let (app, _state, gateway) = app_with(store.clone(), &host_email);
-    let base = spawn(app).await;
-
-    let call = ToolCall {
-        id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
-        name: "shell".to_string(),
-        arguments: json!({ "command": "echo policy" }),
-    };
-    let result = ToolResult::awaiting(
-        &call.id,
-        AwaitingReason::PolicyApproval,
-        "only the on-call may run shell here",
-    );
-    let error =
-        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
-            .await;
-    assert!(
-        error.contains(&format!("requestId: {}", call.id)),
-        "the MCP error names the card's requestId: {error}"
-    );
-    assert!(
-        !error.contains("approval is not available over MCP"),
-        "a policy ask has a card now: {error}"
-    );
-
-    let awaiting = store.awaiting_approval(&account).await.expect("awaiting");
-    assert_eq!(awaiting.len(), 1);
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(
-        run.pending.as_ref().map(|p| p.reason),
-        Some(opengrok_core::run::SuspendReason::PolicyApproval)
-    );
-
-    let transcript = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript");
-    let card = transcript
-        .iter()
-        .find(|entry| entry["message"]["type"] == "auto-review-approval")
-        .cloned()
-        .expect("the policy ask rides the auto-review card");
-    let approval = &card["message"]["approval"];
-    assert_eq!(approval["requestId"], call.id);
-    assert_eq!(approval["status"], "pending");
-    assert_eq!(approval["reason"], "only the on-call may run shell here");
-    assert_eq!(approval["command"], "echo policy");
-    assert!(
-        approval.get("proposedRule").is_none(),
-        "a policy card offers no rule to write: {approval}"
-    );
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-
-    // A retry before the answer reuses the pending card rather than raising a second one.
-    let again =
-        opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
-            .await;
-    assert!(
-        again.contains(&format!("requestId: {}", call.id)),
-        "{again}"
-    );
-
-    let res = reqwest::Client::new()
-        .post(format!("{base}/api/resolveAutoReviewApproval"))
-        .header("Authorization", "Bearer test-bearer")
-        .json(&json!({
-            "entryId": entry_id,
-            "requestId": call.id,
-            "resolution": "approved",
-            "agentId": coworker.as_str(),
-        }))
-        .send()
-        .await
-        .expect("resolve");
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "the desktop verb answers a policy card too"
-    );
-
-    let flipped = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript")
-        .into_iter()
-        .find(|entry| entry["id"] == entry_id)
-        .expect("card still present");
-    assert_eq!(flipped["message"]["approval"]["status"], "approved");
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(run.status, RunStatus::Finished);
-
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "shell",
-            &call.arguments
-        )
-        .await,
-        Some((call.id.clone(), true)),
-        "a policy yes is remembered as a GATE yes for the retry"
     );
 }

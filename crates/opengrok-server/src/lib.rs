@@ -1,7 +1,6 @@
 //! The host-facing HTTP surface.
 //!
-//! One router, assembled here so the binary does not have to know which slices exist. Slice 1 is
-//! auth; the gateway commands and the event stream join it next (`docs/GOAL.md`).
+//! One router, assembled here so the binary does not have to know which slices exist.
 
 use axum::Router;
 
@@ -11,12 +10,12 @@ pub mod artifacts;
 pub mod auth;
 pub mod auto_review;
 pub mod autonomy;
+pub mod cards;
 pub mod computers;
 pub mod connections;
 pub mod domain_proof;
-pub mod gateway;
 pub mod gateway_admin;
-pub mod grpc;
+pub mod health;
 pub mod jev;
 pub mod local_exec;
 pub mod mcp_door;
@@ -25,8 +24,6 @@ pub mod persona;
 pub mod points;
 pub mod recipes;
 pub mod recovery;
-pub mod seamb;
-pub mod seamb_send;
 pub mod spend;
 pub mod templates;
 pub mod workflows;
@@ -35,15 +32,9 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-///
-/// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
-/// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
-/// smoke script was already checking.
-pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(state: AgUiState) -> Router {
     let app = Router::new()
-        .merge(gateway::routes::router(gateway.clone()))
-        .merge(gateway::hooks::router(gateway.clone()))
-        .merge(seamb::router(gateway.clone()))
+        .merge(health::router(state.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
@@ -56,12 +47,12 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
-        .nest("/mcp", mcp_door::router(gateway))
+        .nest("/mcp", mcp_door::router(state.clone()))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
     // Request trace, ON by default (`OG_TRACE_REQUESTS=0` turns it off): one INFO line per
     // request with method, path, status, the request id, whether an Origin header was present
-    // (the gateway refuses those 403 before the token), and the LENGTH of the presented bearer
+    // (the MCP door refuses those 403 before the token), and the LENGTH of the presented bearer
     // (never its value) so a 0- or wrong-length token that can never match is visible. It used to
     // be opt-in, and the dev server went silent for a day after a restart without the flag — the
     // question "was the stream up at 03:16" had no answer. Default-on is the answer.
@@ -70,10 +61,9 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
     } else {
         app.layer(axum::middleware::from_fn(trace_request))
     };
-    // Request ids. `X-Request-Id` is taken from the client when it sends one (the desktop client
-    // stamps every gateway call and every SSE connect), minted as a UUID when it does not, and
-    // echoed on the response either way — so a client log line and a server log line for the same
-    // call share one key. ORDER MATTERS: `.layer()` wraps what came before, so `Set` is added last
+    // Request ids. `X-Request-Id` is taken from the client when it sends one, minted as a UUID
+    // when it does not, and echoed on the response either way — so a client log line and a server
+    // log line for the same call share one key. ORDER MATTERS: `.layer()` wraps what came before, so `Set` is added last
     // to run first, then `Propagate` copies the id onto the response, and only then does the trace
     // above (innermost) see a request that already carries its id.
     app.layer(tower_http::request_id::PropagateRequestIdLayer::x_request_id())
@@ -83,8 +73,7 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .layer(axum::middleware::from_fn(bound_request_id))
 }
 
-/// The longest client-supplied request id we keep. A UUID is 36; the desktop's are shorter. Past
-/// this the header is dropped before `SetRequestId` sees it, so a fresh id is minted instead —
+/// The longest client-supplied request id we keep. A UUID is 36. Past this the header is dropped before `SetRequestId` sees it, so a fresh id is minted instead —
 /// the id lands on every log line the request touches, and an 8 KB value there is a nuisance
 /// even though `HeaderValue` already rules out control characters.
 const REQUEST_ID_MAX: usize = 128;
@@ -140,12 +129,6 @@ async fn trace_request(
         .and_then(|value| value.to_str().ok())
         .map(|value| value.len())
         .unwrap_or(0);
-    // WHETHER AN IDENTITY WAS OFFERED AT ALL. `auth_len` is the SHARED host bearer and is
-    // identical for every caller, so the request line could not distinguish one person from
-    // another — which is why a cross-account bug was read three different wrong ways from a log
-    // that looked clean. This flag is the cheapest thing that would have settled it here; the
-    // account it resolved to is logged by the seam-A dispatch, which has the store to resolve it.
-    let account_hdr = req.headers().contains_key(crate::gateway::ACCOUNT_HEADER);
     let started = std::time::Instant::now();
     let span = tracing::info_span!("http", id = %id);
     let response = next.run(req).instrument(span).await;
@@ -156,7 +139,6 @@ async fn trace_request(
         status = response.status().as_u16(),
         origin = has_origin,
         auth_len,
-        account_hdr,
         ms = started.elapsed().as_millis() as u64,
         "request"
     );

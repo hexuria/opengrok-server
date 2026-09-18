@@ -4,13 +4,14 @@ The server the AI coworkers live on.
 
 One Rust service that owns the agent harness, the tools, the computers and the policy — shipped
 together with [open-ai-gateway](https://github.com/hexuria/open-ai-gateway) as a single AI
-infrastructure. Clients are windows onto it: the reconstructed Grok Bot desktop app connects
-through its OpenGrok server mode, any AG-UI client (openbot among them) through `POST /ag-ui`,
-and a browser through the web console at `/console`.
+infrastructure. Clients are windows onto it: any AG-UI client (openbot among them) through
+`POST /ag-ui`, an MCP client through `/mcp`, and a browser through the web console at `/console`.
+The two doors that booted the reconstructed Grok Bot desktop app were deleted on 18 Sep 2026
+(`docs/LEGAL.md`).
 
 ```
-desktop app / AG-UI / console  ──▶  OpenGrok  ──▶  open-ai-gateway  ──▶  models
-                                      └──▶  a computer per coworker (Docker / box.ascii.dev)
+AG-UI / MCP / console  ──▶  OpenGrok  ──▶  open-ai-gateway  ──▶  models
+                              └──▶  a computer per coworker (Docker / box.ascii.dev)
 ```
 
 A coworker keeps working when you close the tab, because the work was never in the tab.
@@ -18,9 +19,9 @@ A coworker keeps working when you close the tab, because the work was never in t
 ## Status
 
 Slices 1–14 are done and the server is real: auth, the AG-UI endpoint, the durable harness,
-computers, connectors, the scheduler/monitor autonomy pair, the gateway port that boots the
-packaged desktop client, seam B, orgs and invites, the web console, and the consent model with
-model-judged auto-review. **[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is
+computers, connectors, the scheduler/monitor autonomy pair, orgs and invites, the web console,
+and the consent model with model-judged auto-review. The gateway port that booted the packaged
+desktop client and seam B were built in slices 7 to 9 and deleted on 18 Sep 2026. **[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is
 ticked only in the commit that makes it true, and its unticked boxes are the remaining work.
 
 ## Quick start
@@ -43,7 +44,7 @@ cargo build -p opengrok && OG_PORT=1449 \
 ```
 
 The full chain, one file per topic: **[`docs/setup/`](docs/setup/README.md)** —
-postgres → environment → running → gate → desktop-client.
+postgres → environment → running → gate.
 
 ## Start here
 
@@ -66,14 +67,13 @@ postgres → environment → running → gate → desktop-client.
 crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
-  opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
+  opengrok-wire     transcribed shapes with provenance: transcript entries, AG-UI events
   opengrok-harness  the agent loop: turns, tool calls, streaming, durability; the auto-review judge
   opengrok-box      the coworker's computer — a trait; local Docker and box.ascii.dev (typed v1 client) today
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
-  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint, /console
+  opengrok-server   Axum: the host API, the AG-UI endpoint (SSE), the MCP door, /console
 docs/
   setup/ · research/ · box/ (vendor API pages) · verification/ · archive/ · the documents in the table above
 scripts/

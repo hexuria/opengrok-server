@@ -567,6 +567,35 @@ every record that sharing would otherwise break carry whose it is.
   learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
   are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
+## Seam A and seam B deleted (18 Sep 2026)
+
+The two doors that existed only to boot the reconstructed Electron desktop client are out of the
+tree. Whether that client is dead is a product decision the operator has not made; the deletion
+is reversible with git and was opened as a draft gated on that decision. Slices 7 to 9 above stay
+as the record of what was built.
+
+- [x] **Seam B.** `seamb.rs`, `seamb_send.rs`, `grpc.rs` and `crates/opengrok-proto` deleted;
+  `prost`, `tonic` and `protoc` leave the build. The tonic gRPC listener (`OG_GRPC_BIND`) served
+  the same transcribed messages to the same client and went with it, overturning the 30 Aug 2026
+  decision recorded in the workspace `Cargo.toml`. (`773d031`)
+- [x] **Shared helpers rehomed.** `/health` to `health.rs`, the card composers to `cards.rs`,
+  `failure_sentence` to `autonomy/`, the reply-quote helpers to `agui/routes.rs`; the autonomy
+  sweep and the MCP door take `AgUiState` directly. (`16b2206`)
+- [x] **Seam A.** `gateway/` (55 verbs, the live bus, the fixture catalogue), the
+  `ACCOUNT_HEADER` middleware, `GatewayState`, the three smokes that spoke only seam A
+  (slice11, slice12, slice15) and 24 `against_*.rs` files that drove the door.
+  `against_spend_caps.rs` drives its turns through `/ag-ui` instead. (`9e7387c`) The no-on-the-card
+  test from #137 came back the same way, as `against_a_no_on_the_card.rs`. *(this commit)*
+- [x] **`mock-fixtures` and `OG_MODEL_DOOR=mock-cards`.** The feature, the door, the two fixture
+  generators; `gate.sh`, `serve.sh` and `ci.yml` build one configuration. `mock-cards` refuses to
+  boot rather than falling through to a billed door. (`22ae970`)
+- [ ] A surface that answers an MCP door's approval card. The desktop's
+  `resolveAutoReviewApproval` was the only door that finished the synthesized `mcp-` run and
+  remembered the yes; `POST /ag-ui/runs/{id}/answer` resumes a run as a model turn, which an
+  `mcp-` run must not do. Phase 6.
+- [ ] `MockDoor::serving_fixtures` in `opengrok-harness` has no caller; `OG_GRPC_BIND` in
+  `.env.example` names a listener that no longer exists. Both outside this deletion's scope.
+
 ## Later — unordered, deliberately
 
 - [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one

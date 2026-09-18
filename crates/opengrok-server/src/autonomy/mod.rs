@@ -15,14 +15,14 @@ pub mod sweep;
 
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
+use serde_json::Value;
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 
-/// Where a routine's run shows up for the person: the coworker's own chat, as a message from the
-/// coworker, sent live. The run keeps its own thread (the schedule's id) for the pane's history;
+/// Where a routine's run shows up for the person: the coworker's own transcript, as a message
+/// from the coworker. The run keeps its own thread (the schedule's id) for the pane's history;
 /// this is the part a person actually reads. `None` for firings nobody needs told about.
 pub(crate) struct Announce {
-    pub gateway: crate::gateway::GatewayState,
     /// The routine's name — the message opens with it so the chat says WHY the coworker spoke.
     pub name: String,
 }
@@ -127,17 +127,6 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.
     let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
 
-    if let Some(announce) = &announce {
-        // The roster shows the coworker thinking while its routine runs, the same as a turn.
-        crate::gateway::live::set_running(
-            &announce.gateway,
-            coworker_id.as_str(),
-            true,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-
     let events = run_conversation(
         state.door.as_ref(),
         tools.as_ref(),
@@ -152,20 +141,20 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     tracing::info!(%origin, run = %run_id, events = events.len(), "fired a run nobody asked for");
 
     if let Some(announce) = announce {
-        announce_finished(&announce, &coworker_id, &account_id, &events).await;
+        announce_finished(&state, &announce, &coworker_id, &account_id, &events).await;
     }
 }
 
-/// Post the finished routine into the coworker's chat and refresh the Routines pane. The chat
-/// line carries the routine's name and the answer's head (the run's own thread has the whole
-/// thing); it is appended to the gateway transcript like any coworker message and emitted live.
+/// Post the finished routine into the coworker's transcript. The line carries the routine's name
+/// and the answer's head (the run's own thread has the whole thing); it is appended to the
+/// coworker's transcript for this account like any coworker message.
 async fn announce_finished(
+    state: &AgUiState,
     announce: &Announce,
     coworker_id: &CoworkerId,
     account_id: &AccountId,
     events: &[opengrok_wire::agui::Event],
 ) {
-    let gateway = &announce.gateway;
     let mut text = String::new();
     for event in events {
         if event.event_type == opengrok_wire::agui::EventType::TextMessageContent
@@ -176,7 +165,7 @@ async fn announce_finished(
     }
     let head: String = text.trim().chars().take(200).collect();
     let content = if head.is_empty() {
-        match crate::gateway::conversation::failure_sentence(events) {
+        match failure_sentence(events) {
             Some(why) => format!("Routine {} failed: {why}", announce.name),
             None => format!(
                 "Routine {} ran and produced no answer. Its run log has the reason.",
@@ -195,35 +184,54 @@ async fn announce_finished(
         "message": { "type": "text", "content": content },
         "timestampMs": at_ms,
     });
-    match gateway
-        .agui
+    if let Err(error) = state
         .auth
         .store
         .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
         .await
     {
-        Ok(_) => {
-            crate::gateway::live::emit_transcript(
-                gateway,
-                coworker_id.as_str(),
-                account_id,
-                "appended",
-                entry,
-            );
-        }
-        Err(error) => {
-            tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
-        }
+        tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
     }
-    let preview: String = text.chars().take(120).collect();
-    crate::gateway::live::set_running(
-        gateway,
-        coworker_id.as_str(),
-        false,
-        serde_json::json!({ "lastMessagePreview": preview }),
-    )
-    .await;
-    // The firing's own account: a routine acting on its schedule acts for whoever set it,
-    // and that is whose Routines pane this frame refreshes.
-    crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str(), account_id).await;
+}
+
+/// The sentence a failed run leaves for the person, from the run's own failure event: the
+/// gateway's words when it refused (the `error.message` inside its JSON body, when it carries
+/// one — "no subscription credential for xai on this route" rather than the whole body), the
+/// harness's otherwise; capped. `None` when the run did not fail.
+pub(crate) fn failure_sentence(events: &[opengrok_wire::agui::Event]) -> Option<String> {
+    let message = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == opengrok_wire::agui::EventType::RunError)?
+        .extra
+        .get("message")
+        .and_then(Value::as_str)?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    let said = match message.find('{') {
+        Some(at) => {
+            let inner = serde_json::from_str::<Value>(&message[at..])
+                .ok()
+                .and_then(|body| {
+                    body.pointer("/error/message")
+                        .or_else(|| body.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+            match inner {
+                Some(inner) => format!("{} {inner}", message[..at].trim_end()),
+                None => message.to_string(),
+            }
+        }
+        None => message.to_string(),
+    };
+    let said = said.trim().trim_end_matches('.');
+    let capped: String = said.chars().take(300).collect();
+    Some(if capped.chars().count() < said.chars().count() {
+        format!("{capped}…")
+    } else {
+        capped
+    })
 }
