@@ -1495,6 +1495,14 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
         body.get("egress_tunnel").is_none(),
         "do not invent nested ready: {body}"
     );
+    assert_eq!(
+        body["shareScope"], "user",
+        "default per-account share places chrome in Settings→Computer: {body}"
+    );
+    assert!(
+        body.get("groupId").is_none(),
+        "user share has no groupId: {body}"
+    );
 
     let (status, _) = h
         .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
@@ -1525,6 +1533,7 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
         Some(box_id.as_str()),
         "{body}"
     );
+    assert_eq!(body["shareScope"], "user", "{body}");
 }
 
 #[tokio::test]
