@@ -40,6 +40,9 @@ MOCK_FEATURE="opengrok-server/mock-fixtures"
 step "cargo fmt --all --check"
 cargo fmt --all --check || fail "formatting (run: cargo fmt --all)"
 
+step "scripts/crate-size.sh"
+scripts/crate-size.sh || fail "crate size (a crate grew past its ceiling)"
+
 step "cargo check --workspace (default build — no mock catalogue, the one that ships)"
 cargo check --workspace || fail "check (default build)"
 

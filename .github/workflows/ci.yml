@@ -51,6 +51,10 @@ jobs:
           for db in opengrok_s17_gate opengrok_s18_gate opengrok_s19_gate opengrok_s21_gate; do
             psql "postgres://oag:oag@127.0.0.1:5432/postgres" -c "create database $db" || true
           done
+      # A crate that grows past its recorded ceiling is how 36k-line opengrok-server
+      # happened once. The check only ratchets down, so a red main is never the new normal.
+      - name: crate size ceilings
+        run: bash scripts/crate-size.sh
       # The gate does not build; a stale binary is the classic way to test yesterday's code.
       # `--features` matches what gate.sh itself builds with: the smokes run mock doors, and the
       # mock catalogue is off by default so it cannot reach a production binary.
