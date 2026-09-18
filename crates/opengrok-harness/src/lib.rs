@@ -589,9 +589,10 @@ async fn converse(
                         .collect();
                     if !waiting.is_empty() {
                         // One CUSTOM per awaiting call in this completion — NativeChat paints a
-                        // Website login card per TOOL_CALL, and only a matching
-                        // `run-awaiting-approval` CUSTOM gets a gateway `entryId` / Continue.
-                        // Parking on the first leftover left stacked cards without an id.
+                        // Website login card per TOOL_CALL. Live SSE must not forward those
+                        // TOOL_CALLs until the matching CUSTOM has a gateway `e_*` (AgUiSink
+                        // holds them). Parking on the first leftover left stacked cards with
+                        // only a raw `call-*` id.
                         //
                         // Then `RUN_FINISHED`: AG-UI/NativeChat hold Waiting on that closer.
                         // The HTTP stream used to drop after CUSTOM with no ending, which is a
@@ -2195,6 +2196,36 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == EventType::RunStarted),
             "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_website_logins_keep_provider_call_ids_on_each_awaiting_custom() {
+        let journal = MemoryJournal::new();
+        let events = run_conversation(
+            &MockDoor::asking_for_two_website_logins(),
+            Some(&tool_runner()),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let call_ids: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str())
+                        == Some("run-awaiting-approval")
+                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
+            })
+            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            call_ids,
+            vec!["call-42628be6", "call-42628be6-1"],
+            "provider-style parallel ids must each get a CUSTOM: {events:?}"
         );
     }
 

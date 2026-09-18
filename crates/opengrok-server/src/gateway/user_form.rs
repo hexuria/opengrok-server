@@ -22,7 +22,7 @@
 //! twins live on a router that has `GatewayState` (live emit + resume) but authenticates
 //! like AG-UI (`account_from_bearer`), never through `refuse()`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use axum::Router;
@@ -38,6 +38,7 @@ use opengrok_tools::user_form::{
     handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, overall_resolution,
     shared_values, submitted_values, tool_result_content,
 };
+use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
 
 use super::{GatewayState, conversation, live};
@@ -1174,6 +1175,93 @@ fn entry_fingerprint(entry: &Value) -> Option<String> {
     entry.pointer("/message/formRequest").map(form_fingerprint)
 }
 
+/// Live HITL CUSTOM NativeChat keys Continue off — `run-awaiting-approval` / `user-form`.
+pub(crate) fn is_live_user_form_custom(event: &Event) -> bool {
+    event.event_type == EventType::Custom
+        && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
+        && event.extra.get("reason").and_then(Value::as_str) == Some("user-form")
+}
+
+/// NativeChat paints a Website login card from live `TOOL_CALL` frames. It uses `entryId`
+/// when present, otherwise the raw `toolCallId` (`call-…`). Those frames stream during the
+/// model completion, *before* we mint the gateway card — so a second same-title form was
+/// left as `call-*-1` and Continue could not `POST /ag-ui/user-form/submit`.
+///
+/// Hold every `request_user_form` TOOL_CALL until the matching CUSTOM is stamped with `e_*`,
+/// then forward the call frames with that id.
+#[derive(Default)]
+pub(crate) struct UserFormSseHold {
+    form_ids: HashSet<String>,
+    held: Vec<Event>,
+}
+
+impl UserFormSseHold {
+    fn tool_call_id(event: &Event) -> Option<&str> {
+        event
+            .extra
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+    }
+
+    /// Hold a user-form TOOL_CALL; pass every other frame through.
+    pub(crate) fn push(&mut self, event: Event) -> Option<Event> {
+        match event.event_type {
+            EventType::ToolCallStart => {
+                let name = event
+                    .extra
+                    .get("toolCallName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if name == opengrok_tools::REQUEST_USER_FORM {
+                    if let Some(id) = Self::tool_call_id(&event) {
+                        self.form_ids.insert(id.to_string());
+                    }
+                    self.held.push(event);
+                    return None;
+                }
+                Some(event)
+            }
+            EventType::ToolCallArgs | EventType::ToolCallEnd | EventType::ToolCallResult => {
+                if Self::tool_call_id(&event).is_some_and(|id| self.form_ids.contains(id)) {
+                    self.held.push(event);
+                    return None;
+                }
+                Some(event)
+            }
+            _ => Some(event),
+        }
+    }
+
+    /// Frames for this `toolCallId`, now carrying the gateway `entryId`.
+    pub(crate) fn release_for(&mut self, call_id: &str, entry_id: Option<&str>) -> Vec<Event> {
+        if call_id.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut rest = Vec::new();
+        for mut event in std::mem::take(&mut self.held) {
+            if Self::tool_call_id(&event) == Some(call_id) {
+                if let Some(id) = entry_id.filter(|id| !id.is_empty()) {
+                    event.extra.insert("entryId".to_string(), json!(id));
+                }
+                out.push(event);
+            } else {
+                rest.push(event);
+            }
+        }
+        self.held = rest;
+        self.form_ids.remove(call_id);
+        out
+    }
+
+    /// Stream is ending; leftover form TOOL_CALLs (refused, never awaiting) go out as-is.
+    pub(crate) fn release_rest(&mut self) -> Vec<Event> {
+        self.form_ids.clear();
+        std::mem::take(&mut self.held)
+    }
+}
+
 /// Fold current gateway user-form state into AG-UI replay events so a cold
 /// NativeChat rebuilds ✓ Submitted (and idle cards) from `GET /ag-ui/threads/{id}`
 /// / `GET /ag-ui/runs/{id}` — not only from live unresolved CUSTOMs.
@@ -1190,7 +1278,7 @@ pub(crate) fn hydrate_agui_events(
     if forms.is_empty() {
         return events;
     }
-    let mut used = std::collections::HashSet::new();
+    let mut used = HashSet::new();
     for event in &mut events {
         if !is_user_form_agui(event) {
             continue;
@@ -1457,5 +1545,62 @@ mod tests {
         assert!(is_escalated_form(&form));
         assert!(!is_handoff_entry(&form));
         assert!(!is_live_handoff(&form));
+    }
+
+    fn form_tool_start(call_id: &str) -> Event {
+        Event::new(EventType::ToolCallStart, 1)
+            .with("toolCallId", call_id)
+            .with("toolCallName", opengrok_tools::REQUEST_USER_FORM)
+    }
+
+    fn form_tool_args(call_id: &str) -> Event {
+        Event::new(EventType::ToolCallArgs, 2)
+            .with("toolCallId", call_id)
+            .with("delta", r#"{"title":"Website login"}"#)
+    }
+
+    /// Two same-title Website logins: each TOOL_CALL must leave with its own e_*, not the
+    /// raw `call-*-1` NativeChat used when live frames streamed before the gateway stamp.
+    #[test]
+    fn live_sse_holds_stacked_form_tool_calls_until_each_has_a_gateway_entry_id() {
+        let mut hold = UserFormSseHold::default();
+        assert!(hold.push(form_tool_start("call-42628be6")).is_none());
+        assert!(hold.push(form_tool_args("call-42628be6")).is_none());
+        assert!(hold.push(form_tool_start("call-42628be6-1")).is_none());
+        assert!(hold.push(form_tool_args("call-42628be6-1")).is_none());
+
+        let first = hold.release_for("call-42628be6", Some("e_aaa"));
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(
+            first
+                .iter()
+                .all(|event| event.extra.get("entryId") == Some(&json!("e_aaa")))
+        );
+
+        let second = hold.release_for("call-42628be6-1", Some("e_bbb"));
+        assert_eq!(second.len(), 2, "{second:?}");
+        assert!(
+            second
+                .iter()
+                .all(|event| event.extra.get("entryId") == Some(&json!("e_bbb")))
+        );
+        assert_ne!(
+            first[0].extra.get("entryId"),
+            second[0].extra.get("entryId")
+        );
+    }
+
+    #[test]
+    fn shell_tool_calls_pass_through_the_user_form_hold() {
+        let mut hold = UserFormSseHold::default();
+        let event = Event::new(EventType::ToolCallStart, 1)
+            .with("toolCallId", "c1")
+            .with("toolCallName", "shell");
+        let passed = hold.push(event).unwrap();
+        assert_eq!(
+            passed.extra.get("toolCallName").and_then(Value::as_str),
+            Some("shell")
+        );
+        assert!(hold.release_rest().is_empty());
     }
 }

@@ -2262,6 +2262,7 @@ pub async fn run(
             gateway,
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
+            form_hold: Mutex::new(crate::gateway::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_streaming(
             door.as_ref(),
@@ -3441,11 +3442,44 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 /// gateway card first (same `user_form_card` / sanitize as `sendPrompt`), then forward
 /// `name: run-awaiting-approval` + `reason: user-form` + that id. NativeChat never watches
 /// the transcript live stream, so an after-the-fact append does not unblock them.
+///
+/// `request_user_form` TOOL_CALL frames are held until that stamp: NativeChat paints Website
+/// login from TOOL_CALL and falls back to the raw `toolCallId` (`call-…`) when `entryId` is
+/// missing. Streaming those frames during the model completion is how a second same-title
+/// card stayed `call-*-1` with Continue that could not submit.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
     gateway: crate::gateway::GatewayState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
+    form_hold: Mutex<crate::gateway::user_form::UserFormSseHold>,
+}
+
+impl AgUiSink {
+    fn send(&self, event: Event) -> bool {
+        self.tx.send(event).is_ok()
+    }
+
+    fn hold_or_pass(&self, event: Event) -> Option<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Some(event);
+        };
+        hold.push(event)
+    }
+
+    fn release_form(&self, call_id: &str, entry_id: Option<&str>) -> Vec<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Vec::new();
+        };
+        hold.release_for(call_id, entry_id)
+    }
+
+    fn release_held_forms(&self) -> Vec<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Vec::new();
+        };
+        hold.release_rest()
+    }
 }
 
 #[async_trait::async_trait]
@@ -3453,17 +3487,58 @@ impl EventSink for AgUiSink {
     async fn emit(&self, events: &[Event]) {
         for event in events {
             let mut event = event.clone();
-            if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id) {
-                crate::gateway::conversation::stamp_user_form_entry_id(
-                    &self.gateway,
-                    coworker_id,
-                    account_id,
-                    &mut event,
-                )
-                .await;
+            if crate::gateway::user_form::is_live_user_form_custom(&event) {
+                if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id)
+                {
+                    crate::gateway::conversation::stamp_user_form_entry_id(
+                        &self.gateway,
+                        coworker_id,
+                        account_id,
+                        &mut event,
+                    )
+                    .await;
+                }
+                let call_id = event
+                    .extra
+                    .get("callId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let entry_id = event
+                    .extra
+                    .get("entryId")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                for held in self.release_form(&call_id, entry_id.as_deref()) {
+                    if !self.send(held) {
+                        return;
+                    }
+                }
+                if !self.send(event) {
+                    return;
+                }
+                continue;
             }
-            if self.tx.send(event).is_err() {
-                break;
+            if matches!(
+                event.event_type,
+                opengrok_wire::agui::EventType::RunFinished
+                    | opengrok_wire::agui::EventType::RunError
+            ) {
+                for held in self.release_held_forms() {
+                    if !self.send(held) {
+                        return;
+                    }
+                }
+                if !self.send(event) {
+                    return;
+                }
+                continue;
+            }
+            if let Some(event) = self.hold_or_pass(event)
+                && !self.send(event)
+            {
+                return;
             }
         }
     }

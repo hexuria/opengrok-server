@@ -354,6 +354,17 @@ impl MockDoor {
         }
     }
 
+    /// Two same-title Website logins with provider-style parallel ids (`call-…` / `call-…-1`).
+    /// NativeChat painted the second card with the raw tool-call id when live TOOL_CALL
+    /// frames streamed before the gateway `e_*` stamp.
+    pub fn asking_for_two_website_logins() -> Self {
+        Self {
+            script: Self::two_website_login_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
     /// A door that asks NativeChat to broker a saved login (`credential.request`).
     pub fn asking_for_credential() -> Self {
         Self {
@@ -404,6 +415,21 @@ impl MockDoor {
                 "Enter the address and password.",
             ));
         }
+        script
+    }
+
+    fn two_website_login_script() -> Vec<ModelDelta> {
+        let mut script = vec![ModelDelta::Text("I need you to sign in".to_string())];
+        script.extend(Self::user_form_call(
+            "call-42628be6",
+            "Website login",
+            "Enter the address and password.",
+        ));
+        script.extend(Self::user_form_call(
+            "call-42628be6-1",
+            "Website login",
+            "Enter the address and password.",
+        ));
         script
     }
 

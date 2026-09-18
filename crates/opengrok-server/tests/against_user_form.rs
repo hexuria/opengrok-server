@@ -1685,6 +1685,57 @@ fn sse_events(sse: &str) -> Vec<Value> {
         .collect()
 }
 
+/// NativeChat paints Website login from live TOOL_CALL. Those frames must carry `e_*` —
+/// a leftover `call-*` is Continue that cannot `POST /ag-ui/user-form/submit`.
+fn assert_live_form_tool_calls_carry_gateway_entry_ids(events: &[Value], custom_ids: &[String]) {
+    let mut form_calls = Vec::new();
+    for event in events {
+        if event["type"] == "TOOL_CALL_START" && event["toolCallName"] == "request_user_form" {
+            let call_id = event["toolCallId"]
+                .as_str()
+                .expect("toolCallId")
+                .to_string();
+            let entry_id = event["entryId"].as_str().unwrap_or_else(|| {
+                panic!("live TOOL_CALL_START {call_id} must carry e_*, not a raw call id: {event}")
+            });
+            assert!(
+                entry_id.starts_with("e_"),
+                "live TOOL_CALL_START {call_id} entryId must be a gateway id, got {entry_id}"
+            );
+            assert!(
+                custom_ids.iter().any(|id| id == entry_id),
+                "TOOL_CALL {call_id} entryId {entry_id} missing from CUSTOMs {custom_ids:?}"
+            );
+            form_calls.push(call_id);
+        }
+    }
+    assert_eq!(
+        form_calls.len(),
+        custom_ids.len(),
+        "one live TOOL_CALL_START per CUSTOM: calls={form_calls:?} customs={custom_ids:?} {events:?}"
+    );
+    for event in events {
+        let kind = event["type"].as_str().unwrap_or("");
+        if !matches!(
+            kind,
+            "TOOL_CALL_START" | "TOOL_CALL_ARGS" | "TOOL_CALL_END" | "TOOL_CALL_RESULT"
+        ) {
+            continue;
+        }
+        let Some(call_id) = event["toolCallId"].as_str() else {
+            continue;
+        };
+        if !form_calls.iter().any(|id| id == call_id) {
+            continue;
+        }
+        let entry_id = event["entryId"].as_str().unwrap_or("");
+        assert!(
+            entry_id.starts_with("e_"),
+            "live {kind} {call_id} must carry e_*: {event}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn stacked_user_forms_in_one_completion_each_get_an_entry_id() {
     let database_url = database_or_skip!();
@@ -1751,6 +1802,7 @@ async fn stacked_user_forms_in_one_completion_each_get_an_entry_id() {
             "CUSTOM arguments are sanitised: {dump}"
         );
     }
+    assert_live_form_tool_calls_carry_gateway_entry_ids(&events, &entry_ids);
 
     let replay = h
         .client
@@ -1828,6 +1880,103 @@ async fn stacked_user_forms_in_one_completion_each_get_an_entry_id() {
             assert!(
                 h.pending_user_form_runs().await >= 1,
                 "extra stacked Continues must not consume the parked call"
+            );
+        }
+    }
+    h.wait_user_form_idle().await;
+    assert_eq!(h.pending_user_form_runs().await, 0);
+}
+
+#[tokio::test]
+async fn two_same_completion_website_logins_live_tool_calls_carry_e_ids() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-twin-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_two_website_logins()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Twin").await;
+    let thread_id = format!("thr-{}", uuid::Uuid::now_v7());
+    let run_id = uuid::Uuid::now_v7().to_string();
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "threadId": thread_id,
+            "runId": run_id,
+            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+            "forwardedProps": { "coworkerId": agent },
+        }))
+        .send()
+        .await
+        .expect("post ag-ui");
+    assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+    let sse = res.text().await.expect("sse");
+    let events = sse_events(&sse);
+    let customs: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "CUSTOM"
+                && event["name"] == "run-awaiting-approval"
+                && event["reason"] == "user-form"
+        })
+        .collect();
+    assert_eq!(customs.len(), 2, "two Website login CUSTOMs: {sse}");
+    let mut entry_ids = Vec::new();
+    let mut call_ids = Vec::new();
+    for custom in &customs {
+        let id = custom["entryId"]
+            .as_str()
+            .expect("CUSTOM extra.entryId")
+            .to_string();
+        assert!(id.starts_with("e_"), "gateway entryId, not call-*: {id}");
+        assert!(
+            !entry_ids.contains(&id),
+            "twins must not share an entryId: {entry_ids:?}"
+        );
+        entry_ids.push(id);
+        call_ids.push(
+            custom["callId"]
+                .as_str()
+                .expect("CUSTOM callId")
+                .to_string(),
+        );
+    }
+    assert_eq!(
+        call_ids,
+        vec!["call-42628be6".to_string(), "call-42628be6-1".to_string()],
+        "{call_ids:?}"
+    );
+    assert_live_form_tool_calls_carry_gateway_entry_ids(&events, &entry_ids);
+
+    for (index, entry_id) in entry_ids.iter().enumerate() {
+        let res = h
+            .client
+            .post(format!("{}/ag-ui/user-form/submit", h.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "entryId": entry_id,
+                "agentId": agent,
+                "values": { "email": EMAIL, "password": SECRET }
+            }))
+            .send()
+            .await
+            .expect("agui submit");
+        assert_eq!(res.status().as_u16(), 200, "submit {index} status");
+        let body: Value = res.json().await.expect("agui json");
+        assert_eq!(
+            body["formResolution"], "submitted",
+            "submit {index} of {entry_id}: {body}"
+        );
+        if index == 0 {
+            assert!(
+                h.pending_user_form_runs().await >= 1,
+                "first Continue must not consume the parked twin"
             );
         }
     }
