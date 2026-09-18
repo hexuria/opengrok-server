@@ -1,3 +1,4 @@
+#![cfg(feature = "jev")]
 //! Jev: the classifier this server asks, as opposed to the model it talks to.
 //!
 //! Every other model call here is a conversation — a prompt goes out, words come back, and what
