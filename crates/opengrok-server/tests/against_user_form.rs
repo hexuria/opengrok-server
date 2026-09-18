@@ -50,6 +50,7 @@ struct FillStub {
     acts: Mutex<Vec<CuaAction>>,
     shots: Mutex<u32>,
     egress: Mutex<Option<EgressTunnel>>,
+    last_egress_box: Mutex<Option<String>>,
 }
 
 impl FillStub {
@@ -61,6 +62,9 @@ impl FillStub {
     }
     fn set_egress(&self, cap: Option<EgressTunnel>) {
         *self.egress.lock().expect("egress") = cap;
+    }
+    fn last_egress_box(&self) -> Option<String> {
+        self.last_egress_box.lock().expect("egress box").clone()
     }
 }
 
@@ -139,7 +143,8 @@ impl Computer for FillStub {
         self.acts.lock().expect("acts").push(action.clone());
         Ok(())
     }
-    async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
+    async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
+        *self.last_egress_box.lock().expect("egress box") = Some(box_id.to_string());
         *self.egress.lock().expect("egress")
     }
 }
@@ -283,6 +288,22 @@ impl Harness {
             .send()
             .await
             .expect("api call");
+        let status = res.status().as_u16();
+        let text = res.text().await.expect("body");
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    }
+
+    async fn computer_json(&self, token: &str, agent: &str) -> (u16, Value) {
+        let res = self
+            .client
+            .get(format!("{}/coworkers/{agent}/computer", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("GET computer");
         let status = res.status().as_u16();
         let text = res.text().await.expect("body");
         (
@@ -1442,6 +1463,67 @@ async fn egress_tunnel_needs_box_ready_when_info_is_present() {
         body,
         json!(false),
         "a ready box does not override a host that opted out: {body}"
+    );
+}
+
+/// NativeChat 729bdd9 reads GET `/coworkers/{id}/computer` only — not Box
+/// `/v1/info` and not the gateway verb. Live ready must be on this JSON.
+#[tokio::test]
+async fn computer_json_stamps_the_scoped_box_live_egress() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-computer-egress-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "computer-egress").await;
+
+    let (status, body) = h.computer_json(&token, &agent).await;
+    assert_eq!(status, 200, "{body}");
+    let box_id = body["boxId"].as_str().expect("scoped boxId").to_string();
+    assert_eq!(
+        h.stub.last_egress_box().as_deref(),
+        Some(box_id.as_str()),
+        "probe the payload's live boxId, not a frozen coworker row: {body}"
+    );
+    assert_eq!(
+        body["isEgressTunnelAvailable"], false,
+        "missing /v1/info is not available: {body}"
+    );
+    assert!(
+        body.get("egress_tunnel").is_none(),
+        "do not invent nested ready: {body}"
+    );
+
+    let (status, _) = h
+        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
+        .await;
+    assert_eq!(status, 200);
+
+    h.stub.set_egress(Some(EgressTunnel {
+        enabled: true,
+        ready: false,
+    }));
+    let (status, body) = h.computer_json(&token, &agent).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isEgressTunnelAvailable"], false, "{body}");
+    assert_eq!(body["egress_tunnel"]["enabled"], true, "{body}");
+    assert_eq!(body["egress_tunnel"]["ready"], false, "{body}");
+
+    h.stub.set_egress(Some(EgressTunnel {
+        enabled: true,
+        ready: true,
+    }));
+    let (status, body) = h.computer_json(&token, &agent).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["isEgressTunnelAvailable"], true, "{body}");
+    assert_eq!(body["egress_tunnel"]["enabled"], true, "{body}");
+    assert_eq!(body["egress_tunnel"]["ready"], true, "{body}");
+    assert_eq!(
+        h.stub.last_egress_box().as_deref(),
+        Some(box_id.as_str()),
+        "{body}"
     );
 }
 
