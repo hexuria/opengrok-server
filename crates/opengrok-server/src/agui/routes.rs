@@ -1530,8 +1530,10 @@ async fn computer_status(
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
-/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile.
-/// Same shape as the `image` on a `TOOL_CALL_RESULT`, so the client decodes it the same way.
+/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile
+/// and for an explicit observe / Open the screen. Same shape as `TOOL_CALL_RESULT.image`,
+/// with `visibility: transcript` so a client that fetches this on purpose may persist it.
+/// Step shots on the run are `agent` and must not flood the transcript.
 /// `GET /coworkers/{id}/tools` — what this bot would be offered on a turn RIGHT NOW.
 ///
 /// The set is assembled per turn from the coworker's grant, its computer and its plugins, and
@@ -1604,6 +1606,9 @@ async fn computer_screen(
             "base64": shot.png_base64,
             "width": shot.width,
             "height": shot.height,
+            // Explicit observe / Open the screen: this PNG is a transcript event
+            // the client may persist. Step shots on TOOL_CALL_RESULT are `agent`.
+            "visibility": "transcript",
         }))
         .into_response(),
         Err((status, message)) => (status, message).into_response(),
@@ -2472,15 +2477,53 @@ pub async fn replay_run(
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     }
 
+    let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+    let events = events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await;
+
     Json(serde_json::json!({
         "runId": run_id.as_str(),
         "threadId": run.thread_id,
         "status": run.status.as_str(),
         "failure": run.failure,
         "pending": run.pending,
-        "events": run.emitted,
+        "events": events,
     }))
     .into_response()
+}
+
+fn run_time_window(emitted: &[serde_json::Value]) -> (i64, i64) {
+    let times: Vec<i64> = emitted
+        .iter()
+        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64))
+        .collect();
+    match (times.first(), times.last()) {
+        (Some(&first), Some(&last)) => (first, last),
+        _ => (0, i64::MAX),
+    }
+}
+
+async fn events_for_client(
+    state: &AgUiState,
+    account_id: &AccountId,
+    run: &opengrok_core::run::Run,
+    started_at_ms: i64,
+    updated_at_ms: i64,
+) -> Vec<serde_json::Value> {
+    let forms = match run.coworker_id.as_ref() {
+        Some(coworker_id) => state
+            .auth
+            .store
+            .gateway_transcript(coworker_id, account_id)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    crate::gateway::user_form::hydrate_agui_events(
+        run.emitted.clone(),
+        &forms,
+        started_at_ms,
+        updated_at_ms,
+    )
 }
 
 /// How many runs a thread answers with when the caller does not ask for a number.
@@ -2587,6 +2630,8 @@ pub async fn replay_thread(
     }
 
     let mut runs = Vec::with_capacity(newest_first.len());
+    let mut forms_by_coworker: std::collections::HashMap<CoworkerId, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
     // OLDEST FIRST, which is the other way round from the store. `runs_for_thread_owned_by` hands
     // back the newest runs because that is how a limit has to be counted on a long thread; a
     // transcript is read in the order it happened. Reversing once here, rather than leaving it to
@@ -2606,6 +2651,33 @@ pub async fn replay_thread(
         if !run.started {
             continue;
         }
+        let events = if with_events {
+            let forms = match run.coworker_id.as_ref() {
+                Some(coworker_id) => {
+                    if let Some(cached) = forms_by_coworker.get(coworker_id) {
+                        cached.clone()
+                    } else {
+                        let loaded = state
+                            .auth
+                            .store
+                            .gateway_transcript(coworker_id, &account_id)
+                            .await
+                            .unwrap_or_default();
+                        forms_by_coworker.insert(coworker_id.clone(), loaded.clone());
+                        loaded
+                    }
+                }
+                None => Vec::new(),
+            };
+            Some(crate::gateway::user_form::hydrate_agui_events(
+                run.emitted,
+                &forms,
+                summary.started_at_ms,
+                summary.updated_at_ms,
+            ))
+        } else {
+            None
+        };
         runs.push(ThreadRunReplay {
             run_id: summary.id.as_str().to_string(),
             // The aggregate's status, not the projection's, for the same reason `replay_run` uses
@@ -2617,7 +2689,7 @@ pub async fn replay_thread(
             // The frames are loaded either way: whether a run started and why it failed are only
             // knowable from its log, and answering those two from the projection would mean
             // guessing. `events=false` saves the client the megabytes, not the server the read.
-            events: with_events.then_some(run.emitted),
+            events,
         });
     }
 

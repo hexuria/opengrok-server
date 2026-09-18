@@ -106,9 +106,46 @@ pub struct ToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_reason: Option<AwaitingReason>,
     /// A picture that goes with the words: the screen after a `computer` action. The model is
-    /// shown it as an image, the client paints it, the journal keeps it.
+    /// shown it as an image. Whether a client must persist it as a chat event is
+    /// [`ToolImage::visibility`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
+}
+
+/// Where a tool-result image may be shown. Rides `TOOL_CALL_RESULT.image.visibility`.
+///
+/// Computer-step shots default to [`Agent`]: the model sees them, the Computer pane may
+/// paint the live SSE, and they are **not** first-class chat events a client must store.
+/// Promote to [`Transcript`] / [`Failure`] / [`End`] when the person should keep the PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageVisibility {
+    /// Model context + Computer pane. Not a transcript chat event.
+    #[default]
+    Agent,
+    /// Persist in the transcript (explicit observe / Open the screen).
+    Transcript,
+    /// Hard-failure pin.
+    Failure,
+    /// End-of-turn success pin.
+    End,
+}
+
+impl ImageVisibility {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Transcript => "transcript",
+            Self::Failure => "failure",
+            Self::End => "end",
+        }
+    }
+
+    #[must_use]
+    pub fn is_agent(self) -> bool {
+        matches!(self, Self::Agent)
+    }
 }
 
 /// An image a tool hands back, base64 so it rides JSON as-is.
@@ -118,6 +155,11 @@ pub struct ToolImage {
     pub base64: String,
     pub width: u32,
     pub height: u32,
+    /// Absent on rows written before this field existed: treat as `transcript` on the
+    /// wire (legacy clients already stored those PNGs). New computer-step shots set
+    /// [`ImageVisibility::Agent`] explicitly.
+    #[serde(default)]
+    pub visibility: ImageVisibility,
 }
 
 impl From<Screenshot> for ToolImage {
@@ -127,7 +169,17 @@ impl From<Screenshot> for ToolImage {
             base64: shot.png_base64,
             width: shot.width,
             height: shot.height,
+            // Step shots are the model's eyes, not a chat event the client must journal.
+            visibility: ImageVisibility::Agent,
         }
+    }
+}
+
+impl ToolImage {
+    #[must_use]
+    pub fn with_visibility(mut self, visibility: ImageVisibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 }
 
@@ -288,6 +340,7 @@ impl RecipeReceipt {
                 base64: shot.get("png_base64")?.as_str()?.to_string(),
                 width: shot.get("width")?.as_u64()? as u32,
                 height: shot.get("height")?.as_u64()? as u32,
+                visibility: ImageVisibility::Agent,
             })
         });
         Self {
@@ -1555,10 +1608,35 @@ fn describe(error: BoxError) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use opengrok_box::{BoxResult, CommandOutput, StartedCommand};
+    use opengrok_box::{BoxResult, CommandOutput, Screenshot, StartedCommand};
     use opengrok_core::coworker::{BoxMode, CoworkerCommand};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn computer_step_images_default_to_agent_visibility() {
+        let image = ToolImage::from(Screenshot {
+            mime: "image/png".into(),
+            png_base64: "AAAA".into(),
+            width: 8,
+            height: 8,
+        });
+        assert_eq!(image.visibility, ImageVisibility::Agent);
+        let json = serde_json::to_value(&image).unwrap();
+        assert_eq!(json["visibility"], "agent");
+        let back: ToolImage = serde_json::from_value(json!({
+            "mime": "image/png",
+            "base64": "AAAA",
+            "width": 8,
+            "height": 8
+        }))
+        .unwrap();
+        assert_eq!(
+            back.visibility,
+            ImageVisibility::Agent,
+            "serde default for ToolImage is agent; AG-UI frames without visibility stay transcript"
+        );
+    }
 
     /// Records which box it was asked to act on, which is the assertion that matters here.
     #[derive(Default)]

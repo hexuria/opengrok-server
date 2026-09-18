@@ -217,7 +217,10 @@ impl Projection {
             // A refusal is a result the model reads, so whether it succeeded must be legible
             // rather than inferred from the wording.
             .with("ok", result.ok);
-        // A screenshot rides the frame: the client paints it, the journal keeps it.
+        // A screenshot rides the frame. `visibility` tells a client whether this PNG is a
+        // chat event it must persist (`transcript` / `failure` / `end`) or only the model's
+        // eyes + Computer pane (`agent`). Absent on rows written before this field: treat
+        // as `transcript` — those PNGs were already first-class events.
         if let Some(image) = &result.image {
             event = event.with(
                 "image",
@@ -226,6 +229,7 @@ impl Projection {
                     "base64": image.base64,
                     "width": image.width,
                     "height": image.height,
+                    "visibility": image.visibility.as_str(),
                 }),
             );
         }
@@ -635,6 +639,7 @@ mod tests {
                 base64: "AAAA".into(),
                 width: 1280,
                 height: 800,
+                visibility: opengrok_tools::ImageVisibility::Agent,
             },
         );
         let events = projection.push_tool_result(&result);
@@ -649,6 +654,7 @@ mod tests {
             (image["width"].as_u64(), image["height"].as_u64()),
             (Some(1280), Some(800))
         );
+        assert_eq!(image["visibility"], "agent");
 
         let plain = projection.push_tool_result(&opengrok_tools::ToolResult::ok("c2", "done"));
         let frame = plain

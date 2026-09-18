@@ -180,6 +180,7 @@ pub async fn submit_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
+    journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
     (200, settled)
@@ -230,6 +231,7 @@ pub async fn dismiss_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
+    journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     if resolution == FormResolution::Escalated {
         let handoff = start_box_handoff(state, account_id, &coworker_id, &agent_id, &form).await;
@@ -390,7 +392,8 @@ pub async fn timeout_unresolved_form(
             tracing::error!(%error, "could not time out a user-form");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", settled);
+        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
+        journal_settled_form(state, account_id, coworker_id, &settled).await;
         form_for_result = Some(form);
         settled_any = true;
     }
@@ -745,4 +748,294 @@ async fn pending_user_form(
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Journal a settled user-form onto the AG-UI run NativeChat replays.
+///
+/// Live HITL stays `CUSTOM name: run-awaiting-approval` / `reason: user-form`.
+/// NativeChat's assembler already hydrates a later `CUSTOM name: user-form`
+/// whose `value` is the gateway send-message envelope (`message.type:
+/// user-form`, `formRequest`, sibling `formResolution`, no secrets). Without
+/// this frame, `GET /ag-ui/threads/{id}` only has the mint-time CUSTOM and a
+/// cold client cannot rebuild ✓ Submitted.
+async fn journal_settled_form(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    settled: &Value,
+) {
+    let Some((run_id, mut run, seq, pending)) =
+        pending_user_form(state, account_id, coworker_id).await
+    else {
+        return;
+    };
+    let at_ms = now_ms();
+    let mut frame = agui_user_form_frame(settled);
+    if let Some(map) = frame.as_object_mut() {
+        map.insert("threadId".to_string(), json!(run.thread_id.clone()));
+        map.insert("runId".to_string(), json!(run_id.as_str()));
+        map.insert("callId".to_string(), json!(pending.call_id.clone()));
+        map.insert("timestamp".to_string(), json!(at_ms));
+    }
+    let Ok(events) = run.decide(RunCommand::Emit {
+        payload: frame,
+        at_ms,
+    }) else {
+        return;
+    };
+    for event in &events {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    if let Err(error) = state
+        .agui
+        .auth
+        .store
+        .append_run(&run_id, seq, &events, &view, Some(account_id))
+        .await
+    {
+        tracing::error!(%error, "could not journal a settled user-form");
+    }
+}
+
+/// CUSTOM NativeChat already hydrates for settled / cold-load cards. Not live HITL.
+pub(crate) fn agui_user_form_frame(entry: &Value) -> Value {
+    let entry_id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+    let message = entry
+        .get("message")
+        .cloned()
+        .unwrap_or_else(|| json!({ "type": "user-form" }));
+    let form_request = message.get("formRequest").cloned().unwrap_or(Value::Null);
+    let resolution = entry.get("formResolution").cloned().unwrap_or(Value::Null);
+    json!({
+        "type": "CUSTOM",
+        "name": "user-form",
+        "entryId": entry_id,
+        "formRequest": form_request,
+        "formResolution": resolution,
+        "message": message,
+        "value": entry,
+    })
+}
+
+fn overlay_form(event: &mut Value, form: &Value) {
+    let Some(map) = event.as_object_mut() else {
+        return;
+    };
+    if let Some(id) = form.get("id") {
+        map.insert("entryId".to_string(), id.clone());
+    }
+    if let Some(message) = form.get("message") {
+        map.insert("message".to_string(), message.clone());
+        if let Some(request) = message.get("formRequest") {
+            map.insert("formRequest".to_string(), request.clone());
+        }
+    }
+    if let Some(resolution) = form.get("formResolution") {
+        map.insert("formResolution".to_string(), resolution.clone());
+    }
+    map.insert("value".to_string(), form.clone());
+}
+
+fn user_form_event_id(event: &Value) -> Option<&str> {
+    event
+        .get("entryId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| event.pointer("/value/id").and_then(Value::as_str))
+        .or_else(|| event.pointer("/value/entryId").and_then(Value::as_str))
+}
+
+fn is_user_form_agui(event: &Value) -> bool {
+    if event.get("type").and_then(Value::as_str) != Some("CUSTOM") {
+        return false;
+    }
+    let name = event.get("name").and_then(Value::as_str).unwrap_or("");
+    if name == "user-form" {
+        return true;
+    }
+    if name == "run-awaiting-approval"
+        && event.get("reason").and_then(Value::as_str) == Some("user-form")
+    {
+        return true;
+    }
+    event
+        .get("message")
+        .and_then(|message| message.get("type"))
+        .and_then(Value::as_str)
+        == Some("user-form")
+}
+
+fn form_fingerprint(request: &Value) -> String {
+    let title = request.get("title").and_then(Value::as_str).unwrap_or("");
+    let ids = request
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|field| field.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    format!("{title}|{ids}")
+}
+
+fn event_fingerprint(event: &Value) -> Option<String> {
+    let request = event
+        .get("formRequest")
+        .or_else(|| event.get("arguments"))
+        .or_else(|| event.pointer("/message/formRequest"))
+        .or_else(|| event.pointer("/value/message/formRequest"))?;
+    Some(form_fingerprint(request))
+}
+
+fn entry_fingerprint(entry: &Value) -> Option<String> {
+    entry.pointer("/message/formRequest").map(form_fingerprint)
+}
+
+/// Fold current gateway user-form state into AG-UI replay events so a cold
+/// NativeChat rebuilds ✓ Submitted (and idle cards) from `GET /ag-ui/threads/{id}`
+/// / `GET /ag-ui/runs/{id}` — not only from live unresolved CUSTOMs.
+pub(crate) fn hydrate_agui_events(
+    mut events: Vec<Value>,
+    forms: &[Value],
+    started_at_ms: i64,
+    updated_at_ms: i64,
+) -> Vec<Value> {
+    let forms: Vec<&Value> = forms
+        .iter()
+        .filter(|entry| is_user_form_entry(entry))
+        .collect();
+    if forms.is_empty() {
+        return events;
+    }
+    let mut used = std::collections::HashSet::new();
+    for event in &mut events {
+        if !is_user_form_agui(event) {
+            continue;
+        }
+        if let Some(id) = user_form_event_id(event).map(str::to_string)
+            && let Some(form) = forms
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
+        {
+            overlay_form(event, form);
+            used.insert(id);
+            continue;
+        }
+        if let Some(fingerprint) = event_fingerprint(event)
+            && let Some(form) = forms.iter().find(|entry| {
+                let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+                !used.contains(id)
+                    && entry_fingerprint(entry).as_deref() == Some(fingerprint.as_str())
+            })
+        {
+            overlay_form(event, form);
+            if let Some(id) = form.get("id").and_then(Value::as_str) {
+                used.insert(id.to_string());
+            }
+        }
+    }
+    const SLACK_MS: i64 = 5_000;
+    for form in forms {
+        let Some(id) = form.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if used.contains(id) {
+            continue;
+        }
+        let at = form.get("timestampMs").and_then(Value::as_i64).unwrap_or(0);
+        if at < started_at_ms.saturating_sub(SLACK_MS)
+            || at > updated_at_ms.saturating_add(SLACK_MS)
+        {
+            continue;
+        }
+        events.push(agui_user_form_frame(form));
+        used.insert(id.to_string());
+    }
+    events
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn email_form(id: &str, resolution: Option<&str>, at: i64) -> Value {
+        let mut entry = json!({
+            "kind": "send-message",
+            "id": id,
+            "timestampMs": at,
+            "message": {
+                "type": "user-form",
+                "formRequest": {
+                    "title": "Sign in",
+                    "fields": [{"id": "email", "label": "Email", "type": "email", "required": true}]
+                }
+            }
+        });
+        if let Some(word) = resolution {
+            entry["formResolution"] = json!(word);
+        }
+        entry
+    }
+
+    #[test]
+    fn hydrate_overlays_form_resolution_onto_the_awaiting_custom() {
+        let form = email_form("e_form", Some("submitted"), 50);
+        let events = vec![json!({
+            "type": "CUSTOM",
+            "name": "run-awaiting-approval",
+            "reason": "user-form",
+            "callId": "c1",
+            "entryId": "e_form",
+            "arguments": {
+                "title": "Sign in",
+                "fields": [{"id": "email", "label": "Email", "type": "email"}]
+            }
+        })];
+        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["formResolution"], "submitted");
+        assert_eq!(out[0]["message"]["type"], "user-form");
+        assert_eq!(out[0]["entryId"], "e_form");
+        let dump = serde_json::to_string(&out).unwrap();
+        assert!(!dump.contains("s3cret"), "{dump}");
+    }
+
+    #[test]
+    fn hydrate_injects_a_settled_card_when_the_run_never_stamped_entry_id() {
+        let form = email_form("e_form", Some("submitted"), 50);
+        let events = vec![json!({
+            "type": "CUSTOM",
+            "name": "run-awaiting-approval",
+            "reason": "user-form",
+            "callId": "c1",
+            "arguments": {
+                "title": "Sign in",
+                "fields": [{"id": "email", "label": "Email", "type": "email"}]
+            }
+        })];
+        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
+        assert_eq!(out[0]["entryId"], "e_form");
+        assert_eq!(out[0]["formResolution"], "submitted");
+        assert_eq!(out[0]["message"]["type"], "user-form");
+    }
+
+    #[test]
+    fn hydrate_skips_forms_outside_the_run_window() {
+        let other = email_form("e_other", Some("dismissed"), 10_000);
+        let events = vec![json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"})];
+        let out = hydrate_agui_events(events, std::slice::from_ref(&other), 0, 100);
+        assert_eq!(out.len(), 1);
+        assert!(out.iter().all(|event| event["name"] != "user-form"));
+    }
 }

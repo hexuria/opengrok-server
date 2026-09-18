@@ -711,14 +711,16 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
     let h = harness(&database_url, &email).await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Dot").await;
+    let thread_id = format!("thr-{}", uuid::Uuid::now_v7());
+    let run_id = uuid::Uuid::now_v7().to_string();
 
     let res = h
         .client
         .post(format!("{}/ag-ui", h.base))
         .header("authorization", format!("Bearer {token}"))
         .json(&json!({
-            "threadId": format!("thr-{}", uuid::Uuid::now_v7()),
-            "runId": uuid::Uuid::now_v7().to_string(),
+            "threadId": thread_id,
+            "runId": run_id,
             "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
             "forwardedProps": { "coworkerId": agent },
         }))
@@ -814,6 +816,63 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
     );
     assert_eq!(body["formResolution"], "submitted", "{body}");
     assert!(!body.to_string().contains(SECRET), "{body}");
+
+    let tail = h.tail(&agent).await;
+    let tail_dump = dumped(&tail);
+    assert!(
+        !tail_dump.contains(SECRET),
+        "secret in gateway tail: {tail_dump}"
+    );
+    let settled_tail = tail["entries"].as_array().and_then(|entries| {
+        entries.iter().find(|entry| {
+            entry["message"]["type"] == "user-form" && entry.get("formResolution").is_some()
+        })
+    });
+    let settled_tail = settled_tail.expect("getAgentTranscriptTail must emit the settled card");
+    assert_eq!(
+        settled_tail["formResolution"], "submitted",
+        "{settled_tail}"
+    );
+    assert_eq!(
+        settled_tail["message"]["type"], "user-form",
+        "{settled_tail}"
+    );
+
+    let replay = h
+        .client
+        .get(format!("{}/ag-ui/threads/{thread_id}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay thread");
+    assert_eq!(replay.status().as_u16(), 200, "thread replay");
+    let replayed: Value = replay.json().await.expect("replay json");
+    let replay_dump = replayed.to_string();
+    assert!(
+        !replay_dump.contains(SECRET),
+        "secret in AG-UI replay: {replay_dump}"
+    );
+    let settled_replay = replayed["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run["events"].as_array())
+        .flatten()
+        .find(|event| {
+            event.get("formResolution").and_then(Value::as_str) == Some("submitted")
+                && (event["message"]["type"] == "user-form"
+                    || event["name"] == "user-form"
+                    || event["reason"] == "user-form")
+        });
+    let settled_replay = settled_replay.unwrap_or_else(|| {
+        panic!("GET /ag-ui/threads/{{id}} must emit settled user-form for NativeChat hydrate: {replay_dump}")
+    });
+    assert_eq!(settled_replay["formResolution"], "submitted");
+    assert!(
+        settled_replay["message"]["type"] == "user-form"
+            || settled_replay.pointer("/value/message/type") == Some(&json!("user-form")),
+        "message.type user-form: {settled_replay}"
+    );
 
     for _ in 0..50 {
         if !h.stub.acts().is_empty() {
