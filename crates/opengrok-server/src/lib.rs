@@ -39,7 +39,10 @@ pub use auth::{AuthState, TokenMinter};
 /// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
 /// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
 /// smoke script was already checking.
-pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
+    if state.host_settings.is_none() {
+        state.host_settings = Some(gateway.settings.clone());
+    }
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))

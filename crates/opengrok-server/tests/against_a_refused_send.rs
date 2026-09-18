@@ -145,6 +145,7 @@ async fn the_fail_fixture_refuses_the_send_itself() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

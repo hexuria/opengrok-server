@@ -211,6 +211,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),
@@ -785,6 +786,23 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
         .expect("agui submit");
     assert_eq!(res.status().as_u16(), 200, "agui submit status");
     let body: Value = res.json().await.expect("agui json");
+    assert!(
+        body.is_object(),
+        "NativeChat collapses on Null submit body: {body}"
+    );
+    assert!(
+        matches!(
+            body["formResolution"].as_str(),
+            Some("submitted") | Some("fill_failed")
+        ),
+        "submit of a stamped entryId must carry formResolution: {body}"
+    );
+    assert!(
+        body.get("formFieldOutcomes")
+            .and_then(Value::as_array)
+            .is_some(),
+        "formFieldOutcomes required on the happy path: {body}"
+    );
     assert_eq!(body["formResolution"], "submitted", "{body}");
     assert!(!body.to_string().contains(SECRET), "{body}");
 
@@ -965,4 +983,66 @@ async fn agui_handoff_resolve_declines_without_stopping_the_box() {
     }
     assert_eq!(h.pending_user_form_runs().await, 0);
     assert!(h.stub.acts().is_empty());
+}
+
+#[tokio::test]
+async fn a_missing_form_entry_is_an_error_not_null() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-miss-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Hal").await;
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui/user-form/submit", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "entryId": "e_ghost_never_appended",
+            "agentId": agent,
+            "values": { "email": EMAIL }
+        }))
+        .send()
+        .await
+        .expect("agui submit ghost");
+    assert_eq!(res.status().as_u16(), 404, "ghost entryId must not be Null");
+    let body: Value = res.json().await.expect("agui json");
+    assert_ne!(body, Value::Null, "{body}");
+    assert_eq!(body["error"], "form entry missing", "{body}");
+}
+
+#[tokio::test]
+async fn egress_tunnel_follows_host_setting() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-egress-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!(false), "default is off: {body}");
+
+    let (status, settings) = h.api("getHostSettings", json!({})).await;
+    assert_eq!(status, 200, "{settings}");
+    assert_eq!(settings["egressTunnelEnabled"], false, "{settings}");
+
+    let (status, settings) = h
+        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
+        .await;
+    assert_eq!(status, 200, "{settings}");
+    assert_eq!(settings["egressTunnelEnabled"], true, "{settings}");
+
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!(true), "host setting turns the flag on: {body}");
+
+    let (status, settings) = h
+        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
+        .await;
+    assert_eq!(status, 200, "{settings}");
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!(false), "toggle off: {body}");
 }

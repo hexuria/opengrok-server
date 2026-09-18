@@ -613,8 +613,14 @@ async fn command(
         // ---- trays and feature gates: honest empties, correct container types ----
         "getTrays" => reply(StatusCode::OK, json!([])),
         "dismissTray" | "clearTrays" => reply(StatusCode::OK, Value::Null),
-        "isAgentNetworkEnabled" | "isGlobalSearchEnabled" | "isEgressTunnelAvailable" => {
-            reply(StatusCode::OK, json!(false))
+        "isAgentNetworkEnabled" | "isGlobalSearchEnabled" => reply(StatusCode::OK, json!(false)),
+        "isEgressTunnelAvailable" => {
+            // Docker host-network is not the prod path. The box agent owns the tunnel
+            // endpoint; we honor env + host setting and gate leave-box tools on it.
+            reply(
+                StatusCode::OK,
+                json!(super::egress_tunnel_available(&settings_snapshot(&state))),
+            )
         }
 
         // ---- host settings: set must echo the whole record, the resync chain reads it back ----

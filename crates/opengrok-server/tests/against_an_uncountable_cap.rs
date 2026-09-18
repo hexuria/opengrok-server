@@ -131,6 +131,7 @@ fn state_over(store: PgStore, email: &str) -> AgUiState {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     }
 }
 

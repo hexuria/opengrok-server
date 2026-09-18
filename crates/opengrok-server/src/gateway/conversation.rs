@@ -1044,7 +1044,13 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             "pending",
             &suspension.tool,
             &suspension.arguments,
-            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            Some(
+                suspension
+                    .why
+                    .as_deref()
+                    .filter(|why| !why.is_empty())
+                    .unwrap_or(opengrok_tools::review::REVIEW_ASK_REASON),
+            ),
             now_ms(),
         )),
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
@@ -1152,7 +1158,11 @@ pub(crate) async fn stamp_user_form_entry_id(
         .append_gateway_entry(coworker_id, account, &card, now_ms())
         .await
     {
-        tracing::error!(%error, "could not append the suspension card entry");
+        tracing::error!(
+            %error,
+            "could not append the user-form card; not stamping entryId"
+        );
+        return None;
     }
     live::emit_transcript(state, coworker_id.as_str(), account, "appended", card);
     live::set_running(state, coworker_id.as_str(), false, json!({})).await;
@@ -1162,15 +1172,26 @@ pub(crate) async fn stamp_user_form_entry_id(
         coworker_id.clone(),
         coworker_id.as_str().to_string(),
     );
-    event
-        .extra
-        .insert("entryId".to_string(), json!(entry_id.clone()));
+    apply_user_form_stamp(&mut event.extra, entry_id, true)
+}
+
+/// Stamp CUSTOM extra only after the card is in the transcript. Stamping a ghost
+/// `entryId` is how NativeChat POSTs submit and gets Null (the collapse blocker).
+pub(crate) fn apply_user_form_stamp(
+    extra: &mut opengrok_wire::agui::Extra,
+    entry_id: String,
+    appended: bool,
+) -> Option<String> {
+    if !appended {
+        return None;
+    }
+    extra.insert("entryId".to_string(), json!(entry_id.clone()));
     // Same sanitised schema the card stores as `message.formRequest`. CUSTOM already has it
     // as `arguments`; this alias is the field name TurnAssembler / the card already use.
-    if event.extra.get("formRequest").is_none()
-        && let Some(schema) = event.extra.get("arguments").cloned()
+    if extra.get("formRequest").is_none()
+        && let Some(schema) = extra.get("arguments").cloned()
     {
-        event.extra.insert("formRequest".to_string(), schema);
+        extra.insert("formRequest".to_string(), schema);
     }
     Some(entry_id)
 }
@@ -2360,4 +2381,32 @@ async fn resume_gateway_run(
         json!({ "lastMessagePreview": preview, "lastEntry": { "kind": "text", "text": preview } }),
     )
     .await;
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::apply_user_form_stamp;
+    use serde_json::json;
+
+    #[test]
+    fn a_failed_append_does_not_stamp_entry_id() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("name".into(), json!("run-awaiting-approval"));
+        extra.insert("reason".into(), json!("user-form"));
+        extra.insert(
+            "arguments".into(),
+            json!({ "title": "Sign in", "fields": [] }),
+        );
+        assert!(apply_user_form_stamp(&mut extra, "e_ghost".into(), false).is_none());
+        assert!(
+            extra.get("entryId").is_none(),
+            "ghost entryId is the collapse blocker: {extra:?}"
+        );
+        assert_eq!(
+            apply_user_form_stamp(&mut extra, "e_1".into(), true).as_deref(),
+            Some("e_1")
+        );
+        assert_eq!(extra["entryId"], "e_1");
+        assert_eq!(extra["formRequest"], extra["arguments"]);
+    }
 }

@@ -28,7 +28,7 @@ use opengrok_harness::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// How long a turn waits for a sleeping box to come up before running its first command anyway.
 /// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
@@ -60,6 +60,24 @@ pub struct AgUiState {
     /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
     /// still needs it in their ceiling before its tools run.
     pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
+    /// Shared with `GatewayState.settings` so AG-UI turns see `egressTunnelEnabled`.
+    /// `None` until `GatewayState::new` / `router` attach the Arc; env flags still apply.
+    pub host_settings: Option<Arc<Mutex<serde_json::Value>>>,
+}
+
+impl AgUiState {
+    /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
+    /// or host setting `egressTunnelEnabled`. Docker host-network is not this path; the box
+    /// agent owns the tunnel endpoint and we honor the flag + gate leave-box tools.
+    #[must_use]
+    pub fn egress_tunnel_enabled(&self) -> bool {
+        let settings = self
+            .host_settings
+            .as_ref()
+            .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
+            .unwrap_or_else(crate::gateway::default_settings);
+        crate::gateway::egress_tunnel_available(&settings)
+    }
 }
 
 /// Which coworker a run belongs to, and therefore whose computer its tools use.
@@ -294,7 +312,8 @@ pub(crate) async fn tools_for_coworker(
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
-        .with_review_approved(review_approved.iter().cloned());
+        .with_review_approved(review_approved.iter().cloned())
+        .with_egress_tunnel(state.egress_tunnel_enabled());
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.

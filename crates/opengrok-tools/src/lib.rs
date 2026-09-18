@@ -17,8 +17,9 @@
 
 pub mod review;
 pub use review::{
-    AwaitingReason, Gate, Outcome, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy,
-    ReviewVerdict, ask_first_reason, combine, redact_arguments,
+    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, Outcome, REVIEW_ASK_REASON, ReviewAsk,
+    ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
+    redact_arguments,
 };
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
@@ -464,6 +465,10 @@ pub struct Executor {
     /// read at the call, so the level a turn runs at is decided once when the turn is built and
     /// cannot change between two calls of the same conversation.
     observe: crate::observe::Observe,
+    /// Prod user-network path: the box agent's egress tunnel. Docker host-network is not this.
+    /// When on, leave-box screen tools raise the Review-an-action card unless a standing
+    /// auto-review allow is already attached.
+    egress_tunnel: bool,
 }
 
 /// The built-ins that need a display.
@@ -525,6 +530,7 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
+            egress_tunnel: false,
         }
     }
 
@@ -545,6 +551,7 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
+            egress_tunnel: false,
         }
     }
 
@@ -640,6 +647,14 @@ impl Executor {
     #[must_use]
     pub fn with_auto_review(mut self, policy: ReviewPolicy, judge: Arc<dyn ReviewJudge>) -> Self {
         self.auto_review = Some(AutoReview { policy, judge });
+        self
+    }
+
+    /// Prod traffic reroute: leave-box tools (`computer`, `open_url`, `run_recipe`) raise the
+    /// Review-an-action card before they run. Docker host-network is not this path.
+    #[must_use]
+    pub fn with_egress_tunnel(mut self, on: bool) -> Self {
+        self.egress_tunnel = on;
         self
     }
 
@@ -983,6 +998,31 @@ impl Executor {
                 "a form or computer handoff is open on this conversation; do not type, click, or \
                  open pages until the person has finished. Secrets must not be typed with `computer`",
             );
+        }
+
+        // Prod traffic reroute: the box agent's egress tunnel is the user-network path.
+        // Docker host-network is not that. With no standing auto-review allow, leave-box
+        // tools raise the Review-an-action card. A primary-gate Ask subsumes this (one card).
+        if self.egress_tunnel
+            && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+            && !review_approved
+            && self
+                .auto_review
+                .as_ref()
+                .is_none_or(|review| !review.policy.is_active())
+        {
+            match &gate {
+                Gate::Deny(why) => return ToolResult::refused(&call.id, why.clone()),
+                Gate::Ask(_, _) => {}
+                Gate::Allow if !gate_approved => {
+                    return ToolResult::awaiting(
+                        &call.id,
+                        AwaitingReason::AutoReview,
+                        review::EGRESS_TUNNEL_ASK_REASON,
+                    );
+                }
+                Gate::Allow => {}
+            }
         }
 
         // ONE judge call site, for every tool.
@@ -2425,6 +2465,53 @@ mod tests {
             .await;
         assert!(result.ok, "{result:?}");
         assert_eq!(judge.calls(), 0, "nothing written ⇒ no judge call");
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn egress_tunnel_asks_before_computer_use() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(result.content.contains("egress tunnel"), "{result:?}");
+        assert_eq!(spy.last_box(), None, "must not run before Review an action");
+    }
+
+    #[tokio::test]
+    async fn egress_tunnel_lets_an_approved_computer_call_through() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_review_approved(["call_1".to_string()]);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+    }
+
+    #[tokio::test]
+    async fn egress_tunnel_does_not_ask_for_box_local_shell() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone()).with_egress_tunnel(true);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert!(!result.awaiting_approval);
         assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
     }
 

@@ -148,17 +148,9 @@ pub async fn submit_user_form(
     let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
-    if !may_use(state, account_id, &coworker_id).await {
-        return (200, Value::Null);
-    }
-    let Ok(Some((seq, entry))) = state
-        .agui
-        .auth
-        .store
-        .find_gateway_entry(&coworker_id, account_id, &entry_id)
-        .await
-    else {
-        return (200, Value::Null);
+    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+        Ok(row) => row,
+        Err(reply) => return reply,
     };
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
@@ -214,17 +206,9 @@ pub async fn dismiss_user_form(
             );
         }
     };
-    if !may_use(state, account_id, &coworker_id).await {
-        return (200, Value::Null);
-    }
-    let Ok(Some((seq, entry))) = state
-        .agui
-        .auth
-        .store
-        .find_gateway_entry(&coworker_id, account_id, &entry_id)
-        .await
-    else {
-        return (200, Value::Null);
+    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+        Ok(row) => row,
+        Err(reply) => return reply,
     };
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
@@ -293,17 +277,9 @@ pub async fn resolve_box_handoff(
             );
         }
     };
-    if !may_use(state, account_id, &coworker_id).await {
-        return (200, Value::Null);
-    }
-    let Ok(Some((seq, entry))) = state
-        .agui
-        .auth
-        .store
-        .find_gateway_entry(&coworker_id, account_id, &entry_id)
-        .await
-    else {
-        return (200, Value::Null);
+    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+        Ok(row) => row,
+        Err(reply) => return reply,
     };
     if !is_live_handoff(&entry) {
         if entry.get("boxRequestId").and_then(Value::as_str).is_some() {
@@ -518,6 +494,33 @@ async fn may_use(state: &GatewayState, account_id: &AccountId, coworker: &Cowork
         .may_use_coworker(account_id, coworker)
         .await
         .unwrap_or(false)
+}
+
+/// Null stays the disclosure answer for a coworker the caller may not use. A stamped
+/// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
+async fn load_owned_entry(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    entry_id: &str,
+) -> Result<(i64, Value), (u16, Value)> {
+    if !may_use(state, account_id, coworker_id).await {
+        return Err((200, Value::Null));
+    }
+    match state
+        .agui
+        .auth
+        .store
+        .find_gateway_entry(coworker_id, account_id, entry_id)
+        .await
+    {
+        Ok(Some(row)) => Ok(row),
+        Ok(None) => Err((404, json!({ "error": "form entry missing" }))),
+        Err(error) => {
+            tracing::error!(%error, "could not load a form or handoff entry");
+            Err((500, json!({ "error": "transcript unavailable" })))
+        }
+    }
 }
 
 fn settle_entry(

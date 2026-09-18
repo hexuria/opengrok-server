@@ -155,6 +155,7 @@ async fn the_answer_arrives_in_pieces_and_ends_whole() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),
@@ -291,6 +292,7 @@ async fn the_roster_says_a_coworker_is_working_while_it_works() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),
@@ -446,6 +448,7 @@ async fn the_working_state_reaches_an_open_stream() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),
