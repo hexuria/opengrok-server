@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
@@ -63,6 +64,8 @@ async fn store_from(database_url: &str) -> PgStore {
 #[derive(Default)]
 struct GatewayLog {
     principals: Vec<String>,
+    /// Methods used on `/admin/api/principals`. OAG has no GET list (405 by design).
+    principal_methods: Vec<String>,
     mints: Vec<(String, String, Option<String>)>,
     revoked: Vec<String>,
     budgets: Vec<(String, Option<String>)>,
@@ -84,10 +87,20 @@ async fn spawn_stand_in_gateway(log: SharedLog) -> String {
                 post(
                     |State(log): State<SharedLog>, Json(body): Json<Value>| async move {
                         let email = body["email"].as_str().unwrap_or_default().to_string();
-                        log.lock().unwrap().principals.push(email.clone());
+                        let mut log = log.lock().unwrap();
+                        log.principal_methods.push("POST".into());
+                        log.principals.push(email.clone());
                         Json(json!({ "id": "01a0-principal", "email": email }))
                     },
-                ),
+                )
+                .get(|State(log): State<SharedLog>| async move {
+                    // OAG: no list. GET is 405 by design — must not read as unreachable.
+                    log.lock().unwrap().principal_methods.push("GET".into());
+                    (
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        Json(json!({"error": "method not allowed"})),
+                    )
+                }),
             )
             .route(
                 "/admin/api/keys",
@@ -378,6 +391,11 @@ async fn an_admin_mints_a_member_a_key_and_the_secret_is_shown_once() {
             log.principals,
             vec![format!("org-{}@gateway.local", org_id.as_str())],
             "the org's principal address is derived from its id"
+        );
+        assert_eq!(
+            log.principal_methods,
+            vec!["POST"],
+            "upsert is POST; GET of the collection is 405 by design"
         );
         let (principal, name, quota) = log.mints.first().expect("one mint").clone();
         assert_eq!(principal, format!("org-{}@gateway.local", org_id.as_str()));

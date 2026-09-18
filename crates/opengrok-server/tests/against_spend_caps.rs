@@ -82,6 +82,8 @@ struct StandIn {
     /// Principals the gateway knows, by email. A mint on one it does not know is refused with
     /// the real gateway's sentence: the org must be bound first (`ensure_org_principal`).
     principals: Vec<String>,
+    /// Methods used on `/admin/api/principals`. OAG has no GET list (405 by design).
+    principal_methods: Vec<String>,
     /// When true every completion runs on a subscription seat: cost 0, list price 0.001153
     /// (the figure the operator's Grok seat booked on 2 Sep 2026).
     seat: bool,
@@ -248,12 +250,21 @@ async fn spawn_stand_in(shared: Shared) -> String {
                     }
                     let email = body["email"].as_str().unwrap_or_default().to_string();
                     let mut stand_in = shared.lock().unwrap();
+                    stand_in.principal_methods.push("POST".into());
                     if !stand_in.principals.contains(&email) {
                         stand_in.principals.push(email.clone());
                     }
                     (StatusCode::OK, Json(json!({ "email": email })))
                 },
-            ),
+            )
+            .get(|State(shared): State<Shared>, headers: axum::http::HeaderMap| async move {
+                if bearer_of(&headers) != ADMIN_TOKEN {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error": "admin only"})));
+                }
+                // OAG: no list. GET is 405 by design — must not read as unreachable.
+                shared.lock().unwrap().principal_methods.push("GET".into());
+                (StatusCode::METHOD_NOT_ALLOWED, Json(json!({"error": "method not allowed"})))
+            }),
         )
         .route(
             "/admin/api/keys/{id}/quota",
@@ -806,6 +817,11 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
             stand_in.principals,
             vec![GatewayAdmin::org_principal_email(org_id.as_str())],
             "the org was bound to its principal before the mint"
+        );
+        assert_eq!(
+            stand_in.principal_methods,
+            vec!["POST"],
+            "upsert is POST; GET of the collection is 405 by design"
         );
     }
     let (status, spend) = h.spend(&access, &coworker).await;
