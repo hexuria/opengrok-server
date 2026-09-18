@@ -27,7 +27,7 @@ pub mod credential;
 pub use credential::{OFFER_SAVE, REQUEST_CREDENTIAL};
 pub mod mcp;
 
-pub use mcp::{Endpoint, McpError, McpTool};
+pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
 pub mod workflow;
@@ -777,6 +777,57 @@ impl Executor {
             .collect()
     }
 
+    fn reserved_openai_names() -> impl Iterator<Item = &'static str> {
+        Self::builtin_tool_names()
+            .iter()
+            .copied()
+            .chain(std::iter::once(USER_MACHINE_SHELL))
+    }
+
+    /// Internal dotted `qualified_name` ↔ OpenAI-safe wire name for this coworker's plugins.
+    /// Sorted so two names that sanitise the same way get the same `_2` suffix
+    /// regardless of plugin-list order.
+    fn plugin_wire_names(&self) -> Vec<(String, String)> {
+        let mut qualified: Vec<&str> = self
+            .plugin_tools
+            .iter()
+            .map(|tool| tool.qualified_name.as_str())
+            .collect();
+        qualified.sort_unstable();
+        crate::mcp::openai_unique_tool_names(Self::reserved_openai_names(), qualified)
+    }
+
+    /// Accept the model's OpenAI-safe name or a legacy dotted qualify. Policy, sessions and
+    /// `split_qualified` keep the dotted form. `credential.request` is a builtin with a
+    /// dot — OpenAI rejects it — so the wire name is `credential_request`.
+    fn internal_tool_name(&self, call_name: &str) -> String {
+        if let Some(tool) = self.lookup_plugin_tool(call_name) {
+            return tool.qualified_name.clone();
+        }
+        for builtin in Self::reserved_openai_names() {
+            if call_name == builtin || crate::mcp::openai_safe_tool_name(builtin) == call_name {
+                return builtin.to_string();
+            }
+        }
+        call_name.to_string()
+    }
+
+    fn lookup_plugin_tool(&self, name: &str) -> Option<&crate::mcp::McpTool> {
+        self.plugin_tools
+            .iter()
+            .find(|tool| tool.qualified_name == name)
+            .or_else(|| {
+                let qualified = self
+                    .plugin_wire_names()
+                    .into_iter()
+                    .find(|(_, wire)| wire == name)
+                    .map(|(qualified, _)| qualified)?;
+                self.plugin_tools
+                    .iter()
+                    .find(|tool| tool.qualified_name == qualified)
+            })
+    }
+
     /// What the model is told each tool does, so it can choose between them.
     pub fn tool_descriptions(&self) -> Vec<(String, Option<String>)> {
         self.plugin_tools
@@ -825,7 +876,7 @@ impl Executor {
                 }
                 schemas.push(serde_json::json!({
                     "type": "function",
-                    "function": { "name": name, "description": description, "parameters": parameters },
+                    "function": { "name": crate::mcp::openai_safe_tool_name(name), "description": description, "parameters": parameters },
                 }));
             }
         }
@@ -911,7 +962,7 @@ impl Executor {
             schemas.push(serde_json::json!({
                 "type": "function",
                 "function": {
-                    "name": RUN_RECIPE,
+                    "name": crate::mcp::openai_safe_tool_name(RUN_RECIPE),
                     "description": format!(
                         "Run a task a person taught on THIS BOT'S OWN computer, as one step, instead of \
                          looking and clicking your way through it. Use one when the request matches its \
@@ -935,15 +986,21 @@ impl Executor {
         {
             schemas.push(serde_json::json!({
                 "type": "function",
-                "function": { "name": USER_MACHINE_SHELL, "description": description, "parameters": parameters },
+                "function": { "name": crate::mcp::openai_safe_tool_name(USER_MACHINE_SHELL), "description": description, "parameters": parameters },
             }));
         }
+        let plugin_wires = self.plugin_wire_names();
         for tool in &self.plugin_tools {
             if permitted(&tool.qualified_name) {
+                let wire = plugin_wires
+                    .iter()
+                    .find(|(qualified, _)| qualified == &tool.qualified_name)
+                    .map(|(_, wire)| wire.clone())
+                    .unwrap_or_else(|| crate::mcp::openai_safe_tool_name(&tool.qualified_name));
                 schemas.push(serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": tool.qualified_name,
+                        "name": wire,
                         "description": tool.description.clone().unwrap_or_default(),
                         // The MCP server validates the real arguments; we advertise an open object so
                         // the model can call it, rather than a schema we do not have here.
@@ -968,6 +1025,7 @@ impl Executor {
         // The identity rule, applied once, before anything reads an argument — including the judge
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
+        let tool_name = self.internal_tool_name(&call.name);
         // Two different yeses. The gate's approval (the machine owner's or the policy's card)
         // releases the gate's ask AND skips the judge; a review approval skips only the judge.
         let gate_approved = self.approved_calls.contains(&call.id);
@@ -977,7 +1035,7 @@ impl Executor {
         // command against never/ask/bypass + the standing rules), NOT the per-coworker tool grant —
         // which would Deny it for any coworker whose grant lists only the box tools. It runs on
         // the USER'S machine, so it needs no box.
-        let user_machine_command = if call.name == USER_MACHINE_SHELL {
+        let user_machine_command = if tool_name == USER_MACHINE_SHELL {
             match serde_json::from_value::<ShellArgs>(arguments.clone()) {
                 Ok(args) => Some(args.command),
                 Err(error) => {
@@ -1016,7 +1074,7 @@ impl Executor {
             let decision = opengrok_policy::decide(
                 &context.account_id,
                 &context.coworker_id,
-                opengrok_policy::Action::RunTool(&call.name),
+                opengrok_policy::Action::RunTool(&tool_name),
                 &self.policy,
             );
             if decision.needs_approval() {
@@ -1034,7 +1092,7 @@ impl Executor {
         // HITL wait, not approve-then-run — and BEFORE the judge. A form is not a tool that
         // then executes, so auto-review must not steal the card; a `computer` type while a
         // form is open must not send the secret to another model. Policy Deny still refuses.
-        if call.name == REQUEST_USER_FORM {
+        if tool_name == REQUEST_USER_FORM {
             if let Gate::Deny(why) = &gate {
                 return ToolResult::refused(&call.id, why.as_str());
             }
@@ -1050,7 +1108,7 @@ impl Executor {
         // HITL wait, not fill-then-run. NativeChat brokers a session out of agent view;
         // we never see the password and must not type one into the box.
         // A missing origin is a refusal the model can retry, not a hang.
-        if call.name == REQUEST_CREDENTIAL {
+        if tool_name == REQUEST_CREDENTIAL {
             if let Gate::Deny(why) = &gate {
                 return ToolResult::refused(&call.id, why.as_str());
             }
@@ -1073,7 +1131,7 @@ impl Executor {
             );
         }
 
-        if context.screen_hold && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+        if context.screen_hold && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
         {
             return ToolResult::refused(
                 &call.id,
@@ -1087,7 +1145,7 @@ impl Executor {
         // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
         // subsumes this (one card).
         if self.egress_tunnel
-            && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+            && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
             && !review_approved
             && self
                 .auto_review
@@ -1112,7 +1170,7 @@ impl Executor {
         let review = match (&gate, review_approved, self.auto_review.as_ref()) {
             (Gate::Deny(_), _, _) | (_, true, _) | (_, _, None) => None,
             (_, false, Some(review)) if !review.policy.is_active() => None,
-            (_, false, Some(review)) => Some(review.judge(&call.name, &arguments).await),
+            (_, false, Some(review)) => Some(review.judge(&tool_name, &arguments).await),
         };
 
         match combine(gate, review, gate_approved) {
@@ -1173,7 +1231,7 @@ impl Executor {
             box_id
         };
 
-        match call.name.as_str() {
+        match tool_name.as_str() {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
                 Ok(args) => {
                     let values = args.values.unwrap_or_default();
@@ -1371,7 +1429,8 @@ impl Executor {
         name: &str,
         arguments: serde_json::Value,
     ) -> ToolResult {
-        let Some((plugin, server, remote)) = crate::mcp::split_qualified(name) else {
+        let name = self.internal_tool_name(name);
+        let Some((plugin, server, remote)) = crate::mcp::split_qualified(&name) else {
             return ToolResult::refused(call_id, format!("there is no tool called {name}"));
         };
 
@@ -2115,6 +2174,138 @@ mod tests {
         );
     }
 
+    fn openai_safe_wire(name: &str) -> bool {
+        (1..=64).contains(&name.len())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[test]
+    fn plugin_tool_schemas_advertise_openai_safe_names() {
+        let long = format!("{}.api.{}", "plug".repeat(20), "tool".repeat(20));
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![
+                crate::mcp::McpTool {
+                    qualified_name: "gmail.api.send".to_string(),
+                    remote_name: "send".to_string(),
+                    description: Some("Send a message".to_string()),
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c.d".to_string(),
+                    remote_name: "c.d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c_d".to_string(),
+                    remote_name: "c_d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: long.clone(),
+                    remote_name: "t".to_string(),
+                    description: None,
+                },
+            ],
+        );
+        let account = AccountId::from_stored("acct_1");
+        let coworker = CoworkerId::from_stored("cw_1");
+        let schemas = executor.tool_schemas(&account, &coworker);
+        let names: Vec<String> = schemas
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        let truncated = crate::mcp::openai_safe_tool_name(&long);
+        assert_eq!(truncated.len(), 64);
+        assert!(
+            names.contains(&truncated),
+            "names longer than 64 must be truncated on the wire: {names:?}"
+        );
+        assert!(names.contains(&"shell".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"credential_request".to_string()),
+            "credential.request is a dotted builtin and must be sanitised: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == REQUEST_CREDENTIAL),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"gmail_api_send".to_string()),
+            "gmail.api.send must be advertised without dots: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains('.')),
+            "OpenAI function.name must not contain dots: {names:?}"
+        );
+        assert!(names.contains(&"a_b_c_d".to_string()), "{names:?}");
+        assert!(names.contains(&"a_b_c_d_2".to_string()), "{names:?}");
+        for name in &names {
+            assert!(openai_safe_wire(name), "illegal OpenAI name {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_calling_the_openai_safe_name_reaches_the_plugin() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![crate::mcp::McpTool {
+                qualified_name: "gmail.api.send".to_string(),
+                remote_name: "send".to_string(),
+                description: None,
+            }],
+        );
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail_api_send", json!({})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(
+            result.content.contains("not connected"),
+            "safe wire name must resolve to the plugin: {result:?}"
+        );
+        assert!(
+            !result.content.contains("there is no tool called"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_wire_names_round_trip_to_the_matching_plugin() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c.d".to_string(),
+                    remote_name: "c.d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c_d".to_string(),
+                    remote_name: "c_d".to_string(),
+                    description: None,
+                },
+            ],
+        );
+        let first = executor
+            .execute(&context_with_box("box_mine"), &call("a_b_c_d", json!({})))
+            .await;
+        assert!(
+            first.content.contains("a.b.c.d"),
+            "plain sanitised name is the first plugin: {first:?}"
+        );
+        let second = executor
+            .execute(&context_with_box("box_mine"), &call("a_b_c_d_2", json!({})))
+            .await;
+        assert!(
+            second.content.contains("a.b.c_d"),
+            "suffix _2 is the colliding plugin: {second:?}"
+        );
+    }
+
     /// A plugin whose session is gone must say so, rather than reading as "no such tool" — those
     /// send a person to different places.
     #[tokio::test]
@@ -2168,6 +2359,16 @@ mod tests {
             .await;
         assert!(!result.ok);
         assert!(result.content.contains("may never run"), "{result:?}");
+        let via_wire = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail_api_send", json!({})),
+            )
+            .await;
+        assert!(
+            via_wire.content.contains("may never run"),
+            "policy uses the internal dotted name: {via_wire:?}"
+        );
     }
 
     /// Our identity keys are for LOCAL tools. A remote server never asked for them, and a strict
@@ -3509,6 +3710,21 @@ mod tests {
         assert!(result.image.is_none(), "{result:?}");
         assert_eq!(spy.last_box(), None, "await must not type");
         assert!(!result.content.contains("s3cret"), "{result:?}");
+
+        let via_wire = executor
+            .execute(
+                &context,
+                &call(
+                    "credential_request",
+                    json!({ "origin": "accounts.google.com" }),
+                ),
+            )
+            .await;
+        assert!(
+            via_wire.awaiting_approval,
+            "OpenAI-safe name must map back to the builtin: {via_wire:?}"
+        );
+        assert_eq!(via_wire.awaiting_reason, Some(AwaitingReason::Credential));
 
         let missing = executor
             .execute(&context, &call(REQUEST_CREDENTIAL, json!({})))

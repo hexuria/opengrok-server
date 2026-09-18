@@ -15,7 +15,7 @@
 //! TOOL NAMES ARE NAMESPACED `<plugin>.<server>.<tool>`. Two plugins bringing a `search` would
 //! otherwise become one tool nobody can tell apart, and the model would call whichever won.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use opengrok_plugins::{McpServer, Plugin};
 use serde::{Deserialize, Serialize};
@@ -175,6 +175,79 @@ pub fn split_qualified(name: &str) -> Option<(String, String, String)> {
         return None;
     }
     Some((plugin, server, tool))
+}
+
+/// OpenAI `function.name` must match `^[a-zA-Z0-9_-]{1,64}$`. MCP qualify is
+/// `{plugin}.{server}.{remote}` with dots (`gmail.api.send`); advertising that
+/// as the wire name is a 400 from OpenAI. Internal `qualified_name` stays dotted
+/// for `split_qualified` / sessions. Never empty: a name of only illegal chars
+/// becomes `_`.
+#[must_use]
+pub fn openai_safe_tool_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().min(64));
+    for c in name.chars() {
+        if out.len() >= 64 {
+            break;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+/// Unique OpenAI-safe names for `qualified` against `reserved` (builtins already
+/// on the wire). First claim keeps the plain sanitised form; later collisions
+/// get `_2`, `_3`, … still capped at 64 so the mapping round-trips.
+#[must_use]
+pub fn openai_unique_tool_names(
+    reserved: impl IntoIterator<Item = impl AsRef<str>>,
+    qualified: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Vec<(String, String)> {
+    let mut used: BTreeSet<String> = reserved
+        .into_iter()
+        .map(|name| openai_safe_tool_name(name.as_ref()))
+        .collect();
+    let mut out = Vec::new();
+    for name in qualified {
+        let original = name.as_ref().to_string();
+        let wire = unique_openai_name(&mut used, &original);
+        out.push((original, wire));
+    }
+    out
+}
+
+fn unique_openai_name(used: &mut BTreeSet<String>, name: &str) -> String {
+    let base = openai_safe_tool_name(name);
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut n: u32 = 2;
+    loop {
+        let suffix = format!("_{n}");
+        let keep = 64usize.saturating_sub(suffix.len()).max(1);
+        let mut candidate = base.clone();
+        candidate.truncate(keep);
+        if candidate.is_empty() {
+            candidate.push('_');
+        }
+        candidate.push_str(&suffix);
+        if candidate.len() > 64 {
+            candidate.truncate(64);
+        }
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        if n == u32::MAX {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -494,5 +567,52 @@ mod tests {
         assert_eq!(plugin, "gh");
         assert_eq!(server, "api");
         assert_eq!(tool, "repos.list", "only the first two dots are separators");
+    }
+
+    #[test]
+    fn openai_safe_tool_name_maps_dots_and_never_goes_empty() {
+        assert_eq!(openai_safe_tool_name("gmail.api.send"), "gmail_api_send");
+        assert_eq!(openai_safe_tool_name("shell"), "shell");
+        assert_eq!(
+            openai_safe_tool_name("user_machine_shell"),
+            "user_machine_shell"
+        );
+        assert_eq!(openai_safe_tool_name(""), "_");
+        assert_eq!(openai_safe_tool_name("..."), "___");
+        let long = format!("{}.api.{}", "p".repeat(40), "t".repeat(40));
+        let safe = openai_safe_tool_name(&long);
+        assert_eq!(safe.len(), 64);
+        assert!(
+            safe.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
+        assert!(!safe.contains('.'));
+    }
+
+    #[test]
+    fn colliding_sanitised_names_get_a_numeric_suffix() {
+        let names = openai_unique_tool_names(
+            ["shell"],
+            ["gmail.api.send", "gmail_api.send", "foo.bar.baz"],
+        );
+        assert_eq!(
+            names,
+            vec![
+                ("gmail.api.send".to_string(), "gmail_api_send".to_string()),
+                ("gmail_api.send".to_string(), "gmail_api_send_2".to_string()),
+                ("foo.bar.baz".to_string(), "foo_bar_baz".to_string()),
+            ]
+        );
+        // A plugin that sanitises to a builtin does not steal the builtin wire name.
+        let stolen = openai_unique_tool_names(["shell"], ["shell"]);
+        assert_eq!(stolen[0].1, "shell_2");
+        let long_a = "x".repeat(64);
+        let long_b = "x".repeat(70);
+        let longs =
+            openai_unique_tool_names(Vec::<&str>::new(), [long_a.as_str(), long_b.as_str()]);
+        assert_eq!(longs[0].1.len(), 64);
+        assert!(longs[1].1.ends_with("_2"), "{:?}", longs[1]);
+        assert!(longs[1].1.len() <= 64);
+        assert_ne!(longs[0].1, longs[1].1);
     }
 }

@@ -139,8 +139,15 @@ fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<
         .collect();
     preferred
         .iter()
-        .filter(|name| offered.iter().any(|offered| offered == *name))
-        .cloned()
+        .filter_map(|name| {
+            offered
+                .iter()
+                .find(|offered| {
+                    let offered = offered.as_str();
+                    offered == name || offered == opengrok_tools::openai_safe_tool_name(name)
+                })
+                .cloned()
+        })
         .collect()
 }
 
@@ -1606,8 +1613,20 @@ async fn list_tools(
         .filter_map(|schema| {
             let function = schema.get("function")?;
             let name = function.get("name")?.as_str()?.to_string();
-            // A qualified name (`plugin.server.tool`) is a plugin's; a bare one is a built-in.
-            let kind = if name.contains('.') { "plugin" } else { "builtin" };
+            // OpenAI-safe plugin names have no dots (`gmail_api_send`). Kind is
+            // "not a builtin", not "contains a dot".
+            let kind = if opengrok_tools::Executor::builtin_tool_names()
+                .iter()
+                .any(|builtin| {
+                    *builtin == name.as_str()
+                        || opengrok_tools::openai_safe_tool_name(builtin) == name
+                })
+                || name == opengrok_tools::USER_MACHINE_SHELL
+            {
+                "builtin"
+            } else {
+                "plugin"
+            };
             Some(serde_json::json!({
                 "name": name,
                 "description": function.get("description").and_then(serde_json::Value::as_str).unwrap_or(""),
