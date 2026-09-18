@@ -64,6 +64,9 @@ pub enum AwaitingReason {
     AutoReview,
     /// The bot raised an in-chat `user-form` and is waiting for the person (`request_user_form`).
     UserForm,
+    /// The bot asked the client to fill a saved site login (`credential.request`). NativeChat
+    /// fills the box; the server never sees the password.
+    Credential,
 }
 
 impl AwaitingReason {
@@ -73,6 +76,7 @@ impl AwaitingReason {
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
             Self::UserForm => "user-form",
+            Self::Credential => "credential",
         }
     }
 }

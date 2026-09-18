@@ -219,13 +219,17 @@ pub fn computer_system_prompt(
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
          Never describe work done on your box as done on the user's computer. When a page or a \
-         question asks the person to type a password, one-time code, or other secret, call \
-         `request_user_form` and wait. Never type secrets with `computer` — that attaches a \
-         screenshot of what was typed. The person fills in chat; the server types into the focused \
-         field and does not show you the secret. After the form settles, screenshot and confirm \
-         what the page shows; filling is not a successful login. Auth is one challenge per form: \
-         raise email, then after it settles screenshot; if a password page is next, call \
-         `request_user_form` with a password-only form (new entryId, challengeKind \"password\"). \
+         question asks the person to type a password, one-time code, or other secret, prefer \
+         `credential.request` (origin = the page host, username if you know it) when a saved \
+         login is likely and wait. The client fills the box; you never see the password. On \
+         denied, missing, or error, call `request_user_form` and wait. Never type secrets with \
+         `computer` — that attaches a screenshot of what was typed. The person fills in chat; \
+         the server types into the focused field and does not show you the secret. After the \
+         form settles, screenshot and confirm what the page shows; filling is not a successful \
+         login. Auth is one challenge per form: raise email, then after it settles screenshot; \
+         if a password page is next, prefer `credential.request` when a saved login is likely, \
+         otherwise call `request_user_form` with a password-only form (new entryId, \
+         challengeKind \"password\"). \
          Do not put email and password on the same card unless they share a page (`samePage`). \
          If another in-sandbox challenge appears (OTP, a phone code on the same page), call \
          `request_user_form` again with otp fields and challengeKind \"otp\" — never re-raise a \
@@ -554,8 +558,16 @@ mod tests {
             "no box ⇒ the form tool is not offered: {none}"
         );
         assert!(
+            !none.contains("credential.request"),
+            "no box ⇒ saved-login fill is not offered: {none}"
+        );
+        assert!(
             box_only.contains("`request_user_form`"),
             "the form tool is a built-in on a box: {box_only}"
+        );
+        assert!(
+            box_only.contains("`credential.request`"),
+            "prefer saved-login fill before a password form: {box_only}"
         );
         assert!(
             box_only.contains("one challenge per form"),

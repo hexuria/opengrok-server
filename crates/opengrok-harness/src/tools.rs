@@ -205,6 +205,8 @@ pub fn collect_tool_calls(events: &[Event]) -> Vec<ToolCall> {
                     // those secrets reach execute, the pending row, or a later resume.
                     let arguments = if name == opengrok_tools::REQUEST_USER_FORM {
                         opengrok_tools::user_form::sanitize_arguments(&arguments)
+                    } else if name == opengrok_tools::REQUEST_CREDENTIAL {
+                        opengrok_tools::credential::sanitize_request(&arguments)
                     } else {
                         arguments
                     };
@@ -440,5 +442,32 @@ mod tests {
         assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
         assert!(calls[0].arguments.get("values").is_none(), "{dumped}");
         assert_eq!(calls[0].arguments["title"], "Sign in");
+    }
+
+    #[test]
+    fn credential_request_arguments_drop_a_smuggled_password() {
+        let events = events_for(vec![
+            ModelDelta::ToolCallStart {
+                id: "c1".to_string(),
+                name: opengrok_tools::REQUEST_CREDENTIAL.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "c1".to_string(),
+                delta: serde_json::json!({
+                    "origin": "accounts.google.com",
+                    "password": "s3cret-should-never-land"
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+        ]);
+        let calls = collect_tool_calls(&events);
+        assert_eq!(calls.len(), 1);
+        let dumped = calls[0].arguments.to_string();
+        assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
+        assert_eq!(calls[0].arguments["origin"], "accounts.google.com");
+        assert!(calls[0].arguments.get("password").is_none(), "{dumped}");
     }
 }

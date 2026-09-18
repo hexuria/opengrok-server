@@ -23,6 +23,8 @@ pub use review::{
 };
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
+pub mod credential;
+pub use credential::{OFFER_SAVE, REQUEST_CREDENTIAL};
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool};
@@ -737,6 +739,7 @@ impl Executor {
             "open_url",
             "computer",
             REQUEST_USER_FORM,
+            REQUEST_CREDENTIAL,
             RUN_RECIPE,
         ]
     }
@@ -1042,6 +1045,31 @@ impl Executor {
                 );
             }
             return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
+        }
+
+        // HITL wait, not fill-then-run. NativeChat fills the box; we never see the password.
+        // A missing origin is a refusal the model can retry, not a hang.
+        if call.name == REQUEST_CREDENTIAL {
+            if let Gate::Deny(why) = &gate {
+                return ToolResult::refused(&call.id, why.as_str());
+            }
+            if context.screen_hold {
+                return ToolResult::refused(
+                    &call.id,
+                    "a form, saved-credential fill, or computer handoff is already open on this conversation; wait for the person to finish it",
+                );
+            }
+            if crate::credential::origin_of(&arguments).is_none() {
+                return ToolResult::refused(
+                    &call.id,
+                    "call again with origin set to the page host (e.g. accounts.google.com); do not send a password",
+                );
+            }
+            return ToolResult::awaiting(
+                &call.id,
+                AwaitingReason::Credential,
+                "Waiting for a saved credential",
+            );
         }
 
         if context.screen_hold && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
@@ -1481,12 +1509,15 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
         )),
         REQUEST_USER_FORM => Some((
             "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
+             If a saved login for this origin is likely, call `credential.request` first and wait; \
+             on denied, missing, or error, then raise this. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server types into the focused field on the page and never shows \
              you the secret. After it settles, screenshot and confirm what the page shows — \
              filling is not login. Auth is one challenge per form: raise email, then observe; \
-             if a password page is next, call this again with a password-only form (new entryId, \
+             if a password page is next, prefer `credential.request` when a saved login is \
+             likely, otherwise call this again with a password-only form (new entryId, \
              challengeKind \"password\"). Do not put email and password on the same card unless \
              they share a page (`samePage`). If another in-sandbox challenge appears (OTP, phone \
              verification on the same page), call this again with otp fields and \
@@ -1529,6 +1560,27 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                     "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
                 },
                 "required": ["title", "fields"],
+            }),
+        )),
+        REQUEST_CREDENTIAL => Some((
+            "Ask the person's client to fill a saved login for this origin. Prefer this before \
+             a password `request_user_form` when a match is likely (the person saved this site, \
+             or you already collected a username here). The client fills the box; you never see \
+             the password. Wait. On denied, missing, or error, fall back to `request_user_form`. \
+             Do not send a password. Filling is not login — screenshot afterwards.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": "Page host, e.g. accounts.google.com. Required."
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Optional username or email to match."
+                    }
+                },
+                "required": ["origin"],
             }),
         )),
         USER_MACHINE_SHELL => Some((
@@ -2262,7 +2314,12 @@ mod tests {
                     &context,
                     &call(
                         &name,
-                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                        json!({
+                            "command": "ls",
+                            "path": "/tmp/a",
+                            "content": "x",
+                            "origin": "accounts.google.com"
+                        }),
                     ),
                 )
                 .await;
@@ -2745,7 +2802,12 @@ mod tests {
                     &context,
                     &call(
                         &name,
-                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                        json!({
+                            "command": "ls",
+                            "path": "/tmp/a",
+                            "content": "x",
+                            "origin": "accounts.google.com"
+                        }),
                     ),
                 )
                 .await;
@@ -2858,6 +2920,10 @@ mod tests {
         assert!(
             names.iter().any(|name| name == REQUEST_USER_FORM),
             "the form tool does not need a display: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == REQUEST_CREDENTIAL),
+            "saved-login fill does not need a display to be offered: {names:?}"
         );
         assert!(!headless.has_screen());
 
@@ -3412,6 +3478,39 @@ mod tests {
         assert!(result.image.is_none(), "{result:?}");
         assert_eq!(spy.last_box(), None, "await must not type");
         assert!(!result.content.contains("s3cret"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn credential_request_awaits_and_does_not_type() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    REQUEST_CREDENTIAL,
+                    json!({
+                        "origin": "accounts.google.com",
+                        "username": "ada@example.com",
+                        "password": "s3cret"
+                    }),
+                ),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::Credential));
+        assert!(result.content.contains("Waiting"), "{result:?}");
+        assert!(result.image.is_none(), "{result:?}");
+        assert_eq!(spy.last_box(), None, "await must not type");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+
+        let missing = executor
+            .execute(&context, &call(REQUEST_CREDENTIAL, json!({})))
+            .await;
+        assert!(!missing.ok, "{missing:?}");
+        assert!(!missing.awaiting_approval, "{missing:?}");
+        assert!(missing.content.contains("origin"), "{missing:?}");
     }
 
     #[tokio::test]

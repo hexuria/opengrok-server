@@ -181,6 +181,18 @@ pub async fn submit_user_form(
     }
     live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
+    if resolution == FormResolution::Submitted {
+        super::credential::offer_save_after_submit(
+            state,
+            account_id,
+            &coworker_id,
+            &agent_id,
+            &entry_id,
+            &form,
+            &shared,
+        )
+        .await;
+    }
 
     resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
     (200, settled)
@@ -652,8 +664,27 @@ async fn resume_user_form(
     agent_id: &str,
     content: String,
 ) -> bool {
+    resume_settled(
+        state,
+        account_id,
+        coworker_id,
+        agent_id,
+        opengrok_core::run::SuspendReason::UserForm,
+        content,
+    )
+    .await
+}
+
+pub(crate) async fn resume_settled(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    agent_id: &str,
+    reason: opengrok_core::run::SuspendReason,
+    content: String,
+) -> bool {
     let Some((run_id, mut run, seq, pending)) =
-        pending_user_form(state, account_id, coworker_id).await
+        pending_suspended(state, account_id, coworker_id, reason).await
     else {
         return false;
     };
@@ -668,7 +699,7 @@ async fn resume_user_form(
         Ok(events) => events,
         Err(opengrok_core::run::RunError::AlreadyAnswered) => return false,
         Err(error) => {
-            tracing::warn!(%error, "user-form: could not answer the pending run");
+            tracing::warn!(%error, "could not answer the pending run");
             return false;
         }
     };
@@ -689,7 +720,7 @@ async fn resume_user_form(
         .append_run(&run_id, seq, &events, &view, Some(account_id))
         .await
     {
-        tracing::error!(%error, "user-form: could not append the answer");
+        tracing::error!(%error, "could not append the answer");
         return false;
     }
     let in_room = conversation::in_a_room(&run, coworker_id);
@@ -711,10 +742,11 @@ async fn resume_user_form(
     true
 }
 
-async fn pending_user_form(
+pub(crate) async fn pending_suspended(
     state: &GatewayState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
+    reason: opengrok_core::run::SuspendReason,
 ) -> Option<(
     opengrok_core::id::RunId,
     opengrok_core::run::Run,
@@ -738,7 +770,7 @@ async fn pending_user_form(
         let Some(pending) = run.pending.clone() else {
             continue;
         };
-        if pending.reason != opengrok_core::run::SuspendReason::UserForm {
+        if pending.reason != reason {
             continue;
         }
         return Some((run_id, run, seq, pending));
@@ -764,13 +796,33 @@ async fn journal_settled_form(
     coworker_id: &CoworkerId,
     settled: &Value,
 ) {
+    journal_agui_custom(
+        state,
+        account_id,
+        coworker_id,
+        opengrok_core::run::SuspendReason::UserForm,
+        agui_user_form_frame(settled),
+    )
+    .await;
+}
+
+/// Append a CUSTOM onto a still-pending run (NativeChat replays this). Scrubs
+/// accidental password keys before the payload is stored.
+pub(crate) async fn journal_agui_custom(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    reason: opengrok_core::run::SuspendReason,
+    frame: Value,
+) {
     let Some((run_id, mut run, seq, pending)) =
-        pending_user_form(state, account_id, coworker_id).await
+        pending_suspended(state, account_id, coworker_id, reason).await
     else {
         return;
     };
     let at_ms = now_ms();
-    let mut frame = agui_user_form_frame(settled);
+    let scrubbed = opengrok_tools::credential::scrub_secret_keys(&frame);
+    let mut frame = scrubbed;
     if let Some(map) = frame.as_object_mut() {
         map.insert("threadId".to_string(), json!(run.thread_id.clone()));
         map.insert("runId".to_string(), json!(run_id.as_str()));
@@ -800,7 +852,7 @@ async fn journal_settled_form(
         .append_run(&run_id, seq, &events, &view, Some(account_id))
         .await
     {
-        tracing::error!(%error, "could not journal a settled user-form");
+        tracing::error!(%error, "could not journal a custom frame onto a pending run");
     }
 }
 

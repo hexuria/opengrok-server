@@ -192,6 +192,15 @@ struct Harness {
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
+    harness_with_door(
+        database_url,
+        email,
+        Arc::new(MockDoor::asking_for_user_form()),
+    )
+    .await
+}
+
+async fn harness_with_door(database_url: &str, email: &str, door: Arc<MockDoor>) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -210,7 +219,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
     );
     let agui = AgUiState {
         auth,
-        door: Arc::new(MockDoor::asking_for_user_form()),
+        door,
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
         computer: Some(stub.clone()),
@@ -873,6 +882,23 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
             || settled_replay.pointer("/value/message/type") == Some(&json!("user-form")),
         "message.type user-form: {settled_replay}"
     );
+    let offer = replayed["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run["events"].as_array())
+        .flatten()
+        .find(|event| event["name"] == "credential.offer_save");
+    let offer = offer.expect("submitted fill must offer_save on AG-UI replay");
+    assert_eq!(offer["origin"], "accounts.google.com", "{offer}");
+    assert_eq!(offer["username"], EMAIL, "{offer}");
+    assert_eq!(offer["formEntryId"], entry_id, "{offer}");
+    let offer_dump = offer.to_string();
+    assert!(
+        !offer_dump.contains(SECRET),
+        "offer_save must never include the password: {offer_dump}"
+    );
+    assert!(offer.get("password").is_none(), "{offer}");
 
     for _ in 0..50 {
         if !h.stub.acts().is_empty() {
@@ -1175,4 +1201,113 @@ async fn egress_tunnel_needs_box_ready_when_info_is_present() {
         json!(false),
         "a ready box does not override a host that opted out: {body}"
     );
+}
+
+#[tokio::test]
+async fn credential_request_round_trips_a_status_and_never_stores_a_password() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "credential-result-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_credential()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Dot").await;
+    let thread_id = format!("thr-{}", uuid::Uuid::now_v7());
+    let run_id = uuid::Uuid::now_v7().to_string();
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "threadId": thread_id,
+            "runId": run_id,
+            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+            "forwardedProps": { "coworkerId": agent },
+        }))
+        .send()
+        .await
+        .expect("post ag-ui");
+    assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+    let sse = res.text().await.expect("sse");
+    let mut request_id = None;
+    for chunk in sse.split("\n\n") {
+        let Some(payload) = chunk.lines().find_map(|line| line.strip_prefix("data: ")) else {
+            continue;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        if event["type"] == "CUSTOM" && event["name"] == "credential.request" {
+            let dump = event.to_string();
+            assert!(
+                !dump.contains("s3cret-should-never-land"),
+                "CUSTOM must not carry a password: {dump}"
+            );
+            assert_eq!(event["origin"], "accounts.google.com", "{event}");
+            assert_eq!(event["reason"], "credential", "{event}");
+            request_id = event["requestId"]
+                .as_str()
+                .or_else(|| event["callId"].as_str())
+                .map(str::to_string);
+        }
+    }
+    let request_id = request_id.expect("credential.request CUSTOM with requestId");
+
+    let res = h
+        .client
+        .post(format!("{}/ag-ui/credential/result", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "agentId": agent,
+            "requestId": request_id,
+            "status": "filled",
+            "credentialId": "cred_nativechat_1",
+            "password": SECRET
+        }))
+        .send()
+        .await
+        .expect("credential result");
+    assert_eq!(res.status().as_u16(), 200, "credential result status");
+    let body: Value = res.json().await.expect("result json");
+    assert_eq!(body["status"], "filled", "{body}");
+    assert!(!body.to_string().contains(SECRET), "{body}");
+
+    let replay = h
+        .client
+        .get(format!("{}/ag-ui/threads/{thread_id}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay thread");
+    assert_eq!(replay.status().as_u16(), 200, "thread replay");
+    let replayed: Value = replay.json().await.expect("replay json");
+    let replay_dump = replayed.to_string();
+    assert!(
+        !replay_dump.contains(SECRET),
+        "secret in AG-UI replay: {replay_dump}"
+    );
+    assert!(
+        replay_dump.contains("credential.request"),
+        "replay must keep the request CUSTOM: {replay_dump}"
+    );
+
+    let hints = h
+        .store
+        .credential_hints(
+            &h.account,
+            &opengrok_core::id::CoworkerId::from_stored(agent),
+        )
+        .await
+        .expect("hints");
+    assert_eq!(hints.len(), 1, "{hints:?}");
+    assert_eq!(hints[0].origin, "accounts.google.com");
+    assert_eq!(hints[0].credential_id, "cred_nativechat_1");
+    assert!(!format!("{hints:?}").contains(SECRET), "{hints:?}");
 }

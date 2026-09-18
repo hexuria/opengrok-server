@@ -302,7 +302,7 @@ pub(crate) async fn tools_for_coworker(
     let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
     let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
-    context.screen_hold = match state
+    let transcript_hold = match state
         .auth
         .store
         .gateway_transcript(&coworker_id, account_id)
@@ -315,6 +315,8 @@ pub(crate) async fn tools_for_coworker(
         // submit path still refuses to log secrets.
         Err(_) => false,
     };
+    context.screen_hold =
+        transcript_hold || pending_form_or_credential_hold(state, account_id, &coworker_id).await;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -372,6 +374,36 @@ pub(crate) async fn tools_for_coworker(
     }
 
     Some(ToolRunner::new(executor, context))
+}
+
+/// An unresolved user-form **or** a pending `credential.request` must hold the screen even
+/// when NativeChat never minted a gateway card for the credential wait.
+async fn pending_form_or_credential_hold(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+) -> bool {
+    let Ok(run_ids) = state.auth.store.awaiting_approval(account_id).await else {
+        return false;
+    };
+    for run_id in run_ids {
+        let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
+            continue;
+        };
+        if !crate::gateway::conversation::run_belongs_to(&run, coworker_id) {
+            continue;
+        }
+        if matches!(
+            run.pending.as_ref().map(|pending| pending.reason),
+            Some(
+                opengrok_core::run::SuspendReason::UserForm
+                    | opengrok_core::run::SuspendReason::Credential
+            )
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.
@@ -2357,8 +2389,9 @@ async fn append_events(
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
         if event.event_type == opengrok_wire::agui::EventType::Custom
-            && event.extra.get("name").and_then(|name| name.as_str())
-                == Some("run-awaiting-approval")
+            && crate::gateway::conversation::is_suspend_custom(
+                event.extra.get("name").and_then(|name| name.as_str()),
+            )
         {
             let call_id = event
                 .extra
@@ -2854,6 +2887,17 @@ fn resume_outcome(
                 "The person submitted the form. It was filled into the page. Secret field values were typed into the page and never shown to you.".to_string()
             } else {
                 "The person dismissed the form without filling anything. Continue without those credentials; do not type secrets with `computer`.".to_string()
+            })
+        }
+        opengrok_core::run::SuspendReason::Credential => {
+            opengrok_harness::ResumeOutcome::Settled(if approved {
+                opengrok_tools::credential::tool_result_content(
+                    opengrok_tools::credential::CredentialStatus::Filled,
+                )
+            } else {
+                opengrok_tools::credential::tool_result_content(
+                    opengrok_tools::credential::CredentialStatus::Denied,
+                )
             })
         }
         _ if approved => opengrok_harness::ResumeOutcome::Approved,
@@ -3533,6 +3577,16 @@ mod tests {
                 opengrok_harness::ResumeOutcome::Settled(_)
             ),
             "a yes on a user-form must not re-run request_user_form"
+        );
+        assert!(
+            matches!(
+                resume_outcome(
+                    true,
+                    &pending(opengrok_core::run::SuspendReason::Credential)
+                ),
+                opengrok_harness::ResumeOutcome::Settled(_)
+            ),
+            "a yes on credential.request must not re-run the tool"
         );
 
         // None of them blames the model or reads as an error. A refusal is a decision somebody

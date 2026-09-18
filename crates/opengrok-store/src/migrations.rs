@@ -883,6 +883,25 @@ update grant_view
 update ceiling_view
    set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
  where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` joined the built-ins the same way. Site passwords are NOT stored;
+-- this tool only asks the client to fill a saved login.
+update grant_view
+   set profile = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+
+-- Site-login matching metadata only. NEVER a password. Vault stays connector/API secrets.
+create table if not exists credential_hint (
+    account_id     text   not null,
+    coworker_id    text   not null,
+    origin         text   not null,
+    username       text   not null default '',
+    credential_id  text   not null,
+    updated_at_ms  bigint not null,
+    primary key (account_id, coworker_id, origin)
+);
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

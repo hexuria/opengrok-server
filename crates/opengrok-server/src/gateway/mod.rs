@@ -17,6 +17,7 @@
 
 pub mod cards;
 pub mod conversation;
+pub mod credential;
 pub mod group;
 pub mod hooks;
 pub mod lifecycle;

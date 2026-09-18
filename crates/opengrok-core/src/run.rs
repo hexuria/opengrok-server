@@ -94,6 +94,10 @@ pub enum SuspendReason {
     /// approval of a tool that will then run: submit types into the box outside `computer_use`,
     /// and the tool result is synthesised so a secret never re-enters the executor.
     UserForm,
+    /// The bot asked the client to fill a saved site login (`credential.request`). Not an
+    /// approval that then runs a tool: NativeChat fills the box and POSTs a status. Site
+    /// passwords never enter the vault, the journal, or a tool result.
+    Credential,
 }
 
 impl SuspendReason {
@@ -103,16 +107,18 @@ impl SuspendReason {
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
             Self::UserForm => "user-form",
+            Self::Credential => "credential",
         }
     }
 
     /// From the wire word; anything unrecognised is the default, which is the closed reading
-    /// (an exec-consent card asks the machine owner, the strictest of the four).
+    /// (an exec-consent card asks the machine owner, the strictest of the kinds).
     pub fn from_stored(word: &str) -> Self {
         match word {
             "policy-approval" => Self::PolicyApproval,
             "auto-review" => Self::AutoReview,
             "user-form" => Self::UserForm,
+            "credential" => Self::Credential,
             _ => Self::ExecConsent,
         }
     }
@@ -1084,6 +1090,24 @@ mod tests {
             RunStatus::from_stored("something we have never heard of"),
             RunStatus::Running,
             "an unreadable status must not be mistaken for an ending"
+        );
+    }
+
+    #[test]
+    fn the_stored_suspend_reason_word_round_trips() {
+        for reason in [
+            SuspendReason::ExecConsent,
+            SuspendReason::PolicyApproval,
+            SuspendReason::AutoReview,
+            SuspendReason::UserForm,
+            SuspendReason::Credential,
+        ] {
+            assert_eq!(SuspendReason::from_stored(reason.as_str()), reason);
+        }
+        assert_eq!(
+            SuspendReason::from_stored("something we have never heard of"),
+            SuspendReason::ExecConsent,
+            "an unreadable reason is the closed reading"
         );
     }
 

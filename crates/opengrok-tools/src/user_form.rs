@@ -370,7 +370,7 @@ pub fn tool_result_content(
     };
     let secret_note = "Secret field values were typed into the page and never shown to you.";
     let observe = if types_only_first_field(form) {
-        "Screenshot and confirm what the page shows now; do not claim login succeeded. Auth is one challenge per form: if a password page is next, call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
+        "Screenshot and confirm what the page shows now; do not claim login succeeded. Auth is one challenge per form: if a password page is next, prefer `credential.request` when a saved login is likely, otherwise call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
     } else {
         "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form."
     };

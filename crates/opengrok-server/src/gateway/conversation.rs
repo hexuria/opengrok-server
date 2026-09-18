@@ -967,10 +967,17 @@ pub(crate) struct Suspension {
     pub(crate) why: Option<String>,
 }
 
+pub(crate) fn is_suspend_custom(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some("run-awaiting-approval") | Some(opengrok_tools::REQUEST_CREDENTIAL)
+    )
+}
+
 pub(crate) fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
     for event in events {
         if event.event_type == opengrok_wire::agui::EventType::Custom
-            && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
+            && is_suspend_custom(event.extra.get("name").and_then(Value::as_str))
         {
             let call_id = event
                 .extra
@@ -1070,6 +1077,8 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             &suspension.arguments,
             now_ms(),
         )),
+        // NativeChat paints CUSTOM `credential.request`. No Grok Bot chrome.
+        SuspendReason::Credential => None,
         // Reverse-exec consent on anything but user_machine_shell: nothing renders it.
         _ => None,
     }
@@ -1088,33 +1097,47 @@ pub(crate) async fn emit_suspension(
     agent_id: &str,
     suspension: &Suspension,
 ) -> bool {
-    let Some(card) = card_for(suspension) else {
+    let card = card_for(suspension);
+    if card.is_none() && suspension.reason != opengrok_core::run::SuspendReason::Credential {
         tracing::warn!(
             tool = %suspension.tool,
             reason = suspension.reason.as_str(),
             "a run suspended for a reason that has no card yet; the turn ends as an answer"
         );
         return false;
-    };
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .append_gateway_entry(coworker_id, account, &card, now_ms())
-        .await
-    {
-        tracing::error!(%error, "could not append the suspension card entry");
     }
-    live::emit_transcript(state, agent_id, account, "appended", card);
+    if let Some(card) = card {
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(coworker_id, account, &card, now_ms())
+            .await
+        {
+            tracing::error!(%error, "could not append the suspension card entry");
+        }
+        live::emit_transcript(state, agent_id, account, "appended", card);
+    }
     // The turn is paused, not running. It resumes when the card is answered.
     live::set_running(state, agent_id, false, json!({})).await;
-    if suspension.reason == opengrok_core::run::SuspendReason::UserForm {
-        super::user_form::spawn_form_hold_timeout(
-            state.clone(),
-            account.clone(),
-            coworker_id.clone(),
-            agent_id.to_string(),
-        );
+    match suspension.reason {
+        opengrok_core::run::SuspendReason::UserForm => {
+            super::user_form::spawn_form_hold_timeout(
+                state.clone(),
+                account.clone(),
+                coworker_id.clone(),
+                agent_id.to_string(),
+            );
+        }
+        opengrok_core::run::SuspendReason::Credential => {
+            super::credential::spawn_credential_hold_timeout(
+                state.clone(),
+                account.clone(),
+                coworker_id.clone(),
+                agent_id.to_string(),
+            );
+        }
+        _ => {}
     }
     true
 }

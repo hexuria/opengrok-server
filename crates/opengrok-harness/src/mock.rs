@@ -330,6 +330,37 @@ impl MockDoor {
         }
     }
 
+    /// A door that asks the client to fill a saved login (`credential.request`).
+    pub fn asking_for_credential() -> Self {
+        Self {
+            script: Self::credential_script(),
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
+    fn credential_script() -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::Text("I'll use a saved login".to_string()),
+            ModelDelta::ToolCallStart {
+                id: "mock-cred-1".to_string(),
+                name: opengrok_tools::REQUEST_CREDENTIAL.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "mock-cred-1".to_string(),
+                delta: serde_json::json!({
+                    "origin": "accounts.google.com",
+                    "username": "ada@example.com",
+                    "password": "s3cret-should-never-land"
+                })
+                .to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "mock-cred-1".to_string(),
+            },
+        ]
+    }
+
     fn user_form_script() -> Vec<ModelDelta> {
         vec![
             ModelDelta::Text("I need you to sign in".to_string()),

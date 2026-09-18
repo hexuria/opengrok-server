@@ -3031,3 +3031,71 @@ impl PgStore {
         Ok(())
     }
 }
+
+/// Site-login matching metadata. Origin + opaque client `credentialId` + username.
+/// NEVER a password — that stays in NativeChat / the person's password manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialHint {
+    pub origin: String,
+    pub username: String,
+    pub credential_id: String,
+}
+
+impl PgStore {
+    /// Remember that this coworker has a saved login at `origin`. Overwrites the previous
+    /// hint for that origin. Callers must not pass a password; the table has no column for one.
+    pub async fn upsert_credential_hint(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &CoworkerId,
+        origin: &str,
+        username: &str,
+        credential_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into credential_hint
+               (account_id, coworker_id, origin, username, credential_id, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (account_id, coworker_id, origin) do update set
+               username = excluded.username,
+               credential_id = excluded.credential_id,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker_id.as_str())
+        .bind(origin)
+        .bind(username)
+        .bind(credential_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn credential_hints(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &CoworkerId,
+    ) -> StoreResult<Vec<CredentialHint>> {
+        let rows = sqlx::query(
+            "select origin, username, credential_id
+               from credential_hint
+              where account_id = $1 and coworker_id = $2
+              order by origin",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut hints = Vec::with_capacity(rows.len());
+        for row in rows {
+            hints.push(CredentialHint {
+                origin: row.try_get("origin")?,
+                username: row.try_get("username")?,
+                credential_id: row.try_get("credential_id")?,
+            });
+        }
+        Ok(hints)
+    }
+}

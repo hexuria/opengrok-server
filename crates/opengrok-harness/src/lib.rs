@@ -388,7 +388,8 @@ async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
     if let Some(sink) = sink
         && !events.is_empty()
     {
-        sink.emit(events).await;
+        let clean: Vec<Event> = events.iter().cloned().map(scrub_event_secrets).collect();
+        sink.emit(&clean).await;
     }
 }
 
@@ -782,6 +783,7 @@ async fn converse(
 /// Computer-step shots are `agent`: live SSE may carry the PNG for the Computer pane, but the
 /// journal drops the bytes so a reconnecting client is not flooded with every click. Missing
 /// `visibility` is a legacy frame — those PNGs were already first-class events and stay.
+/// Accidental `password` keys are dropped here too — site logins must not persist.
 fn strip_agent_png(mut event: Event) -> Event {
     if event.event_type != opengrok_wire::agui::EventType::ToolCallResult {
         return event;
@@ -801,8 +803,21 @@ fn strip_agent_png(mut event: Event) -> Event {
     event
 }
 
+fn scrub_event_secrets(mut event: Event) -> Event {
+    let extra = serde_json::Value::Object(event.extra.clone());
+    if let serde_json::Value::Object(map) = opengrok_tools::credential::scrub_secret_keys(&extra) {
+        event.extra = map;
+    }
+    event
+}
+
 fn for_journal(events: &[Event]) -> Vec<Event> {
-    events.iter().cloned().map(strip_agent_png).collect()
+    events
+        .iter()
+        .cloned()
+        .map(strip_agent_png)
+        .map(scrub_event_secrets)
+        .collect()
 }
 
 async fn record_round(
@@ -2052,6 +2067,52 @@ mod tests {
         assert_eq!(
             end_with_bytes, 1,
             "journal keeps the end pin PNG: {journaled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_journal_scrubs_a_password_off_credential_request() {
+        let journal = MemoryJournal::new();
+        let runner = tool_runner_with(|executor| executor);
+        let events = run_conversation(
+            &MockDoor::asking_for_credential(),
+            Some(&runner),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let custom = events.iter().find(|event| {
+            event.event_type == EventType::Custom
+                && event.extra.get("name").and_then(|v| v.as_str())
+                    == Some(opengrok_tools::REQUEST_CREDENTIAL)
+        });
+        let custom = custom.expect("credential.request CUSTOM");
+        assert_eq!(
+            custom.extra.get("origin").and_then(|v| v.as_str()),
+            Some("accounts.google.com")
+        );
+        assert!(
+            custom
+                .extra
+                .get("arguments")
+                .and_then(|v| v.get("password"))
+                .is_none(),
+            "{custom:?}"
+        );
+        let journaled = serde_json::to_string(&journal.batches()).unwrap_or_default();
+        assert!(
+            !journaled.contains("s3cret-should-never-land"),
+            "journal must not keep a site password: {journaled}"
+        );
+        assert!(journaled.contains("credential.request"), "{journaled}");
+        assert!(
+            !serde_json::to_string(&custom)
+                .unwrap_or_default()
+                .contains("s3cret-should-never-land"),
+            "{custom:?}"
         );
     }
 
