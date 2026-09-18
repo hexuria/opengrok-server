@@ -334,14 +334,16 @@ pub fn default_settings() -> serde_json::Value {
         "sidebarSections": [],
         "hasSeenOnboarding": true,
         // User-network tunnel. Default off: docker host-network is not the prod path.
-        // `isEgressTunnelAvailable` is this flag OR `OG_EGRESS_TUNNEL_ENABLED=1` /
-        // `SAND_EGRESS_TUNNEL_ENABLED=1`. The box agent owns the tunnel endpoint.
+        // Host intent only. `isEgressTunnelAvailable` is this flag (or env) AND the
+        // box's `/v1/info` `egress_tunnel.ready`, falling back to the flag when info
+        // is unavailable. The box agent owns the tunnel endpoint; we do not dial WS.
         "egressTunnelEnabled": false
     })
 }
 
 /// Grok host: `process.env.SAND_EGRESS_TUNNEL_ENABLED === "1"`. OpenGrok also honors
-/// `OG_EGRESS_TUNNEL_ENABLED`. The in-app toggle is `egressTunnelEnabled`. Any one is enough.
+/// `OG_EGRESS_TUNNEL_ENABLED`. The in-app toggle is `egressTunnelEnabled`. Any one is
+/// host intent — not yet "the laptop client is attached".
 #[must_use]
 pub fn egress_tunnel_from(
     settings: &serde_json::Value,
@@ -363,6 +365,41 @@ pub fn egress_tunnel_available(settings: &serde_json::Value) -> bool {
         std::env::var("OG_EGRESS_TUNNEL_ENABLED").ok().as_deref(),
         std::env::var("SAND_EGRESS_TUNNEL_ENABLED").ok().as_deref(),
     )
+}
+
+/// Host wants the tunnel, AND the live box reports `egress_tunnel.ready` when we
+/// can ask `/v1/info`. Info missing (no computer, no active box, timeout, old
+/// guest) falls back to the host flag. OpenGrok does not dial the guest WS.
+pub async fn is_egress_tunnel_available(state: &GatewayState) -> bool {
+    let host_wants = egress_tunnel_available(
+        &state
+            .settings
+            .lock()
+            .map(|settings| settings.clone())
+            .unwrap_or_else(|_| default_settings()),
+    );
+    if !host_wants {
+        return false;
+    }
+    let Some(computer) = state.agui.computer.as_ref() else {
+        return true;
+    };
+    let Some(box_id) = live_box_id_for_egress(state).await else {
+        return true;
+    };
+    opengrok_box::EgressTunnel::advertised(true, computer.egress_tunnel(&box_id).await)
+}
+
+async fn live_box_id_for_egress(state: &GatewayState) -> Option<String> {
+    let agent = state.active_agent.lock().ok()?.clone()?;
+    let (coworker, _) = state
+        .agui
+        .auth
+        .store
+        .load_coworker(&opengrok_core::id::CoworkerId::from_stored(agent))
+        .await
+        .ok()?;
+    coworker.computer().map(|id| id.as_str().to_string())
 }
 
 /// The gateway's whole access decision, in the order the shipped host applies it.
@@ -439,5 +476,21 @@ mod tests {
             None,
             None
         ));
+    }
+
+    #[test]
+    fn advertised_needs_the_box_ready_when_info_is_present() {
+        let ready = opengrok_box::EgressTunnel {
+            enabled: true,
+            ready: true,
+        };
+        let waiting = opengrok_box::EgressTunnel {
+            enabled: true,
+            ready: false,
+        };
+        assert!(opengrok_box::EgressTunnel::advertised(true, None));
+        assert!(opengrok_box::EgressTunnel::advertised(true, Some(ready)));
+        assert!(!opengrok_box::EgressTunnel::advertised(true, Some(waiting)));
+        assert!(!opengrok_box::EgressTunnel::advertised(false, Some(ready)));
     }
 }

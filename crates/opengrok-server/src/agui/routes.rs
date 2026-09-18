@@ -67,8 +67,10 @@ pub struct AgUiState {
 
 impl AgUiState {
     /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
-    /// or host setting `egressTunnelEnabled`. Docker host-network is not this path; the box
-    /// agent owns the tunnel endpoint and we honor the flag + gate leave-box tools.
+    /// or host setting `egressTunnelEnabled`. This is host *intent*. Availability also
+    /// needs the box's `/v1/info` `egress_tunnel.ready` (laptop client attached); missing
+    /// info falls back to this flag. Docker host-network is not the prod path; OpenGrok
+    /// does not dial the guest WS.
     #[must_use]
     pub fn egress_tunnel_enabled(&self) -> bool {
         let settings = self
@@ -77,6 +79,20 @@ impl AgUiState {
             .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
             .unwrap_or_else(crate::gateway::default_settings);
         crate::gateway::egress_tunnel_available(&settings)
+    }
+
+    /// Host intent AND this box's `egress_tunnel.ready`, or host intent alone when
+    /// `/v1/info` cannot be asked.
+    pub async fn egress_tunnel_for(
+        &self,
+        computer: &dyn opengrok_box::Computer,
+        box_id: &str,
+    ) -> bool {
+        let host_wants = self.egress_tunnel_enabled();
+        if !host_wants {
+            return false;
+        }
+        opengrok_box::EgressTunnel::advertised(true, computer.egress_tunnel(box_id).await)
     }
 }
 
@@ -286,6 +302,7 @@ pub(crate) async fn tools_for_coworker(
     // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
     // never told about them, so it cannot be sent down a dead end.
     let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
+    let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     context.screen_hold = match state
         .auth
@@ -313,7 +330,7 @@ pub(crate) async fn tools_for_coworker(
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel(state.egress_tunnel_enabled());
+        .with_egress_tunnel(egress_tunnel);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.

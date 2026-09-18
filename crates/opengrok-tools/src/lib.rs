@@ -1000,9 +1000,10 @@ impl Executor {
             );
         }
 
-        // Prod traffic reroute: the box agent's egress tunnel is the user-network path.
-        // Docker host-network is not that. With no standing auto-review allow, leave-box
-        // tools raise the Review-an-action card. A primary-gate Ask subsumes this (one card).
+        // Prod traffic reroute: host wants the tunnel AND the box reports ready (laptop
+        // client attached). Docker host-network is not that. With no standing auto-review
+        // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
+        // subsumes this (one card).
         if self.egress_tunnel
             && matches!(call.name.as_str(), "computer" | "open_url" | RUN_RECIPE)
             && !review_approved

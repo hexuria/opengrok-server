@@ -615,11 +615,12 @@ async fn command(
         "dismissTray" | "clearTrays" => reply(StatusCode::OK, Value::Null),
         "isAgentNetworkEnabled" | "isGlobalSearchEnabled" => reply(StatusCode::OK, json!(false)),
         "isEgressTunnelAvailable" => {
-            // Docker host-network is not the prod path. The box agent owns the tunnel
-            // endpoint; we honor env + host setting and gate leave-box tools on it.
+            // Host intent AND box `/v1/info` `egress_tunnel.ready`. Missing info
+            // falls back to the host flag. Docker host-network is not the prod path;
+            // OpenGrok does not dial the guest WS.
             reply(
                 StatusCode::OK,
-                json!(super::egress_tunnel_available(&settings_snapshot(&state))),
+                json!(super::is_egress_tunnel_available(&state).await),
             )
         }
 

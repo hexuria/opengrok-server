@@ -22,6 +22,39 @@ pub mod docker;
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
 pub use docker::DockerComputer;
 
+/// Guest `/v1/info` `capabilities.egress_tunnel` (hexuria/box).
+///
+/// `enabled` is `BOX_EGRESS_TUNNEL=1`: the guest started the CONNECT proxy on
+/// `127.0.0.1:8791` and launched Chromium with `--proxy-server`. `ready` means a
+/// user-machine client is attached on the WS the box agent owns. OpenGrok does
+/// not dial that WS; we only report availability and gate leave-box tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgressTunnel {
+    pub enabled: bool,
+    pub ready: bool,
+}
+
+impl EgressTunnel {
+    /// `None` when the capability is absent or malformed — callers then fall
+    /// back to the host flag only. Both booleans must be present; a partial
+    /// object is treated as "info unavailable", not as `ready: false`.
+    pub fn from_info(info: &serde_json::Value) -> Option<Self> {
+        let cap = info.get("capabilities")?.get("egress_tunnel")?;
+        Some(Self {
+            enabled: cap.get("enabled").and_then(serde_json::Value::as_bool)?,
+            ready: cap.get("ready").and_then(serde_json::Value::as_bool)?,
+        })
+    }
+
+    /// `isEgressTunnelAvailable`: host wants the tunnel AND the box is ready.
+    /// Missing guest info falls back to the host flag (old guests, ascii,
+    /// headless, timeout). Docker host-network is still not the prod path.
+    #[must_use]
+    pub fn advertised(host_wants: bool, box_cap: Option<Self>) -> bool {
+        host_wants && box_cap.is_none_or(|cap| cap.ready)
+    }
+}
+
 /// What a command did. `truncated` is carried rather than dropped: a tail is not the output, and a
 /// coworker reasoning over a silently clipped log reaches confident wrong conclusions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,6 +394,14 @@ pub trait Computer: Send + Sync {
     fn kind(&self) -> &'static str {
         "local-docker"
     }
+
+    /// Guest `/v1/info` `capabilities.egress_tunnel`, or `None` when the guest
+    /// cannot be asked or does not advertise the capability. Default `None` so
+    /// ascii / headless / test stubs fall back to the host flag. A Docker
+    /// desktop probes box-host; it does not dial the tunnel WS.
+    async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +474,56 @@ mod tests {
     #[test]
     fn no_screen_is_a_refusal_not_an_outage() {
         assert!(matches!(no_screen(), BoxError::Refused { status: 501, .. }));
+    }
+
+    #[test]
+    fn egress_tunnel_from_info_reads_enabled_and_ready() {
+        let info = serde_json::json!({
+            "capabilities": {
+                "exec": { "enabled": true, "ready": true },
+                "egress_tunnel": { "enabled": true, "ready": false }
+            }
+        });
+        assert_eq!(
+            EgressTunnel::from_info(&info),
+            Some(EgressTunnel {
+                enabled: true,
+                ready: false
+            })
+        );
+        assert!(
+            EgressTunnel::from_info(&serde_json::json!({"capabilities": {"exec": {}}})).is_none(),
+            "old guests without the capability fall back to the host flag"
+        );
+        assert!(
+            EgressTunnel::from_info(&serde_json::json!({
+                "capabilities": { "egress_tunnel": { "enabled": true } }
+            }))
+            .is_none(),
+            "partial objects are unavailable, not ready:false"
+        );
+    }
+
+    #[test]
+    fn advertised_is_host_wants_and_box_ready() {
+        let ready = EgressTunnel {
+            enabled: true,
+            ready: true,
+        };
+        let not_ready = EgressTunnel {
+            enabled: true,
+            ready: false,
+        };
+        assert!(!EgressTunnel::advertised(false, None));
+        assert!(
+            EgressTunnel::advertised(true, None),
+            "info unavailable → host flag only"
+        );
+        assert!(EgressTunnel::advertised(true, Some(ready)));
+        assert!(
+            !EgressTunnel::advertised(true, Some(not_ready)),
+            "enabled guest with no laptop client is not available"
+        );
+        assert!(!EgressTunnel::advertised(false, Some(ready)));
     }
 }

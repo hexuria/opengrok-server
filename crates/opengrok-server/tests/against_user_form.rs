@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use opengrok_box::{BoxResult, CommandOutput, Computer, CuaAction, Screenshot, StartedCommand};
+use opengrok_box::{
+    BoxResult, CommandOutput, Computer, CuaAction, EgressTunnel, Screenshot, StartedCommand,
+};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::id::AccountId;
 use opengrok_harness::MockDoor;
@@ -47,6 +49,7 @@ const EMAIL: &str = "ada@example.com";
 struct FillStub {
     acts: Mutex<Vec<CuaAction>>,
     shots: Mutex<u32>,
+    egress: Mutex<Option<EgressTunnel>>,
 }
 
 impl FillStub {
@@ -55,6 +58,9 @@ impl FillStub {
     }
     fn shots(&self) -> u32 {
         *self.shots.lock().expect("shots")
+    }
+    fn set_egress(&self, cap: Option<EgressTunnel>) {
+        *self.egress.lock().expect("egress") = cap;
     }
 }
 
@@ -132,6 +138,9 @@ impl Computer for FillStub {
     async fn act(&self, _box_id: &str, action: &CuaAction) -> BoxResult<()> {
         self.acts.lock().expect("acts").push(action.clone());
         Ok(())
+    }
+    async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
+        *self.egress.lock().expect("egress")
     }
 }
 
@@ -1045,4 +1054,54 @@ async fn egress_tunnel_follows_host_setting() {
     let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body, json!(false), "toggle off: {body}");
+}
+
+#[tokio::test]
+async fn egress_tunnel_needs_box_ready_when_info_is_present() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-egress-box-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "egress-box").await;
+    let (status, _) = h.api("openAgent", json!({ "id": agent })).await;
+    assert_eq!(status, 200);
+
+    h.stub.set_egress(Some(EgressTunnel {
+        enabled: true,
+        ready: false,
+    }));
+    let (status, _) = h
+        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!(false),
+        "host wants the tunnel but no laptop client is attached: {body}"
+    );
+
+    h.stub.set_egress(Some(EgressTunnel {
+        enabled: true,
+        ready: true,
+    }));
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, json!(true), "ready box + host setting: {body}");
+
+    let (status, _) = h
+        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
+        .await;
+    assert_eq!(status, 200);
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!(false),
+        "a ready box does not override a host that opted out: {body}"
+    );
 }

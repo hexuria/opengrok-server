@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 use crate::{
-    BoxError, BoxResult, CommandOutput, Computer, CuaAction, ImageStatus, Screenshot,
+    BoxError, BoxResult, CommandOutput, Computer, CuaAction, EgressTunnel, ImageStatus, Screenshot,
     StartedCommand, no_screen,
 };
 
@@ -592,6 +592,40 @@ impl Computer for DockerComputer {
             CuaAction::Scroll { x, y, dx, dy } => guest.scroll(*x, *y, *dx, *dy).await,
         };
         done.map(|_| ()).map_err(guest_error)
+    }
+
+    async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
+        let guest = match self.guest(box_id).await {
+            Ok(guest) => guest,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    %box_id,
+                    "guest /v1/info unreachable; falling back to host egress flag"
+                );
+                return None;
+            }
+        };
+        let info = match tokio::time::timeout(std::time::Duration::from_secs(1), guest.info()).await
+        {
+            Ok(Ok(info)) => info,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    %error,
+                    %box_id,
+                    "guest /v1/info refused; falling back to host egress flag"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    %box_id,
+                    "guest /v1/info timed out; falling back to host egress flag"
+                );
+                return None;
+            }
+        };
+        EgressTunnel::from_info(&info)
     }
 }
 
