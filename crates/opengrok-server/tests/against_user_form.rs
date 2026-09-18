@@ -1784,8 +1784,18 @@ async fn stacked_user_forms_in_one_completion_each_get_an_entry_id() {
 
     let cards = h.wait_for_forms(&agent, 3).await;
     assert_eq!(cards.len(), 3, "{cards:?}");
-    for (card, id) in cards.iter().zip(entry_ids.iter()) {
-        assert_eq!(card["id"].as_str(), Some(id.as_str()), "{card}");
+    // Tail is newest-first; SSE CUSTOMs are oldest-first. Join on id, not zip order.
+    let card_ids: Vec<&str> = cards
+        .iter()
+        .filter_map(|card| card["id"].as_str())
+        .collect();
+    for id in &entry_ids {
+        assert!(
+            card_ids.contains(&id.as_str()),
+            "gateway card missing for {id}: {cards:?}"
+        );
+    }
+    for card in &cards {
         assert!(
             card.get("callId")
                 .and_then(Value::as_str)

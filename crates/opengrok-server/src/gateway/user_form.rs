@@ -1096,6 +1096,14 @@ fn overlay_form(event: &mut Value, form: &Value) {
     if let Some(id) = form.get("id") {
         map.insert("entryId".to_string(), id.clone());
     }
+    if map
+        .get("callId")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        && let Some(call_id) = form.get("callId")
+    {
+        map.insert("callId".to_string(), call_id.clone());
+    }
     if let Some(message) = form.get("message") {
         map.insert("message".to_string(), message.clone());
         if let Some(request) = message.get("formRequest") {
@@ -1194,6 +1202,23 @@ pub(crate) fn hydrate_agui_events(
         {
             overlay_form(event, form);
             used.insert(id);
+            continue;
+        }
+        // Same-completion stacked Website login cards share a fingerprint. Join
+        // on `callId` so replay does not stamp the last card onto the first TOOL_CALL.
+        if let Some(call_id) = event
+            .get("callId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            && let Some(form) = forms.iter().find(|entry| {
+                let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
+                !used.contains(id) && entry.get("callId").and_then(Value::as_str) == Some(call_id)
+            })
+        {
+            overlay_form(event, form);
+            if let Some(id) = form.get("id").and_then(Value::as_str) {
+                used.insert(id.to_string());
+            }
             continue;
         }
         if let Some(fingerprint) = event_fingerprint(event)
@@ -1367,6 +1392,63 @@ mod tests {
         let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
         assert_eq!(out[0]["entryId"], "e_form");
         assert_eq!(out[1]["entryId"], "e_form");
+    }
+
+    #[test]
+    fn hydrate_joins_stacked_same_fingerprint_forms_by_call_id() {
+        let mut forms = Vec::new();
+        for (id, call) in [("e_3", "c3"), ("e_1", "c1"), ("e_2", "c2")] {
+            let mut form = email_form(id, None, 50);
+            form["callId"] = json!(call);
+            forms.push(form);
+        }
+        let events = vec![
+            json!({"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "request_user_form"}),
+            json!({"type": "TOOL_CALL_START", "toolCallId": "c2", "toolCallName": "request_user_form"}),
+            json!({"type": "TOOL_CALL_START", "toolCallId": "c3", "toolCallName": "request_user_form"}),
+            json!({
+                "type": "CUSTOM",
+                "name": "run-awaiting-approval",
+                "reason": "user-form",
+                "callId": "c1",
+                "arguments": {
+                    "title": "Sign in",
+                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
+                }
+            }),
+            json!({
+                "type": "CUSTOM",
+                "name": "run-awaiting-approval",
+                "reason": "user-form",
+                "callId": "c2",
+                "arguments": {
+                    "title": "Sign in",
+                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
+                }
+            }),
+            json!({
+                "type": "CUSTOM",
+                "name": "run-awaiting-approval",
+                "reason": "user-form",
+                "callId": "c3",
+                "arguments": {
+                    "title": "Sign in",
+                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
+                }
+            }),
+        ];
+        let out = hydrate_agui_events(events, &forms, 0, 100);
+        let by_call: Vec<(&str, &str)> = out
+            .iter()
+            .filter(|event| event["type"] == "TOOL_CALL_START")
+            .map(|event| {
+                (
+                    event["toolCallId"].as_str().unwrap(),
+                    event["entryId"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(by_call, vec![("c1", "e_1"), ("c2", "e_2"), ("c3", "e_3")]);
     }
 
     #[test]
