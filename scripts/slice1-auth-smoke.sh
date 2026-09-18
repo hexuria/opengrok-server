@@ -78,13 +78,26 @@ new_refresh=$(echo "$refreshed" | jq -r '.refresh_token // empty')
 [ "$new_refresh" != "$refresh" ] || fail "refresh token was not rotated"
 ok "rotated: new access_token and refresh_token issued"
 
-echo "5. the old refresh token stops working"
-# Without this, a leaked refresh token is immortal.
-old_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/oauth/token" \
+echo "5. the just-rotated-away refresh reuses the current pair (short grace)"
+# NativeChat can fire concurrent /oauth/token with the same refresh. One-shot rotate
+# without grace 401'd the loser and cleared the session. Inside REFRESH_GRACE_MS (45s)
+# the previous hash returns the already-minted current refresh — not a second rotation
+# and not 401. After the window the old hash is dead; that is the account unit test,
+# not a 45s sleep in this smoke.
+reused=$(curl -fsS -X POST "$BASE/oauth/token" \
   -H 'content-type: application/json' \
-  -d "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"$refresh\"}")
-[ "$old_status" = "401" ] || fail "reusing the old refresh token returned $old_status, expected 401"
-ok "the rotated-away token is refused with 401"
+  -d "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"$refresh\"}") \
+  || fail "grace reuse of the previous refresh failed"
+reused_refresh=$(echo "$reused" | jq -r '.refresh_token // empty')
+[ -n "$reused_refresh" ] || fail "no refresh_token on grace reuse: $reused"
+[ "$reused_refresh" = "$new_refresh" ] || fail "grace reuse must return the current refresh, not rotate again: $reused"
+ok "within grace, the previous token returns the current pair"
+
+unknown_status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/oauth/token" \
+  -H 'content-type: application/json' \
+  -d '{"grant_type":"refresh_token","refresh_token":"ogr_not_a_real_token"}')
+[ "$unknown_status" = "401" ] || fail "unknown refresh token returned $unknown_status, expected 401"
+ok "an unknown refresh token is still 401"
 
 echo "6. the same person signing in twice is one account, not two"
 # The client dev-logs-in on every launch. Two accounts would split somebody's coworkers in half.
@@ -108,4 +121,4 @@ if [ "$count" != "skip" ]; then
 fi
 
 echo
-echo "PASS — slice 1: a client can sign in, stay signed in, and cannot reuse a spent token."
+echo "PASS — slice 1: a client can sign in, stay signed in, and a racey refresh reuses the current pair."
