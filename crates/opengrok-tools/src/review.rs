@@ -64,8 +64,8 @@ pub enum AwaitingReason {
     AutoReview,
     /// The bot raised an in-chat `user-form` and is waiting for the person (`request_user_form`).
     UserForm,
-    /// The bot asked the client to fill a saved site login (`credential.request`). NativeChat
-    /// fills the box; the server never sees the password.
+    /// The bot asked NativeChat to broker a saved site login (`credential.request`). NativeChat
+    /// establishes the session out of agent view; the server never sees the password.
     Credential,
 }
 

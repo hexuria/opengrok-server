@@ -631,7 +631,7 @@ mod tests {
                 }),
             },
             opengrok_tools::AwaitingReason::Credential,
-            Some("Waiting for a saved credential"),
+            Some("Waiting for a saved session"),
         );
         let last = waiting.last().unwrap();
         let dumped = format!("{:?}", last.extra);

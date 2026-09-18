@@ -330,7 +330,7 @@ impl MockDoor {
         }
     }
 
-    /// A door that asks the client to fill a saved login (`credential.request`).
+    /// A door that asks NativeChat to broker a saved login (`credential.request`).
     pub fn asking_for_credential() -> Self {
         Self {
             script: Self::credential_script(),

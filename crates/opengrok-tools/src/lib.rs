@@ -1047,7 +1047,8 @@ impl Executor {
             return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
         }
 
-        // HITL wait, not fill-then-run. NativeChat fills the box; we never see the password.
+        // HITL wait, not fill-then-run. NativeChat brokers a session out of agent view;
+        // we never see the password and must not type one into the box.
         // A missing origin is a refusal the model can retry, not a hang.
         if call.name == REQUEST_CREDENTIAL {
             if let Gate::Deny(why) = &gate {
@@ -1056,7 +1057,7 @@ impl Executor {
             if context.screen_hold {
                 return ToolResult::refused(
                     &call.id,
-                    "a form, saved-credential fill, or computer handoff is already open on this conversation; wait for the person to finish it",
+                    "a form, saved-login session, or computer handoff is already open on this conversation; wait for the person to finish it",
                 );
             }
             if crate::credential::origin_of(&arguments).is_none() {
@@ -1068,7 +1069,7 @@ impl Executor {
             return ToolResult::awaiting(
                 &call.id,
                 AwaitingReason::Credential,
-                "Waiting for a saved credential",
+                "Waiting for a saved session",
             );
         }
 
@@ -1510,7 +1511,8 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
         REQUEST_USER_FORM => Some((
             "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
              If a saved login for this origin is likely, call `credential.request` first and wait; \
-             on denied, missing, or error, then raise this. \
+             on session_established or filled the session is ready (observe the page — do not type \
+             the password with `computer`); on denied, missing, or error, then raise this. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server types into the focused field on the page and never shows \
@@ -1563,11 +1565,13 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         REQUEST_CREDENTIAL => Some((
-            "Ask the person's client to fill a saved login for this origin. Prefer this before \
-             a password `request_user_form` when a match is likely (the person saved this site, \
-             or you already collected a username here). The client fills the box; you never see \
-             the password. Wait. On denied, missing, or error, fall back to `request_user_form`. \
-             Do not send a password. Filling is not login — screenshot afterwards.",
+            "Ask NativeChat to broker a saved login for this origin, out of your view. Prefer \
+             this before a password `request_user_form` when a match is likely (the person saved \
+             this site, or you already collected a username here). The box receives \
+             cookies/session only; you never see a password. Do not type the password with \
+             `computer`. Wait. On session_established or filled, the session is ready — \
+             screenshot the page. On denied, missing, or error, fall back to \
+             `request_user_form`. Do not send a password.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2923,7 +2927,7 @@ mod tests {
         );
         assert!(
             names.iter().any(|name| name == REQUEST_CREDENTIAL),
-            "saved-login fill does not need a display to be offered: {names:?}"
+            "saved-login session does not need a display to be offered: {names:?}"
         );
         assert!(!headless.has_screen());
 

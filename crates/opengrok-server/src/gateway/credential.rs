@@ -1,8 +1,9 @@
 //! Site-login credential protocol — AG-UI REST and gateway twin.
 //!
 //! WHY THIS IS NOT THE VAULT. Connector credentials stay in `opengrok-store::Vault`. A site
-//! password must never be stored, journaled, or shown to the model. NativeChat fills the box;
-//! we emit `credential.offer_save` / `credential.request` and accept `credential.result`.
+//! password must never be stored, journaled, or shown to the model. NativeChat brokers the
+//! login out of agent view; the box gets cookies/session only. We emit
+//! `credential.offer_save` / `credential.request` and accept a status-only `credential.result`.
 
 use axum::Router;
 use axum::extract::State;
@@ -62,8 +63,10 @@ pub async fn result_for_caller(state: &GatewayState, args: &Value, caller: &str)
 }
 
 /// `POST /ag-ui/credential/result` and gateway `submitCredentialResult`.
-/// `{ status: filled|denied|missing|error, credentialId?, requestId?, agentId }`.
-/// A password in the body is dropped, never stored.
+/// `{ status: filled|denied|missing|error|session_established, credentialId?, requestId?, agentId }`.
+/// Status only. A password in the body is dropped, never stored. `filled` and
+/// `session_established` both mean the session was brokered, not that a password was typed
+/// into the box.
 pub async fn submit_credential_result(
     state: &GatewayState,
     args: &Value,
@@ -86,7 +89,7 @@ pub async fn submit_credential_result(
     let Some(parsed) = result_from(&scrubbed) else {
         return (
             400,
-            json!({ "error": "status must be filled, denied, missing, or error" }),
+            json!({ "error": "status must be filled, denied, missing, error, or session_established" }),
         );
     };
 
@@ -109,7 +112,7 @@ pub async fn submit_credential_result(
         );
     }
 
-    if parsed.status == CredentialStatus::Filled
+    if parsed.status.session_ready()
         && let Some(credential_id) = parsed.credential_id.as_deref()
     {
         let origin = opengrok_tools::credential::origin_of(&pending.arguments).unwrap_or_default();
@@ -259,6 +262,12 @@ mod tests {
         let parsed = result_from(&clean).expect("status");
         assert_eq!(parsed.status, CredentialStatus::Filled);
         assert_eq!(parsed.credential_id.as_deref(), Some("cred_1"));
+        let established = result_from(&json!({
+            "agentId": "cw_1",
+            "status": "session_established"
+        }))
+        .expect("session_established");
+        assert!(established.status.session_ready());
     }
 
     #[test]

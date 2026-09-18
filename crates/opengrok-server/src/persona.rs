@@ -218,15 +218,17 @@ pub fn computer_system_prompt(
          write_file tools act ONLY on your own box — they cannot touch the user's machine. When you \
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
-         Never describe work done on your box as done on the user's computer. When a page or a \
-         question asks the person to type a password, one-time code, or other secret, prefer \
-         `credential.request` (origin = the page host, username if you know it) when a saved \
-         login is likely and wait. The client fills the box; you never see the password. On \
-         denied, missing, or error, call `request_user_form` and wait. Never type secrets with \
-         `computer` — that attaches a screenshot of what was typed. The person fills in chat; \
-         the server types into the focused field and does not show you the secret. After the \
-         form settles, screenshot and confirm what the page shows; filling is not a successful \
-         login. Auth is one challenge per form: raise email, then after it settles screenshot; \
+         Never describe work done on your box as done on the user's computer. When a page asks \
+         for a site login, prefer `credential.request` (origin = the page host, username if you \
+         know it) when a saved login is likely and wait. NativeChat brokers the login out of \
+         your view; the box receives a session (cookies), not a typed password. You never see \
+         the password. Do not type secrets with `computer` — a screenshot of an observable fill \
+         would leak them. On session_established or filled, treat the session as ready: \
+         screenshot and confirm the page; do not type the password. On denied, missing, or \
+         error, call `request_user_form` and wait. The person fills in chat; the server types \
+         into the focused field and does not show you the secret. After a user-form settles, \
+         screenshot and confirm what the page shows; filling is not a successful login. Auth is \
+         one challenge per form: raise email, then after it settles screenshot; \
          if a password page is next, prefer `credential.request` when a saved login is likely, \
          otherwise call `request_user_form` with a password-only form (new entryId, \
          challengeKind \"password\"). \
@@ -559,7 +561,7 @@ mod tests {
         );
         assert!(
             !none.contains("credential.request"),
-            "no box ⇒ saved-login fill is not offered: {none}"
+            "no box ⇒ saved-login session is not offered: {none}"
         );
         assert!(
             box_only.contains("`request_user_form`"),
@@ -567,7 +569,11 @@ mod tests {
         );
         assert!(
             box_only.contains("`credential.request`"),
-            "prefer saved-login fill before a password form: {box_only}"
+            "prefer a brokered saved-login session before a password form: {box_only}"
+        );
+        assert!(
+            box_only.contains("out of your view") && box_only.contains("session_established"),
+            "saved login is a session broker, not a box password fill: {box_only}"
         );
         assert!(
             box_only.contains("one challenge per form"),
