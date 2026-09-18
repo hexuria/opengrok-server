@@ -1,3 +1,4 @@
+#![cfg(feature = "jev")]
 //! A Jev that answers from a script, so the suite never needs a key, a network or a bill.
 //!
 //! The same bargain `MockDoor` makes for the model door: it satisfies the trait and gets no

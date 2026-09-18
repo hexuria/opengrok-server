@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
+# ON BY DEFAULT so a deployment with OG_JEV_API_KEY keeps the live TypeSafe client. `dep:` so
+# cargo does not invent a feature named typesafe-sdk. Off, the binary carries one reqwest and
+# one hyper.
+default = ["jev"]
+jev = ["dep:typesafe-sdk"]
 # The mock fixture catalogue: ~65 KB of embedded sample documents plus a filesystem read verb,
 # for developing the client's renderers with no provider and no spend. OFF BY DEFAULT because it
 # is development surface — a release build should not have to remember to exclude it, and a
@@ -54,4 +59,4 @@ tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-typesafe-sdk.workspace = true
+typesafe-sdk = { workspace = true, optional = true }
