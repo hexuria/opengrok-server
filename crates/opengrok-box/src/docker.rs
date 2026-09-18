@@ -601,7 +601,7 @@ impl Computer for DockerComputer {
                 tracing::debug!(
                     %error,
                     %box_id,
-                    "guest /v1/info unreachable; falling back to host egress flag"
+                    "guest /v1/info unreachable; egress tunnel not ready"
                 );
                 return None;
             }
@@ -613,14 +613,14 @@ impl Computer for DockerComputer {
                 tracing::debug!(
                     %error,
                     %box_id,
-                    "guest /v1/info refused; falling back to host egress flag"
+                    "guest /v1/info refused; egress tunnel not ready"
                 );
                 return None;
             }
             Err(_) => {
                 tracing::debug!(
                     %box_id,
-                    "guest /v1/info timed out; falling back to host egress flag"
+                    "guest /v1/info timed out; egress tunnel not ready"
                 );
                 return None;
             }

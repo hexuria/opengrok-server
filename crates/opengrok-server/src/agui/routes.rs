@@ -67,10 +67,8 @@ pub struct AgUiState {
 
 impl AgUiState {
     /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
-    /// or host setting `egressTunnelEnabled`. This is host *intent*. Availability also
-    /// needs the box's `/v1/info` `egress_tunnel.ready` (laptop client attached); missing
-    /// info falls back to this flag. Docker host-network is not the prod path; OpenGrok
-    /// does not dial the guest WS.
+    /// or host setting `egressTunnelEnabled`. This is host *intent*. The gateway verb
+    /// and Review-an-action gate also need `/v1/info` `egress_tunnel.ready`.
     #[must_use]
     pub fn egress_tunnel_enabled(&self) -> bool {
         let settings = self
@@ -81,8 +79,8 @@ impl AgUiState {
         crate::gateway::egress_tunnel_available(&settings)
     }
 
-    /// Host intent AND this box's `egress_tunnel.ready`, or host intent alone when
-    /// `/v1/info` cannot be asked.
+    /// Host intent AND this box's `egress_tunnel.ready`. Failed info → false.
+    /// Review-an-action for leave-box tools uses this, not host intent alone.
     pub async fn egress_tunnel_for(
         &self,
         computer: &dyn opengrok_box::Computer,

@@ -334,9 +334,9 @@ pub fn default_settings() -> serde_json::Value {
         "sidebarSections": [],
         "hasSeenOnboarding": true,
         // User-network tunnel. Default off: docker host-network is not the prod path.
-        // Host intent only. `isEgressTunnelAvailable` is this flag (or env) AND the
-        // box's `/v1/info` `egress_tunnel.ready`, falling back to the flag when info
-        // is unavailable. The box agent owns the tunnel endpoint; we do not dial WS.
+        // Host intent only. `isEgressTunnelAvailable` is this flag (or env) AND
+        // `/v1/info` `capabilities.egress_tunnel.ready`. No box / failed info → false
+        // so NativeChat does not paint the toggle live until a client is attached.
         "egressTunnelEnabled": false
     })
 }
@@ -367,9 +367,10 @@ pub fn egress_tunnel_available(settings: &serde_json::Value) -> bool {
     )
 }
 
-/// Host wants the tunnel, AND the live box reports `egress_tunnel.ready` when we
-/// can ask `/v1/info`. Info missing (no computer, no active box, timeout, old
-/// guest) falls back to the host flag. OpenGrok does not dial the guest WS.
+/// Host wants the tunnel AND the live box reports `egress_tunnel.ready`.
+/// No computer, no box, failed `/v1/info`, or `enabled` without a laptop
+/// client → false. NativeChat must not show the toggle as live until attached.
+/// OpenGrok does not dial the guest WS; `GET /v1/info` is enough.
 pub async fn is_egress_tunnel_available(state: &GatewayState) -> bool {
     let host_wants = egress_tunnel_available(
         &state
@@ -382,10 +383,10 @@ pub async fn is_egress_tunnel_available(state: &GatewayState) -> bool {
         return false;
     }
     let Some(computer) = state.agui.computer.as_ref() else {
-        return true;
+        return false;
     };
     let Some(box_id) = live_box_id_for_egress(state).await else {
-        return true;
+        return false;
     };
     opengrok_box::EgressTunnel::advertised(true, computer.egress_tunnel(&box_id).await)
 }
@@ -488,7 +489,7 @@ mod tests {
             enabled: true,
             ready: false,
         };
-        assert!(opengrok_box::EgressTunnel::advertised(true, None));
+        assert!(!opengrok_box::EgressTunnel::advertised(true, None));
         assert!(opengrok_box::EgressTunnel::advertised(true, Some(ready)));
         assert!(!opengrok_box::EgressTunnel::advertised(true, Some(waiting)));
         assert!(!opengrok_box::EgressTunnel::advertised(false, Some(ready)));

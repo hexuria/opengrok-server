@@ -615,9 +615,9 @@ async fn command(
         "dismissTray" | "clearTrays" => reply(StatusCode::OK, Value::Null),
         "isAgentNetworkEnabled" | "isGlobalSearchEnabled" => reply(StatusCode::OK, json!(false)),
         "isEgressTunnelAvailable" => {
-            // Host intent AND box `/v1/info` `egress_tunnel.ready`. Missing info
-            // falls back to the host flag. Docker host-network is not the prod path;
-            // OpenGrok does not dial the guest WS.
+            // Host intent AND `/v1/info` `egress_tunnel.ready`. No box / failed
+            // info → false (NativeChat must not show the toggle live). Docker
+            // host-network is not the prod path; we do not dial the guest WS.
             reply(
                 StatusCode::OK,
                 json!(super::is_egress_tunnel_available(&state).await),

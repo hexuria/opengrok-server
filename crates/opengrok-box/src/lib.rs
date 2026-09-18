@@ -35,9 +35,8 @@ pub struct EgressTunnel {
 }
 
 impl EgressTunnel {
-    /// `None` when the capability is absent or malformed — callers then fall
-    /// back to the host flag only. Both booleans must be present; a partial
-    /// object is treated as "info unavailable", not as `ready: false`.
+    /// `None` when the capability is absent or malformed. Both booleans must be
+    /// present; a partial object is not `ready: false` and is not available.
     pub fn from_info(info: &serde_json::Value) -> Option<Self> {
         let cap = info.get("capabilities")?.get("egress_tunnel")?;
         Some(Self {
@@ -46,12 +45,12 @@ impl EgressTunnel {
         })
     }
 
-    /// `isEgressTunnelAvailable`: host wants the tunnel AND the box is ready.
-    /// Missing guest info falls back to the host flag (old guests, ascii,
-    /// headless, timeout). Docker host-network is still not the prod path.
+    /// Gateway verb: host wants the tunnel AND `capabilities.egress_tunnel.ready`.
+    /// No box, failed `/v1/info`, or `enabled` without a laptop client → false.
+    /// NativeChat must not paint the toggle live until a client is attached.
     #[must_use]
     pub fn advertised(host_wants: bool, box_cap: Option<Self>) -> bool {
-        host_wants && box_cap.is_none_or(|cap| cap.ready)
+        host_wants && box_cap.is_some_and(|cap| cap.ready)
     }
 }
 
@@ -395,10 +394,10 @@ pub trait Computer: Send + Sync {
         "local-docker"
     }
 
-    /// Guest `/v1/info` `capabilities.egress_tunnel`, or `None` when the guest
-    /// cannot be asked or does not advertise the capability. Default `None` so
-    /// ascii / headless / test stubs fall back to the host flag. A Docker
-    /// desktop probes box-host; it does not dial the tunnel WS.
+    /// Guest `GET /v1/info` `capabilities.egress_tunnel`, or `None` when the
+    /// guest cannot be asked or does not advertise the capability. Default
+    /// `None` (not available). A Docker desktop probes box-host; it does not
+    /// dial the tunnel WS or `GET /v1/egress`.
     async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
         None
     }
@@ -493,7 +492,7 @@ mod tests {
         );
         assert!(
             EgressTunnel::from_info(&serde_json::json!({"capabilities": {"exec": {}}})).is_none(),
-            "old guests without the capability fall back to the host flag"
+            "old guests without the capability are not ready"
         );
         assert!(
             EgressTunnel::from_info(&serde_json::json!({
@@ -516,8 +515,8 @@ mod tests {
         };
         assert!(!EgressTunnel::advertised(false, None));
         assert!(
-            EgressTunnel::advertised(true, None),
-            "info unavailable → host flag only"
+            !EgressTunnel::advertised(true, None),
+            "no /v1/info → not available; do not claim reroute works"
         );
         assert!(EgressTunnel::advertised(true, Some(ready)));
         assert!(

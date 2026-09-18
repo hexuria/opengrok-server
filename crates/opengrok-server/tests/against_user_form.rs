@@ -1045,7 +1045,11 @@ async fn egress_tunnel_follows_host_setting() {
 
     let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(true), "host setting turns the flag on: {body}");
+    assert_eq!(
+        body,
+        json!(false),
+        "host setting alone is not available until /v1/info ready: {body}"
+    );
 
     let (status, settings) = h
         .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
@@ -1069,14 +1073,22 @@ async fn egress_tunnel_needs_box_ready_when_info_is_present() {
     let (status, _) = h.api("openAgent", json!({ "id": agent })).await;
     assert_eq!(status, 200);
 
-    h.stub.set_egress(Some(EgressTunnel {
-        enabled: true,
-        ready: false,
-    }));
     let (status, _) = h
         .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
         .await;
     assert_eq!(status, 200);
+    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!(false),
+        "a box that cannot report /v1/info is not available: {body}"
+    );
+
+    h.stub.set_egress(Some(EgressTunnel {
+        enabled: true,
+        ready: false,
+    }));
     let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
