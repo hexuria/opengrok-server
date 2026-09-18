@@ -377,6 +377,16 @@ impl Harness {
             .await;
         tail
     }
+
+    async fn wait_user_form_idle(&self) {
+        for _ in 0..50 {
+            if self.pending_user_form_runs().await == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("user-form run still awaiting after Skip/hand-back");
+    }
 }
 
 fn dumped(tail: &Value) -> String {
@@ -1077,6 +1087,238 @@ async fn agui_handoff_resolve_declines_without_stopping_the_box() {
     }
     assert_eq!(h.pending_user_form_runs().await, 0);
     assert!(h.stub.acts().is_empty());
+}
+
+#[tokio::test]
+async fn skip_via_form_entry_id_settles_the_live_handoff_and_resumes() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-skip-form-id-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ivy").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-skip-form" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let form_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, body) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff_id = body["handoffEntryId"]
+        .as_str()
+        .expect("handoff id")
+        .to_string();
+    let _ = h.wait_for_handoff(&agent).await;
+    assert!(
+        h.pending_user_form_runs().await >= 1,
+        "escalate must not resume"
+    );
+
+    // NativeChat KeepAlive: Skip posts the form gateway id when handoffEntryId is missing.
+    let (status, resolved) = h
+        .api(
+            "resolveBoxHandoff",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "resolution": "declined"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{resolved}");
+    assert_eq!(resolved["boxResolution"], "declined", "{resolved}");
+
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    let form = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &form_id)
+        .await
+        .expect("load form")
+        .expect("form row")
+        .1;
+    assert_eq!(form["formResolution"], "escalated", "{form}");
+    assert!(
+        form.get("boxRequestId").is_none(),
+        "resolve must not convert the form into a handoff: {form}"
+    );
+    assert!(
+        form.get("boxResolution").is_none(),
+        "boxResolution stays on the sibling: {form}"
+    );
+    let handoff = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &handoff_id)
+        .await
+        .expect("load handoff")
+        .expect("handoff row")
+        .1;
+    assert_eq!(handoff["boxResolution"], "declined", "{handoff}");
+
+    h.wait_user_form_idle().await;
+    assert!(h.stub.acts().is_empty());
+}
+
+#[tokio::test]
+async fn dismiss_dismissed_after_escalate_abandons_the_live_handoff() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-abandon-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Jen").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-abandon" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let form_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, body) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff_id = body["handoffEntryId"]
+        .as_str()
+        .expect("handoff id")
+        .to_string();
+    let _ = h.wait_for_handoff(&agent).await;
+    assert!(h.pending_user_form_runs().await >= 1);
+
+    let (status, dismissed) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "dismissed"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{dismissed}");
+    assert_eq!(dismissed["formResolution"], "escalated", "{dismissed}");
+    assert!(dismissed.get("boxRequestId").is_none(), "{dismissed}");
+
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    let handoff = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &handoff_id)
+        .await
+        .expect("load handoff")
+        .expect("handoff row")
+        .1;
+    assert_eq!(handoff["boxResolution"], "declined", "{handoff}");
+    h.wait_user_form_idle().await;
+    assert!(h.stub.acts().is_empty());
+}
+
+#[tokio::test]
+async fn a_second_escalate_does_not_resume_while_the_handoff_is_live() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-reesc-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Kim").await;
+
+    let (status, _) = h
+        .api(
+            "sendPrompt",
+            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-reesc" }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let card = h.wait_for_form(&agent).await;
+    let form_id = card["id"].as_str().expect("entry id").to_string();
+
+    let (status, first) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{first}");
+    let handoff_id = first["handoffEntryId"]
+        .as_str()
+        .expect("handoff id")
+        .to_string();
+    let _ = h.wait_for_handoff(&agent).await;
+
+    let (status, again) = h
+        .api(
+            "dismissUserForm",
+            json!({
+                "entryId": form_id,
+                "agentId": agent,
+                "mode": "escalated"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["formResolution"], "escalated", "{again}");
+    assert!(
+        h.pending_user_form_runs().await >= 1,
+        "a second escalate must not resume"
+    );
+
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    let handoff = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &handoff_id)
+        .await
+        .expect("load handoff")
+        .expect("handoff row")
+        .1;
+    assert!(
+        handoff.get("boxResolution").is_none(),
+        "escalate retry must leave the handoff live: {handoff}"
+    );
+
+    let (status, resolved) = h
+        .api(
+            "resolveBoxHandoff",
+            json!({
+                "entryId": handoff_id,
+                "agentId": agent,
+                "resolution": "handed_back"
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{resolved}");
+    assert_eq!(resolved["boxResolution"], "handed_back", "{resolved}");
+    h.wait_user_form_idle().await;
 }
 
 #[tokio::test]

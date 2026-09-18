@@ -10,6 +10,14 @@
 //! person on the computer — the Facebook hang after password when phone verify hits. This is
 //! not OpenGrok Take over / I'm done / Skip, and it is not `handBackForeverBox` (lifecycle stop).
 //!
+//! SKIP MAY POST THE FORM ID. NativeChat KeepAlive prefers `handoffEntryId` from the escalate
+//! response, then falls back to the form gateway `entryId`. That form never carries
+//! `boxRequestId` (a stray one converts the card into a handoff). Resolve must therefore
+//! find and settle live `sand://box` siblings when the posted id is the escalated form,
+//! or chrome stays "Waiting for you" on a still-suspended UserForm run. Same for
+//! `dismissUserForm` mode `dismissed` on an already-escalated form: that is abandon, not
+//! an escalate retry.
+//!
 //! NativeChat talks AG-UI with an account bearer, not the gateway host bearer, so the REST
 //! twins live on a router that has `GatewayState` (live emit + resume) but authenticates
 //! like AG-UI (`account_from_bearer`), never through `refuse()`.
@@ -227,6 +235,12 @@ pub async fn dismiss_user_form(
         return (400, json!({ "error": "that entry is not a user-form" }));
     }
     if !is_unresolved(&entry) {
+        // Skip after Open the screen can land as dismissed on the *form* id while a
+        // live sand://box sibling still holds the screen. heal_or_already would
+        // no-op because the form is already escalated.
+        if resolution == FormResolution::Dismissed && is_escalated_form(&entry) {
+            return abandon_escalated_form(state, account_id, &coworker_id, &agent_id, entry).await;
+        }
         return heal_or_already(state, account_id, &coworker_id, &agent_id, &entry).await;
     }
 
@@ -266,8 +280,10 @@ pub async fn dismiss_user_form(
 }
 
 /// `resolveBoxHandoff {entryId, agentId, resolution: handed_back|declined|timed_out}`.
-/// Stamps `boxResolution` on the attachment and resumes the waiting user-form run. Does **not**
-/// stop the box (`handBackForeverBox` is a lifecycle verb).
+/// Stamps `boxResolution` on every live `sand://box` sibling and resumes the waiting
+/// user-form run. Accepts the handoff entry id **or** the escalated form entry id
+/// (NativeChat KeepAlive falls back to the form when `handoffEntryId` is missing).
+/// Does **not** stop the box (`handBackForeverBox` is a lifecycle verb).
 pub async fn resolve_box_handoff(
     state: &GatewayState,
     args: &Value,
@@ -291,35 +307,40 @@ pub async fn resolve_box_handoff(
             );
         }
     };
-    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let (_seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
-    if !is_live_handoff(&entry) {
-        if entry.get("boxRequestId").and_then(Value::as_str).is_some() {
-            resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
-            return (200, json!({ "alreadyAnswered": true }));
-        }
+    let posted_live = is_live_handoff(&entry);
+    let posted_handoff = is_handoff_entry(&entry);
+    let posted_escalated_form = is_escalated_form(&entry);
+    if !posted_live && !posted_handoff && !posted_escalated_form {
         return (
             400,
             json!({ "error": "that entry is not a live box handoff" }),
         );
     }
 
-    let settled = settle_handoff(entry, word, timed_out);
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .update_gateway_entry(&coworker_id, account_id, seq, &settled)
-        .await
-    {
-        tracing::error!(%error, "could not settle a box handoff");
-        return (500, json!({ "error": "transcript unavailable" }));
-    }
-    live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
+    let settled_siblings =
+        settle_live_handoffs(state, account_id, &coworker_id, &agent_id, word, timed_out).await;
     resume_user_form(state, account_id, &coworker_id, &agent_id, content).await;
-    (200, settled)
+
+    if posted_live {
+        if let Some(card) = settled_siblings
+            .into_iter()
+            .find(|card| card.get("id") == entry.get("id"))
+        {
+            return (200, card);
+        }
+        return (200, json!({ "alreadyAnswered": true }));
+    }
+    if posted_escalated_form {
+        if let Some(card) = settled_siblings.into_iter().next() {
+            return (200, card);
+        }
+        return (200, json!({ "alreadyAnswered": true }));
+    }
+    (200, json!({ "alreadyAnswered": true }))
 }
 
 /// Spawned when a user-form card is minted. No-ops if the form already settled (including
@@ -579,6 +600,96 @@ fn settle_handoff(mut entry: Value, resolution: &str, timed_out: bool) -> Value 
         }
     }
     entry
+}
+
+fn is_handoff_entry(entry: &Value) -> bool {
+    entry
+        .get("boxRequestId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+}
+
+fn is_escalated_form(entry: &Value) -> bool {
+    is_user_form_entry(entry)
+        && entry.get("formResolution").and_then(Value::as_str) == Some("escalated")
+}
+
+/// Stamp `boxResolution` on every still-live sand://box sibling. One Skip must not
+/// leave another unanswered handoff holding "Waiting for you".
+async fn settle_live_handoffs(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    agent_id: &str,
+    resolution: &str,
+    timed_out: bool,
+) -> Vec<Value> {
+    let Ok(entries) = state
+        .agui
+        .auth
+        .store
+        .gateway_transcript(coworker_id, account_id)
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut settled = Vec::new();
+    for entry in entries {
+        if !is_live_handoff(&entry) {
+            continue;
+        }
+        let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let Ok(Some((seq, current))) = state
+            .agui
+            .auth
+            .store
+            .find_gateway_entry(coworker_id, account_id, &entry_id)
+            .await
+        else {
+            continue;
+        };
+        if !is_live_handoff(&current) {
+            continue;
+        }
+        let card = settle_handoff(current, resolution, timed_out);
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .update_gateway_entry(coworker_id, account_id, seq, &card)
+            .await
+        {
+            tracing::error!(%error, "could not settle a box handoff");
+            continue;
+        }
+        live::emit_transcript(state, agent_id, account_id, "updated", card.clone());
+        settled.push(card);
+    }
+    settled
+}
+
+/// NativeChat Skip after Open the screen: form is already `escalated`, live handoff
+/// still unanswered. Settle siblings as declined and resume. Escalate itself never
+/// comes here (`mode: escalated` on a settled form still hits heal_or_already).
+async fn abandon_escalated_form(
+    state: &GatewayState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    agent_id: &str,
+    entry: Value,
+) -> (u16, Value) {
+    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    resume_user_form(
+        state,
+        account_id,
+        coworker_id,
+        agent_id,
+        HANDOFF_DECLINED_TOOL_RESULT.to_string(),
+    )
+    .await;
+    (200, entry)
 }
 
 async fn fill_on_box(
@@ -1089,5 +1200,13 @@ mod tests {
         let out = hydrate_agui_events(events, std::slice::from_ref(&other), 0, 100);
         assert_eq!(out.len(), 1);
         assert!(out.iter().all(|event| event["name"] != "user-form"));
+    }
+
+    #[test]
+    fn an_escalated_form_is_not_a_live_handoff() {
+        let form = email_form("e_form", Some("escalated"), 50);
+        assert!(is_escalated_form(&form));
+        assert!(!is_handoff_entry(&form));
+        assert!(!is_live_handoff(&form));
     }
 }
