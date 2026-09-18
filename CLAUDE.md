@@ -100,7 +100,7 @@ cargo check --workspace          # must stay clean — this is the DEFAULT build
 cargo clippy --workspace --all-targets
 cargo test --workspace --features opengrok-server/mock-fixtures   # see below
 scripts/serve.sh                 # build + (re)start the dev server from .env
-scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/setup/gate.md
+scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
 ```
 
 **`mock-fixtures` is a cargo feature, off by default.** It carries the mock transcript catalogue —
