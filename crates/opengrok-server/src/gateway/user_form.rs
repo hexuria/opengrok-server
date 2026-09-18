@@ -446,7 +446,7 @@ pub async fn timeout_live_handoff(
     else {
         return false;
     };
-    let Some(entry) = entries.into_iter().find(|entry| is_live_handoff(entry)) else {
+    let Some(entry) = entries.into_iter().find(is_live_handoff) else {
         return false;
     };
     let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
