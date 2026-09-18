@@ -17,6 +17,24 @@
 //! per call, but it means a socket path, an API version to track and a client dependency, in
 //! exchange for a saving that does not matter next to the container's own startup. `docker` on the
 //! PATH is the whole configuration.
+//!
+//! EGRESS TUNNEL (hexuria/box#30). NativeChat "Review an action" needs
+//! `capabilities.egress_tunnel.ready` from guest `GET /v1/info`. `ready` is false until a
+//! laptop client attaches to the guest WS. Docker cannot publish a port after create, so
+//! the WS is only published when the host wants the tunnel at create (or recreate):
+//!
+//! ```text
+//! docker port <box> 8790
+//! # 127.0.0.1:NNNN
+//! docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <box> \
+//!   | sed -n 's/^BOX_EGRESS_TUNNEL_BEARER=//p' > /tmp/box-egress.bearer
+//! box-egress-tunnel client \
+//!   --url ws://127.0.0.1:NNNN \
+//!   --bearer-file /tmp/box-egress.bearer
+//! ```
+//!
+//! A container started without 8790 must be recreated. The image must ship `box-egress-tunnel`
+//! (`grok-box:local` rebuild). Never publish 8791/8792 — those stay guest-internal.
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -38,7 +56,14 @@ pub const DEFAULT_IMAGE: &str = "debian:stable-slim";
 pub const PUBLISHED_PORTS: &[u16] = &[3000, 5173, 8000, 8080];
 
 /// noVNC (6080) and grok-box exec/host (1337/1340). Only published when the image is a desktop.
+/// Not 8790: that WS is opened only when the host wants the egress tunnel, so a default
+/// desktop does not expose an unused authenticated socket.
 pub const DESKTOP_PORTS: &[u16] = &[6080, 1337, 1340];
+
+/// Guest egress-tunnel WS (hexuria/box#30). The guest listens `0.0.0.0:8790`; we publish
+/// only `127.0.0.1::8790`. Never 8791/8792 (guest-internal CONNECT / proxy). Docker cannot
+/// add a publish after create — a live box without this port must be recreated.
+pub const EGRESS_TUNNEL_PORT: u16 = 8790;
 
 /// x11vnc on grok-box uses the first 8 characters. Same value is put on the noVNC URL.
 const DESKTOP_VNC_PASSWORD: &str = "opengrok";
@@ -101,6 +126,11 @@ pub struct DockerComputer {
     /// `OG_BOX_RUN_TAG`. The gate sets one per invocation and removes everything carrying it on
     /// exit, so a smoke that hires and forgets leaves nothing behind. `None` outside such runs.
     pub run_tag: Option<String>,
+    /// Pins host egress intent for tests. `None` reads `OG_EGRESS_TUNNEL_ENABLED` /
+    /// `SAND_EGRESS_TUNNEL_ENABLED` (strict `"1"`, same words as the gateway helper) at
+    /// create time. The in-app `egressTunnelEnabled` toggle is host intent for the *verb*;
+    /// it cannot publish a port on an already-created container.
+    egress_tunnel: Option<bool>,
 }
 
 impl Default for DockerComputer {
@@ -117,12 +147,27 @@ impl DockerComputer {
             run_tag: std::env::var("OG_BOX_RUN_TAG")
                 .ok()
                 .filter(|tag| !tag.is_empty()),
+            egress_tunnel: None,
         }
     }
 
     pub fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();
         self
+    }
+
+    /// Pin host egress intent so unit tests do not inherit CI's `OG_EGRESS_TUNNEL_ENABLED=1`.
+    pub fn with_egress_tunnel(mut self, on: bool) -> Self {
+        self.egress_tunnel = Some(on);
+        self
+    }
+
+    /// Host wants the guest CONNECT-proxy + WS. Same env words as the gateway helper
+    /// (`OG_…` / `SAND_…` strictly `"1"`). Settings live in the gateway crate; Docker
+    /// cannot see them here, and they cannot hot-add a publish anyway.
+    pub fn wants_egress(&self) -> bool {
+        self.egress_tunnel
+            .unwrap_or_else(host_wants_egress_from_env)
     }
 
     /// Run `docker` and return its output, mapping the ways it can fail.
@@ -161,6 +206,9 @@ impl DockerComputer {
         let mut ports = PUBLISHED_PORTS.to_vec();
         if self.wants_desktop() {
             ports.extend_from_slice(DESKTOP_PORTS);
+            if self.wants_egress() {
+                ports.push(EGRESS_TUNNEL_PORT);
+            }
         }
         ports
     }
@@ -215,6 +263,16 @@ impl DockerComputer {
             args.push("BOX_CHROME=0".to_string());
             args.push("-e".to_string());
             args.push("BOX_ALLOW_INSECURE_DEV=1".to_string());
+            if self.wants_egress() {
+                args.push("-e".to_string());
+                args.push("BOX_EGRESS_TUNNEL=1".to_string());
+                // Dev path: BOX_ALLOW_INSECURE_DEV is already on, so an env bearer is
+                // accepted on loopback. Same length posture as BOX_TOKEN (grok-box
+                // refuses <16). Recovered after restart by inspecting Config.Env,
+                // same as box_token — OpenGrok does not dial the WS.
+                args.push("-e".to_string());
+                args.push(format!("BOX_EGRESS_TUNNEL_BEARER=og-{}", uuid_like()));
+            }
             args.push(self.image.clone());
             return args;
         }
@@ -632,7 +690,9 @@ impl Computer for DockerComputer {
 /// The guest agents inside a desktop box (`box-exec` on 1337, `box-host` on 1340), spoken to
 /// with hexuria/box's own client. What this side owns is only what the client cannot know:
 /// the ports Docker published for them, and the `BOX_TOKEN` the box was created with — read
-/// back from the container's environment, so a server restart does not lose it.
+/// back from the container's environment, so a server restart does not lose it. The egress
+/// bearer is stored the same way (`BOX_EGRESS_TUNNEL_BEARER`); OpenGrok does not dial that
+/// WS, so ops recover it with `docker inspect` for the laptop client.
 impl DockerComputer {
     async fn guest(&self, box_id: &str) -> BoxResult<grok_box::GrokBox> {
         let exec_url = self.published_url(box_id, 1337).await?;
@@ -650,10 +710,7 @@ impl DockerComputer {
                 "{{range .Config.Env}}{{println .}}{{end}}",
             ])
             .await?;
-        env.lines()
-            .find_map(|line| line.strip_prefix("BOX_TOKEN="))
-            .map(str::to_string)
-            .ok_or_else(no_screen)
+        env_from_inspect(&env, "BOX_TOKEN").ok_or_else(no_screen)
     }
 
     async fn published_url(&self, box_id: &str, port: u16) -> BoxResult<String> {
@@ -798,6 +855,25 @@ fn host_port(mapping: &str) -> Option<u16> {
     host.parse().ok()
 }
 
+/// Gateway helper's env words, kept here because `opengrok-box` must not depend on the server.
+/// Strict `"1"` — `"true"` is off, matching Grok host `=== "1"`.
+fn host_wants_egress_from_env() -> bool {
+    env_is_one("OG_EGRESS_TUNNEL_ENABLED") || env_is_one("SAND_EGRESS_TUNNEL_ENABLED")
+}
+
+fn env_is_one(name: &str) -> bool {
+    std::env::var(name).as_deref() == Ok("1")
+}
+
+/// One `KEY=` line from `docker inspect` Config.Env. Shared by `BOX_TOKEN` and
+/// `BOX_EGRESS_TUNNEL_BEARER` so a restart recovers both the same way.
+fn env_from_inspect(blob: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    blob.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(str::to_string)
+}
+
 /// A short unique-enough token for naming a process's log files.
 ///
 /// Not a UUID crate: this names two files inside one container, and the id only has to be unique
@@ -879,6 +955,83 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "BOX_DESKTOP=1"));
         assert!(args.iter().any(|arg| arg == "BOX_CHROME=0"));
         assert!(args.iter().any(|arg| arg.starts_with("BOX_TOKEN=og-")));
+    }
+
+    #[test]
+    fn desktop_create_publishes_egress_ws_when_the_host_wants_it() {
+        let args = DockerComputer::new()
+            .with_image("grok-box:local")
+            .with_egress_tunnel(true)
+            .create_args(None);
+        assert!(
+            args.iter().any(|arg| arg == "127.0.0.1::8790"),
+            "guest WS must be loopback-published, got {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("::8791") || arg.contains("::8792")),
+            "8791/8792 stay guest-internal, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "BOX_EGRESS_TUNNEL=1"),
+            "{args:?}"
+        );
+        let bearer = args
+            .iter()
+            .find(|arg| arg.starts_with("BOX_EGRESS_TUNNEL_BEARER="))
+            .expect("create must pass a bearer");
+        let value = bearer
+            .strip_prefix("BOX_EGRESS_TUNNEL_BEARER=")
+            .expect("prefix");
+        assert!(
+            value.len() >= 16,
+            "grok-box refuses short bearers, got {value:?}"
+        );
+        assert!(value.starts_with("og-"), "{value}");
+    }
+
+    #[test]
+    fn desktop_create_does_not_open_the_egress_ws_when_the_host_does_not_want_it() {
+        let args = DockerComputer::new()
+            .with_image("grok-box:local")
+            .with_egress_tunnel(false)
+            .create_args(None);
+        assert!(
+            !args.iter().any(|arg| arg.contains("8790")),
+            "unused WS must stay closed, got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("BOX_EGRESS_TUNNEL")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn a_headless_box_never_publishes_the_egress_ws() {
+        let args = DockerComputer::new()
+            .with_image("debian:stable-slim")
+            .with_egress_tunnel(true)
+            .create_args(None);
+        assert!(!args.iter().any(|arg| arg.contains("8790")), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.contains("BOX_EGRESS_TUNNEL")),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn egress_bearer_is_recovered_from_container_env_like_box_token() {
+        let blob = "PATH=/usr/bin\nBOX_TOKEN=og-abc\nBOX_EGRESS_TUNNEL_BEARER=og-tunnel-secret-1\n";
+        assert_eq!(
+            env_from_inspect(blob, "BOX_TOKEN").as_deref(),
+            Some("og-abc")
+        );
+        assert_eq!(
+            env_from_inspect(blob, "BOX_EGRESS_TUNNEL_BEARER").as_deref(),
+            Some("og-tunnel-secret-1")
+        );
+        assert_eq!(env_from_inspect(blob, "BOX_EGRESS_TUNNEL"), None);
     }
 
     #[test]

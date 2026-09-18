@@ -25,8 +25,10 @@ pub use docker::DockerComputer;
 /// Guest `/v1/info` `capabilities.egress_tunnel` (hexuria/box).
 ///
 /// `enabled` is `BOX_EGRESS_TUNNEL=1`: the guest started the CONNECT proxy on
-/// `127.0.0.1:8791` and launched Chromium with `--proxy-server`. `ready` means a
-/// user-machine client is attached on the WS the box agent owns. OpenGrok does
+/// `127.0.0.1:8791` (guest-internal; never published) and launched Chromium
+/// with `--proxy-server`. The laptop client attaches to the WS on guest
+/// `0.0.0.0:8790`, which Docker publishes as `127.0.0.1::8790` only when the
+/// host wants the tunnel. `ready` means that client is attached. OpenGrok does
 /// not dial that WS; we only report availability and gate leave-box tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EgressTunnel {
