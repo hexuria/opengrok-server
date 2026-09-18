@@ -7,9 +7,19 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use opengrok_core::REFRESH_GRACE_MS;
 use opengrok_core::id::{AccountId, SessionId};
+use tokio::sync::Notify;
+
+/// How long a race loser waits for this replica's winner to stash the current refresh.
+///
+/// `remember` runs in the same task after append commits, with no await between them — but the
+/// loser's `append` Conflict (or empty `decide`) can be polled first. `yield_now` is not enough
+/// on a busy runtime; we subscribe to [`Notify`] and fail closed after this cap. Never a second
+/// rotate while waiting: that would invalidate the winner's cookies.
+const REUSE_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone)]
 pub(crate) struct GraceSlot {
@@ -22,6 +32,7 @@ pub(crate) struct GraceSlot {
 
 pub(crate) struct RefreshGrace {
     slots: Mutex<HashMap<String, (GraceSlot, i64)>>,
+    notify: Notify,
 }
 
 impl std::fmt::Debug for RefreshGrace {
@@ -34,17 +45,21 @@ impl Default for RefreshGrace {
     fn default() -> Self {
         Self {
             slots: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
         }
     }
 }
 
 impl RefreshGrace {
     pub(crate) fn remember(&self, previous_hash: String, slot: GraceSlot, at_ms: i64) {
-        let Ok(mut slots) = self.slots.lock() else {
-            return;
-        };
-        slots.retain(|_, (_, stored_at)| at_ms.saturating_sub(*stored_at) <= REFRESH_GRACE_MS);
-        slots.insert(previous_hash, (slot, at_ms));
+        {
+            let Ok(mut slots) = self.slots.lock() else {
+                return;
+            };
+            slots.retain(|_, (_, stored_at)| at_ms.saturating_sub(*stored_at) <= REFRESH_GRACE_MS);
+            slots.insert(previous_hash, (slot, at_ms));
+        }
+        self.notify.notify_waiters();
     }
 
     pub(crate) fn reuse(&self, previous_hash: &str, at_ms: i64) -> Option<GraceSlot> {
@@ -54,12 +69,42 @@ impl RefreshGrace {
         slots.retain(|_, (_, stored_at)| at_ms.saturating_sub(*stored_at) <= REFRESH_GRACE_MS);
         slots.get(previous_hash).map(|(slot, _)| slot.clone())
     }
+
+    /// Wait until [`Self::remember`] stashes this previous hash, or [`REUSE_WAIT`] elapses.
+    pub(crate) async fn wait_for_reuse(
+        &self,
+        previous_hash: &str,
+        at_ms: i64,
+    ) -> Option<GraceSlot> {
+        let deadline = tokio::time::Instant::now() + REUSE_WAIT;
+        loop {
+            if let Some(slot) = self.reuse(previous_hash, at_ms) {
+                return Some(slot);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return self.reuse(previous_hash, at_ms);
+            }
+            // Subscribe before the second lookup so a remember between the two is not lost.
+            let notified = self.notify.notified();
+            if let Some(slot) = self.reuse(previous_hash, at_ms) {
+                return Some(slot);
+            }
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep(remaining) => {
+                    return self.reuse(previous_hash, at_ms);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn slot(refresh: &str) -> GraceSlot {
         GraceSlot {
@@ -88,5 +133,21 @@ mod tests {
                 .reuse("hash-1", 1_000 + REFRESH_GRACE_MS + 1)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_reuse_wakes_when_the_winner_remembers() {
+        let grace = Arc::new(RefreshGrace::default());
+        let waiter = Arc::clone(&grace);
+        let wait = tokio::spawn(async move { waiter.wait_for_reuse("hash-1", 1_000).await });
+        // The waiter must subscribe before remember; a single yield is not a guarantee, but the
+        // 100ms cap plus Notify covers both orderings. Give the task a tick to start waiting.
+        tokio::task::yield_now().await;
+        grace.remember("hash-1".into(), slot("ogr_current"), 1_000);
+        let reused = wait
+            .await
+            .expect("join")
+            .expect("winner stashed the current refresh");
+        assert_eq!(reused.current_refresh, "ogr_current");
     }
 }

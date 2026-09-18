@@ -878,23 +878,24 @@ async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, Str
     Ok((access_token, new_refresh))
 }
 
-/// The race loser's path: the winner already rotated. Wait briefly for that replica to stash
-/// the current plaintext (append commits before `remember`), then mint a fresh access token
+/// The race loser's path: the winner already rotated. Wait for that replica to stash the
+/// current plaintext (append commits before `remember`), then mint a fresh access token
 /// against the same current refresh. Fail closed if this process never did the rotate.
 async fn reuse_rotated_pair(
     state: &AuthState,
     presented_hash: &str,
     at_ms: i64,
 ) -> Result<(String, String), AuthFailure> {
-    for _ in 0..16 {
-        if let Some(slot) = state.refresh_grace.reuse(presented_hash, at_ms) {
-            return mint_access_for_slot(state, &slot, now_ms());
-        }
-        tokio::task::yield_now().await;
+    match state
+        .refresh_grace
+        .wait_for_reuse(presented_hash, at_ms)
+        .await
+    {
+        Some(slot) => mint_access_for_slot(state, &slot, now_ms()),
+        None => Err(AuthFailure::SessionRejected(
+            "unknown refresh token".to_string(),
+        )),
     }
-    Err(AuthFailure::SessionRejected(
-        "unknown refresh token".to_string(),
-    ))
 }
 
 fn mint_access_for_slot(
