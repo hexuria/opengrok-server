@@ -28,7 +28,6 @@ use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::domain_proof::{StaticDns, TxtLookup};
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 
 macro_rules! database_or_skip {
@@ -151,13 +150,7 @@ fn app_with(
         },
         plugins: Arc::new(BTreeMap::new()),
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
-    (opengrok_server::router(agui, gateway), auth)
+    (opengrok_server::router(agui), auth)
 }
 
 async fn spawn(app: axum::Router) -> String {

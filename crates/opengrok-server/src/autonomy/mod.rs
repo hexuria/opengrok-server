@@ -19,11 +19,10 @@ use serde_json::Value;
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 
-/// Where a routine's run shows up for the person: the coworker's own chat, as a message from the
-/// coworker, sent live. The run keeps its own thread (the schedule's id) for the pane's history;
+/// Where a routine's run shows up for the person: the coworker's own transcript, as a message
+/// from the coworker. The run keeps its own thread (the schedule's id) for the pane's history;
 /// this is the part a person actually reads. `None` for firings nobody needs told about.
 pub(crate) struct Announce {
-    pub gateway: crate::gateway::GatewayState,
     /// The routine's name — the message opens with it so the chat says WHY the coworker spoke.
     pub name: String,
 }
@@ -128,17 +127,6 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.
     let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
 
-    if let Some(announce) = &announce {
-        // The roster shows the coworker thinking while its routine runs, the same as a turn.
-        crate::gateway::live::set_running(
-            &announce.gateway,
-            coworker_id.as_str(),
-            true,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-
     let events = run_conversation(
         state.door.as_ref(),
         tools.as_ref(),
@@ -153,20 +141,20 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     tracing::info!(%origin, run = %run_id, events = events.len(), "fired a run nobody asked for");
 
     if let Some(announce) = announce {
-        announce_finished(&announce, &coworker_id, &account_id, &events).await;
+        announce_finished(&state, &announce, &coworker_id, &account_id, &events).await;
     }
 }
 
-/// Post the finished routine into the coworker's chat and refresh the Routines pane. The chat
-/// line carries the routine's name and the answer's head (the run's own thread has the whole
-/// thing); it is appended to the gateway transcript like any coworker message and emitted live.
+/// Post the finished routine into the coworker's transcript. The line carries the routine's name
+/// and the answer's head (the run's own thread has the whole thing); it is appended to the
+/// coworker's transcript for this account like any coworker message.
 async fn announce_finished(
+    state: &AgUiState,
     announce: &Announce,
     coworker_id: &CoworkerId,
     account_id: &AccountId,
     events: &[opengrok_wire::agui::Event],
 ) {
-    let gateway = &announce.gateway;
     let mut text = String::new();
     for event in events {
         if event.event_type == opengrok_wire::agui::EventType::TextMessageContent
@@ -196,37 +184,14 @@ async fn announce_finished(
         "message": { "type": "text", "content": content },
         "timestampMs": at_ms,
     });
-    match gateway
-        .agui
+    if let Err(error) = state
         .auth
         .store
         .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
         .await
     {
-        Ok(_) => {
-            crate::gateway::live::emit_transcript(
-                gateway,
-                coworker_id.as_str(),
-                account_id,
-                "appended",
-                entry,
-            );
-        }
-        Err(error) => {
-            tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
-        }
+        tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
     }
-    let preview: String = text.chars().take(120).collect();
-    crate::gateway::live::set_running(
-        gateway,
-        coworker_id.as_str(),
-        false,
-        serde_json::json!({ "lastMessagePreview": preview }),
-    )
-    .await;
-    // The firing's own account: a routine acting on its schedule acts for whoever set it,
-    // and that is whose Routines pane this frame refreshes.
-    crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str(), account_id).await;
 }
 
 /// The sentence a failed run leaves for the person, from the run's own failure event: the

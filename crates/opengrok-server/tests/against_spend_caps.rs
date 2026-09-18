@@ -25,7 +25,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_server::gateway_admin::GatewayAdmin;
 use opengrok_server::spend::GuardedDoor;
 use opengrok_store::{PgStore, Vault};
@@ -606,16 +605,7 @@ async fn harness(database_url: &str, host_email: &str) -> Harness {
         },
         plugins: Arc::new(BTreeMap::new()),
     };
-    let gateway_state = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
-    let app = opengrok_server::router(agui.clone(), gateway_state);
+    let app = opengrok_server::router(agui.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -648,25 +638,6 @@ impl Harness {
             .expect("mint access")
     }
 
-    /// `POST /api/{method}` with the gateway bearer — how the desktop's coordinator calls.
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .expect("api call");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
-    }
-
     async fn spend(&self, access: &str, coworker: &str) -> (u16, Value) {
         let res = self
             .client
@@ -679,11 +650,11 @@ impl Harness {
         (status, res.json().await.unwrap_or(Value::Null))
     }
 
-    /// Wait until the coworker's gateway thread has `expected` runs and the newest has settled;
+    /// Wait until the coworker's thread has `expected` runs and the newest has settled;
     /// hand back that run's status and failure. Counting is what keeps a fast poll from
     /// answering with the previous turn's run.
     async fn settled_run(&self, coworker: &str, expected: usize) -> (String, Option<String>) {
-        let thread = format!("gateway-{coworker}");
+        let thread = format!("spend-{coworker}");
         for _ in 0..100 {
             let runs = self.store.runs_for_thread(&thread, 50).await.expect("runs");
             if runs.len() >= expected
@@ -702,15 +673,28 @@ impl Harness {
 }
 
 impl Harness {
-    async fn turn(&self, coworker: &str, n: usize) -> (String, Option<String>) {
-        let (status, sent) = self
-            .api(
-                "sendPrompt",
-                // A nonce dedupes a press per payload; two coworkers' first turns must not share one.
-                json!({ "agentId": coworker, "prompt": format!("turn {n}"), "clientNonce": format!("n{n}-{coworker}") }),
+    /// One turn of `coworker` over `/ag-ui`, as its owner. The thread is fixed per coworker so
+    /// `settled_run` can count the turns on it; the run id is fresh so no two turns collide.
+    async fn turn(&self, access: &str, coworker: &str, n: usize) -> (String, Option<String>) {
+        let res = self
+            .client
+            .post(format!("{}/ag-ui", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .header("content-type", "application/json")
+            .body(
+                json!({
+                    "threadId": format!("spend-{coworker}"),
+                    "runId": uuid::Uuid::now_v7().to_string(),
+                    "messages": [{ "id": format!("m{n}"), "role": "user", "content": format!("turn {n}") }],
+                    "forwardedProps": { "coworkerId": coworker },
+                })
+                .to_string(),
             )
-            .await;
-        assert_eq!(status, 200, "{sent}");
+            .send()
+            .await
+            .expect("turn");
+        let status = res.status().as_u16();
+        assert_eq!(status, 200, "{}", res.text().await.unwrap_or_default());
         self.settled_run(coworker, n).await
     }
 
@@ -832,7 +816,7 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     // No limits at any layer: a turn goes out on the coworker's own key and NEVER reads the
     // meter — with unlimited as the shipped default, a meter blip must not be everyone's outage.
     let reads_before = h.usage_reads();
-    let (state, failure) = h.turn(&coworker, 1).await;
+    let (state, failure) = h.turn(&access, &coworker, 1).await;
     assert_eq!(state, "finished", "{failure:?}");
     assert_eq!(
         h.usage_reads(),
@@ -1019,13 +1003,13 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     // million the one after is refused, in the plan's sentence — the cap, the month, what is
     // used, when it resets, and what the pool leaves for other agents.
     let reads_before = h.usage_reads();
-    let (state, failure) = h.turn(&coworker, 2).await;
+    let (state, failure) = h.turn(&access, &coworker, 2).await;
     assert_eq!(state, "finished", "{failure:?}");
     assert!(
         h.usage_reads() > reads_before,
         "a capped coworker reads the meter"
     );
-    let (state, failure) = h.turn(&coworker, 3).await;
+    let (state, failure) = h.turn(&access, &coworker, 3).await;
     assert_eq!(state, "failed", "{failure:?}");
     let failure = failure.unwrap_or_default();
     assert!(
@@ -1096,9 +1080,9 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
         json!(12_000_000),
         "what the pool leaves her: {limit}"
     );
-    let (state, failure) = h.turn(&coworker, 4).await;
+    let (state, failure) = h.turn(&access, &coworker, 4).await;
     assert_eq!(state, "finished", "{failure:?}");
-    let (state, failure) = h.turn(&coworker, 5).await;
+    let (state, failure) = h.turn(&access, &coworker, 5).await;
     assert_eq!(state, "failed", "{failure:?}");
     let failure = failure.unwrap_or_default();
     assert!(
@@ -1132,9 +1116,9 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
             .is_some_and(|t| t.ends_with('Z')),
         "{limit}"
     );
-    let (state, failure) = h.turn(&coworker, 6).await;
+    let (state, failure) = h.turn(&access, &coworker, 6).await;
     assert_eq!(state, "finished", "{failure:?}");
-    let (state, failure) = h.turn(&coworker, 7).await;
+    let (state, failure) = h.turn(&access, &coworker, 7).await;
     assert_eq!(state, "failed", "{failure:?}");
     let failure = failure.unwrap_or_default();
     assert!(
@@ -1155,7 +1139,7 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
     // The meter goes down. A reading under a minute old stands in for this coworker and for
     // the owner's pool; a coworker the guard has never read is held, with the reason.
     h.stand_in.lock().unwrap().meter_down = true;
-    let (state, failure) = h.turn(&coworker, 8).await;
+    let (state, failure) = h.turn(&access, &coworker, 8).await;
     assert_eq!(state, "finished", "a fresh reading stands in: {failure:?}");
     let res = h
         .client
@@ -1170,7 +1154,7 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
         .as_str()
         .expect("id")
         .to_string();
-    let (state, failure) = h.turn(&bob, 1).await;
+    let (state, failure) = h.turn(&access, &bob, 1).await;
     assert_eq!(state, "failed");
     assert!(
         failure
@@ -1199,8 +1183,14 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
         .and_then(|m| m.iter().find(|m| m["id"] == account_id.as_str()))
         .and_then(|m| m["usedPoints"].as_i64())
         .expect("used");
-    let (status, deleted) = h.api("deleteAgents", json!({ "ids": [coworker] })).await;
-    assert_eq!(status, 200, "{deleted}");
+    let retired = h
+        .client
+        .delete(format!("{}/coworkers/{coworker}", h.base))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .expect("retire");
+    assert_eq!(retired.status().as_u16(), 204);
     assert!(
         h.stand_in.lock().unwrap().keys[0].revoked,
         "revoked on the gateway at retirement"
@@ -1267,7 +1257,7 @@ async fn a_hirer_outside_any_org_hires_on_the_deployment_key_and_the_console_say
         .await;
     assert_eq!(status, 403);
     // Its turn goes out on the deployment's key, and never reads the meter.
-    let (state, failure) = h.turn(&coworker, 1).await;
+    let (state, failure) = h.turn(&access, &coworker, 1).await;
     assert_eq!(state, "finished", "{failure:?}");
     assert_eq!(
         h.stand_in.lock().unwrap().bearers,
@@ -1327,7 +1317,7 @@ async fn a_coworker_hired_while_the_gateway_would_not_mint_gets_its_key_on_its_n
 
     // The admin key is fixed: the next turn mints the key before it thinks, and thinks on it.
     h.stand_in.lock().unwrap().refuse_mints = false;
-    let (status, failure) = h.turn(&coworker, 1).await;
+    let (status, failure) = h.turn(&access, &coworker, 1).await;
     assert!(status.contains("finished"), "{status} {failure:?}");
     {
         let stand_in = h.stand_in.lock().unwrap();
@@ -1360,9 +1350,9 @@ async fn a_gateway_that_keeps_refusing_is_asked_once_an_interval_and_the_deploym
 
     // Two turns while the gateway still refuses: both think on the deployment's key (no limits
     // means no hold), and the gateway is asked once more, not once per turn.
-    let (status, failure) = h.turn(&coworker, 1).await;
+    let (status, failure) = h.turn(&access, &coworker, 1).await;
     assert!(status.contains("finished"), "{status} {failure:?}");
-    let (status, failure) = h.turn(&coworker, 2).await;
+    let (status, failure) = h.turn(&access, &coworker, 2).await;
     assert!(status.contains("finished"), "{status} {failure:?}");
     let stand_in = h.stand_in.lock().unwrap();
     assert!(
@@ -1408,9 +1398,9 @@ async fn a_seats_usage_shows_its_requests_and_the_bill_it_displaced() {
     // Two turns on a subscription seat: zero cost, a request count, and the list-price bill the
     // seat displaced — per window and for the month.
     h.stand_in.lock().unwrap().seat = true;
-    let (status, failure) = h.turn(&coworker, 1).await;
+    let (status, failure) = h.turn(&access, &coworker, 1).await;
     assert!(status.contains("finished"), "{status} {failure:?}");
-    let (status, failure) = h.turn(&coworker, 2).await;
+    let (status, failure) = h.turn(&access, &coworker, 2).await;
     assert!(status.contains("finished"), "{status} {failure:?}");
     let (_, spend) = h.spend(&access, &coworker).await;
     assert_eq!(spend["seat"], json!("subscription"), "{spend}");

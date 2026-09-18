@@ -14,11 +14,13 @@
 //! - **An `ask` raises a real card — the judge's and the policy grant's alike.** `run_one` has no
 //!   in-flight run to suspend, so the door synthesizes one (Start + Suspend) and emits the same
 //!   `auto-review-approval` card a shell Ask would; a policy ask carries the grant's reason and
-//!   no proposed rule. The MCP reply names `requestId` and does **not** wait; the person answers
-//!   in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run; the MCP
-//!   client retries under the remembered call id, and the remembered yes releases the gate or
-//!   skips the judge by the ask's reason. Reverse-exec is excluded before execute, so ExecConsent
-//!   cannot arrive here.
+//!   no proposed rule. The MCP reply names `requestId` and does **not** wait. Answering the card
+//!   must Finish the synthesized run and remember the yes under the answered call id, so the MCP
+//!   client's retry spends it and the remembered yes releases the gate or skips the judge by the
+//!   ask's reason. THE DOOR THAT ANSWERED IT WAS THE DESKTOP'S `resolveAutoReviewApproval`, deleted
+//!   with seam A; `POST /ag-ui/runs/{id}/answer` resumes a run as a model turn, which an `mcp-`
+//!   run must not do, so until a surface takes that branch over an MCP ask is raised and waits.
+//!   Reverse-exec is excluded before execute, so ExecConsent cannot arrive here.
 //! - **The reverse-exec channel (`user_machine_shell`) is not carried over MCP in v1.** It reaches
 //!   the account owner's real machine; a leaked bot key must not widen from "this coworker's box"
 //!   to "the owner's laptop" through a new external ingress. It is excluded from the listing and
@@ -52,14 +54,13 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
+use crate::agui::routes::{AgUiState, principal_from_bearer, tools_for_coworker};
 
 /// How long an MCP call waits for a sleeping box before trying its command anyway. The MCP client
 /// (Claude Code) has its own request timeout, so this stays well under it; a box still starting
 /// answers the command with 409 `box_starting`, which reaches the caller as a truthful tool
 /// result it can retry, rather than a request that times out with nothing to show.
 const MCP_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
-use crate::gateway::GatewayState;
 use opengrok_core::CoworkerId;
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::run::{Run, RunCommand, RunStatus, RunView, SuspendReason};
@@ -79,13 +80,13 @@ struct McpPrincipal {
 }
 
 /// The `/mcp` surface: the rmcp streamable-HTTP service behind the auth-and-origin guard.
-pub fn router(state: GatewayState) -> axum::Router {
+pub fn router(state: AgUiState) -> axum::Router {
     axum::Router::new()
         .fallback_service(service(state.clone()))
         .layer(axum::middleware::from_fn_with_state(state, guard))
 }
 
-fn service(state: GatewayState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
+fn service(state: AgUiState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
     StreamableHttpService::new(
         move || {
             Ok(McpDoor {
@@ -112,9 +113,9 @@ fn service(state: GatewayState) -> StreamableHttpService<McpDoor, LocalSessionMa
 /// personal, or revoked credential never reaches rmcp (which would answer 200 + a JSON-RPC error);
 /// it gets a real `401`/`403`, so an OAuth-capable client can discover it must authenticate, and
 /// `initialize` itself is gated.
-async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) -> Response {
-    // A browser page must never be able to drive this, with or without a token — the same refusal
-    // the gateway makes, before anything else.
+async fn guard(State(state): State<AgUiState>, mut req: Request, next: Next) -> Response {
+    // A browser page must never be able to drive this, with or without a token, before anything
+    // else.
     if req.headers().contains_key(header::ORIGIN) {
         return (StatusCode::FORBIDDEN, "browser origins are not served").into_response();
     }
@@ -123,20 +124,19 @@ async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) 
     // keys carry no audience and stay accepted — they are ours.
     if let Some(token) = bearer_of(req.headers())
         && let Ok(claims) = state
-            .agui
             .auth
             .minter
             .verify_claims::<crate::auth::bot_keys::BotKeyClaims>(token)
         && let Some(aud) = claims.aud.as_deref()
-        && aud != crate::auth::oauth_mcp::resource_uri(&state.agui.auth.public_url)
+        && aud != crate::auth::oauth_mcp::resource_uri(&state.auth.public_url)
     {
         return unauthorized(
-            &state.agui.auth.public_url,
+            &state.auth.public_url,
             "this token was issued for another server",
         );
     }
-    let public_url = state.agui.auth.public_url.clone();
-    match principal_from_bearer(&state.agui, req.headers()).await {
+    let public_url = state.auth.public_url.clone();
+    match principal_from_bearer(&state, req.headers()).await {
         Ok(Some((account, Some(coworker)))) => {
             let request_id = crate::request_id(req.headers());
             req.extensions_mut().insert(McpPrincipal {
@@ -186,7 +186,7 @@ fn unauthorized(public_url: &str, message: &str) -> Response {
 }
 
 pub struct McpDoor {
-    state: GatewayState,
+    state: AgUiState,
 }
 
 /// What a coworker's toolbox resolved to. The three cases are kept apart because collapsing them is
@@ -222,7 +222,6 @@ impl McpDoor {
     ) -> Toolbox {
         let Ok((coworker, _)) = self
             .state
-            .agui
             .auth
             .store
             .load_coworker(&principal.coworker)
@@ -234,7 +233,7 @@ impl McpDoor {
             return Toolbox::NoComputer;
         }
         match tools_for_coworker(
-            &self.state.agui,
+            &self.state,
             &principal.account,
             &principal.coworker,
             gate_yes,
@@ -399,7 +398,7 @@ impl ServerHandler for McpDoor {
                 "Tools run on the coworker this key names, on that coworker's own computer, \
                  under the account's policy. A call that needs a person's approval (the \
                  account's auto-review, or the coworker's policy) is refused with a requestId; \
-                 a card is waiting in the Open Grok app — answer it there, then retry. \
+                 a card is raised for a person to answer; once answered, retry. \
                  Reverse-exec (your own machine) is not available over MCP.",
             )
     }
@@ -537,11 +536,11 @@ impl McpDoor {
         // a leftover yes.
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
-        let store = &self.state.agui.auth.store;
-        // PAIRED WITH the remember in `gateway/conversation.rs`, which writes the account of
-        // whoever pressed approve. A yes is spendable only by the account that gave it, so if
-        // these two ever resolve to different people the yes is silently lost and the retry
-        // asks again. See the note at that call site before sharing goes live.
+        let store = &self.state.auth.store;
+        // PAIRED WITH `remember_mcp_allow_once`, whose caller writes the account of whoever
+        // pressed approve. A yes is spendable only by the account that gave it, so if these two
+        // ever resolve to different people the yes is silently lost and the retry asks again.
+        // Check that pairing before sharing goes live on whichever surface answers the card.
         let once = take_mcp_allow_once_stamped(
             store,
             &principal.coworker,
@@ -713,7 +712,6 @@ impl McpDoor {
         };
         if let Err(error) = self
             .state
-            .agui
             .auth
             .store
             .insert_mcp_call(&principal.account, &principal.coworker, &row)
@@ -731,8 +729,8 @@ impl McpDoor {
 
 fn ask_waiting_text(content: &str, request_id: &str) -> String {
     format!(
-        "{content} — a card is waiting in the Open Grok app (requestId: {request_id}). \
-         Answer it there, then retry this call."
+        "{content} — a card is waiting for a person's answer (requestId: {request_id}). \
+         Once it is answered, retry this call."
     )
 }
 
@@ -740,7 +738,7 @@ fn ask_waiting_text(content: &str, request_id: &str) -> String {
 /// Returns the error text the door sends the MCP client. Public so the door test can drive
 /// this path without a Ready toolbox (a computer) — `run_one` only Asks after that.
 pub async fn reply_to_ask(
-    state: &GatewayState,
+    state: &AgUiState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
@@ -790,7 +788,7 @@ pub async fn reply_to_ask(
 /// in OpenGrok. Returns the `requestId` (the tool call id). A retry of the same tool+args
 /// while a card is already pending reuses that requestId — a second persist would flood cards.
 async fn persist_mcp_ask(
-    state: &GatewayState,
+    state: &AgUiState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
@@ -803,11 +801,10 @@ async fn persist_mcp_ask(
 
     let at_ms = chrono::Utc::now().timestamp_millis();
     let run_id = RunId::new();
-    // Distinct from `gateway-{coworker}`: this run is the MCP call's audit row, not a
-    // conversation turn. Answering it Finishes the run; it must not resume as a model turn.
+    // Its own thread, never a conversation's: this run is the MCP call's audit row, not a
+    // turn. Answering it Finishes the run; it must not resume as a model turn.
     let thread_id = format!("mcp-{}", coworker.as_str());
     let model = state
-        .agui
         .auth
         .store
         .load_coworker(coworker)
@@ -852,7 +849,6 @@ async fn persist_mcp_ask(
         updated_at_ms: at_ms,
     };
     let seq = state
-        .agui
         .auth
         .store
         .append_run(&run_id, 0, &events, &view, Some(account))
@@ -880,7 +876,6 @@ async fn persist_mcp_ask(
         ),
     };
     if let Err(error) = state
-        .agui
         .auth
         .store
         .append_gateway_entry(coworker, account, &card, at_ms)
@@ -904,7 +899,6 @@ async fn persist_mcp_ask(
                 updated_at_ms: at_ms,
             };
             let _ = state
-                .agui
                 .auth
                 .store
                 .append_run(&run_id, seq, &failed, &failed_view, Some(account))
@@ -912,21 +906,18 @@ async fn persist_mcp_ask(
         }
         return Err(error);
     }
-    // Persist-only would be enough for a reload; emitting means an open desktop sees the
-    // card without reconnecting. No subscriber is an ordinary morning (live::emit).
-    crate::gateway::live::emit_transcript(state, coworker.as_str(), account, "appended", card);
     Ok(call.id.clone())
 }
 
 async fn existing_mcp_ask(
-    state: &GatewayState,
+    state: &AgUiState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
 ) -> Result<Option<String>, opengrok_store::StoreError> {
-    let waiting = state.agui.auth.store.awaiting_approval(account).await?;
+    let waiting = state.auth.store.awaiting_approval(account).await?;
     for run_id in waiting {
-        let (run, seq) = match state.agui.auth.store.load_run(&run_id).await {
+        let (run, seq) = match state.auth.store.load_run(&run_id).await {
             Ok(pair) => pair,
             Err(error) => return Err(error),
         };
@@ -958,13 +949,12 @@ async fn existing_mcp_ask(
 }
 
 async fn card_pending_for(
-    state: &GatewayState,
+    state: &AgUiState,
     coworker: &CoworkerId,
     account: &AccountId,
     request_id: &str,
 ) -> Result<bool, opengrok_store::StoreError> {
     let entries = state
-        .agui
         .auth
         .store
         .gateway_transcript(coworker, account)
@@ -977,7 +967,7 @@ async fn card_pending_for(
 }
 
 async fn fail_stuck_mcp_run(
-    state: &GatewayState,
+    state: &AgUiState,
     account: &AccountId,
     run_id: &RunId,
     mut run: Run,
@@ -1001,7 +991,6 @@ async fn fail_stuck_mcp_run(
         updated_at_ms: at_ms,
     };
     state
-        .agui
         .auth
         .store
         .append_run(run_id, seq, &failed, &view, Some(account))

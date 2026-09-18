@@ -234,11 +234,9 @@ async fn close_streaming_entries(
             tracing::warn!(%error, run = %run_id, entry = %id, "could not close a streaming entry");
             continue;
         }
-        // NO LIVE FRAME, AND THAT IS ENOUGH HERE. The sweep holds `AgUiState`, which has no path
-        // to the live bus (`GatewayState` owns it, and it owns `AgUiState`, not the reverse) — and
-        // plumbing one through for this would be the wrong trade. The case this exists for is a
-        // process that died: the client is reconnecting to a NEW process and re-reads the
-        // transcript as it does, so it sees the closed row without ever needing a push.
+        // NO LIVE FRAME, AND THAT IS ENOUGH HERE. The case this exists for is a process that
+        // died: the client is reconnecting to a NEW process and re-reads the transcript as it
+        // does, so it sees the closed row without ever needing a push.
         //
         // The gap is the multi-replica case — replica A dies mid-turn, replica B sweeps it, and a
         // client still attached to B keeps its dots until it next reloads. Worth fixing when a
