@@ -30,6 +30,7 @@ use opengrok_core::id::{AccountId, SessionId};
 use opengrok_store::{PgStore, StoreError};
 use serde::{Deserialize, Serialize};
 
+use super::refresh_grace::GraceSlot;
 use super::token::{ACCESS_TOKEN_TTL_SECONDS, TokenMinter, hash_refresh_token, mint_refresh_token};
 
 /// How long a registered challenge is good for. Long enough for a person to finish in the
@@ -86,6 +87,9 @@ pub struct AuthState {
     /// Told the id of every account created here. The binary listens and warms the account's
     /// computer (`provision::warm_scope_for_account`); auth itself knows nothing about boxes.
     pub account_created: Option<tokio::sync::mpsc::UnboundedSender<opengrok_core::id::AccountId>>,
+    /// Just-rotated-away refresh plaintext, held for `REFRESH_GRACE_MS` so a concurrent refresh
+    /// with the old cookie can reuse the current pair. See `refresh_grace`.
+    refresh_grace: std::sync::Arc<super::refresh_grace::RefreshGrace>,
 }
 
 impl AuthState {
@@ -115,6 +119,7 @@ impl AuthState {
             cimd_cache: Arc::new(Mutex::new(HashMap::new())),
             cimd_allow_loopback: false,
             account_created: None,
+            refresh_grace: std::sync::Arc::new(super::refresh_grace::RefreshGrace::default()),
         }
     }
 
@@ -768,25 +773,38 @@ pub async fn oauth_token(
 /// desktop client's `/oauth/token` and the browser console's cookie `/auth/refresh`: look the
 /// presented token up by hash, append the rotation to the session's log, and mint a new access
 /// token bound to that session.
+///
+/// Concurrent callers with the same previous token: the first rotates; a loser inside
+/// `REFRESH_GRACE_MS` gets the already-minted current refresh and a fresh access token — not a
+/// second rotation and not 401. After grace, or without a prior rotate, the old hash is dead.
 async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, String), AuthFailure> {
     let presented_hash = hash_refresh_token(&refresh_token);
+    let at_ms = now_ms();
+
+    if let Some(slot) = state.refresh_grace.reuse(&presented_hash, at_ms) {
+        return mint_access_for_slot(state, &slot, at_ms);
+    }
+
     let account_id = state
         .store
-        .account_by_refresh_hash(&presented_hash)
+        .account_by_refresh_hash(&presented_hash, at_ms)
         .await?
         .ok_or_else(|| AuthFailure::SessionRejected("unknown refresh token".to_string()))?;
 
     let (account, seq) = state.store.load_account(&account_id).await?;
-    let new_refresh = mint_refresh_token();
-    let at_ms = now_ms();
 
+    let new_refresh = mint_refresh_token();
     let events = account
         .decide(AccountCommand::Refresh {
-            presented_hash,
+            presented_hash: presented_hash.clone(),
             new_hash: hash_refresh_token(&new_refresh),
             at_ms,
         })
         .map_err(|error| AuthFailure::SessionRejected(error.to_string()))?;
+
+    if events.is_empty() {
+        return reuse_rotated_pair(state, &presented_hash, at_ms).await;
+    }
 
     // The session the rotation belongs to — needed for the new access token's `sid`.
     let session_id = events
@@ -820,10 +838,30 @@ async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, Str
         enabled: after.enabled,
         avatar_url: after.avatar_url.clone(),
     };
-    state
+    match state
         .store
         .append_account(&account_id, seq, &events, &view)
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(StoreError::Conflict) => {
+            // The other request won the seq race and rotated. Reuse its pair.
+            return reuse_rotated_pair(state, &presented_hash, now_ms()).await;
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    state.refresh_grace.remember(
+        presented_hash,
+        GraceSlot {
+            current_refresh: new_refresh.clone(),
+            account_id: account_id.clone(),
+            session_id: session_id.clone(),
+            email: after.email.clone(),
+            plan: plan.as_wire().to_string(),
+        },
+        at_ms,
+    );
 
     let access_token = state
         .minter
@@ -838,4 +876,42 @@ async fn rotate(state: &AuthState, refresh_token: String) -> Result<(String, Str
         .map_err(|error| AuthFailure::Unavailable(error.to_string()))?;
 
     Ok((access_token, new_refresh))
+}
+
+/// The race loser's path: the winner already rotated. Wait briefly for that replica to stash
+/// the current plaintext (append commits before `remember`), then mint a fresh access token
+/// against the same current refresh. Fail closed if this process never did the rotate.
+async fn reuse_rotated_pair(
+    state: &AuthState,
+    presented_hash: &str,
+    at_ms: i64,
+) -> Result<(String, String), AuthFailure> {
+    for _ in 0..16 {
+        if let Some(slot) = state.refresh_grace.reuse(presented_hash, at_ms) {
+            return mint_access_for_slot(state, &slot, now_ms());
+        }
+        tokio::task::yield_now().await;
+    }
+    Err(AuthFailure::SessionRejected(
+        "unknown refresh token".to_string(),
+    ))
+}
+
+fn mint_access_for_slot(
+    state: &AuthState,
+    slot: &GraceSlot,
+    at_ms: i64,
+) -> Result<(String, String), AuthFailure> {
+    let access_token = state
+        .minter
+        .mint_access(
+            slot.account_id.as_str(),
+            slot.session_id.as_str(),
+            &slot.email,
+            &slot.plan,
+            at_ms / 1_000,
+            ACCESS_TOKEN_TTL_SECONDS,
+        )
+        .map_err(|error| AuthFailure::Unavailable(error.to_string()))?;
+    Ok((access_token, slot.current_refresh.clone()))
 }

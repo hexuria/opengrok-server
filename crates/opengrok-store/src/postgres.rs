@@ -112,9 +112,11 @@ impl PgStore {
             .await?;
         }
 
-        // Maintain the session index from the same events, in the same transaction. A refresh that
-        // rotated the token must make the OLD hash unfindable at the instant the new one appears —
-        // if these could drift, a rotated token would stay usable for the width of the gap.
+        // Maintain the session index from the same events, in the same transaction. The current
+        // hash is always findable. The just-rotated-away hash stays findable until
+        // `grace_until_ms` (REFRESH_GRACE_MS after the rotation) so a concurrent refresh with
+        // the old cookie can load the account; decide() still refuses it once the window has
+        // passed, and the next rotate drops hashes that are neither current nor previous.
         for event in events {
             match event {
                 AccountEvent::SessionIssued {
@@ -123,8 +125,8 @@ impl PgStore {
                     ..
                 } => {
                     sqlx::query(
-                        "insert into session_view (refresh_token_hash, account_id, session_id)
-                         values ($1, $2, $3)
+                        "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                         values ($1, $2, $3, null)
                          on conflict (refresh_token_hash) do nothing",
                     )
                     .bind(refresh_token_hash)
@@ -136,21 +138,60 @@ impl PgStore {
                 AccountEvent::SessionRefreshed {
                     session_id,
                     refresh_token_hash,
-                    ..
+                    previous_refresh_token_hash,
+                    at_ms,
                 } => {
-                    sqlx::query("delete from session_view where session_id = $1")
-                        .bind(session_id.as_str())
-                        .execute(&mut *tx)
-                        .await?;
                     sqlx::query(
-                        "insert into session_view (refresh_token_hash, account_id, session_id)
-                         values ($1, $2, $3)",
+                        "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                         values ($1, $2, $3, null)
+                         on conflict (refresh_token_hash) do update set
+                           account_id = excluded.account_id,
+                           session_id = excluded.session_id,
+                           grace_until_ms = null",
                     )
                     .bind(refresh_token_hash)
                     .bind(id.as_str())
                     .bind(session_id.as_str())
                     .execute(&mut *tx)
                     .await?;
+                    if let Some(previous) = previous_refresh_token_hash {
+                        let grace_until = *at_ms + opengrok_core::REFRESH_GRACE_MS;
+                        sqlx::query(
+                            "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                             values ($1, $2, $3, $4)
+                             on conflict (refresh_token_hash) do update set
+                               account_id = excluded.account_id,
+                               session_id = excluded.session_id,
+                               grace_until_ms = excluded.grace_until_ms",
+                        )
+                        .bind(previous)
+                        .bind(id.as_str())
+                        .bind(session_id.as_str())
+                        .bind(grace_until)
+                        .execute(&mut *tx)
+                        .await?;
+                        sqlx::query(
+                            "delete from session_view
+                              where session_id = $1
+                                and refresh_token_hash <> $2
+                                and refresh_token_hash <> $3",
+                        )
+                        .bind(session_id.as_str())
+                        .bind(refresh_token_hash)
+                        .bind(previous)
+                        .execute(&mut *tx)
+                        .await?;
+                    } else {
+                        sqlx::query(
+                            "delete from session_view
+                              where session_id = $1
+                                and refresh_token_hash <> $2",
+                        )
+                        .bind(session_id.as_str())
+                        .bind(refresh_token_hash)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
                 AccountEvent::SessionRevoked { session_id, .. } => {
                     sqlx::query("delete from session_view where session_id = $1")
@@ -205,12 +246,23 @@ impl PgStore {
         Ok(seq)
     }
 
-    /// Which account holds this refresh token, if any. The read side of the rotation check.
-    pub async fn account_by_refresh_hash(&self, hash: &str) -> StoreResult<Option<AccountId>> {
-        let row = sqlx::query("select account_id from session_view where refresh_token_hash = $1")
-            .bind(hash)
-            .fetch_optional(&self.pool)
-            .await?;
+    /// Which account holds this refresh token, if any. The current hash, or the just-rotated-away
+    /// hash whose `grace_until_ms` has not passed. After grace the previous hash is invisible here
+    /// even if the row has not been swept yet.
+    pub async fn account_by_refresh_hash(
+        &self,
+        hash: &str,
+        at_ms: i64,
+    ) -> StoreResult<Option<AccountId>> {
+        let row = sqlx::query(
+            "select account_id from session_view
+              where refresh_token_hash = $1
+                and (grace_until_ms is null or grace_until_ms >= $2)",
+        )
+        .bind(hash)
+        .bind(at_ms)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| {
             Ok(AccountId::from_stored(
                 row.try_get::<String, _>("account_id")?,

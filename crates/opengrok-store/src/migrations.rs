@@ -30,13 +30,16 @@ create table if not exists events (
 create index if not exists events_stream_idx on events (stream_id, stream_seq);
 
 -- The lookup index for "whose refresh token is this". A projection like any other: derivable by
--- replaying `events`, and maintained in the same transaction as the append. A row exists only
--- while the token it names is live, so a rotated or revoked token simply has no row.
+-- replaying `events`, and maintained in the same transaction as the append. The current hash
+-- has grace_until_ms NULL (live until rotated). The just-rotated-away hash is kept until
+-- grace_until_ms so a concurrent refresh with the old cookie can still find the session;
+-- after that the lookup ignores it, and the next rotate deletes it. Never a history of hashes.
 create table if not exists session_view (
     refresh_token_hash text   primary key,
     account_id         text   not null,
     session_id         text   not null
 );
+alter table session_view add column if not exists grace_until_ms bigint;
 
 create index if not exists session_view_session_idx on session_view (session_id);
 
