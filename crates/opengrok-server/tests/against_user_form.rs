@@ -411,7 +411,7 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     assert_eq!(body["formFieldOutcomes"][0]["filled"], true, "{body}");
     assert_eq!(body["formFieldOutcomes"][0]["fillFailed"], false, "{body}");
     assert_eq!(body["formFieldOutcomes"][1]["id"], "password", "{body}");
-    assert_eq!(body["formFieldOutcomes"][1]["filled"], true, "{body}");
+    assert_eq!(body["formFieldOutcomes"][1]["filled"], false, "{body}");
     assert_eq!(body["formFieldOutcomes"][1]["fillFailed"], false, "{body}");
     assert!(
         body.get("boxRequestId").is_none(),
@@ -429,28 +429,23 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     let mut acts = Vec::new();
     for _ in 0..50 {
         acts = h.stub.acts();
-        if acts.len() >= 4 {
+        if !acts.is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(
         acts,
-        vec![
-            CuaAction::Type {
-                text: EMAIL.to_string()
-            },
-            CuaAction::Key {
-                key: "Tab".to_string()
-            },
-            CuaAction::Type {
-                text: SECRET.to_string()
-            },
-            CuaAction::Key {
-                key: "Return".to_string()
-            },
-        ],
-        "fill is Type, Tab, Type, Return"
+        vec![CuaAction::Type {
+            text: EMAIL.to_string()
+        }],
+        "default multi-field types only the first field"
+    );
+    assert!(
+        !acts
+            .iter()
+            .any(|act| matches!(act, CuaAction::Type { text } if text == SECRET)),
+        "must not type the password into the email box: {acts:?}"
     );
     assert_eq!(h.stub.shots(), 0, "fill must not screenshot");
 
@@ -537,7 +532,7 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
     assert!(!body.to_string().contains(SECRET), "{body}");
 
     for _ in 0..50 {
-        if h.stub.acts().len() >= 4 {
+        if !h.stub.acts().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -546,16 +541,24 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
         h.stub
             .acts()
             .iter()
-            .any(|act| matches!(act, CuaAction::Type { text } if text == SECRET)),
-        "AG-UI submit still types: {:?}",
+            .any(|act| matches!(act, CuaAction::Type { text } if text == EMAIL)),
+        "AG-UI submit still types the focused field: {:?}",
         h.stub.acts()
     );
     assert!(
-        h.stub
+        !h.stub
+            .acts()
+            .iter()
+            .any(|act| matches!(act, CuaAction::Type { text } if text == SECRET)),
+        "must not type the password into the email box: {:?}",
+        h.stub.acts()
+    );
+    assert!(
+        !h.stub
             .acts()
             .iter()
             .any(|act| matches!(act, CuaAction::Key { key } if key == "Return")),
-        "post-fill Return: {:?}",
+        "default multi-field must not Return: {:?}",
         h.stub.acts()
     );
     assert_eq!(h.stub.shots(), 0);
@@ -786,28 +789,17 @@ async fn an_agui_only_turn_still_mints_a_user_form_entry_id() {
     assert!(!body.to_string().contains(SECRET), "{body}");
 
     for _ in 0..50 {
-        if h.stub.acts().len() >= 4 {
+        if !h.stub.acts().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(
         h.stub.acts(),
-        vec![
-            CuaAction::Type {
-                text: EMAIL.to_string()
-            },
-            CuaAction::Key {
-                key: "Tab".to_string()
-            },
-            CuaAction::Type {
-                text: SECRET.to_string()
-            },
-            CuaAction::Key {
-                key: "Return".to_string()
-            },
-        ],
-        "fill is Type, Tab, Type, Return"
+        vec![CuaAction::Type {
+            text: EMAIL.to_string()
+        }],
+        "default multi-field types only the first field"
     );
     assert_eq!(h.stub.shots(), 0, "fill must not screenshot");
 }

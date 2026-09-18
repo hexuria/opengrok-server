@@ -223,12 +223,15 @@ pub fn computer_system_prompt(
          `request_user_form` and wait. Never type secrets with `computer` — that attaches a \
          screenshot of what was typed. The person fills in chat; the server types into the focused \
          field and does not show you the secret. After the form settles, screenshot and confirm \
-         what the page shows; filling is not a successful login. If another in-sandbox challenge \
-         appears (OTP, a phone code on the same page), call `request_user_form` again with otp \
-         fields and challengeKind \"otp\" — never re-raise a form that already settled. Captcha, \
-         passkey, or a page outside this box is not another password form: the person finishes on \
-         the computer (Open the screen). If they dismiss or decline, continue without those \
-         credentials and do not loop."
+         what the page shows; filling is not a successful login. Auth is one challenge per form: \
+         raise email, then after it settles screenshot; if a password page is next, call \
+         `request_user_form` with a password-only form (new entryId, challengeKind \"password\"). \
+         Do not put email and password on the same card unless they share a page (`samePage`). \
+         If another in-sandbox challenge appears (OTP, a phone code on the same page), call \
+         `request_user_form` again with otp fields and challengeKind \"otp\" — never re-raise a \
+         form that already settled. Captcha, passkey, or a page outside this box is not another \
+         password form: the person finishes on the computer (Open the screen). If they dismiss or \
+         decline, continue without those credentials and do not loop."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -555,8 +558,12 @@ mod tests {
             "the form tool is a built-in on a box: {box_only}"
         );
         assert!(
-            box_only.contains("filling is not a successful login"),
-            "observe after settle: {box_only}"
+            box_only.contains("one challenge per form"),
+            "stepped login contract: {box_only}"
+        );
+        assert!(
+            box_only.contains("password-only"),
+            "password follow-up is a new form: {box_only}"
         );
         assert!(
             box_only.contains("challengeKind"),

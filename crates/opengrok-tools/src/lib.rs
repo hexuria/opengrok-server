@@ -1391,7 +1391,10 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server types into the focused field on the page and never shows \
              you the secret. After it settles, screenshot and confirm what the page shows — \
-             filling is not login. If another in-sandbox challenge appears (OTP, phone \
+             filling is not login. Auth is one challenge per form: raise email, then observe; \
+             if a password page is next, call this again with a password-only form (new entryId, \
+             challengeKind \"password\"). Do not put email and password on the same card unless \
+             they share a page (`samePage`). If another in-sandbox challenge appears (OTP, phone \
              verification on the same page), call this again with otp fields and \
              challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
              passkey, or a page outside this box is not another password form: the person \
@@ -1405,6 +1408,14 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                     "challengeKind": {
                         "type": "string",
                         "description": "Optional hint: password, otp, captcha, passkey, outside_sandbox. Captcha/passkey/outside-sandbox must not be another password form."
+                    },
+                    "samePage": {
+                        "type": "boolean",
+                        "description": "Fields share one HTML page: Tab between them. Default false — type only the first focused field (Facebook email then password)."
+                    },
+                    "submit": {
+                        "type": "boolean",
+                        "description": "Press Return after a successful fill. Default false. Combined forms must set this; a single field still Returns."
                     },
                     "fields": {
                         "type": "array",

@@ -10,7 +10,10 @@
 //! never screenshots.
 //!
 //! hexuria/box today is X11 type-into-focus (`POST /v1/cua/type`), not Playwright aria-ref.
-//! Multi-field MVP: assume the first field is focused (prior bot click), Type, Tab, Type.
+//! Facebook login is often stepped (email page, then password). Tab/Return on a combined
+//! email+password form mis-focuses; CUA still succeeds and we used to report `submitted`
+//! while the password landed in the wrong box. Default: type only the first focused field.
+//! `samePage: true` allows Tab; `submit: true` allows Return.
 
 use std::collections::BTreeMap;
 
@@ -68,6 +71,18 @@ pub struct FormRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub challenge_kind: Option<String>,
+    /// Fields share one HTML page: Tab between them. Default false — type only the first
+    /// focused field so a stepped login (Facebook email, then password) cannot mistype.
+    #[serde(
+        default,
+        rename = "samePage",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub same_page: bool,
+    /// Press Return after a successful fill. Default false; a single field, or otp/password
+    /// with exactly one typed field, still Returns. Combined forms must set this explicitly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub submit: bool,
 }
 
 /// What the model reads when the person hands the computer back after Open-the-screen.
@@ -181,6 +196,14 @@ pub fn form_request_from(value: &Value) -> FormRequest {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        same_page: source
+            .get("samePage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        submit: source
+            .get("submit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -202,6 +225,12 @@ pub fn sanitize_arguments(arguments: &Value) -> Value {
     }
     if let Some(kind) = form.challenge_kind {
         body["challengeKind"] = json!(kind);
+    }
+    if form.same_page {
+        body["samePage"] = json!(true);
+    }
+    if form.submit {
+        body["submit"] = json!(true);
     }
     body
 }
@@ -340,7 +369,11 @@ pub fn tool_result_content(
         form.title.as_str()
     };
     let secret_note = "Secret field values were typed into the page and never shown to you.";
-    let observe = "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form.";
+    let observe = if types_only_first_field(form) {
+        "Screenshot and confirm what the page shows now; do not claim login succeeded. Auth is one challenge per form: if a password page is next, call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
+    } else {
+        "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form."
+    };
     match resolution {
         FormResolution::Submitted => {
             let shared_line = if shared.is_empty() {
@@ -430,9 +463,36 @@ pub fn history_line(entry: &Value) -> Option<String> {
     Some(line)
 }
 
-/// Type each value into the currently focused field, Tab between fields. After a successful
-/// fill, press Return so the page actually submits (Facebook hang: fill reported submitted
-/// with no post-fill submit). No screenshot — the model observes after settle.
+/// Combined email+password without `samePage`: type only the first focused field.
+#[must_use]
+pub fn types_only_first_field(form: &FormRequest) -> bool {
+    form.fields.len() > 1 && !form.same_page
+}
+
+/// Return is unsafe on a stepped multi-field form (Facebook). Safe when the person asked
+/// (`submit`), there is a single field, or an otp/password challenge typed exactly one field
+/// on a same-page / single-field form.
+#[must_use]
+pub fn should_press_return(form: &FormRequest, typed_count: usize) -> bool {
+    if typed_count == 0 {
+        return false;
+    }
+    if form.submit {
+        return true;
+    }
+    if types_only_first_field(form) {
+        return false;
+    }
+    if form.fields.len() == 1 {
+        return true;
+    }
+    let kind = form.challenge_kind.as_deref().unwrap_or("");
+    typed_count == 1 && (kind.eq_ignore_ascii_case("otp") || kind.eq_ignore_ascii_case("password"))
+}
+
+/// Type into the currently focused field. Default multi-field: first field only, no Tab,
+/// no Return. `samePage` Tabs; `submit` (or a single / otp / password field) Returns.
+/// No screenshot — the model observes after settle.
 pub async fn fill_into_focus(
     computer: &dyn Computer,
     box_id: &str,
@@ -441,8 +501,13 @@ pub async fn fill_into_focus(
 ) -> Vec<FieldOutcome> {
     let mut outcomes = Vec::new();
     let mut previous_typed = false;
-    let mut typed_any = false;
-    for field in &form.fields {
+    let mut typed_count = 0usize;
+    let type_limit = if types_only_first_field(form) {
+        form.fields.len().min(1)
+    } else {
+        form.fields.len()
+    };
+    for field in form.fields.iter().take(type_limit) {
         let value = values.get(&field.id).cloned().unwrap_or_default();
         if field.required && value.is_empty() {
             outcomes.push(FieldOutcome {
@@ -482,7 +547,6 @@ pub async fn fill_into_focus(
                 filled: false,
                 fill_failed: true,
             });
-            // Everything after a failed Tab cannot assume focus.
             for rest in form.fields.iter().skip(outcomes.len()) {
                 if outcomes.iter().any(|seen| seen.id == rest.id) {
                     continue;
@@ -503,7 +567,7 @@ pub async fn fill_into_focus(
                     fill_failed: false,
                 });
                 previous_typed = true;
-                typed_any = true;
+                typed_count += 1;
             }
             Err(error) => {
                 tracing::warn!(field = %field.label, %error, "user-form: Type failed");
@@ -516,10 +580,17 @@ pub async fn fill_into_focus(
             }
         }
     }
-    if overall_resolution(&outcomes) == FormResolution::Submitted && typed_any {
-        // Fields were typed; Return submits the page. A failed Return does not rewrite
-        // fill_failed — the values are on the page; the model screenshots after settle.
-        if let Err(error) = computer
+    for rest in form.fields.iter().skip(outcomes.len()) {
+        // Not this challenge — do not mark fill_failed (that would lie that CUA missed).
+        outcomes.push(FieldOutcome {
+            id: rest.id.clone(),
+            filled: false,
+            fill_failed: false,
+        });
+    }
+    if overall_resolution(&outcomes) == FormResolution::Submitted
+        && should_press_return(form, typed_count)
+        && let Err(error) = computer
             .act(
                 box_id,
                 &CuaAction::Key {
@@ -527,9 +598,8 @@ pub async fn fill_into_focus(
                 },
             )
             .await
-        {
-            tracing::warn!(%error, "user-form: post-fill Return failed; fields were typed");
-        }
+    {
+        tracing::warn!(%error, "user-form: post-fill Return failed; fields were typed");
     }
     outcomes
 }
@@ -615,10 +685,14 @@ mod tests {
             "title": "Enter code",
             "fields": [{ "id": "otp", "label": "Code", "type": "otp", "required": true }],
             "challengeKind": "otp",
+            "samePage": true,
+            "submit": true,
             "values": { "otp": "123456" }
         });
         let cleaned = sanitize_arguments(&raw);
         assert_eq!(cleaned["challengeKind"], "otp");
+        assert_eq!(cleaned["samePage"], true);
+        assert_eq!(cleaned["submit"], true);
         assert!(cleaned.get("values").is_none());
         assert!(!cleaned.to_string().contains("123456"));
     }
@@ -647,6 +721,8 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            same_page: false,
+            submit: false,
         };
         let values = BTreeMap::from([
             ("email".into(), "ada@example.com".into()),
@@ -662,6 +738,8 @@ mod tests {
         assert!(content.contains("ada@example.com"));
         assert!(content.contains("filled into the page"));
         assert!(content.contains("Screenshot"));
+        assert!(content.contains("password-only"));
+        assert!(content.contains("new entryId"));
         assert!(!content.contains("logged in"));
         assert!(!content.contains("s3cret-pass"));
         assert!(!contains_secret_value(&content, &form, &values));
@@ -757,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fill_types_then_tabs_and_never_screenshots() {
+    async fn fill_types_only_the_first_field_by_default() {
         let spy = FillSpy::default();
         let form = FormRequest {
             title: "Sign in".into(),
@@ -781,6 +859,8 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            same_page: false,
+            submit: false,
         };
         let values = BTreeMap::from([
             ("email".into(), "ada@example.com".into()),
@@ -788,8 +868,95 @@ mod tests {
         ]);
         let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
         assert_eq!(outcomes.len(), 2);
-        assert!(outcomes.iter().all(|o| o.filled && !o.fill_failed));
+        assert!(outcomes[0].filled && !outcomes[0].fill_failed);
+        assert!(
+            !outcomes[1].filled && !outcomes[1].fill_failed,
+            "password is the next challenge, not a CUA miss: {:?}",
+            outcomes[1]
+        );
         assert_eq!(overall_resolution(&outcomes), FormResolution::Submitted);
+        let acts = spy.acts.lock().unwrap().clone();
+        assert_eq!(
+            acts,
+            vec![CuaAction::Type {
+                text: "ada@example.com".into()
+            }],
+            "default multi-field must not Tab or Return: {acts:?}"
+        );
+        assert_eq!(*spy.shots.lock().unwrap(), 0, "fill must not screenshot");
+    }
+
+    #[tokio::test]
+    async fn a_single_password_field_may_press_return() {
+        let spy = FillSpy::default();
+        let form = FormRequest {
+            title: "Password".into(),
+            instruction: String::new(),
+            fields: vec![FormField {
+                id: "password".into(),
+                label: "Password".into(),
+                r#type: "password".into(),
+                required: true,
+                secret: false,
+            }],
+            domain: None,
+            live_host: None,
+            challenge_kind: Some("password".into()),
+            same_page: false,
+            submit: false,
+        };
+        let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
+        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+        assert_eq!(overall_resolution(&outcomes), FormResolution::Submitted);
+        let acts = spy.acts.lock().unwrap().clone();
+        assert_eq!(
+            acts,
+            vec![
+                CuaAction::Type {
+                    text: "s3cret-pass".into()
+                },
+                CuaAction::Key {
+                    key: "Return".into()
+                },
+            ]
+        );
+        assert_eq!(*spy.shots.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_page_with_submit_tabs_and_returns() {
+        let spy = FillSpy::default();
+        let form = FormRequest {
+            title: "Sign in".into(),
+            instruction: String::new(),
+            fields: vec![
+                FormField {
+                    id: "email".into(),
+                    label: "Email".into(),
+                    r#type: "email".into(),
+                    required: true,
+                    secret: false,
+                },
+                FormField {
+                    id: "password".into(),
+                    label: "Password".into(),
+                    r#type: "password".into(),
+                    required: true,
+                    secret: false,
+                },
+            ],
+            domain: None,
+            live_host: None,
+            challenge_kind: None,
+            same_page: true,
+            submit: true,
+        };
+        let values = BTreeMap::from([
+            ("email".into(), "ada@example.com".into()),
+            ("password".into(), "s3cret-pass".into()),
+        ]);
+        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+        assert!(outcomes.iter().all(|o| o.filled && !o.fill_failed));
         let acts = spy.acts.lock().unwrap().clone();
         assert_eq!(
             acts,
@@ -806,7 +973,48 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(*spy.shots.lock().unwrap(), 0, "fill must not screenshot");
+        assert_eq!(*spy.shots.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn return_is_opt_in_on_multi_field_forms() {
+        let email = FormField {
+            id: "email".into(),
+            label: "Email".into(),
+            r#type: "email".into(),
+            required: true,
+            secret: false,
+        };
+        let password = FormField {
+            id: "password".into(),
+            label: "Password".into(),
+            r#type: "password".into(),
+            required: true,
+            secret: false,
+        };
+        let multi = FormRequest {
+            fields: vec![email.clone(), password.clone()],
+            ..FormRequest::default()
+        };
+        assert!(
+            !should_press_return(&multi, 1),
+            "default multi-field must not Return"
+        );
+        assert!(types_only_first_field(&multi));
+        let single = FormRequest {
+            fields: vec![password.clone()],
+            challenge_kind: Some("password".into()),
+            ..FormRequest::default()
+        };
+        assert!(should_press_return(&single, 1));
+        let same_page_submit = FormRequest {
+            fields: vec![email, password],
+            same_page: true,
+            submit: true,
+            ..FormRequest::default()
+        };
+        assert!(should_press_return(&same_page_submit, 2));
+        assert!(!types_only_first_field(&same_page_submit));
     }
 
     #[test]
@@ -824,6 +1032,8 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            same_page: false,
+            submit: false,
         };
         let raw = json!({
             "email": "ada@example.com",
@@ -924,6 +1134,8 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            same_page: false,
+            submit: false,
         };
         let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
         let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
