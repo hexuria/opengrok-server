@@ -2892,7 +2892,7 @@ fn resume_outcome(
         opengrok_core::run::SuspendReason::Credential => {
             opengrok_harness::ResumeOutcome::Settled(if approved {
                 opengrok_tools::credential::tool_result_content(
-                    opengrok_tools::credential::CredentialStatus::SessionEstablished,
+                    opengrok_tools::credential::CredentialStatus::Filled,
                 )
             } else {
                 opengrok_tools::credential::tool_result_content(

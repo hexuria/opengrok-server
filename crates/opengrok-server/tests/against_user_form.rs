@@ -1267,7 +1267,7 @@ async fn credential_request_round_trips_a_status_and_never_stores_a_password() {
         .json(&json!({
             "agentId": agent,
             "requestId": request_id,
-            "status": "session_established",
+            "status": "filled",
             "credentialId": "cred_nativechat_1",
             "password": SECRET
         }))
@@ -1276,7 +1276,7 @@ async fn credential_request_round_trips_a_status_and_never_stores_a_password() {
         .expect("credential result");
     assert_eq!(res.status().as_u16(), 200, "credential result status");
     let body: Value = res.json().await.expect("result json");
-    assert_eq!(body["status"], "session_established", "{body}");
+    assert_eq!(body["status"], "filled", "{body}");
     assert!(!body.to_string().contains(SECRET), "{body}");
 
     let replay = h

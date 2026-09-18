@@ -2,8 +2,8 @@
 //!
 //! WHY THIS IS NOT THE VAULT. Connector credentials stay in `opengrok-store::Vault`. A site
 //! password must never be stored, journaled, or shown to the model. NativeChat brokers the
-//! login out of agent view; the box gets cookies/session only. We emit
-//! `credential.offer_save` / `credential.request` and accept a status-only `credential.result`.
+//! login out of agent view; the box gets cookies/session only. `credential.result` status
+//! `filled` means that authenticated session is ready — not that a password was typed.
 
 use axum::Router;
 use axum::extract::State;
@@ -63,10 +63,11 @@ pub async fn result_for_caller(state: &GatewayState, args: &Value, caller: &str)
 }
 
 /// `POST /ag-ui/credential/result` and gateway `submitCredentialResult`.
-/// `{ status: filled|denied|missing|error|session_established, credentialId?, requestId?, agentId }`.
-/// Status only. A password in the body is dropped, never stored. `filled` and
-/// `session_established` both mean the session was brokered, not that a password was typed
-/// into the box.
+/// `{ status: filled|denied|missing|error, credentialId?, requestId?, agentId }`.
+/// Status only. A password in the body is dropped, never stored.
+/// LOCKED: `filled` means the authenticated session is ready (cookies/profile applied to the
+/// box after NativeChat broker). It does NOT mean a password was typed into the box.
+/// `session_established` is accepted as an alias and canonicalized to `filled`.
 pub async fn submit_credential_result(
     state: &GatewayState,
     args: &Value,
@@ -89,7 +90,7 @@ pub async fn submit_credential_result(
     let Some(parsed) = result_from(&scrubbed) else {
         return (
             400,
-            json!({ "error": "status must be filled, denied, missing, error, or session_established" }),
+            json!({ "error": "status must be filled, denied, missing, or error" }),
         );
     };
 
@@ -262,12 +263,13 @@ mod tests {
         let parsed = result_from(&clean).expect("status");
         assert_eq!(parsed.status, CredentialStatus::Filled);
         assert_eq!(parsed.credential_id.as_deref(), Some("cred_1"));
-        let established = result_from(&json!({
+        let alias = result_from(&json!({
             "agentId": "cw_1",
             "status": "session_established"
         }))
-        .expect("session_established");
-        assert!(established.status.session_ready());
+        .expect("session_established is an alias of filled");
+        assert_eq!(alias.status, CredentialStatus::Filled);
+        assert_eq!(alias.status.as_str(), "filled");
     }
 
     #[test]

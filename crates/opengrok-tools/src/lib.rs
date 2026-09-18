@@ -1511,8 +1511,9 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
         REQUEST_USER_FORM => Some((
             "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
              If a saved login for this origin is likely, call `credential.request` first and wait; \
-             on session_established or filled the session is ready (observe the page — do not type \
-             the password with `computer`); on denied, missing, or error, then raise this. \
+             on filled the authenticated session is ready (observe the page — you did not receive \
+             a password and must not type one with `computer`); on denied, missing, or error, \
+             then raise this. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server types into the focused field on the page and never shows \
@@ -1567,11 +1568,11 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
         REQUEST_CREDENTIAL => Some((
             "Ask NativeChat to broker a saved login for this origin, out of your view. Prefer \
              this before a password `request_user_form` when a match is likely (the person saved \
-             this site, or you already collected a username here). The box receives \
-             cookies/session only; you never see a password. Do not type the password with \
-             `computer`. Wait. On session_established or filled, the session is ready — \
-             screenshot the page. On denied, missing, or error, fall back to \
-             `request_user_form`. Do not send a password.",
+             this site, or you already collected a username here). Wait. On filled, the \
+             authenticated session is ready: cookies/profile were applied to the box. You did \
+             not receive a password and must not type one with `computer`. Screenshot the page. \
+             On denied, missing, or error, fall back to `request_user_form`. Do not send a \
+             password.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

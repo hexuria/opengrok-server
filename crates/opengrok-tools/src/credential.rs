@@ -3,11 +3,11 @@
 //! WHY THIS IS NOT THE VAULT. `opengrok-store::Vault` seals connector / API secrets. A Google
 //! password must never enter it, Postgres, the journal, or a tool result.
 //!
-//! SESSION BROKER, NOT A BOX FILL. NativeChat brokers the login *out of agent view*. The box
-//! receives cookies / a session, not a typed password. `credential.request` must not instruct
-//! or enable an observable password fill into agent-controlled Chromium — a screenshot of that
-//! fill would teach the model the secret. `filled` and `session_established` both mean the
-//! session was brokered. OpenGrok orchestrates statuses; it never relays the password.
+//! SEMANTIC LOCK. `credential.result` `status: "filled"` means the **authenticated session is
+//! ready**: NativeChat brokered login out of agent view and applied cookies/profile to the box.
+//! It does **not** mean a password was typed into the agent-observable browser. The model and
+//! the tool never receive or type a password. OpenGrok orchestrates statuses; it never relays
+//! the secret. `session_established` on the wire is accepted as an alias of `filled`.
 //!
 //! WHY THE MODEL NEVER SEES A PASSWORD. `offer_save` is `{ origin, username, formEntryId }`.
 //! `request` is `{ origin, username? }` plus `requestId`. `result` is a status. Accidental
@@ -34,10 +34,9 @@ const SECRET_KEYS: &[&str] = &["password", "passwd", "pwd"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialStatus {
-    /// NativeChat preferred: login was brokered out of agent view; the box has a session.
-    SessionEstablished,
-    /// Same meaning as `session_established` (session brokered). Kept because NativeChat may
-    /// send either word; neither means "a password was typed into the box".
+    /// LOCKED: `filled` = authenticated session ready. Cookies/profile applied to the box after
+    /// NativeChat brokered login out of agent view. NOT a password typed into the agent-observable
+    /// browser. The model/tool never received or typed a password.
     Filled,
     Denied,
     Missing,
@@ -48,7 +47,6 @@ impl CredentialStatus {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SessionEstablished => "session_established",
             Self::Filled => "filled",
             Self::Denied => "denied",
             Self::Missing => "missing",
@@ -59,8 +57,8 @@ impl CredentialStatus {
     #[must_use]
     pub fn from_wire(word: &str) -> Option<Self> {
         match word {
-            "session_established" => Some(Self::SessionEstablished),
-            "filled" => Some(Self::Filled),
+            // Locked success word. `session_established` is the same meaning, accepted as alias.
+            "filled" | "session_established" => Some(Self::Filled),
             "denied" => Some(Self::Denied),
             "missing" => Some(Self::Missing),
             "error" => Some(Self::Error),
@@ -68,10 +66,10 @@ impl CredentialStatus {
         }
     }
 
-    /// `filled` and `session_established` are both success: a session was brokered.
+    /// `filled`: authenticated session ready (cookies/profile on the box).
     #[must_use]
     pub fn session_ready(self) -> bool {
-        matches!(self, Self::Filled | Self::SessionEstablished)
+        matches!(self, Self::Filled)
     }
 }
 
@@ -214,12 +212,13 @@ pub fn result_from(value: &Value) -> Option<CredentialResult> {
     })
 }
 
-/// What the model reads. Status only. No secret, no instruction to type a password into the box.
+/// What the model reads. Status only. `filled` = authenticated session ready — never that
+/// a password was received or typed.
 #[must_use]
 pub fn tool_result_content(status: CredentialStatus) -> String {
     match status {
-        CredentialStatus::SessionEstablished | CredentialStatus::Filled => {
-            "A saved login session was established out of your view. The box has the session (cookies), not a typed password. Secret values were never shown to you. Treat the session as ready: screenshot and confirm what the page shows. Do not type secrets with `computer`. If another challenge appears, prefer `credential.request` when a saved login is likely, otherwise `request_user_form`."
+        CredentialStatus::Filled => {
+            "filled: the authenticated session is ready. Cookies and profile were applied to the box out of your view. You did not receive a password and must not type one. Screenshot and confirm what the page shows. Do not type secrets with `computer`. If another challenge appears, prefer `credential.request` when a saved login is likely, otherwise `request_user_form`."
                 .to_string()
         }
         CredentialStatus::Denied => {
@@ -305,13 +304,7 @@ mod tests {
 
     #[test]
     fn result_statuses_round_trip_and_drop_a_password() {
-        for status in [
-            "session_established",
-            "filled",
-            "denied",
-            "missing",
-            "error",
-        ] {
+        for status in ["filled", "denied", "missing", "error"] {
             let parsed = result_from(&json!({
                 "status": status,
                 "credentialId": "cred_1",
@@ -323,31 +316,32 @@ mod tests {
             assert_eq!(parsed.credential_id.as_deref(), Some("cred_1"));
             assert_eq!(parsed.request_id.as_deref(), Some("req_1"));
         }
+        let alias = result_from(&json!({ "status": "session_established" })).expect("alias");
+        assert_eq!(alias.status, CredentialStatus::Filled);
+        assert_eq!(alias.status.as_str(), "filled");
         assert!(result_from(&json!({ "status": "nope" })).is_none());
         assert!(CredentialStatus::Filled.session_ready());
-        assert!(CredentialStatus::SessionEstablished.session_ready());
         assert!(!CredentialStatus::Denied.session_ready());
     }
 
     #[test]
-    fn a_ready_session_does_not_tell_the_model_to_type_a_password_into_the_box() {
-        for status in [
-            CredentialStatus::SessionEstablished,
-            CredentialStatus::Filled,
-        ] {
-            let content = tool_result_content(status);
-            let lower = content.to_ascii_lowercase();
-            assert!(
-                !lower.contains("filled into"),
-                "success must not describe an observable box fill: {content}"
-            );
-            assert!(
-                content.contains("session"),
-                "success is a brokered session: {content}"
-            );
-            assert!(content.contains("Do not type secrets"), "{content}");
-            assert!(!content.contains("s3cret"), "{content}");
-        }
+    fn filled_means_authenticated_session_ready_not_a_typed_password() {
+        let content = tool_result_content(CredentialStatus::Filled);
+        let lower = content.to_ascii_lowercase();
+        assert!(
+            content.contains("authenticated session is ready"),
+            "{content}"
+        );
+        assert!(
+            !lower.contains("filled into"),
+            "filled must not mean a password was typed into the box: {content}"
+        );
+        assert!(
+            content.contains("You did not receive a password"),
+            "{content}"
+        );
+        assert!(content.contains("Do not type secrets"), "{content}");
+        assert!(!content.contains("s3cret"), "{content}");
     }
 
     #[test]
