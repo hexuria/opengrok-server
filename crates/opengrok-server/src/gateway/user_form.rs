@@ -340,7 +340,18 @@ pub async fn resolve_box_handoff(
 
     let settled_siblings =
         settle_live_handoffs(state, account_id, &coworker_id, &agent_id, word, timed_out).await;
-    resume_user_form(state, account_id, &coworker_id, &agent_id, content, None).await;
+    // Name the call this resume answers. Passing `None` lets it land on whichever
+    // call happens to be parked, which for stacked forms is the sibling's -- the
+    // twin then gets this form's tool result.
+    resume_user_form(
+        state,
+        account_id,
+        &coworker_id,
+        &agent_id,
+        content,
+        call_id_of(&entry),
+    )
+    .await;
 
     if posted_live {
         if let Some(card) = settled_siblings
@@ -454,6 +465,11 @@ pub async fn timeout_unresolved_form(
             }
             None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
         };
+        // `None` on purpose: every unresolved form just timed out, so the parked
+        // call is one of them, and the run should resume with a timed-out result.
+        // Naming the last-settled entry here would make `resume_settled` refuse
+        // whenever that entry is not the pending one, and the run would stay
+        // parked with nothing left to wake it.
         resume_user_form(state, account_id, coworker_id, agent_id, content, None).await;
     }
     settled_any
@@ -766,13 +782,15 @@ async fn abandon_escalated_form(
     entry: Value,
 ) -> (u16, Value) {
     settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    // Name the call this Skip answers; with `None` a stacked sibling's parked
+    // call would take the declined result instead.
     resume_user_form(
         state,
         account_id,
         coworker_id,
         agent_id,
         HANDOFF_DECLINED_TOOL_RESULT.to_string(),
-        None,
+        call_id_of(&entry),
     )
     .await;
     (200, entry)
@@ -845,7 +863,16 @@ async fn heal_or_already(
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
     let content = tool_result_content(&form, resolution, &shared, timed_out);
-    if resume_user_form(state, account_id, coworker_id, agent_id, content, None).await {
+    if resume_user_form(
+        state,
+        account_id,
+        coworker_id,
+        agent_id,
+        content,
+        call_id_of(entry),
+    )
+    .await
+    {
         return (200, entry.clone());
     }
     (200, json!({ "alreadyAnswered": true }))
