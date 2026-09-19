@@ -86,6 +86,9 @@ pub enum BoxError {
     Refused { status: u16, body: String },
     #[error("no box with that id")]
     NoSuchBox,
+    /// The host could not mint a secret for the box (no OS randomness).
+    #[error("could not mint a box secret: {0}")]
+    Secret(String),
 }
 
 impl BoxError {
@@ -100,6 +103,7 @@ impl BoxError {
             }
             BoxError::Refused { .. } => "provider_error",
             BoxError::NoSuchBox => "provider_error",
+            BoxError::Secret(_) => "provider_error",
         }
     }
 }

@@ -1712,6 +1712,7 @@ fn strip_identity(arguments: Value) -> Value {
 fn describe(error: BoxError) -> String {
     match error {
         BoxError::NoSuchBox => "that computer no longer exists".to_string(),
+        BoxError::Secret(reason) => reason.clone(),
         BoxError::Unreachable(detail) => format!("the computer is unreachable: {detail}"),
         BoxError::Refused { status, body } => {
             format!("the computer refused the request ({status}): {body}")
@@ -1782,6 +1783,7 @@ mod tests {
             if let Some(error) = &self.fail_with {
                 return Err(match error {
                     BoxError::NoSuchBox => BoxError::NoSuchBox,
+                    BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
                     BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
                     BoxError::Refused { status, body } => BoxError::Refused {
                         status: *status,

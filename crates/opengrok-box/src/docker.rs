@@ -214,13 +214,17 @@ impl DockerComputer {
     }
 
     /// The arguments that create a box. Split out so the shape is testable without a daemon.
-    pub fn create_args(&self, ttl_seconds: Option<u64>) -> Vec<String> {
+    pub fn create_args(&self, ttl_seconds: Option<u64>) -> BoxResult<Vec<String>> {
         self.create_args_on(ttl_seconds, &BoxVolumes::fresh())
     }
 
     /// `create_args` on a chosen pair of volumes — `recreate` passes the old box's, so the new
     /// container comes up on the same home and workspace.
-    pub fn create_args_on(&self, ttl_seconds: Option<u64>, volumes: &BoxVolumes) -> Vec<String> {
+    pub fn create_args_on(
+        &self,
+        ttl_seconds: Option<u64>,
+        volumes: &BoxVolumes,
+    ) -> BoxResult<Vec<String>> {
         let mut args = vec![
             "run".to_string(),
             "-d".to_string(),
@@ -250,9 +254,9 @@ impl DockerComputer {
             args.push(format!("127.0.0.1::{port}"));
         }
         if self.wants_desktop() {
-            // grok-box refuses tokens shorter than 16 characters. uuid_like is hex nanos.
+            // grok-box refuses tokens shorter than 16 characters; `secret_token` is 64 hex.
             args.push("-e".to_string());
-            args.push(format!("BOX_TOKEN=og-{}", uuid_like()));
+            args.push(format!("BOX_TOKEN=og-{}", secret_token()?));
             args.push("-e".to_string());
             args.push(format!("BOX_VNC_PASSWORD={DESKTOP_VNC_PASSWORD}"));
             args.push("-e".to_string());
@@ -271,10 +275,10 @@ impl DockerComputer {
                 // refuses <16). Recovered after restart by inspecting Config.Env,
                 // same as box_token — OpenGrok does not dial the WS.
                 args.push("-e".to_string());
-                args.push(format!("BOX_EGRESS_TUNNEL_BEARER=og-{}", uuid_like()));
+                args.push(format!("BOX_EGRESS_TUNNEL_BEARER=og-{}", secret_token()?));
             }
             args.push(self.image.clone());
-            return args;
+            return Ok(args);
         }
         args.push(self.image.clone());
         // `sleep infinity` keeps the container alive with no service in it; the TTL is enforced by
@@ -285,14 +289,14 @@ impl DockerComputer {
             Some(seconds) => format!("sleep {seconds}"),
             None => "sleep infinity".to_string(),
         });
-        args
+        Ok(args)
     }
 }
 
 #[async_trait]
 impl Computer for DockerComputer {
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
-        let args = self.create_args(ttl_seconds);
+        let args = self.create_args(ttl_seconds)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let id = self.docker(&borrowed).await?;
         // Docker prints the full 64-character id; the short form is what a person sees everywhere
@@ -575,7 +579,7 @@ impl Computer for DockerComputer {
         if self.wants_desktop() {
             self.seed_defaults(&volumes.home).await?;
         }
-        let args = self.create_args_on(None, &volumes);
+        let args = self.create_args_on(None, &volumes)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
         let id = self.docker(&borrowed).await?;
         // Only once the new box exists: a failed create above leaves the old one stopped but
@@ -878,6 +882,18 @@ fn env_from_inspect(blob: &str, key: &str) -> Option<String> {
 ///
 /// Not a UUID crate: this names two files inside one container, and the id only has to be unique
 /// among that container's own concurrent processes.
+/// A secret the guest compares in constant time — so it has to be unguessable.
+/// `uuid_like` is hex nanoseconds: fine for naming a file, not for a bearer. The
+/// egress-tunnel token and `BOX_TOKEN` were both minted from the clock, microseconds
+/// apart, so knowing one narrowed the other. 32 bytes from the OS CSPRNG, as hex:
+/// 64 characters, well past grok-box's 16-character floor.
+fn secret_token() -> BoxResult<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|err| BoxError::Secret(format!("no OS randomness: {err}")))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -894,7 +910,9 @@ mod tests {
 
     #[test]
     fn a_box_is_created_on_loopback_and_labelled_as_ours() {
-        let args = DockerComputer::new().create_args(Some(60));
+        let args = DockerComputer::new()
+            .create_args(Some(60))
+            .expect("create args");
         assert!(args.contains(&"run".to_string()));
         assert!(args.contains(&"-d".to_string()));
         // Labelled, so destroy cannot remove a container somebody else made.
@@ -910,6 +928,7 @@ mod tests {
         assert!(
             tagged
                 .create_args(None)
+                .expect("create args")
                 .iter()
                 .any(|arg| arg == "dev.opengrok.run=gate-42")
         );
@@ -926,7 +945,9 @@ mod tests {
     /// A box with no TTL still has to be created, but it must not silently become a 0-second one.
     #[test]
     fn a_box_without_a_ttl_sleeps_forever_rather_than_not_at_all() {
-        let args = DockerComputer::new().create_args(None);
+        let args = DockerComputer::new()
+            .create_args(None)
+            .expect("create args");
         assert!(args.iter().any(|arg| arg == "sleep infinity"), "{args:?}");
     }
 
@@ -934,7 +955,8 @@ mod tests {
     fn the_image_can_be_chosen() {
         let args = DockerComputer::new()
             .with_image("rust:1-slim")
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(args.contains(&"rust:1-slim".to_string()));
     }
 
@@ -942,7 +964,8 @@ mod tests {
     fn a_grok_box_image_keeps_its_entrypoint_and_publishes_novnc() {
         let args = DockerComputer::new()
             .with_image("grok-box:local")
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(args.contains(&"grok-box:local".to_string()));
         assert!(
             args.iter().any(|arg| arg == "127.0.0.1::6080"),
@@ -962,7 +985,8 @@ mod tests {
         let args = DockerComputer::new()
             .with_image("grok-box:local")
             .with_egress_tunnel(true)
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(
             args.iter().any(|arg| arg == "127.0.0.1::8790"),
             "guest WS must be loopback-published, got {args:?}"
@@ -996,7 +1020,8 @@ mod tests {
         let args = DockerComputer::new()
             .with_image("grok-box:local")
             .with_egress_tunnel(false)
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(
             !args.iter().any(|arg| arg.contains("8790")),
             "unused WS must stay closed, got {args:?}"
@@ -1012,7 +1037,8 @@ mod tests {
         let args = DockerComputer::new()
             .with_image("debian:stable-slim")
             .with_egress_tunnel(true)
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(!args.iter().any(|arg| arg.contains("8790")), "{args:?}");
         assert!(
             !args.iter().any(|arg| arg.contains("BOX_EGRESS_TUNNEL")),
@@ -1038,7 +1064,8 @@ mod tests {
     fn a_headless_image_still_sleeps() {
         let args = DockerComputer::new()
             .with_image("debian:stable-slim")
-            .create_args(None);
+            .create_args(None)
+            .expect("create args");
         assert!(args.iter().any(|arg| arg == "sleep infinity"), "{args:?}");
         assert!(!args.iter().any(|arg| arg == "127.0.0.1::6080"));
     }
@@ -1051,7 +1078,8 @@ mod tests {
         };
         let args = DockerComputer::new()
             .with_image("grok-box:local")
-            .create_args_on(None, &volumes);
+            .create_args_on(None, &volumes)
+            .expect("create args");
         assert!(
             args.iter().any(|a| a == "ogbox-abc-ws:/workspace"),
             "{args:?}"
@@ -1074,7 +1102,8 @@ mod tests {
         // A headless box has no desktop user; only the workspace travels.
         let args = DockerComputer::new()
             .with_image("debian:stable-slim")
-            .create_args_on(None, &BoxVolumes::fresh());
+            .create_args_on(None, &BoxVolumes::fresh())
+            .expect("create args");
         assert!(!args.iter().any(|a| a.ends_with(":/home/box")), "{args:?}");
         assert!(args.iter().any(|a| a.ends_with(":/workspace")), "{args:?}");
     }
