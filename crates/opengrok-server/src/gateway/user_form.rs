@@ -1279,13 +1279,15 @@ impl UserFormSseHold {
         }
         self.held = rest;
         self.form_ids.remove(call_id);
-        out
+        // Every fragment of this call is in hand here, which the per-delta scrub in
+        // the harness never has: assemble and scrub before anything reaches the wire.
+        opengrok_harness::scrub_streamed_tool_args(out)
     }
 
     /// Stream is ending; leftover form TOOL_CALLs (refused, never awaiting) go out as-is.
     pub(crate) fn release_rest(&mut self) -> Vec<Event> {
         self.form_ids.clear();
-        std::mem::take(&mut self.held)
+        opengrok_harness::scrub_streamed_tool_args(std::mem::take(&mut self.held))
     }
 }
 

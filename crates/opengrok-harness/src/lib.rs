@@ -395,7 +395,25 @@ async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
 
 /// The loop both entry points share.
 #[allow(clippy::too_many_arguments)]
+/// What a run emitted, with streamed secret-bearing tool arguments assembled and scrubbed.
+/// The raw loop is `converse_raw`; every exit of it goes through this one gate, so
+/// `run.emitted` — which API clients read back — cannot carry a fragment the journal would
+/// have refused.
 async fn converse(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    projection: Projection,
+    run_id: &str,
+    sink: Option<&dyn EventSink>,
+) -> Vec<Event> {
+    scrub_streamed_tool_args(
+        converse_raw(door, tools, journal, request, projection, run_id, sink).await,
+    )
+}
+
+async fn converse_raw(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
     journal: &dyn RunJournal,
@@ -825,10 +843,100 @@ fn scrub_event_secrets(mut event: Event) -> Event {
     event
 }
 
-fn for_journal(events: &[Event]) -> Vec<Event> {
-    events
+/// Streamed tool-call arguments arrive as `TOOL_CALL_ARGS` fragments — `"password":"s3`
+/// and then `cret"` — and `scrub_secret_keys` can only scrub a value it can parse, so a
+/// real streaming model walked a smuggled secret straight past the per-event scrub. For
+/// the tools whose arguments may carry one, gather each call's fragments, scrub the
+/// whole, and put back ONE fragment holding the scrubbed JSON where the first one was.
+/// Fragments that never assemble into JSON become `{}`: text that cannot be scrubbed
+/// does not get to leave as it is.
+///
+/// The wire shape is kept — one `TOOL_CALL_ARGS` per call rather than none — because
+/// NativeChat builds its live login card by concatenating these very fragments.
+pub fn scrub_streamed_tool_args(events: Vec<Event>) -> Vec<Event> {
+    use opengrok_wire::agui::EventType;
+    use std::collections::{HashMap, HashSet};
+
+    let sensitive: HashSet<String> = events
         .iter()
-        .cloned()
+        .filter(|event| event.event_type == EventType::ToolCallStart)
+        .filter(|event| {
+            matches!(
+                event
+                    .extra
+                    .get("toolCallName")
+                    .and_then(serde_json::Value::as_str),
+                Some(opengrok_tools::REQUEST_USER_FORM) | Some(opengrok_tools::REQUEST_CREDENTIAL)
+            )
+        })
+        .filter_map(|event| {
+            event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    if sensitive.is_empty() {
+        return events;
+    }
+    let mut joined: HashMap<String, String> = HashMap::new();
+    for event in &events {
+        if event.event_type == EventType::ToolCallArgs
+            && let Some(id) = event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+            && sensitive.contains(id)
+            && let Some(delta) = event.extra.get("delta").and_then(serde_json::Value::as_str)
+        {
+            joined.entry(id.to_string()).or_default().push_str(delta);
+        }
+    }
+    let scrubbed: HashMap<String, String> = joined
+        .into_iter()
+        .map(|(id, text)| {
+            let clean = serde_json::from_str::<serde_json::Value>(text.trim())
+                .ok()
+                .map(|value| opengrok_tools::credential::scrub_secret_keys(&value))
+                .and_then(|value| serde_json::to_string(&value).ok())
+                .unwrap_or_else(|| "{}".to_string());
+            (id, clean)
+        })
+        .collect();
+    let mut placed: HashSet<String> = HashSet::new();
+    events
+        .into_iter()
+        .filter_map(|mut event| {
+            if event.event_type != EventType::ToolCallArgs {
+                return Some(event);
+            }
+            let Some(id) = event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                return Some(event);
+            };
+            let Some(clean) = scrubbed.get(&id) else {
+                return Some(event);
+            };
+            if !placed.insert(id) {
+                return None;
+            }
+            event.extra.insert(
+                "delta".to_string(),
+                serde_json::Value::String(clean.clone()),
+            );
+            Some(event)
+        })
+        .collect()
+}
+
+fn for_journal(events: &[Event]) -> Vec<Event> {
+    scrub_streamed_tool_args(events.to_vec())
+        .into_iter()
         .map(strip_agent_png)
         .map(scrub_event_secrets)
         .collect()
@@ -2102,6 +2210,81 @@ mod tests {
             end_with_bytes, 1,
             "journal keeps the end pin PNG: {journaled:?}"
         );
+    }
+
+    /// The case the earlier test could not fail: a real streaming model sends the
+    /// arguments in pieces, and a per-fragment scrub sees no JSON to scrub.
+    #[test]
+    fn streamed_fragments_of_a_smuggled_password_are_assembled_and_scrubbed() {
+        use opengrok_wire::agui::EventType;
+        let ev = |kind: EventType| Event::new(kind, 0);
+        let events = vec![
+            ev(EventType::ToolCallStart)
+                .with("toolCallId", "call-1")
+                .with("toolCallName", opengrok_tools::REQUEST_USER_FORM),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-1")
+                .with(
+                    "delta",
+                    "{\"title\":\"Log in\",\"values\":{\"password\":\"s3",
+                ),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-1")
+                .with("delta", "cret\"}}"),
+            ev(EventType::ToolCallEnd).with("toolCallId", "call-1"),
+            // A tool that carries no secrets keeps its fragments exactly as they were.
+            ev(EventType::ToolCallStart)
+                .with("toolCallId", "call-2")
+                .with("toolCallName", "shell"),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-2")
+                .with("delta", "{\"cmd\":\"ls"),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-2")
+                .with("delta", " -la\"}"),
+        ];
+        let out = scrub_streamed_tool_args(events);
+        let text = serde_json::to_string(&out).expect("serialise");
+        assert!(
+            !text.contains("s3cret"),
+            "the smuggled password must not survive: {text}"
+        );
+        assert!(!text.contains("s3"), "not even a fragment of it: {text}");
+        let form_args: Vec<&Event> = out
+            .iter()
+            .filter(|e| {
+                e.event_type == opengrok_wire::agui::EventType::ToolCallArgs
+                    && e.extra
+                        .get("toolCallId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("call-1")
+            })
+            .collect();
+        assert_eq!(
+            form_args.len(),
+            1,
+            "one assembled fragment stands in for the pieces"
+        );
+        let delta = form_args[0]
+            .extra
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(
+            delta.contains("Log in"),
+            "non-secret fields are kept: {delta}"
+        );
+        let shell_args: Vec<&Event> = out
+            .iter()
+            .filter(|e| {
+                e.extra
+                    .get("toolCallId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("call-2")
+            })
+            .collect();
+        assert_eq!(shell_args.len(), 3, "an ordinary tool is untouched");
+        assert!(text.contains("ls"), "{text}");
     }
 
     #[tokio::test]
