@@ -495,11 +495,11 @@ async fn converse(
                         let produced = projection.push(delta);
                         // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
                         // adds a second reader that does not have to wait for the run to end.
-                        if let Some(sink) = sink
-                            && !produced.is_empty()
-                        {
-                            sink.emit(&produced).await;
-                        }
+                        // Through `emit_live`, never `sink.emit` directly, so the live
+                        // delta path meets `scrub_event_secrets` like every other path.
+                        // Without it a model that smuggled a `values.password` into its
+                        // own tool args reached NativeChat verbatim.
+                        emit_live(sink, &produced).await;
                         round_events.extend(produced);
                     }
                     Err(error) => {
