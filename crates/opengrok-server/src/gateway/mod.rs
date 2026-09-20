@@ -15,14 +15,11 @@
 //! served — exactly `gateway-server.ts`'s posture, so a deployment that forgets the token fails
 //! closed instead of open.
 
-pub mod cards;
 pub mod conversation;
-pub mod credential;
 pub mod group;
 pub mod hooks;
 pub mod lifecycle;
 pub mod live;
-pub mod user_form;
 // THE MOCK CATALOGUE IS A BUILD-TIME CHOICE, not just a runtime one. `mock_fixtures` carries
 // ~65 KB of embedded fixture files and a filesystem read verb; both are development surface and
 // neither belongs in a production binary, where the only thing standing between them and a caller
@@ -42,6 +39,10 @@ use std::sync::{Arc, Mutex};
 use subtle::ConstantTimeEq;
 
 use crate::agui::routes::AgUiState;
+
+pub use crate::agui::host_settings::{
+    default_settings, egress_tunnel_available, egress_tunnel_from,
+};
 
 /// The header carrying the CALLER's account access token on gateway calls — the per-account pivot.
 ///
@@ -313,61 +314,6 @@ impl GatewayState {
     }
 }
 
-/// The `getHostSettings` record the client reads back — every field from
-/// `client-grok-bot.md` §9, with the defaults the shipped host starts from. Fields the shape
-/// marks "omitted when undefined" are omitted.
-pub fn default_settings() -> serde_json::Value {
-    serde_json::json!({
-        "notifications": {
-            "isEnabled": false, "allowedApps": [], "minIntervalMs": 5000,
-            "maxPerWindow": 10, "windowMs": 300_000
-        },
-        "mcpCustomInstructions": {},
-        "mcpCustomInstructionsByServerId": {},
-        "mcpDisabledToolsByServerId": {},
-        "mcpBoxServers": [],
-        "autoReviewInstructions": null,
-        "localToolPermission": null,
-        "webauthnProxyEnabled": false,
-        // Ours, not Cursor's — but the field must exist, the resync chain reads the record whole.
-        "inferenceProvider": "cursor",
-        "inferenceRouterUsage": null,
-        "sidebarSections": [],
-        "hasSeenOnboarding": true,
-        // User-network tunnel. Default off: docker host-network is not the prod path.
-        // Host intent only. `isEgressTunnelAvailable` is this flag (or env) AND
-        // `/v1/info` `capabilities.egress_tunnel.ready`. No box / failed info → false
-        // so NativeChat does not paint the toggle live until a client is attached.
-        "egressTunnelEnabled": false
-    })
-}
-
-/// Grok host: `process.env.SAND_EGRESS_TUNNEL_ENABLED === "1"`. OpenGrok also honors
-/// `OG_EGRESS_TUNNEL_ENABLED`. The in-app toggle is `egressTunnelEnabled`. Any one is
-/// host intent — not yet "the laptop client is attached".
-#[must_use]
-pub fn egress_tunnel_from(
-    settings: &serde_json::Value,
-    og_env: Option<&str>,
-    sand_env: Option<&str>,
-) -> bool {
-    og_env == Some("1")
-        || sand_env == Some("1")
-        || settings
-            .get("egressTunnelEnabled")
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-}
-
-#[must_use]
-pub fn egress_tunnel_available(settings: &serde_json::Value) -> bool {
-    egress_tunnel_from(
-        settings,
-        std::env::var("OG_EGRESS_TUNNEL_ENABLED").ok().as_deref(),
-        std::env::var("SAND_EGRESS_TUNNEL_ENABLED").ok().as_deref(),
-    )
-}
-
 /// Host wants the tunnel AND the live box reports `egress_tunnel.ready`.
 /// No computer, no box, failed `/v1/info`, or `enabled` without a laptop
 /// client → false. NativeChat must not show the toggle as live until attached.
@@ -449,50 +395,5 @@ pub fn refuse(
                 Some((403, "no gateway token is configured; loopback only"))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn egress_tunnel_is_off_by_default() {
-        let settings = default_settings();
-        assert_eq!(settings["egressTunnelEnabled"], false);
-        assert!(!egress_tunnel_from(&settings, None, None));
-    }
-
-    #[test]
-    fn egress_tunnel_env_or_setting_turns_it_on() {
-        let settings = default_settings();
-        assert!(egress_tunnel_from(&settings, Some("1"), None));
-        assert!(egress_tunnel_from(&settings, None, Some("1")));
-        assert!(
-            !egress_tunnel_from(&settings, Some("true"), None),
-            "Grok host parity is strictly === \"1\""
-        );
-        assert!(egress_tunnel_from(
-            &json!({ "egressTunnelEnabled": true }),
-            None,
-            None
-        ));
-    }
-
-    #[test]
-    fn advertised_needs_the_box_ready_when_info_is_present() {
-        let ready = opengrok_box::EgressTunnel {
-            enabled: true,
-            ready: true,
-        };
-        let waiting = opengrok_box::EgressTunnel {
-            enabled: true,
-            ready: false,
-        };
-        assert!(!opengrok_box::EgressTunnel::advertised(true, None));
-        assert!(opengrok_box::EgressTunnel::advertised(true, Some(ready)));
-        assert!(!opengrok_box::EgressTunnel::advertised(true, Some(waiting)));
-        assert!(!opengrok_box::EgressTunnel::advertised(false, Some(ready)));
     }
 }

@@ -359,8 +359,8 @@ pub(crate) async fn interrupt_parked_hitl(
         }
     }
     if stopped > 0 {
-        super::user_form::dismiss_unresolved_on_interrupt(
-            state,
+        crate::user_form::dismiss_unresolved_on_interrupt(
+            &state.agui,
             account_id,
             coworker_id,
             coworker_id.as_str(),
@@ -1190,7 +1190,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
                 },
             }))
         }
-        SuspendReason::AutoReview => Some(super::cards::auto_review_card(
+        SuspendReason::AutoReview => Some(crate::cards::auto_review_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -1208,7 +1208,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
         // reason and no proposed rule. Answered by `resolveAutoReviewApproval`, which routes the
         // yes to the GATE (not the judge) by this reason.
-        SuspendReason::PolicyApproval => Some(super::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => Some(crate::cards::policy_approval_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -1217,7 +1217,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             suspension.why.as_deref(),
             now_ms(),
         )),
-        SuspendReason::UserForm => Some(super::cards::user_form_card(
+        SuspendReason::UserForm => Some(crate::cards::user_form_card(
             &entry_id(),
             &suspension.arguments,
             now_ms(),
@@ -1268,16 +1268,16 @@ pub(crate) async fn emit_suspension(
     live::set_running(state, agent_id, false, json!({})).await;
     match suspension.reason {
         opengrok_core::run::SuspendReason::UserForm => {
-            super::user_form::spawn_form_hold_timeout(
-                state.clone(),
+            crate::user_form::spawn_form_hold_timeout(
+                state.agui.clone(),
                 account.clone(),
                 coworker_id.clone(),
                 agent_id.to_string(),
             );
         }
         opengrok_core::run::SuspendReason::Credential => {
-            super::credential::spawn_credential_hold_timeout(
-                state.clone(),
+            crate::credential::spawn_credential_hold_timeout(
+                state.agui.clone(),
                 account.clone(),
                 coworker_id.clone(),
                 agent_id.to_string(),
@@ -1304,83 +1304,6 @@ pub(crate) async fn emit_suspensions(
         }
     }
     held
-}
-
-/// NativeChat is AG-UI-first and never watches the gateway transcript live stream. When this
-/// CUSTOM is `run-awaiting-approval` / `reason: user-form`, mint the gateway card **first** so
-/// the id is stable, stamp `extra.entryId` (and `formRequest`, the sanitised schema the card
-/// already carries) onto the event, then append + live-emit the card. The SSE frame NativeChat
-/// receives therefore has the same id `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
-/// are left untouched. Idempotent if `entryId` is already present.
-pub(crate) async fn stamp_user_form_entry_id(
-    state: &GatewayState,
-    coworker_id: &CoworkerId,
-    account: &opengrok_core::id::AccountId,
-    event: &mut opengrok_wire::agui::Event,
-) -> Option<String> {
-    if event.event_type != opengrok_wire::agui::EventType::Custom {
-        return None;
-    }
-    if event.extra.get("name").and_then(Value::as_str) != Some("run-awaiting-approval") {
-        return None;
-    }
-    if event.extra.get("reason").and_then(Value::as_str) != Some("user-form") {
-        return None;
-    }
-    if let Some(existing) = event
-        .extra
-        .get("entryId")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-    {
-        return Some(existing.to_string());
-    }
-    let suspension = find_suspension(std::slice::from_ref(event))?;
-    let card = card_for(&suspension)?;
-    let entry_id = card.get("id").and_then(Value::as_str)?.to_string();
-    if let Err(error) = state
-        .agui
-        .auth
-        .store
-        .append_gateway_entry(coworker_id, account, &card, now_ms())
-        .await
-    {
-        tracing::error!(
-            %error,
-            "could not append the user-form card; not stamping entryId"
-        );
-        return None;
-    }
-    live::emit_transcript(state, coworker_id.as_str(), account, "appended", card);
-    live::set_running(state, coworker_id.as_str(), false, json!({})).await;
-    super::user_form::spawn_form_hold_timeout(
-        state.clone(),
-        account.clone(),
-        coworker_id.clone(),
-        coworker_id.as_str().to_string(),
-    );
-    apply_user_form_stamp(&mut event.extra, entry_id, true)
-}
-
-/// Stamp CUSTOM extra only after the card is in the transcript. Stamping a ghost
-/// `entryId` is how NativeChat POSTs submit and gets Null (the collapse blocker).
-pub(crate) fn apply_user_form_stamp(
-    extra: &mut opengrok_wire::agui::Extra,
-    entry_id: String,
-    appended: bool,
-) -> Option<String> {
-    if !appended {
-        return None;
-    }
-    extra.insert("entryId".to_string(), json!(entry_id.clone()));
-    // Same sanitised schema the card stores as `message.formRequest`. CUSTOM already has it
-    // as `arguments`; this alias is the field name TurnAssembler / the card already use.
-    if extra.get("formRequest").is_none()
-        && let Some(schema) = extra.get("arguments").cloned()
-    {
-        extra.insert("formRequest".to_string(), schema);
-    }
-    Some(entry_id)
 }
 
 /// The sentence a failed run leaves for the person, from the run's own failure event: the
@@ -2566,32 +2489,4 @@ async fn resume_gateway_run(
         json!({ "lastMessagePreview": preview, "lastEntry": { "kind": "text", "text": preview } }),
     )
     .await;
-}
-
-#[cfg(test)]
-mod stamp_tests {
-    use super::apply_user_form_stamp;
-    use serde_json::json;
-
-    #[test]
-    fn a_failed_append_does_not_stamp_entry_id() {
-        let mut extra = serde_json::Map::new();
-        extra.insert("name".into(), json!("run-awaiting-approval"));
-        extra.insert("reason".into(), json!("user-form"));
-        extra.insert(
-            "arguments".into(),
-            json!({ "title": "Sign in", "fields": [] }),
-        );
-        assert!(apply_user_form_stamp(&mut extra, "e_ghost".into(), false).is_none());
-        assert!(
-            extra.get("entryId").is_none(),
-            "ghost entryId is the collapse blocker: {extra:?}"
-        );
-        assert_eq!(
-            apply_user_form_stamp(&mut extra, "e_1".into(), true).as_deref(),
-            Some("e_1")
-        );
-        assert_eq!(extra["entryId"], "e_1");
-        assert_eq!(extra["formRequest"], extra["arguments"]);
-    }
 }

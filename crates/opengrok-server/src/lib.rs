@@ -11,11 +11,15 @@ pub mod artifacts;
 pub mod auth;
 pub mod auto_review;
 pub mod autonomy;
+pub mod cards;
 pub mod computers;
 pub mod connections;
+pub mod credential;
 pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
+pub mod health;
+pub mod hitl;
 #[cfg(feature = "jev")]
 pub mod jev;
 #[cfg(not(feature = "jev"))]
@@ -40,6 +44,7 @@ pub mod recipes;
 pub mod recovery;
 pub mod spend;
 pub mod templates;
+pub mod user_form;
 pub mod workflows;
 
 pub use agui::AgUiState;
@@ -47,20 +52,21 @@ pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
 ///
-/// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
-/// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
-/// smoke script was already checking.
+/// `/health` is its own module: the gate, every smoke and a deployment's supervisor wait on it,
+/// and none of them are the desktop's supervisor.
 pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
     if state.host_settings.is_none() {
         state.host_settings = Some(gateway.settings.clone());
     }
     let app = Router::new()
+        .merge(health::router(state.clone()))
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
-        .merge(gateway::user_form::agui_router(gateway.clone()))
-        .merge(gateway::credential::agui_router(gateway.clone()))
-        // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
-        // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
+        .merge(user_form::agui_router(state.clone()))
+        .merge(credential::agui_router(state.clone()))
+        // `POST /ag-ui` takes `GatewayState` so a UserForm CUSTOM can mint the card and stamp
+        // `entryId` on the SSE frame. The helpers read `AgUiState`; this parameter goes when
+        // seam A does.
         .merge(agui::run_router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))

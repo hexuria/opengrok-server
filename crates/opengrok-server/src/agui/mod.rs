@@ -4,6 +4,7 @@
 //! client through this stream.
 
 pub mod chat_ui;
+pub mod host_settings;
 pub mod provision;
 pub mod routes;
 

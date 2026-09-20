@@ -11,6 +11,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
+
+use crate::agui::AgUiState;
 use opengrok_tools::credential::{
     CredentialStatus, origin_from_form, result_from, scrub_secret_keys, tool_result_content,
     username_from_shared,
@@ -19,21 +21,20 @@ use opengrok_tools::user_form::FormRequest;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use super::GatewayState;
-use super::user_form::{journal_agui_custom, pending_suspended, resume_settled};
+use crate::user_form::{journal_agui_custom, pending_suspended, resume_settled};
 
-pub fn agui_router(state: GatewayState) -> Router {
+pub fn agui_router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/credential/result", post(agui_result))
         .with_state(state)
 }
 
 async fn agui_result(
-    State(state): State<GatewayState>,
+    State(state): State<AgUiState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
-    let Some(account_id) = crate::agui::routes::account_from_bearer(&state.agui, &headers) else {
+    let Some(account_id) = crate::agui::routes::account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     let (code, body) = submit_credential_result(&state, &args, &account_id).await;
@@ -44,9 +45,8 @@ async fn agui_result(
         .into_response()
 }
 
-pub async fn result_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+pub async fn result_for_caller(state: &AgUiState, args: &Value, caller: &str) -> (u16, Value) {
     let Some(account) = state
-        .agui
         .auth
         .store
         .account_by_email(caller)
@@ -69,7 +69,7 @@ pub async fn result_for_caller(state: &GatewayState, args: &Value, caller: &str)
 /// box after NativeChat broker). It does NOT mean a password was typed into the box.
 /// `session_established` is accepted as an alias and canonicalized to `filled`.
 pub async fn submit_credential_result(
-    state: &GatewayState,
+    state: &AgUiState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -121,7 +121,6 @@ pub async fn submit_credential_result(
             opengrok_tools::credential::username_of(&pending.arguments).unwrap_or_default();
         if !origin.is_empty()
             && let Err(error) = state
-                .agui
                 .auth
                 .store
                 .upsert_credential_hint(
@@ -168,7 +167,7 @@ pub async fn submit_credential_result(
 
 /// After a successful user-form fill, ask NativeChat to save origin+username. Never a password.
 pub async fn offer_save_after_submit(
-    state: &GatewayState,
+    state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     _agent_id: &str,
@@ -192,19 +191,19 @@ pub async fn offer_save_after_submit(
 }
 
 pub fn spawn_credential_hold_timeout(
-    state: GatewayState,
+    state: AgUiState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep(super::user_form::FORM_HOLD_TIMEOUT).await;
+        tokio::time::sleep(crate::user_form::FORM_HOLD_TIMEOUT).await;
         timeout_credential_request(&state, &account_id, &coworker_id, &agent_id).await;
     });
 }
 
 async fn timeout_credential_request(
-    state: &GatewayState,
+    state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -232,9 +231,8 @@ async fn timeout_credential_request(
     .await
 }
 
-async fn may_use(state: &GatewayState, account_id: &AccountId, coworker_id: &CoworkerId) -> bool {
+async fn may_use(state: &AgUiState, account_id: &AccountId, coworker_id: &CoworkerId) -> bool {
     state
-        .agui
         .auth
         .store
         .may_use_coworker(account_id, coworker_id)

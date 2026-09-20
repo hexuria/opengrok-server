@@ -172,7 +172,7 @@ async fn seed_suspended_run(
 
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let card = match reason {
-        SuspendReason::AutoReview => opengrok_server::gateway::cards::auto_review_card(
+        SuspendReason::AutoReview => opengrok_server::cards::auto_review_card(
             &entry_id,
             call_id,
             "pending",
@@ -393,7 +393,7 @@ async fn a_press_on_a_dead_request_heals_the_card_to_expired_with_410() {
     let coworker = seed_coworker(&store, &account).await;
     // A card whose run never existed (or died): nothing is awaiting this requestId.
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
-    let card = opengrok_server::gateway::cards::auto_review_card(
+    let card = opengrok_server::cards::auto_review_card(
         &entry_id,
         "call_ghost",
         "pending",
