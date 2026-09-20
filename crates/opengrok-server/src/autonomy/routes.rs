@@ -49,6 +49,7 @@ fn schedules_router(state: HostState) -> Router {
         .route("/schedules", post(create_schedule).get(list_schedules))
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
+        .route("/schedules/{id}/rotate-key", post(rotate_schedule_key))
         .route("/schedules/{id}", axum::routing::delete(delete_schedule))
         .with_state(state)
 }
@@ -466,6 +467,67 @@ async fn delete_schedule(
         at_ms,
     })
     .await
+}
+
+/// A new bearer for a webhook routine. The hook id — and so the POST URL — is unchanged; only
+/// the key moves, which is what makes this a rotation rather than a new routine: whoever holds
+/// the old key stops working at the moment the new one starts, and nothing else has to be
+/// reconfigured.
+///
+/// THE OLD KEY IS NOT SHOWN A GRACE PERIOD. A key is rotated because it leaked or because
+/// somebody left; a window in which both work is a window in which the reason for rotating still
+/// holds. `SecretRotated` replaces the hash, and the very next POST with the old key is a 401.
+///
+/// Same auth and ownership as pause/resume: not-yours and no-such are both 404, and a cron
+/// routine is a 409 — the aggregate refuses (`ScheduleError::NotWebhook`) and it is refused
+/// there rather than here, so "there is no key to rotate" is one answer, not two.
+async fn rotate_schedule_key(
+    State(state): State<HostState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let id = ScheduleId::from_stored(id);
+    let (_, _, account_id) = match owned_schedule(&state.agui, &headers, &id).await {
+        Ok(loaded) => loaded,
+        Err(refusal) => return refusal,
+    };
+    let key = crate::hooks::mint_webhook_key();
+    let secret_hash = crate::hooks::hash_webhook_key(&key);
+    let at_ms = now_ms();
+    // Through `mutate_schedule` rather than `change_schedule`: the answer is the new key, so the
+    // aggregate AFTER the append is the thing being asked for — and the retry it does is worth
+    // having here, where a rotation racing an edit is the ordinary case rather than a rare one.
+    let after = match mutate_schedule(&state, &account_id, &id, at_ms, |loaded| {
+        loaded
+            .decide(ScheduleCommand::RotateWebhookSecret {
+                secret_hash: secret_hash.clone(),
+                webhook_key: key.clone(),
+                at_ms,
+            })
+            .map_err(|reason| {
+                (
+                    StatusCode::CONFLICT.as_u16(),
+                    serde_json::json!({ "error": reason.to_string() }),
+                )
+            })
+    })
+    .await
+    {
+        Ok(after) => after,
+        Err((code, body)) => {
+            return (
+                StatusCode::from_u16(code).unwrap_or(StatusCode::CONFLICT),
+                Json(body),
+            )
+                .into_response();
+        }
+    };
+    Json(serde_json::json!({
+        "id": id.as_str(),
+        "kind": after.kind.as_str(),
+        "webhook": crate::hooks::webhook_trigger_json(&state, &after.hook_id, &after.webhook_key),
+    }))
+    .into_response()
 }
 
 async fn create_monitor(
