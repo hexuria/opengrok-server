@@ -7,7 +7,9 @@
 //! because "everything that is not yours" is the only rule that cannot miss a fixture shape.
 //!
 //! One transaction, children first. A dry run does the same work and rolls it back, so its
-//! report is exactly what the real run would do.
+//! report is what the real run would do on the same rows. Run it against a stopped server: the
+//! id lists are read at the start, so a coworker hired or a run started while the purge runs
+//! would be left behind naming an account that is gone.
 
 use std::collections::BTreeMap;
 
@@ -39,7 +41,7 @@ impl PgStore {
     ) -> StoreResult<PurgeReport> {
         let keep: Vec<String> = keep
             .iter()
-            .map(|email| email.trim().to_ascii_lowercase())
+            .map(|email| email.trim().to_string())
             .filter(|email| !email.is_empty())
             .collect();
         if keep.is_empty() {
@@ -49,6 +51,11 @@ impl PgStore {
         }
 
         let mut tx = self.pool().begin().await?;
+        // One purge at a time. The id lists are read once and used as literals below, so a
+        // second purge interleaving with this one would delete around a moving target.
+        sqlx::query("select pg_advisory_xact_lock(7_324_001)")
+            .execute(&mut *tx)
+            .await?;
 
         let kept_rows =
             sqlx::query("select id, email, org_id from account_view where lower(email) = any($1)")
@@ -92,11 +99,16 @@ impl PgStore {
                 .bind(&kept_ids)
                 .fetch_all(&mut *tx)
                 .await?;
-        let orgs: Vec<String> =
-            sqlx::query_scalar("select id from org_view where not (id = any($1))")
-                .bind(&kept_orgs)
-                .fetch_all(&mut *tx)
-                .await?;
+        // An org survives when a kept account belongs to it or administers it. Everything else
+        // goes — and "everything else" is decided per org, never by an empty list turning into
+        // "all of them".
+        let orgs: Vec<String> = sqlx::query_scalar(
+            "select id from org_view where not (id = any($1)) and not (admin_id = any($2))",
+        )
+        .bind(&kept_orgs)
+        .bind(&kept_ids)
+        .fetch_all(&mut *tx)
+        .await?;
         let coworkers: Vec<String> =
             sqlx::query_scalar("select id from coworker_view where account_id = any($1)")
                 .bind(&accounts)
@@ -116,6 +128,20 @@ impl PgStore {
         .bind(&coworkers)
         .fetch_all(&mut *tx)
         .await?;
+        let connections: Vec<String> = sqlx::query_scalar(
+            "select id from connection_view where owner_id = any($1) or owner_id = any($2) \
+             or owner_id = any($3)",
+        )
+        .bind(&accounts)
+        .bind(&coworkers)
+        .bind(&orgs)
+        .fetch_all(&mut *tx)
+        .await?;
+        let templates: Vec<String> =
+            sqlx::query_scalar("select id from coworker_template where org_id = any($1)")
+                .bind(&orgs)
+                .fetch_all(&mut *tx)
+                .await?;
         let recipes: Vec<String> = sqlx::query_scalar(
             "select id from recipe where owner_id = any($1) or org_id = any($2)",
         )
@@ -146,11 +172,20 @@ impl PgStore {
         streams.extend(orgs.iter().map(|id| format!("org/{id}")));
         streams.extend(monitors.iter().map(|id| format!("monitor/{id}")));
         streams.extend(runs.iter().map(|id| format!("run/{id}")));
+        streams.extend(connections.iter().map(|id| format!("connection/{id}")));
 
+        // Vault keys embed an owner id (`org-computer:<org>:<kind>`, `conn_<connector>_<acct>`),
+        // so the id as a LIKE infix is the handle — with `_` and `%` escaped, since every id has
+        // an underscore in it.
+        let like_escape = |id: &String| {
+            id.replace('\\', "\\\\")
+                .replace('_', "\\_")
+                .replace('%', "\\%")
+        };
         let mut owners: Vec<String> = Vec::new();
-        owners.extend(accounts.iter().cloned());
-        owners.extend(coworkers.iter().cloned());
-        owners.extend(orgs.iter().cloned());
+        owners.extend(accounts.iter().map(like_escape));
+        owners.extend(coworkers.iter().map(like_escape));
+        owners.extend(orgs.iter().map(like_escape));
 
         macro_rules! delete {
             ($table:literal, $sql:literal $(, $bind:expr)*) => {{
@@ -441,9 +476,9 @@ impl PgStore {
             &accounts
         );
 
-        report.accounts_deleted = accounts.len() as u64;
-        report.coworkers_deleted = coworkers.len() as u64;
-        report.orgs_deleted = orgs.len() as u64;
+        report.accounts_deleted = report.rows.get("account_view").copied().unwrap_or(0);
+        report.coworkers_deleted = report.rows.get("coworker_view").copied().unwrap_or(0);
+        report.orgs_deleted = report.rows.get("org_view").copied().unwrap_or(0);
 
         if dry_run {
             tx.rollback().await?;

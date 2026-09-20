@@ -20,7 +20,8 @@ fn now_ms() -> i64 {
 }
 
 async fn connect() -> Option<PgStore> {
-    let database_url = std::env::var("OG_DATABASE_URL").ok()?;
+    let database_url =
+        opengrok_store::gate_database_or_panic(std::env::var("OG_DATABASE_URL").ok()?);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -249,8 +250,18 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
     out
 }
 
-/// One test, in order, because the real purge at the end removes every account the gate
-/// database holds but one — a second test seeding beside it would be purged mid-flight.
+/// Everyone the database already holds is on the allowlist, plus the account seeded to be kept;
+/// only the account seeded to go is off it. So the purge deletes exactly one account, whatever
+/// else the database holds and whatever runs beside this test.
+async fn everyone_but(store: &PgStore, gone: &str) -> Vec<String> {
+    sqlx::query_scalar("select email from account_view where email <> $1")
+        .bind(gone)
+        .fetch_all(store.pool())
+        .await
+        .expect("emails")
+}
+
+/// One test, in order: the refusals and the dry run first, the real purge last.
 #[tokio::test]
 async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
     let Some(store) = connect().await else {

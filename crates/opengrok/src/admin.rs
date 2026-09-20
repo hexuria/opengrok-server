@@ -371,7 +371,7 @@ async fn run(args: &[String]) -> Result<(), String> {
         }
 
         Some("purge") => {
-            let flags = parse_flags(&args[1..], &["keep", "dry-run"])?;
+            let flags = parse_flags(&args[1..], &["keep", "commit"])?;
             let keep: Vec<String> = flags
                 .get("keep")
                 .ok_or("--keep is required: the emails that survive, comma-separated")?
@@ -379,24 +379,29 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .map(|email| email.trim().to_string())
                 .filter(|email| !email.is_empty())
                 .collect();
-            let dry_run = flags
-                .get("dry-run")
+            // Reading is the default; deleting is the flag. Forgetting a flag must cost nothing.
+            let commit = flags
+                .get("commit")
                 .is_some_and(|value| !matches!(value.as_str(), "0" | "false" | "no"));
             let store = store().await?;
             let report = store
-                .purge_accounts_except(&keep, dry_run)
+                .purge_accounts_except(&keep, !commit)
                 .await
                 .map_err(|e| e.to_string())?;
             println!(
                 "{}",
-                if dry_run { "purge (dry run — nothing deleted)" } else { "purge done" }
+                if commit {
+                    "purge done"
+                } else {
+                    "purge (dry run — nothing deleted; add --commit 1 to delete)"
+                }
             );
             for (email, id) in &report.kept {
                 println!("  kept:     {email} ({id})");
             }
-            println!("  accounts: {} deleted", report.accounts_deleted);
+            println!("  accounts:  {} deleted", report.accounts_deleted);
             println!("  coworkers: {} deleted", report.coworkers_deleted);
-            println!("  orgs:     {} deleted", report.orgs_deleted);
+            println!("  orgs:      {} deleted", report.orgs_deleted);
             for (table, rows) in &report.rows {
                 if *rows > 0 {
                     println!("  {table:<22} {rows}");
@@ -413,7 +418,7 @@ async fn run(args: &[String]) -> Result<(), String> {
             "  opengrok admin account create --email <email> --org <org_id> --name \"<First Last>\" [--password <p>]\n",
             "  opengrok admin account enable --email <email>\n",
             "  opengrok admin account password --email <email> [--password <p>]   (the no-mailer reset)\n",
-            "  opengrok admin purge --keep <email[,email]> [--dry-run 1]   (delete every other account and all it owns)"
+            "  opengrok admin purge --keep <email[,email]> [--commit 1]   (dry run by default; --commit 1 deletes every other account and all it owns)"
         )
         .to_string()),
     }
