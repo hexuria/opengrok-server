@@ -30,14 +30,12 @@ workspace = true
 subtle.workspace = true
 hickory-resolver.workspace = true
 argon2.workspace = true
-tonic.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
 opengrok-recipes = { path = "../opengrok-recipes" }
 opengrok-tools = { path = "../opengrok-tools" }
 opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-wire = { path = "../opengrok-wire" }
-opengrok-proto = { path = "../opengrok-proto" }
 opengrok-harness = { path = "../opengrok-harness" }
 rmcp.workspace = true
 opengrok-store = { path = "../opengrok-store" }

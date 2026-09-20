@@ -40,10 +40,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # `opengrok-proto`'s build script compiles our own transcribed .proto with prost-build, which
-      # shells out to protoc. Without this the workspace does not build at all.
-      - name: install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       # Four smokes are handed their own database so they cannot race the shared one; the gate
       # derives the names and expects them to exist.
       - name: create the databases the gate expects

@@ -16,7 +16,6 @@ pub mod connections;
 pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
-pub mod grpc;
 #[cfg(feature = "jev")]
 pub mod jev;
 #[cfg(not(feature = "jev"))]
@@ -39,8 +38,6 @@ pub mod persona;
 pub mod points;
 pub mod recipes;
 pub mod recovery;
-pub mod seamb;
-pub mod seamb_send;
 pub mod spend;
 pub mod templates;
 pub mod workflows;
@@ -65,7 +62,6 @@ pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
         // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
         // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
         .merge(agui::run_router(gateway.clone()))
-        .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
