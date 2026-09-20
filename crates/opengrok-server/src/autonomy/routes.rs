@@ -16,11 +16,12 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use opengrok_core::id::{CoworkerId, MonitorId, ScheduleId};
+use opengrok_core::id::{AccountId, CoworkerId, MonitorId, ScheduleId};
 use opengrok_core::monitor::{Monitor, MonitorCommand};
 use opengrok_core::schedule::{Schedule, ScheduleCommand, Wake};
 
 use crate::agui::routes::{AgUiState, account_from_bearer};
+use crate::host_state::HostState;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -232,6 +233,70 @@ async fn change_schedule(
             (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
         }
     }
+}
+
+/// Load the schedule, decide with `decide`, append at the loaded seq — and if another writer got
+/// there first, re-read and try ONCE more before answering 409. Why: the desktop's Routines pane
+/// autosaves an edit on blur at the same instant a person clicks "Test run", so two mutations on
+/// one schedule a few milliseconds apart are the ordinary case, not a race to design away. The
+/// loser used to answer 500 "storage failed" (seen live 2 Sep 2026); now it decides again against
+/// the winner's state, which is what the person meant anyway.
+///
+/// `decide` sees the fresh aggregate and returns the events to append, or a refusal already
+/// shaped for the wire. Returns the aggregate after the append and the seq it landed at.
+///
+/// Shared with the webhook door (`hooks.rs`) — its only caller today, and the reason this lives
+/// beside `change_schedule` rather than inside it: a fired routine and an edit to the same
+/// routine a few milliseconds apart is exactly the race this retry exists for.
+pub(crate) async fn mutate_schedule<F>(
+    state: &HostState,
+    account_id: &AccountId,
+    schedule_id: &ScheduleId,
+    at_ms: i64,
+    mut decide: F,
+) -> Result<Schedule, (u16, serde_json::Value)>
+where
+    F: FnMut(
+        &Schedule,
+    ) -> Result<Vec<opengrok_core::schedule::ScheduleEvent>, (u16, serde_json::Value)>,
+{
+    for attempt in 0..2 {
+        let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(schedule_id).await else {
+            return Err((404, serde_json::json!({ "error": "no such routine" })));
+        };
+        let events = decide(&loaded)?;
+        let mut after = loaded;
+        for event in &events {
+            after.apply(event);
+        }
+        match state
+            .agui
+            .auth
+            .store
+            .append_schedule(schedule_id, account_id, seq, &events, &after, at_ms)
+            .await
+        {
+            Ok(_) => return Ok(after),
+            Err(opengrok_store::StoreError::Conflict) if attempt == 0 => {
+                tracing::info!(schedule = %schedule_id, "a routine write lost a race; re-reading and retrying once");
+                continue;
+            }
+            Err(opengrok_store::StoreError::Conflict) => {
+                return Err((
+                    409,
+                    serde_json::json!({ "error": "another change to this routine landed first; reload and retry" }),
+                ));
+            }
+            Err(error) => {
+                tracing::error!(%error, schedule = %schedule_id, "could not write a routine change");
+                return Err((500, serde_json::json!({ "error": "storage failed" })));
+            }
+        }
+    }
+    Err((
+        409,
+        serde_json::json!({ "error": "another change to this routine landed first; reload and retry" }),
+    ))
 }
 
 async fn pause_schedule(

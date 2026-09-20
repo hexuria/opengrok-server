@@ -26,7 +26,7 @@ use subtle::ConstantTimeEq;
 use opengrok_core::id::RunId;
 use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
-use super::lifecycle::mutate_schedule;
+use crate::autonomy::routes::mutate_schedule;
 use crate::host_state::HostState;
 
 /// Largest JSON body we will attach to a wake. A webhook is a ping-or-payload, not a file drop.

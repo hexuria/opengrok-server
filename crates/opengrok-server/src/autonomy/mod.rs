@@ -165,7 +165,7 @@ async fn announce_finished(
     }
     let head: String = text.trim().chars().take(200).collect();
     let content = if head.is_empty() {
-        match crate::gateway::conversation::failure_sentence(events) {
+        match crate::agui::resume::failure_sentence(events) {
             Some(why) => format!("Routine {} failed: {why}", announce.name),
             None => format!(
                 "Routine {} ran and produced no answer. Its run log has the reason.",

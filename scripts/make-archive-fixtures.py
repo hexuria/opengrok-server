@@ -7,7 +7,7 @@ produces byte-identical files and a regeneration is not a diff. The zip and the 
 SAME tree so their listings can be read against each other."""
 import gzip, io, tarfile, zipfile, pathlib
 
-OUT = pathlib.Path("crates/opengrok-server/src/gateway/fixtures")
+OUT = pathlib.Path("crates/opengrok-server/src/fixtures")
 
 # The tree, shared by the zip and the tar.gz so the two listings can be compared side by side.
 # Two folders plus a file at the root, four files in all, and enough bytes that the size column

@@ -884,7 +884,7 @@ async fn persist_mcp_ask(
 
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let card = match reason {
-        SuspendReason::PolicyApproval => crate::gateway::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => crate::cards::policy_approval_card(
             &entry_id,
             &call.id,
             "pending",
@@ -893,11 +893,11 @@ async fn persist_mcp_ask(
             why,
             at_ms,
         ),
-        // The ask's OWN sentence, the way `conversation::card_for` does it. Hardcoding the
+        // The ask's OWN sentence, the way `resume::card_for` does it. Hardcoding the
         // judge's default reason here overwrote the real one: an egress-tunnel ask says "this
         // would use your network through the egress tunnel", and the person was shown "your
         // auto-review instructions did not clearly allow this" instead.
-        _ => crate::gateway::cards::auto_review_card(
+        _ => crate::cards::auto_review_card(
             &entry_id,
             &call.id,
             "pending",

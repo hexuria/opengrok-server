@@ -43,7 +43,7 @@ use opengrok_tools::user_form::{
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
 
-use super::conversation;
+use super::resume;
 use crate::host_state::HostState;
 
 /// How long an unanswered form or live handoff may block the turn. Tests call the settlers
@@ -471,7 +471,7 @@ async fn start_box_handoff(
     agent_id: &str,
     form: &FormRequest,
 ) -> Option<Value> {
-    let card = super::cards::computer_handoff_card(
+    let card = crate::cards::computer_handoff_card(
         &format!("e_{}", uuid::Uuid::now_v7()),
         &format!("req_{}", uuid::Uuid::now_v7().simple()),
         &handoff_instruction(form),
@@ -909,12 +909,12 @@ pub(crate) async fn resume_settled(
         tracing::error!(%error, "could not append the answer");
         return false;
     }
-    let in_room = conversation::in_a_room(&run, coworker_id);
+    let in_room = resume::in_a_room(&run, coworker_id);
     let state = state.clone();
     let account_id = account_id.clone();
     let coworker_id = coworker_id.clone();
     let agent_id = agent_id.to_string();
-    tokio::spawn(conversation::resume_where_it_lives(
+    tokio::spawn(resume::resume_where_it_lives(
         in_room,
         state,
         account_id,
@@ -950,7 +950,7 @@ pub(crate) async fn pending_suspended(
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
         };
-        if !conversation::run_belongs_to(&run, coworker_id) {
+        if !resume::run_belongs_to(&run, coworker_id) {
             continue;
         }
         let Some(pending) = run.pending.clone() else {

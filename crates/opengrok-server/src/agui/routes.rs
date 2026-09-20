@@ -398,7 +398,7 @@ async fn pending_form_or_credential_hold(
         let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
             continue;
         };
-        if !crate::gateway::conversation::run_belongs_to(&run, coworker_id) {
+        if !crate::agui::resume::run_belongs_to(&run, coworker_id) {
             continue;
         }
         if matches!(
@@ -2109,7 +2109,7 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
-        crate::gateway::conversation::interrupt_parked_hitl(
+        crate::agui::resume::interrupt_parked_hitl(
             &gateway,
             account_id,
             &coworker_id,
@@ -2267,7 +2267,7 @@ pub async fn run(
             gateway,
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
-            form_hold: Mutex::new(crate::gateway::user_form::UserFormSseHold::default()),
+            form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_streaming(
             door.as_ref(),
@@ -2421,7 +2421,7 @@ async fn append_events(
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
         if event.event_type == opengrok_wire::agui::EventType::Custom
-            && crate::gateway::conversation::is_suspend_custom(
+            && crate::agui::resume::is_suspend_custom(
                 event.extra.get("name").and_then(|name| name.as_str()),
             )
         {
@@ -2592,7 +2592,7 @@ async fn events_for_client(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    crate::gateway::user_form::hydrate_agui_events(
+    crate::agui::user_form::hydrate_agui_events(
         run.emitted.clone(),
         &forms,
         started_at_ms,
@@ -2743,7 +2743,7 @@ pub async fn replay_thread(
                 }
                 None => Vec::new(),
             };
-            Some(crate::gateway::user_form::hydrate_agui_events(
+            Some(crate::agui::user_form::hydrate_agui_events(
                 run.emitted,
                 &forms,
                 summary.started_at_ms,
@@ -2944,7 +2944,7 @@ pub async fn answer_run(
     // about a refusal somebody made on purpose. Worse, the tool call was left with no result at
     // all, so the next turn in that thread replayed a call nothing answered.
     //
-    // The gateway's own answer path has done this from the start (`gateway::conversation`); the
+    // The suspended-run resume path has done this from the start (`agui::resume`); the
     // two doors on to the same run disagreed, and this is the one that was wrong.
     let continuing = pending.is_some();
     if let Some(pending) = pending {
@@ -3412,9 +3412,9 @@ pub async fn list_awaiting(
 /// writes the rest, the same words the card itself uses for what is about to happen.
 fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
     use opengrok_core::run::SuspendReason;
-    let what = crate::gateway::cards::summary_for(&pending.tool, &pending.arguments);
+    let what = crate::cards::summary_for(&pending.tool, &pending.arguments);
     let asking = match pending.reason {
-        SuspendReason::PolicyApproval => crate::gateway::cards::POLICY_ASK_REASON,
+        SuspendReason::PolicyApproval => crate::cards::POLICY_ASK_REASON,
         // Deliberately not the judge's default reason text: the ask's own sentence lives on the
         // card, and an egress-tunnel ask has a different one. Saying which judge instruction
         // fired, from a run that does not know, would be a guess printed as a fact.
@@ -3578,7 +3578,7 @@ fn reply_quote(
     } else {
         "your earlier message"
     };
-    crate::gateway::conversation::reply_quote_line(who, text)
+    crate::agui::resume::reply_quote_line(who, text)
 }
 
 /// A user message with the quote it answers ahead of it.
@@ -3593,7 +3593,7 @@ fn with_reply_context(
 ) -> String {
     if content
         .trim_start()
-        .starts_with(crate::gateway::conversation::REPLY_QUOTE_OPENING)
+        .starts_with(crate::agui::resume::REPLY_QUOTE_OPENING)
     {
         return content.to_string();
     }
@@ -3663,7 +3663,7 @@ struct AgUiSink {
     gateway: crate::host_state::HostState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
-    form_hold: Mutex<crate::gateway::user_form::UserFormSseHold>,
+    form_hold: Mutex<crate::agui::user_form::UserFormSseHold>,
 }
 
 impl AgUiSink {
@@ -3698,10 +3698,10 @@ impl EventSink for AgUiSink {
     async fn emit(&self, events: &[Event]) {
         for event in events {
             let mut event = event.clone();
-            if crate::gateway::user_form::is_live_user_form_custom(&event) {
+            if crate::agui::user_form::is_live_user_form_custom(&event) {
                 if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id)
                 {
-                    crate::gateway::conversation::stamp_user_form_entry_id(
+                    crate::agui::resume::stamp_user_form_entry_id(
                         &self.gateway,
                         coworker_id,
                         account_id,

@@ -1023,7 +1023,7 @@ async fn an_unanswered_form_times_out_and_resumes() {
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let settled = opengrok_server::gateway::user_form::timeout_unresolved_form(
+    let settled = opengrok_server::agui::user_form::timeout_unresolved_form(
         &h.gateway, &h.account, &coworker, &agent,
     )
     .await;
