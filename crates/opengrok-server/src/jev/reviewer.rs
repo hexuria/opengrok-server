@@ -31,7 +31,7 @@
 
 use std::collections::BTreeMap;
 
-use cred_swap_core::detect::candidates::{Candidate, Shape};
+use cred_swap_core::detect::candidates::{Candidate, Shape, Surveyed};
 use cred_swap_core::{EntityKind, Finding};
 use typesafe_sdk::{JsonContent, Question};
 
@@ -111,6 +111,13 @@ pub struct Review {
     pub judgement_model: String,
     /// The request id, when Jev sent one.
     pub request_id: Option<String>,
+    /// Distinct values the survey's budget could not afford to ask about.
+    ///
+    /// Carried through rather than swallowed. A caller that reports "nothing
+    /// else looked sensitive" while this is non-zero is reporting that it
+    /// stopped looking, which is the failure this module's no-fallback rule
+    /// exists to prevent.
+    pub unexamined: usize,
 }
 
 /// Ask Jev to judge a set of candidates.
@@ -128,21 +135,30 @@ pub struct Review {
 pub async fn review(
     jev: &dyn JevDoor,
     text: &str,
-    candidates: Vec<Candidate>,
+    surveyed: Surveyed,
     threshold: f64,
 ) -> Result<Review, JevError> {
+    let unexamined = surveyed.dropped;
+    let candidates = surveyed.candidates;
+
     if candidates.is_empty() {
         return Ok(Review {
             findings: Vec::new(),
             verdicts: Vec::new(),
             judgement_model: String::new(),
             request_id: None,
+            unexamined,
         });
     }
 
+    // One question per distinct value, not per occurrence. The same name five
+    // times is one judgement, and the verdict applies to all five; asking five
+    // times would cost five times as much to learn the same thing.
+    let distinct = distinct_values(&candidates);
+
     let ask = Ask {
-        state: state_for(text, &candidates),
-        questions: candidates
+        state: state_for(text, &distinct),
+        questions: distinct
             .iter()
             .enumerate()
             .map(|(index, candidate)| (question_name(index), question_for(candidate)))
@@ -151,7 +167,21 @@ pub async fn review(
     };
 
     let judgement = jev.ask(ask).await?;
-    Ok(collect(candidates, &judgement, threshold))
+    Ok(collect(
+        candidates, &distinct, &judgement, threshold, unexamined,
+    ))
+}
+
+/// One representative candidate per distinct span text, in document order.
+fn distinct_values(candidates: &[Candidate]) -> Vec<Candidate> {
+    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if seen.insert(candidate.text.as_str(), ()).is_none() {
+            out.push(candidate.clone());
+        }
+    }
+    out
 }
 
 /// The state Jev judges: the message, and the spans in question.
@@ -221,31 +251,50 @@ fn question_for(candidate: &Candidate) -> Question {
     }
 }
 
-/// Turn the answers back into findings, in the order the candidates came.
-fn collect(candidates: Vec<Candidate>, judgement: &Judgement, threshold: f64) -> Review {
+/// Turn the answers back into findings, one per occurrence.
+///
+/// Jev was asked about distinct values; the verdict is then applied to every
+/// place that value appears, so masking one mention of a name masks all of
+/// them. Leaving the others would defeat the point: the reader learns the name
+/// from the occurrence that was missed.
+fn collect(
+    candidates: Vec<Candidate>,
+    distinct: &[Candidate],
+    judgement: &Judgement,
+    threshold: f64,
+    unexamined: usize,
+) -> Review {
     let answers: BTreeMap<&str, &typesafe_sdk::Answer> = judgement
         .answers
         .iter()
         .map(|(name, answer)| (name.as_str(), answer))
         .collect();
 
-    let mut findings = Vec::new();
-    let mut verdicts = Vec::new();
-
-    for (index, candidate) in candidates.into_iter().enumerate() {
+    let mut by_value: BTreeMap<&str, Verdict> = BTreeMap::new();
+    for (index, candidate) in distinct.iter().enumerate() {
         let Some(choice) = answers
             .get(question_name(index).as_str())
             .and_then(|answer| answer.as_choice())
         else {
             continue;
         };
+        by_value.insert(
+            candidate.text.as_str(),
+            Verdict {
+                label: choice.choice.clone(),
+                confidence: choice.confidence,
+                kind: kind_for(&choice.choice),
+            },
+        );
+    }
 
-        let verdict = Verdict {
-            label: choice.choice.clone(),
-            confidence: choice.confidence,
-            kind: kind_for(&choice.choice),
+    let mut findings = Vec::new();
+    let mut verdicts = Vec::new();
+
+    for candidate in candidates {
+        let Some(verdict) = by_value.get(candidate.text.as_str()).cloned() else {
+            continue;
         };
-
         if verdict.masks(threshold)
             && let Some(kind) = verdict.kind.clone()
         {
@@ -264,6 +313,7 @@ fn collect(candidates: Vec<Candidate>, judgement: &Judgement, threshold: f64) ->
         verdicts,
         judgement_model: judgement.model.clone(),
         request_id: judgement.request_id.clone(),
+        unexamined,
     }
 }
 
@@ -332,7 +382,7 @@ mod tests {
     }
 
     /// The spans a message offers for judgement, in order.
-    fn spans(text: &str) -> Vec<Candidate> {
+    fn spans(text: &str) -> Surveyed {
         candidates(text, &cloak().inspect(text), &Survey::default())
     }
 
@@ -341,12 +391,14 @@ mod tests {
         let text = "Avery Sinclair signed off on the migration.";
         let asking = spans(text);
         let index = asking
+            .candidates
             .iter()
             .position(|c| c.text == "Avery Sinclair")
             .expect("the name is a candidate");
 
         let jev = MockJev::answering(
             asking
+                .candidates
                 .iter()
                 .enumerate()
                 .map(|(position, _)| {
@@ -374,6 +426,7 @@ mod tests {
         let asking = spans(text);
         let jev = MockJev::answering(
             asking
+                .candidates
                 .iter()
                 .enumerate()
                 .map(|(position, _)| (question_name(position), chose("person", 0.31)))
@@ -395,6 +448,7 @@ mod tests {
         let asking = spans(text);
         let jev = MockJev::answering(
             asking
+                .candidates
                 .iter()
                 .enumerate()
                 .map(|(position, _)| (question_name(position), chose("technical", 0.99)))
@@ -418,11 +472,13 @@ mod tests {
 
         let asking = candidates(text, &rules, &Survey::default());
         let index = asking
+            .candidates
             .iter()
             .position(|c| c.text == "Avery Sinclair")
             .expect("the name is a candidate");
         let jev = MockJev::answering(
             asking
+                .candidates
                 .iter()
                 .enumerate()
                 .map(|(position, _)| {
@@ -469,7 +525,11 @@ mod tests {
     #[tokio::test]
     async fn nothing_to_judge_costs_nothing() {
         let jev = MockJev::answering(Vec::<(String, Answer)>::new());
-        let review = review(&jev, "nothing here", Vec::new(), DEFAULT_THRESHOLD)
+        let empty = Surveyed {
+            candidates: Vec::new(),
+            dropped: 0,
+        };
+        let review = review(&jev, "nothing here", empty, DEFAULT_THRESHOLD)
             .await
             .unwrap();
         assert!(review.findings.is_empty());
@@ -480,27 +540,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_question_per_value_and_a_verdict_for_every_occurrence() {
+        let text = "Avery Sinclair wrote it. Avery Sinclair shipped it. Avery Sinclair broke it.";
+        let asking = spans(text);
+        let occurrences = asking
+            .candidates
+            .iter()
+            .filter(|c| c.text == "Avery Sinclair")
+            .count();
+        assert_eq!(occurrences, 3, "every occurrence must reach the reviewer");
+
+        let jev = MockJev::answering(vec![(question_name(0), chose("person", 0.95))]);
+        let review = review(&jev, text, asking, DEFAULT_THRESHOLD).await.unwrap();
+
+        assert_eq!(
+            jev.asked()[0].questions.len(),
+            1,
+            "the same name was asked about more than once"
+        );
+        assert_eq!(
+            review.findings.len(),
+            3,
+            "masking one mention and not the others teaches the reader the name"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unaffordable_survey_is_reported_not_swallowed() {
+        let mut text = String::new();
+        for name in ["Avery Ashford", "Rowan Barlow", "Quinn Cartwright"] {
+            text.push_str(name);
+            text.push_str(" approved it. ");
+        }
+
+        let asking = candidates(&text, &[], &Survey::default().limit(1));
+        assert!(asking.truncated(), "the fixture did not truncate");
+
+        let jev = MockJev::answering(vec![(question_name(0), chose("ordinary", 0.9))]);
+        let review = review(&jev, &text, asking, DEFAULT_THRESHOLD)
+            .await
+            .unwrap();
+        assert!(
+            review.unexamined > 0,
+            "a caller could not tell the survey stopped looking"
+        );
+    }
+
+    #[tokio::test]
     async fn every_candidate_is_asked_about_with_its_context() {
         let text = "The change was approved by Avery Sinclair on Tuesday.";
         let asking = spans(text);
         let jev = MockJev::answering(
             asking
+                .candidates
                 .iter()
                 .enumerate()
                 .map(|(position, _)| (question_name(position), chose("ordinary", 0.9)))
                 .collect::<Vec<_>>(),
         );
 
-        review(&jev, text, asking.clone(), DEFAULT_THRESHOLD)
-            .await
-            .unwrap();
+        let wanted: Vec<Candidate> = asking.candidates.clone();
+        review(&jev, text, asking, DEFAULT_THRESHOLD).await.unwrap();
 
         let asked = jev.asked();
         assert_eq!(asked.len(), 1, "one call, however many spans");
-        assert_eq!(asked[0].questions.len(), asking.len());
+        assert_eq!(asked[0].questions.len(), wanted.len());
 
         let rendered = serde_json::to_string(&asked[0].state).unwrap();
-        for candidate in &asking {
+        for candidate in &wanted {
             assert!(
                 rendered.contains(&candidate.text),
                 "{} was not in the state",

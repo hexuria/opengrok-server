@@ -534,7 +534,7 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 [[package]]
 name = "cred-swap-core"
 version = "0.1.0"
-source = "git+https://github.com/hexuria/cred-swap?branch=classifier-seam#9519302363aa729629e51626746afe7c0ee0027a"
+source = "git+https://github.com/hexuria/cred-swap?branch=classifier-seam#970ad3c805927a915f0951af8b9b12432db396b3"
 dependencies = [
  "aho-corasick",
  "hmac 0.12.1",
