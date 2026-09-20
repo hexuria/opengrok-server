@@ -33,9 +33,9 @@ fn now_ms() -> i64 {
 }
 
 /// Fire due schedules forever. Started by the binary; stops when the process does. Takes the
-/// gateway rather than the bare AG-UI state because a routine's finished run is posted into the
-/// coworker's chat, and the chat's live stream belongs to the gateway.
-pub async fn schedules_forever(gateway: crate::gateway::GatewayState) {
+/// host state rather than the bare AG-UI state because a routine's finished run is posted into
+/// the coworker's chat, and the chat's live stream belongs to the host state.
+pub async fn schedules_forever(gateway: crate::host_state::HostState) {
     loop {
         if let Err(error) = schedule_tick(&gateway).await {
             // Same stance as recovery: a failed tick is a warning, not an outage. The schedules
@@ -47,7 +47,7 @@ pub async fn schedules_forever(gateway: crate::gateway::GatewayState) {
 }
 
 pub async fn schedule_tick(
-    gateway: &crate::gateway::GatewayState,
+    gateway: &crate::host_state::HostState,
 ) -> Result<usize, opengrok_store::StoreError> {
     let state: &AgUiState = &gateway.agui;
     let due = state

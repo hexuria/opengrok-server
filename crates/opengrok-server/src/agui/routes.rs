@@ -61,8 +61,8 @@ pub struct AgUiState {
     /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
     /// still needs it in their ceiling before its tools run.
     pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
-    /// Shared with `GatewayState.settings` so AG-UI turns see `egressTunnelEnabled`.
-    /// `None` until `GatewayState::new` / `router` attach the Arc; env flags still apply.
+    /// Shared with `HostState.settings` so AG-UI turns see `egressTunnelEnabled`.
+    /// `None` until `HostState::new` / `router` attach the Arc; env flags still apply.
     pub host_settings: Option<Arc<Mutex<serde_json::Value>>>,
 }
 
@@ -76,8 +76,8 @@ impl AgUiState {
             .host_settings
             .as_ref()
             .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
-            .unwrap_or_else(crate::gateway::default_settings);
-        crate::gateway::egress_tunnel_available(&settings)
+            .unwrap_or_else(crate::host_state::default_settings);
+        crate::host_state::egress_tunnel_available(&settings)
     }
 
     /// Host intent AND this box's `egress_tunnel.ready`. Failed info → false.
@@ -634,10 +634,10 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
-/// `POST /ag-ui` lives on `GatewayState` so a UserForm CUSTOM can mint the gateway card and
+/// `POST /ag-ui` lives on `HostState` so a UserForm CUSTOM can mint the gateway card and
 /// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
 /// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
-pub fn run_router(state: crate::gateway::GatewayState) -> Router {
+pub fn run_router(state: crate::host_state::HostState) -> Router {
     Router::new().route("/ag-ui", post(run)).with_state(state)
 }
 
@@ -2023,12 +2023,12 @@ pub(crate) async fn principal_from_bearer(
 
 /// Start a run and stream its events.
 pub async fn run(
-    State(gateway): State<crate::gateway::GatewayState>,
+    State(gateway): State<crate::host_state::HostState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
-    // `GatewayState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
+    // `AgUiState` has no path to the live bus (`HostState` owns it). This handler lives on
+    // `HostState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
     // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
     // AG-UI path does.
     let state = gateway.agui.clone();
@@ -3476,7 +3476,7 @@ pub async fn patch_host_settings(
     };
     if let Ok(mut settings) = lock.lock() {
         if !settings.is_object() {
-            *settings = crate::gateway::default_settings();
+            *settings = crate::host_state::default_settings();
         }
         if let Some(record) = settings.as_object_mut() {
             for (key, value) in patch {
@@ -3496,7 +3496,7 @@ async fn host_settings_reply(
         .host_settings
         .as_ref()
         .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
-        .unwrap_or_else(crate::gateway::default_settings);
+        .unwrap_or_else(crate::host_state::default_settings);
     let available = egress_tunnel_available_for(state, account_id, coworker).await;
     if let Some(record) = record.as_object_mut() {
         record.insert(
@@ -3660,7 +3660,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 /// card stayed `call-*-1` with Continue that could not submit.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
-    gateway: crate::gateway::GatewayState,
+    gateway: crate::host_state::HostState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
     form_hold: Mutex<crate::gateway::user_form::UserFormSseHold>,

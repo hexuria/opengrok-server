@@ -235,7 +235,7 @@ async fn close_streaming_entries(
             continue;
         }
         // NO LIVE FRAME, AND THAT IS ENOUGH HERE. The sweep holds `AgUiState`, which has no path
-        // to the live bus (`GatewayState` owns it, and it owns `AgUiState`, not the reverse) — and
+        // to the live bus (`HostState` owns it, and it owns `AgUiState`, not the reverse) — and
         // plumbing one through for this would be the wrong trade. The case this exists for is a
         // process that died: the client is reconnecting to a NEW process and re-reads the
         // transcript as it does, so it sees the closed row without ever needing a push.

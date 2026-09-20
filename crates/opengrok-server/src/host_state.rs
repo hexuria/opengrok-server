@@ -1,28 +1,18 @@
-//! What is left of the gateway: the state the surviving doors share.
+//! `HostState`: what the surviving doors share beyond `AgUiState`.
 //!
-//! This module was seam A — the JSON+SSE door the discontinued Electron client lived on. The door
-//! is gone (`POST /api/{method}`, `GET /events`, `/avatars/{id}`, the live bus, the rooms). What
-//! stays is the machinery AG-UI, the MCP door, the hooks and the autonomy loops reach for through
-//! it: the conversation's suspension/resume path, user forms, credential prompts, the cards, and
-//! the host settings record.
-//!
-//! `GatewayState` KEEPS ITS NAME for now. Renaming it would touch every test that constructs one
-//! and say nothing new; it is a follow-up, not this deletion.
-
-pub mod cards;
-pub mod conversation;
-pub mod credential;
-pub mod hooks;
-pub mod lifecycle;
-pub mod user_form;
+//! Three things, all fixed the moment this process starts: the host settings record — the same
+//! `Arc` `AgUiState.host_settings` holds, so `GET/PUT /ag-ui/host-settings` and every reader of a
+//! setting agree on one record; the start time `/health` reports as `startedAt`; and the public
+//! URL this host advertises for itself — write-only today, and the address under which a webhook
+//! wake will be minted once the AG-UI schedules door can mint one.
 
 use std::sync::{Arc, Mutex};
 
 use crate::agui::routes::AgUiState;
 
-/// What the gateway knows beyond the shared server state.
+/// What a door needs beyond the shared server state.
 #[derive(Clone)]
-pub struct GatewayState {
+pub struct HostState {
     pub agui: AgUiState,
     /// The host settings record — the same `Arc` `AgUiState.host_settings` holds, so
     /// `GET/PUT /ag-ui/host-settings` and everything that reads a setting read one record.
@@ -33,12 +23,12 @@ pub struct GatewayState {
     /// `hooks::hook_url`, which minted the POST URL for a webhook-triggered routine, and the only
     /// door that ever minted one went with seam A. Kept — field and constructor parameter both —
     /// because giving the AG-UI schedules door a webhook wake is the follow-up that reads it
-    /// again, and dropping the parameter would churn every test that builds a `GatewayState`.
+    /// again, and dropping the parameter would churn every test that builds a `HostState`.
     /// `None` means we do not invent an address.
     pub public_gateway_url: Option<String>,
 }
 
-impl GatewayState {
+impl HostState {
     pub fn new(mut agui: AgUiState, public_gateway_url: Option<String>) -> Self {
         let settings = agui
             .host_settings

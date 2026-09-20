@@ -22,7 +22,7 @@ use crate::agui::routes::{AgUiState, StoreJournal};
 /// coworker, sent live. The run keeps its own thread (the schedule's id) for the pane's history;
 /// this is the part a person actually reads. `None` for firings nobody needs told about.
 pub(crate) struct Announce {
-    pub gateway: crate::gateway::GatewayState,
+    pub gateway: crate::host_state::HostState,
     /// The routine's name — the message opens with it so the chat says WHY the coworker spoke.
     pub name: String,
 }

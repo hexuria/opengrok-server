@@ -16,6 +16,7 @@ pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
 pub mod health;
+pub mod host_state;
 #[cfg(feature = "jev")]
 pub mod jev;
 #[cfg(not(feature = "jev"))]
@@ -46,7 +47,7 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(mut state: AgUiState, gateway: host_state::HostState) -> Router {
     if state.host_settings.is_none() {
         state.host_settings = Some(gateway.settings.clone());
     }
@@ -55,7 +56,7 @@ pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(gateway::hooks::router(gateway.clone()))
         .merge(gateway::user_form::agui_router(gateway.clone()))
         .merge(gateway::credential::agui_router(gateway.clone()))
-        // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
+        // `POST /ag-ui` needs `HostState` so a UserForm CUSTOM can mint the gateway
         // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
         .merge(agui::run_router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))

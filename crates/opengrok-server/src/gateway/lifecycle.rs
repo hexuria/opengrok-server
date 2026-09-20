@@ -12,7 +12,7 @@ use opengrok_core::id::AccountId;
 use opengrok_core::id::ScheduleId;
 use opengrok_core::schedule::Schedule;
 
-use super::GatewayState;
+use crate::host_state::HostState;
 
 /// Load the schedule, decide with `decide`, append at the loaded seq — and if another writer got
 /// there first, re-read and try ONCE more before answering 409. Why: the desktop's Routines pane
@@ -24,7 +24,7 @@ use super::GatewayState;
 /// `decide` sees the fresh aggregate and returns the events to append, or a refusal already
 /// shaped for the wire. Returns the aggregate after the append and the seq it landed at.
 pub(crate) async fn mutate_schedule<F>(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     schedule_id: &ScheduleId,
     at_ms: i64,

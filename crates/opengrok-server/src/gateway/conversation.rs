@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_harness::ModelRequest;
 
-use super::GatewayState;
+use crate::host_state::HostState;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -24,7 +24,7 @@ fn entry_id() -> String {
 /// Stop every parked HITL run for this coworker and settle unresolved user-form / live
 /// handoff chrome without resuming the model. New user text then starts a fresh turn.
 pub(crate) async fn interrupt_parked_hitl(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     by: &str,
@@ -45,7 +45,7 @@ pub(crate) async fn interrupt_parked_hitl(
 }
 
 async fn stop_parked_run(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     run_id: &opengrok_core::id::RunId,
@@ -312,7 +312,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 /// the gateway transcript live stream, so `AgUiSink` mints this card **before** the CUSTOM
 /// frame and stamps `entryId` on it. `POST /ag-ui/user-form/submit` uses that same id.
 pub(crate) async fn emit_suspension(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     agent_id: &str,
@@ -362,7 +362,7 @@ pub(crate) async fn emit_suspension(
 /// Mint a card for every HITL CUSTOM in the batch. `true` when at least one pause
 /// should hold the turn (a card went out, or a credential CUSTOM with no Grok chrome).
 pub(crate) async fn emit_suspensions(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     agent_id: &str,
@@ -384,7 +384,7 @@ pub(crate) async fn emit_suspensions(
 /// `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
 /// are left untouched. Idempotent if `entryId` is already present.
 pub(crate) async fn stamp_user_form_entry_id(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     event: &mut opengrok_wire::agui::Event,
@@ -521,7 +521,7 @@ pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bo
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume_where_it_lives(
     in_a_room: bool,
-    state: GatewayState,
+    state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,
@@ -556,7 +556,7 @@ pub(crate) async fn resume_where_it_lives(
 /// transcript as an ordinary bot message.
 #[allow(clippy::too_many_arguments)]
 async fn resume_gateway_run(
-    state: GatewayState,
+    state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,
