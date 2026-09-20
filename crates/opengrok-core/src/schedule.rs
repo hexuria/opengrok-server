@@ -601,6 +601,15 @@ pub struct ScheduleView {
     /// Public hook id when `kind` is webhook; empty otherwise.
     #[serde(default)]
     pub hook_id: String,
+    /// SHA-256 hex of the bearer, so an inbound POST can be refused from the projection without
+    /// replaying the stream. EMPTY on a webhook row projected before the column existed — a
+    /// reader must ask the aggregate for those rather than read the emptiness as "no key".
+    #[serde(default)]
+    pub secret_hash: String,
+    /// The bearer itself, so a listing can show the owner theirs without replaying the stream.
+    /// Empty on a cron row, and on a webhook row projected before the column existed.
+    #[serde(default)]
+    pub webhook_key: String,
 }
 
 #[cfg(test)]
