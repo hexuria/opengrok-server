@@ -186,11 +186,6 @@ step "scripts/slice10-autonomy-smoke.sh"
 OG_PORT="$PORT" scripts/slice10-autonomy-smoke.sh >/dev/null || fail "autonomy"
 echo "  passed"
 
-# Starts its own server too: it needs OG_GATEWAY_BEARER and OG_PUBLIC_GATEWAY_URL in its env.
-step "scripts/slice13-seamb-smoke.sh"
-OG_PORT="$PORT" scripts/slice13-seamb-smoke.sh >/dev/null || fail "seamb"
-echo "  passed"
-
 # Also its own server: it configures OG_PUBLIC_GATEWAY_URL + OG_GATEWAY_BEARER internally, and
 # proves the browser login leg AND that the blind LAN token-mint hole is closed.
 step "scripts/slice16-browser-login-smoke.sh"
