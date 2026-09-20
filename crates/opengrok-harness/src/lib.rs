@@ -12,6 +12,7 @@
 pub mod gateway;
 pub mod journal;
 pub mod mock;
+pub mod cloaked_door;
 pub mod model;
 pub mod projection;
 pub mod review;

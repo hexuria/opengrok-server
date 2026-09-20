@@ -22,6 +22,12 @@ reqwest.workspace = true
 workspace = true
 
 [dependencies]
+# Reversible scrubbing of what leaves for the provider. A hand-rolled version
+# would have to re-solve check-digit-preserving substitution and stand-ins that
+# arrive split across stream fragments; both are already tested there.
+#
+# Pinned to a branch until hexuria/cred-swap#2 lands, then move this to a tag.
+cred-swap-core = { git = "https://github.com/hexuria/cred-swap", branch = "classifier-seam" }
 subtle.workspace = true
 hickory-resolver.workspace = true
 argon2.workspace = true
