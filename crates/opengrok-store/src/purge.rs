@@ -61,10 +61,11 @@ impl PgStore {
         for row in &kept_rows {
             let id: String = row.try_get("id")?;
             let email: String = row.try_get("email")?;
-            if let Some(org) = row.try_get::<Option<String>, _>("org_id")? {
-                if !org.trim().is_empty() {
-                    kept_orgs.push(org);
-                }
+            if let Some(org) = row
+                .try_get::<Option<String>, _>("org_id")?
+                .filter(|org| !org.trim().is_empty())
+            {
+                kept_orgs.push(org);
             }
             kept_ids.push(id.clone());
             report.kept.push((email, id));
