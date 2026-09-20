@@ -8,10 +8,12 @@
 //! The route is deliberately NOT behind any account token: the caller is a todo app (or a curl),
 //! not a signed-in person. Auth is the hook's own key.
 //!
-//! MINTING A HOOK WENT WITH SEAM A. The only door that ever created a webhook wake — and handed
-//! back the URL and the bearer — was the desktop's `createAgentAutomation`. This route still
-//! serves the rows that door wrote; nothing on this server writes a new one. Giving the AG-UI
-//! schedules door a webhook wake is the follow-up.
+//! MINTING A HOOK LIVES HERE, beside the route that checks what it minted. The only door that
+//! ever created a webhook wake was the desktop's `createAgentAutomation`, and it went with seam A;
+//! `POST /schedules` with `"kind": "webhook"` is what writes one now, and it calls the four
+//! functions below. Keeping the mint and the check in one file is the point: the key is minted
+//! here, hashed here with `hash_webhook_key`, and compared here with `key_matches` — three things
+//! that have to agree, and would agree by coincidence if they lived in three places.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -23,7 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use opengrok_core::id::RunId;
+use opengrok_core::id::{HookId, RunId};
 use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
 use crate::autonomy::routes::mutate_schedule;
@@ -36,6 +38,18 @@ pub fn router(state: HostState) -> Router {
     Router::new()
         .route("/hooks/{hook_id}", post(inbound))
         .with_state(state)
+}
+
+/// A fresh inbound bearer. `og_` matches the placeholder NativeChat already shows; 32 random
+/// bytes is the same entropy as a refresh token.
+pub(crate) fn mint_webhook_key() -> String {
+    use rand::RngExt;
+    let bytes: [u8; 32] = rand::rng().random();
+    format!("og_{}", hex(&bytes))
+}
+
+pub(crate) fn mint_hook_id() -> String {
+    HookId::new().as_str().to_string()
 }
 
 pub(crate) fn hash_webhook_key(key: &str) -> String {
@@ -57,6 +71,36 @@ pub(crate) fn key_matches(secret_hash: &str, presented: &str) -> bool {
             .as_bytes()
             .ct_eq(secret_hash.as_bytes())
             .into()
+}
+
+/// The POST URL the editor shows. Prefers the advertised public gateway address so a loopback
+/// bind never leaks into a URL a phone or a SaaS app would POST to.
+pub(crate) fn hook_url(state: &HostState, hook_id: &str) -> String {
+    let advertised = state
+        .public_gateway_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            let url = state.agui.auth.public_url.as_str();
+            (!url.is_empty()).then_some(url)
+        })
+        .unwrap_or("");
+    let base = advertised.trim_end_matches('/');
+    if base.is_empty() {
+        format!("/hooks/{hook_id}")
+    } else {
+        format!("{base}/hooks/{hook_id}")
+    }
+}
+
+pub(crate) fn webhook_trigger_json(state: &HostState, hook_id: &str, key: &str) -> Value {
+    let url = hook_url(state, hook_id);
+    json!({
+        "type": "webhook",
+        "url": url,
+        "key": key,
+        "header": format!("Authorization: Bearer {key}"),
+    })
 }
 
 fn now_ms() -> i64 {

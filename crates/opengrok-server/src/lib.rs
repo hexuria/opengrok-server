@@ -63,7 +63,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
-        .merge(autonomy::routes::router(state.clone()))
+        .merge(autonomy::routes::router(host.clone()))
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
         .merge(workflows::router(state.clone()))

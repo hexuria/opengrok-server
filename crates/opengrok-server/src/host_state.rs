@@ -3,8 +3,8 @@
 //! Three things, all fixed the moment this process starts: the host settings record — the same
 //! `Arc` `AgUiState.host_settings` holds, so `GET/PUT /ag-ui/host-settings` and every reader of a
 //! setting agree on one record; the start time `/health` reports as `startedAt`; and the public
-//! URL this host advertises for itself — write-only today, and the address under which a webhook
-//! wake will be minted once the AG-UI schedules door can mint one.
+//! URL this host advertises for itself, which is the address a minted webhook wake is handed out
+//! under.
 
 use std::sync::{Arc, Mutex};
 
@@ -19,12 +19,11 @@ pub struct HostState {
     pub settings: Arc<Mutex<serde_json::Value>>,
     /// When this process started — `/health`'s `startedAt`.
     pub started_at_ms: i64,
-    /// The address this host advertises for itself. WRITE-ONLY TODAY: its one reader was
-    /// `hooks::hook_url`, which minted the POST URL for a webhook-triggered routine, and the only
-    /// door that ever minted one went with seam A. Kept — field and constructor parameter both —
-    /// because giving the AG-UI schedules door a webhook wake is the follow-up that reads it
-    /// again, and dropping the parameter would churn every test that builds a `HostState`.
-    /// `None` means we do not invent an address.
+    /// The address this host advertises for itself. Read by `hooks::hook_url`, which builds the
+    /// POST URL a webhook-triggered routine is handed out under — and which is why the schedules
+    /// door is mounted on `HostState` and not on `AgUiState`: a loopback bind must never leak
+    /// into a URL a phone or a SaaS app is asked to POST to. `None` means we do not invent an
+    /// address, and `hook_url` falls back to `agui.auth.public_url` and then to the bare path.
     pub public_gateway_url: Option<String>,
 }
 
