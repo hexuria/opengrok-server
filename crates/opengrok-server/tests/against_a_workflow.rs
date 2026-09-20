@@ -25,7 +25,7 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_server::jev::{Answer, JevDoor, JevError, MockJev, NoulAnswer};
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
@@ -206,7 +206,7 @@ async fn harness(database_url: &str, jev: Option<Arc<dyn JevDoor>>, probe_says: 
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -14,9 +14,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde_json::{Value, json};
 
-use crate::gateway::GatewayState;
+use crate::host_state::HostState;
 
-pub fn router(state: GatewayState) -> Router {
+pub fn router(state: HostState) -> Router {
     Router::new()
         .route("/health", get(health))
         .with_state(state)
@@ -53,7 +53,7 @@ pub(crate) fn refusal(code: u16, message: &str) -> Response {
 /// Token-free is not origin-free. A probe is a process, not a page; a browser page that learned
 /// this host still gets nothing — not even "up" — which is the rule the gateway smoke asserted for
 /// every path on this server and the rule this endpoint keeps now that it is the last one here.
-async fn health(State(state): State<GatewayState>, headers: HeaderMap) -> Response {
+async fn health(State(state): State<HostState>, headers: HeaderMap) -> Response {
     if headers.get(axum::http::header::ORIGIN).is_some() {
         return refusal(403, "browser origins are not served");
     }

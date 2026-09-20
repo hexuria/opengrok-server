@@ -4,7 +4,10 @@
 //! client through this stream.
 
 pub mod chat_ui;
+pub mod credential;
 pub mod provision;
+pub mod resume;
 pub mod routes;
+pub mod user_form;
 
 pub use routes::{AgUiState, router, run_router, to_chat_messages};

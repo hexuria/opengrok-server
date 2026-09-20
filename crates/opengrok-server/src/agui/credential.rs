@@ -19,17 +19,17 @@ use opengrok_tools::user_form::FormRequest;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use super::GatewayState;
 use super::user_form::{journal_agui_custom, pending_suspended, resume_settled};
+use crate::host_state::HostState;
 
-pub fn agui_router(state: GatewayState) -> Router {
+pub fn agui_router(state: HostState) -> Router {
     Router::new()
         .route("/ag-ui/credential/result", post(agui_result))
         .with_state(state)
 }
 
 async fn agui_result(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -51,7 +51,7 @@ async fn agui_result(
 /// box after NativeChat broker). It does NOT mean a password was typed into the box.
 /// `session_established` is accepted as an alias and canonicalized to `filled`.
 pub async fn submit_credential_result(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -150,7 +150,7 @@ pub async fn submit_credential_result(
 
 /// After a successful user-form fill, ask NativeChat to save origin+username. Never a password.
 pub async fn offer_save_after_submit(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     _agent_id: &str,
@@ -174,7 +174,7 @@ pub async fn offer_save_after_submit(
 }
 
 pub fn spawn_credential_hold_timeout(
-    state: GatewayState,
+    state: HostState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
@@ -186,7 +186,7 @@ pub fn spawn_credential_hold_timeout(
 }
 
 async fn timeout_credential_request(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -214,7 +214,7 @@ async fn timeout_credential_request(
     .await
 }
 
-async fn may_use(state: &GatewayState, account_id: &AccountId, coworker_id: &CoworkerId) -> bool {
+async fn may_use(state: &HostState, account_id: &AccountId, coworker_id: &CoworkerId) -> bool {
     state
         .agui
         .auth

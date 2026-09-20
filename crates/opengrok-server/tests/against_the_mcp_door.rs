@@ -20,7 +20,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use opengrok_tools::{AwaitingReason, ToolCall, ToolResult, USER_MACHINE_SHELL};
 use serde_json::{Value, json};
@@ -124,7 +124,7 @@ async fn seed_computerless_coworker(store: &PgStore, account: &AccountId) -> Cow
     id
 }
 
-fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, GatewayState) {
+fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, HostState) {
     let auth = AuthState::new(
         store,
         Arc::new(TokenMinter::new(b"mcp-door-test-secret-mcp-door-test!!")),
@@ -144,7 +144,7 @@ fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, Gatew
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (
         opengrok_server::router(agui.clone(), gateway.clone()),
         agui,

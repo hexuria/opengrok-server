@@ -22,7 +22,7 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -193,7 +193,7 @@ struct Harness {
     account: AccountId,
     stub: Arc<FillStub>,
     client: reqwest::Client,
-    gateway: GatewayState,
+    gateway: HostState,
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
@@ -236,7 +236,7 @@ async fn harness_with_door(database_url: &str, email: &str, door: Arc<MockDoor>)
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1023,7 +1023,7 @@ async fn an_unanswered_form_times_out_and_resumes() {
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let settled = opengrok_server::gateway::user_form::timeout_unresolved_form(
+    let settled = opengrok_server::agui::user_form::timeout_unresolved_form(
         &h.gateway, &h.account, &coworker, &agent,
     )
     .await;

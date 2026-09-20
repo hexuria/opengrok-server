@@ -27,7 +27,7 @@ import pathlib
 import struct
 import zipfile
 
-OUT = pathlib.Path("crates/opengrok-server/src/gateway/fixtures")
+OUT = pathlib.Path("crates/opengrok-server/src/fixtures")
 
 # 1980-01-01, the earliest a DOS timestamp can express, so every entry is fixed.
 ZIP_DATE = (1980, 1, 1, 0, 0, 0)

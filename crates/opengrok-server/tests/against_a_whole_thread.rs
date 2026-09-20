@@ -19,7 +19,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -251,7 +251,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

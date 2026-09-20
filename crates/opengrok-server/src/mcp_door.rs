@@ -59,7 +59,7 @@ use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
 /// answers the command with 409 `box_starting`, which reaches the caller as a truthful tool
 /// result it can retry, rather than a request that times out with nothing to show.
 const MCP_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
-use crate::gateway::GatewayState;
+use crate::host_state::HostState;
 use opengrok_core::CoworkerId;
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::run::{PendingApproval, Run, RunCommand, RunStatus, RunView, SuspendReason};
@@ -79,13 +79,13 @@ struct McpPrincipal {
 }
 
 /// The `/mcp` surface: the rmcp streamable-HTTP service behind the auth-and-origin guard.
-pub fn router(state: GatewayState) -> axum::Router {
+pub fn router(state: HostState) -> axum::Router {
     axum::Router::new()
         .fallback_service(service(state.clone()))
         .layer(axum::middleware::from_fn_with_state(state, guard))
 }
 
-fn service(state: GatewayState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
+fn service(state: HostState) -> StreamableHttpService<McpDoor, LocalSessionManager> {
     StreamableHttpService::new(
         move || {
             Ok(McpDoor {
@@ -112,7 +112,7 @@ fn service(state: GatewayState) -> StreamableHttpService<McpDoor, LocalSessionMa
 /// personal, or revoked credential never reaches rmcp (which would answer 200 + a JSON-RPC error);
 /// it gets a real `401`/`403`, so an OAuth-capable client can discover it must authenticate, and
 /// `initialize` itself is gated.
-async fn guard(State(state): State<GatewayState>, mut req: Request, next: Next) -> Response {
+async fn guard(State(state): State<HostState>, mut req: Request, next: Next) -> Response {
     // A browser page must never be able to drive this, with or without a token — the same refusal
     // the gateway makes, before anything else.
     if req.headers().contains_key(header::ORIGIN) {
@@ -186,7 +186,7 @@ fn unauthorized(public_url: &str, message: &str) -> Response {
 }
 
 pub struct McpDoor {
-    state: GatewayState,
+    state: HostState,
 }
 
 /// What a coworker's toolbox resolved to. The three cases are kept apart because collapsing them is
@@ -740,7 +740,7 @@ fn ask_waiting_text(content: &str, request_id: &str) -> String {
 /// Returns the error text the door sends the MCP client. Public so the door test can drive
 /// this path without a Ready toolbox (a computer) — `run_one` only Asks after that.
 pub async fn reply_to_ask(
-    state: &GatewayState,
+    state: &HostState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
@@ -816,7 +816,7 @@ pub fn is_mcp_audit_run(run: &Run) -> bool {
 /// in OpenGrok. Returns the `requestId` (the tool call id). A retry of the same tool+args
 /// while a card is already pending reuses that requestId — a second persist would flood cards.
 async fn persist_mcp_ask(
-    state: &GatewayState,
+    state: &HostState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
@@ -884,7 +884,7 @@ async fn persist_mcp_ask(
 
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let card = match reason {
-        SuspendReason::PolicyApproval => crate::gateway::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => crate::cards::policy_approval_card(
             &entry_id,
             &call.id,
             "pending",
@@ -893,11 +893,11 @@ async fn persist_mcp_ask(
             why,
             at_ms,
         ),
-        // The ask's OWN sentence, the way `conversation::card_for` does it. Hardcoding the
+        // The ask's OWN sentence, the way `resume::card_for` does it. Hardcoding the
         // judge's default reason here overwrote the real one: an egress-tunnel ask says "this
         // would use your network through the egress tunnel", and the person was shown "your
         // auto-review instructions did not clearly allow this" instead.
-        _ => crate::gateway::cards::auto_review_card(
+        _ => crate::cards::auto_review_card(
             &entry_id,
             &call.id,
             "pending",
@@ -1154,7 +1154,7 @@ pub async fn settle_mcp_answer(
 }
 
 async fn existing_mcp_ask(
-    state: &GatewayState,
+    state: &HostState,
     account: &AccountId,
     coworker: &CoworkerId,
     call: &ToolCall,
@@ -1220,7 +1220,7 @@ async fn pending_card_entry_for(
 }
 
 async fn fail_stuck_mcp_run(
-    state: &GatewayState,
+    state: &HostState,
     account: &AccountId,
     run_id: &RunId,
     mut run: Run,

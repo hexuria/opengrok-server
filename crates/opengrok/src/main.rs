@@ -264,8 +264,8 @@ async fn main() -> anyhow::Result<()> {
 
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
     // the half of the mission that does not wait for a request. The schedule sweep is started
-    // below, after the gateway exists: a routine's finished run is posted into the coworker's
-    // chat through the gateway's live stream.
+    // below, after the host state exists: a routine's finished run is posted into the coworker's
+    // chat through the host state's live stream.
     tokio::spawn(opengrok_server::autonomy::sweep::monitors_forever(
         state.clone(),
     ));
@@ -278,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
 
     // What the surviving doors share beyond `AgUiState`: the host settings record, this
     // process's start time (`/health`), and the address a client is handed for this host.
-    let gateway = opengrok_server::gateway::GatewayState::new(
+    let gateway = opengrok_server::host_state::HostState::new(
         state.clone(),
         std::env::var("OG_PUBLIC_GATEWAY_URL")
             .ok()

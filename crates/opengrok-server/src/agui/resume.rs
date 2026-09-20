@@ -1,17 +1,18 @@
-//! What is left of P4: pausing a turn for a person, and picking it up again.
+//! Resuming a suspended run, and everything on both sides of the pause: finding a suspension in a
+//! batch of AG-UI events, minting its card, stamping the entry id the AG-UI submit route answers
+//! against, stopping a parked run, and picking the model back up once a person has answered.
 //!
-//! The send path went with seam A — `sendPrompt`, the streaming sink, the roster pulses, the
-//! turn guard. AG-UI drives a turn now. What stays is everything the human-in-the-loop chrome
-//! needs on both sides of the pause: finding a suspension in a batch of AG-UI events, minting
-//! its card, stamping the entry id the AG-UI submit route answers against, stopping a parked
-//! run, and resuming one once the card has been answered.
+//! This is what is left of P4. The send path around it — `sendPrompt`, the streaming sink, the
+//! roster pulses, the turn guard — went with seam A; AG-UI drives every turn now, and what stays
+//! is the human-in-the-loop machinery AG-UI, the MCP door and the hooks all suspend and resume
+//! through.
 
 use serde_json::{Value, json};
 
 use opengrok_core::id::{CoworkerId, RunId};
 use opengrok_harness::ModelRequest;
 
-use super::GatewayState;
+use crate::host_state::HostState;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -24,7 +25,7 @@ fn entry_id() -> String {
 /// Stop every parked HITL run for this coworker and settle unresolved user-form / live
 /// handoff chrome without resuming the model. New user text then starts a fresh turn.
 pub(crate) async fn interrupt_parked_hitl(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     by: &str,
@@ -45,7 +46,7 @@ pub(crate) async fn interrupt_parked_hitl(
 }
 
 async fn stop_parked_run(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     run_id: &opengrok_core::id::RunId,
@@ -265,7 +266,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
                 },
             }))
         }
-        SuspendReason::AutoReview => Some(super::cards::auto_review_card(
+        SuspendReason::AutoReview => Some(crate::cards::auto_review_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -283,7 +284,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
         // reason and no proposed rule. Answered by `resolveAutoReviewApproval`, which routes the
         // yes to the GATE (not the judge) by this reason.
-        SuspendReason::PolicyApproval => Some(super::cards::policy_approval_card(
+        SuspendReason::PolicyApproval => Some(crate::cards::policy_approval_card(
             &entry_id(),
             &suspension.call_id,
             "pending",
@@ -292,7 +293,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             suspension.why.as_deref(),
             now_ms(),
         )),
-        SuspendReason::UserForm => Some(super::cards::user_form_card(
+        SuspendReason::UserForm => Some(crate::cards::user_form_card(
             &entry_id(),
             &suspension.arguments,
             now_ms(),
@@ -312,7 +313,7 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 /// the gateway transcript live stream, so `AgUiSink` mints this card **before** the CUSTOM
 /// frame and stamps `entryId` on it. `POST /ag-ui/user-form/submit` uses that same id.
 pub(crate) async fn emit_suspension(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     agent_id: &str,
@@ -362,7 +363,7 @@ pub(crate) async fn emit_suspension(
 /// Mint a card for every HITL CUSTOM in the batch. `true` when at least one pause
 /// should hold the turn (a card went out, or a credential CUSTOM with no Grok chrome).
 pub(crate) async fn emit_suspensions(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     agent_id: &str,
@@ -384,7 +385,7 @@ pub(crate) async fn emit_suspensions(
 /// `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
 /// are left untouched. Idempotent if `entryId` is already present.
 pub(crate) async fn stamp_user_form_entry_id(
-    state: &GatewayState,
+    state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     event: &mut opengrok_wire::agui::Event,
@@ -521,7 +522,7 @@ pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bo
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume_where_it_lives(
     in_a_room: bool,
-    state: GatewayState,
+    state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,
@@ -538,7 +539,7 @@ pub(crate) async fn resume_where_it_lives(
         );
         return;
     }
-    resume_gateway_run(
+    resume_suspended_run(
         state,
         account_id,
         run_id,
@@ -551,12 +552,12 @@ pub(crate) async fn resume_where_it_lives(
     .await;
 }
 
-/// Resume an approved gateway run: re-run the conversation with the approved tool call (which makes
-/// `user_machine_shell` dispatch instead of re-asking), then land the model's summary in the
-/// transcript as an ordinary bot message.
+/// Resume an approved suspended run: re-run the conversation with the approved tool call (which
+/// makes `user_machine_shell` dispatch instead of re-asking), then land the model's summary in
+/// the transcript as an ordinary bot message.
 #[allow(clippy::too_many_arguments)]
-async fn resume_gateway_run(
-    state: GatewayState,
+async fn resume_suspended_run(
+    state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,

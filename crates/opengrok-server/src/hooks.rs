@@ -26,13 +26,13 @@ use subtle::ConstantTimeEq;
 use opengrok_core::id::RunId;
 use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
-use super::GatewayState;
-use super::lifecycle::mutate_schedule;
+use crate::autonomy::routes::mutate_schedule;
+use crate::host_state::HostState;
 
 /// Largest JSON body we will attach to a wake. A webhook is a ping-or-payload, not a file drop.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-pub fn router(state: GatewayState) -> Router {
+pub fn router(state: HostState) -> Router {
     Router::new()
         .route("/hooks/{hook_id}", post(inbound))
         .with_state(state)
@@ -64,7 +64,7 @@ fn now_ms() -> i64 {
 }
 
 async fn inbound(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     Path(hook_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,

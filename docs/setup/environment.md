@@ -17,7 +17,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 | Variable | Default | What it is |
 |---|---|---|
 | `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** — or `127.0.0.1:1447` behind Caddy | where everything listens: AG-UI, auth, `/mcp`, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server). With TLS in front (`setup/tls.md`) the server binds loopback and Caddy takes the LAN address on the same port |
-| `OG_PUBLIC_GATEWAY_URL` | `http://<OG_BIND>` | the address this host advertises for itself (e.g. `http://192.168.100.24:1447`): the base of every emailed link and of the browser-login redirect (`crates/opengrok/src/main.rs:70`), and the MCP door's OAuth issuer + `resource` (`<url>/mcp`). Behind TLS it must be the HTTPS address clients actually reach. `GatewayState` also keeps it for the webhook mint, which has no door today — see `gateway/mod.rs` |
+| `OG_PUBLIC_GATEWAY_URL` | `http://<OG_BIND>` | the address this host advertises for itself (e.g. `http://192.168.100.24:1447`): the base of every emailed link and of the browser-login redirect (`crates/opengrok/src/main.rs:70`), and the MCP door's OAuth issuer + `resource` (`<url>/mcp`). Behind TLS it must be the HTTPS address clients actually reach. `HostState` also keeps it for the webhook mint, which has no door today — see `host_state.rs` |
 | `OG_COOKIE_SECURE` | unset | `1` marks the console's auth cookies `Secure` — set it behind HTTPS |
 
 ## The model door

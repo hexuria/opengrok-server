@@ -10,12 +10,14 @@ pub mod artifacts;
 pub mod auth;
 pub mod auto_review;
 pub mod autonomy;
+pub mod cards;
 pub mod computers;
 pub mod connections;
 pub mod domain_proof;
-pub mod gateway;
 pub mod gateway_admin;
 pub mod health;
+pub mod hooks;
+pub mod host_state;
 #[cfg(feature = "jev")]
 pub mod jev;
 #[cfg(not(feature = "jev"))]
@@ -46,18 +48,18 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
     if state.host_settings.is_none() {
-        state.host_settings = Some(gateway.settings.clone());
+        state.host_settings = Some(host.settings.clone());
     }
     let app = Router::new()
-        .merge(health::router(gateway.clone()))
-        .merge(gateway::hooks::router(gateway.clone()))
-        .merge(gateway::user_form::agui_router(gateway.clone()))
-        .merge(gateway::credential::agui_router(gateway.clone()))
-        // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
+        .merge(health::router(host.clone()))
+        .merge(hooks::router(host.clone()))
+        .merge(agui::user_form::agui_router(host.clone()))
+        .merge(agui::credential::agui_router(host.clone()))
+        // `POST /ag-ui` needs `HostState` so a UserForm CUSTOM can mint the gateway
         // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
-        .merge(agui::run_router(gateway.clone()))
+        .merge(agui::run_router(host.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
         .merge(agui::router(state.clone()))
@@ -72,7 +74,7 @@ pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
-        .nest("/mcp", mcp_door::router(gateway))
+        .nest("/mcp", mcp_door::router(host))
         .merge(connections::routes::router(state));
     let app = mount_web_console(app);
     // Request trace, ON by default (`OG_TRACE_REQUESTS=0` turns it off): one INFO line per

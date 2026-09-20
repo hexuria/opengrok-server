@@ -21,7 +21,7 @@
 //! an escalate retry.
 //!
 //! NativeChat talks AG-UI with an account bearer, not the gateway host bearer, so the REST
-//! twins live on a router that has `GatewayState` (live emit + resume) but authenticates
+//! twins live on a router that has `HostState` (live emit + resume) but authenticates
 //! like AG-UI (`account_from_bearer`), never through `refuse()`.
 
 use std::collections::{BTreeMap, HashSet};
@@ -43,14 +43,15 @@ use opengrok_tools::user_form::{
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
 
-use super::{GatewayState, conversation};
+use super::resume;
+use crate::host_state::HostState;
 
 /// How long an unanswered form or live handoff may block the turn. Tests call the settlers
 /// directly rather than waiting this out. Facebook hang: password fill reported submitted and
 /// the OTP wait never ended.
 pub const FORM_HOLD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-pub fn agui_router(state: GatewayState) -> Router {
+pub fn agui_router(state: HostState) -> Router {
     Router::new()
         .route("/ag-ui/user-form/submit", post(agui_submit))
         .route("/ag-ui/user-form/dismiss", post(agui_dismiss))
@@ -59,7 +60,7 @@ pub fn agui_router(state: GatewayState) -> Router {
 }
 
 async fn agui_submit(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -75,7 +76,7 @@ async fn agui_submit(
 }
 
 async fn agui_dismiss(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -91,7 +92,7 @@ async fn agui_dismiss(
 }
 
 async fn agui_resolve_handoff(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -110,7 +111,7 @@ async fn agui_resolve_handoff(
 /// `formResolution` plus `formFieldOutcomes`, resumes with a secret-free tool result that says
 /// the values were filled into the page — not that login succeeded.
 pub async fn submit_user_form(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -177,7 +178,7 @@ pub async fn submit_user_form(
 /// `dismissUserForm {entryId, mode: dismissed|escalated, agentId, platform?}`. No fill.
 /// `dismissed` resumes. `escalated` starts a box handoff and does **not** resume.
 pub async fn dismiss_user_form(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -260,7 +261,7 @@ pub async fn dismiss_user_form(
 /// (NativeChat KeepAlive falls back to the form when `handoffEntryId` is missing).
 /// Does **not** stop the box (`handBackForeverBox` is a lifecycle verb).
 pub async fn resolve_box_handoff(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -332,7 +333,7 @@ pub async fn resolve_box_handoff(
 /// Spawned when a user-form card is minted. No-ops if the form already settled (including
 /// escalate — that wait is the handoff timer).
 pub fn spawn_form_hold_timeout(
-    state: GatewayState,
+    state: HostState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
@@ -344,7 +345,7 @@ pub fn spawn_form_hold_timeout(
 }
 
 pub fn spawn_handoff_hold_timeout(
-    state: GatewayState,
+    state: HostState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
@@ -357,7 +358,7 @@ pub fn spawn_handoff_hold_timeout(
 
 /// Settle every still-unresolved user-form as `dismissed` + `timedOut` and resume. Idempotent.
 pub async fn timeout_unresolved_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -434,7 +435,7 @@ pub async fn timeout_unresolved_form(
 
 /// Stamp `boxResolution: timed_out` on a live handoff and resume. Idempotent.
 pub async fn timeout_live_handoff(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -464,13 +465,13 @@ pub async fn timeout_live_handoff(
 }
 
 async fn start_box_handoff(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
     form: &FormRequest,
 ) -> Option<Value> {
-    let card = super::cards::computer_handoff_card(
+    let card = crate::cards::computer_handoff_card(
         &format!("e_{}", uuid::Uuid::now_v7()),
         &format!("req_{}", uuid::Uuid::now_v7().simple()),
         &handoff_instruction(form),
@@ -499,7 +500,7 @@ async fn start_box_handoff(
 /// handoff chrome without resuming — the new text is steer, not a card answer.
 /// Escalate itself never calls this.
 pub(crate) async fn dismiss_unresolved_on_interrupt(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) {
@@ -577,7 +578,7 @@ fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
     ))
 }
 
-async fn may_use(state: &GatewayState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
+async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
     state
         .agui
         .auth
@@ -590,7 +591,7 @@ async fn may_use(state: &GatewayState, account_id: &AccountId, coworker: &Cowork
 /// Null stays the disclosure answer for a coworker the caller may not use. A stamped
 /// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
 async fn load_owned_entry(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     entry_id: &str,
@@ -672,7 +673,7 @@ fn is_escalated_form(entry: &Value) -> bool {
 /// Stamp `boxResolution` on every still-live sand://box sibling. One Skip must not
 /// leave another unanswered handoff holding "Waiting for you".
 async fn settle_live_handoffs(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     resolution: &str,
@@ -727,7 +728,7 @@ async fn settle_live_handoffs(
 /// still unanswered. Settle siblings as declined and resume. Escalate itself never
 /// comes here (`mode: escalated` on a settled form still hits heal_or_already).
 async fn abandon_escalated_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -749,7 +750,7 @@ async fn abandon_escalated_form(
 }
 
 async fn fill_on_box(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     form: &FormRequest,
@@ -784,7 +785,7 @@ async fn fill_on_box(
 }
 
 async fn heal_or_already(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -834,7 +835,7 @@ async fn heal_or_already(
 /// pending run was found and answered (a retry can pick up a card that settled before the
 /// run did).
 async fn resume_user_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -854,7 +855,7 @@ async fn resume_user_form(
 }
 
 pub(crate) async fn resume_settled(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -908,12 +909,12 @@ pub(crate) async fn resume_settled(
         tracing::error!(%error, "could not append the answer");
         return false;
     }
-    let in_room = conversation::in_a_room(&run, coworker_id);
+    let in_room = resume::in_a_room(&run, coworker_id);
     let state = state.clone();
     let account_id = account_id.clone();
     let coworker_id = coworker_id.clone();
     let agent_id = agent_id.to_string();
-    tokio::spawn(conversation::resume_where_it_lives(
+    tokio::spawn(resume::resume_where_it_lives(
         in_room,
         state,
         account_id,
@@ -928,7 +929,7 @@ pub(crate) async fn resume_settled(
 }
 
 pub(crate) async fn pending_suspended(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,
@@ -949,7 +950,7 @@ pub(crate) async fn pending_suspended(
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
         };
-        if !conversation::run_belongs_to(&run, coworker_id) {
+        if !resume::run_belongs_to(&run, coworker_id) {
             continue;
         }
         let Some(pending) = run.pending.clone() else {
@@ -976,7 +977,7 @@ fn now_ms() -> i64 {
 /// this frame, `GET /ag-ui/threads/{id}` only has the mint-time CUSTOM and a
 /// cold client cannot rebuild ✓ Submitted.
 async fn journal_settled_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     settled: &Value,
@@ -994,7 +995,7 @@ async fn journal_settled_form(
 /// Append a CUSTOM onto a still-pending run (NativeChat replays this). Scrubs
 /// accidental password keys before the payload is stored.
 pub(crate) async fn journal_agui_custom(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,
