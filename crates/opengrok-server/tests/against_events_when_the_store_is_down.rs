@@ -46,6 +46,7 @@ async fn spawn_with_a_dead_store() -> String {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),
@@ -217,6 +218,7 @@ async fn a_stream_opened_during_the_outage_is_seeded_once_the_store_is_back() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

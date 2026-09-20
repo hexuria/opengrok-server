@@ -231,6 +231,10 @@ pub enum ResumeOutcome {
     Approved,
     /// Refused, with the text the model reads — the rule that stopped it.
     Refused(String),
+    /// The card was answered by something other than yes/no of a tool that should then run.
+    /// The call is NOT re-executed; this text is the tool result. User-form submit fills
+    /// outside `computer_use` and must not re-raise `request_user_form`.
+    Settled(String),
 }
 
 /// What a resumed run already knows: the call that was answered, how, and where the first half
@@ -262,6 +266,18 @@ impl Resumption {
             approved: call,
             message_seq,
             outcome: ResumeOutcome::Refused(why.into()),
+        }
+    }
+
+    pub fn settled(
+        call: opengrok_tools::ToolCall,
+        message_seq: u32,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            approved: call,
+            message_seq,
+            outcome: ResumeOutcome::Settled(content.into()),
         }
     }
 }
@@ -300,12 +316,15 @@ pub async fn resume_conversation(
     let results = match outcome {
         ResumeOutcome::Approved => tools.run_all(std::slice::from_ref(&approved)).await,
         ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
+        ResumeOutcome::Settled(content) => {
+            vec![opengrok_tools::ToolResult::ok(&approved.id, content)]
+        }
     };
     for result in &results {
         all.extend(projection.push_tool_result(result));
         request.messages.push(tool_result_message(result));
     }
-    let _ = journal.record(&run_id, &all).await;
+    let _ = record_round(journal, &run_id, &all).await;
 
     // If the approved call itself is still waiting, something is wrong with the approval rather
     // than with the run; stop rather than loop.
@@ -313,9 +332,9 @@ pub async fn resume_conversation(
         let reason = still_waiting
             .awaiting_reason
             .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-        let mut waiting =
-            projection.awaiting_approval(&approved, reason, awaiting_why(&still_waiting.content));
-        let _ = journal.record(&run_id, &waiting).await;
+        let parked = (&approved, reason, still_waiting.content.as_str());
+        let mut waiting = park_awaiting(&mut projection, std::slice::from_ref(&parked));
+        let _ = record_round(journal, &run_id, &waiting).await;
         all.append(&mut waiting);
         return all;
     }
@@ -347,11 +366,19 @@ async fn stop_here(
     sink: Option<&dyn EventSink>,
     run_id: &str,
     mut round_events: Vec<Event>,
+    last_agent_shot: &mut Option<Event>,
 ) -> Vec<Event> {
+    pin_last_agent_shot(
+        sink,
+        last_agent_shot,
+        opengrok_tools::ImageVisibility::End,
+        &mut round_events,
+    )
+    .await;
     let ending = projection.stopped();
     emit_live(sink, &ending).await;
     round_events.extend(ending);
-    let _ = journal.record(run_id, &round_events).await;
+    let _ = record_round(journal, run_id, &round_events).await;
     round_events
 }
 
@@ -361,13 +388,32 @@ async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
     if let Some(sink) = sink
         && !events.is_empty()
     {
-        sink.emit(events).await;
+        let clean: Vec<Event> = events.iter().cloned().map(scrub_event_secrets).collect();
+        sink.emit(&clean).await;
     }
 }
 
 /// The loop both entry points share.
 #[allow(clippy::too_many_arguments)]
+/// What a run emitted, with streamed secret-bearing tool arguments assembled and scrubbed.
+/// The raw loop is `converse_raw`; every exit of it goes through this one gate, so
+/// `run.emitted` — which API clients read back — cannot carry a fragment the journal would
+/// have refused.
 async fn converse(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    projection: Projection,
+    run_id: &str,
+    sink: Option<&dyn EventSink>,
+) -> Vec<Event> {
+    scrub_streamed_tool_args(
+        converse_raw(door, tools, journal, request, projection, run_id, sink).await,
+    )
+}
+
+async fn converse_raw(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
     journal: &dyn RunJournal,
@@ -409,6 +455,9 @@ async fn converse(
     // The last screenshot the model was shown, and how many times in a row it was the same.
     let mut last_screen: Option<u64> = None;
     let mut same_screen = 0usize;
+    // Last computer-step TOOL_CALL_RESULT whose image is still `agent`. Promoted to `end`
+    // or `failure` when the run closes so replay keeps one PNG, not every step.
+    let mut last_agent_shot: Option<Event> = None;
     // Whether the model has produced anything at all this run — a word, a tool call, a thought.
     // A run that ends having produced nothing is a failure with a sentence, not a silent finish.
     let mut any_delta = false;
@@ -419,7 +468,17 @@ async fn converse(
         // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
         // going to ask next is not asked, and nothing more is spent on it.
         if journal.stopped(run_id).await {
-            all.extend(stop_here(journal, &mut projection, sink, run_id, round_events).await);
+            all.extend(
+                stop_here(
+                    journal,
+                    &mut projection,
+                    sink,
+                    run_id,
+                    round_events,
+                    &mut last_agent_shot,
+                )
+                .await,
+            );
             return all;
         }
 
@@ -427,6 +486,13 @@ async fn converse(
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
+                pin_last_agent_shot(
+                    sink,
+                    &mut last_agent_shot,
+                    opengrok_tools::ImageVisibility::Failure,
+                    &mut round_events,
+                )
+                .await;
                 let failed = projection.fail(error.to_string());
                 emit_live(sink, &failed).await;
                 round_events.extend(failed);
@@ -447,14 +513,21 @@ async fn converse(
                         let produced = projection.push(delta);
                         // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
                         // adds a second reader that does not have to wait for the run to end.
-                        if let Some(sink) = sink
-                            && !produced.is_empty()
-                        {
-                            sink.emit(&produced).await;
-                        }
+                        // Through `emit_live`, never `sink.emit` directly, so the live
+                        // delta path meets `scrub_event_secrets` like every other path.
+                        // Without it a model that smuggled a `values.password` into its
+                        // own tool args reached NativeChat verbatim.
+                        emit_live(sink, &produced).await;
                         round_events.extend(produced);
                     }
                     Err(error) => {
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::Failure,
+                            &mut round_events,
+                        )
+                        .await;
                         let failed = projection.fail(error.to_string());
                         emit_live(sink, &failed).await;
                         round_events.extend(failed);
@@ -491,7 +564,15 @@ async fn converse(
                     // stop takes hold before the next one.
                     if journal.stopped(run_id).await {
                         all.extend(
-                            stop_here(journal, &mut projection, sink, run_id, round_events).await,
+                            stop_here(
+                                journal,
+                                &mut projection,
+                                sink,
+                                run_id,
+                                round_events,
+                                &mut last_agent_shot,
+                            )
+                            .await,
                         );
                         return all;
                     }
@@ -500,30 +581,45 @@ async fn converse(
                     for result in &results {
                         let produced = projection.push_tool_result(result);
                         emit_live(sink, &produced).await;
+                        remember_agent_shot(&produced, &mut last_agent_shot);
                         round_events.extend(produced);
                         // The model needs to see what its tool said, in its own transcript.
                         request.messages.push(tool_result_message(result));
                     }
 
-                    if let Some((waiting, reason, why)) = results
+                    let waiting: Vec<(
+                        &opengrok_tools::ToolCall,
+                        opengrok_tools::AwaitingReason,
+                        &str,
+                    )> = results
                         .iter()
-                        .position(|result| result.awaiting_approval)
-                        .and_then(|index| {
-                            let reason = results[index]
-                                .awaiting_reason
-                                .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-                            calls
-                                .get(index)
-                                .map(|call| (call, reason, results[index].content.clone()))
+                        .zip(calls.iter())
+                        .filter(|(result, _)| result.awaiting_approval)
+                        .map(|(result, call)| {
+                            (
+                                call,
+                                result
+                                    .awaiting_reason
+                                    .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent),
+                                result.content.as_str(),
+                            )
                         })
-                    {
-                        // Ended as a readable state, not a silent stop and not a failure. The run
-                        // stays `running` in the log, which is exactly what `interrupted_runs`
-                        // looks for — resumption and approval share the same machinery.
-                        let mut waiting_events =
-                            projection.awaiting_approval(waiting, reason, awaiting_why(&why));
-                        let _ = journal.record(run_id, &round_events).await;
-                        let _ = journal.record(run_id, &waiting_events).await;
+                        .collect();
+                    if !waiting.is_empty() {
+                        // One CUSTOM per awaiting call in this completion — NativeChat paints a
+                        // Website login card per TOOL_CALL. Live SSE must not forward those
+                        // TOOL_CALLs until the matching CUSTOM has a gateway `e_*` (AgUiSink
+                        // holds them). Parking on the first leftover left stacked cards with
+                        // only a raw `call-*` id.
+                        //
+                        // Then `RUN_FINISHED`: AG-UI/NativeChat hold Waiting on that closer.
+                        // The HTTP stream used to drop after CUSTOM with no ending, which is a
+                        // forever spinner. The aggregate stays `awaiting-approval` (the journal
+                        // does not Finish a suspended run) so Continue can still resume. A new
+                        // user message interrupts instead of leaving a zombie parked run.
+                        let mut waiting_events = park_awaiting(&mut projection, &waiting);
+                        let _ = record_round(journal, run_id, &round_events).await;
+                        let _ = record_round(journal, run_id, &waiting_events).await;
                         emit_live(sink, &waiting_events).await;
                         all.append(&mut round_events);
                         all.append(&mut waiting_events);
@@ -557,8 +653,15 @@ async fn converse(
                             "`{}` was refused the same way twice ({why}); stopping instead of retrying",
                             names.join("`, `")
                         ));
-                        let _ = journal.record(run_id, &round_events).await;
-                        let _ = journal.record(run_id, &ending).await;
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::Failure,
+                            &mut round_events,
+                        )
+                        .await;
+                        let _ = record_round(journal, run_id, &round_events).await;
+                        let _ = record_round(journal, run_id, &ending).await;
                         emit_live(sink, &ending).await;
                         all.append(&mut round_events);
                         all.append(&mut ending);
@@ -582,8 +685,15 @@ async fn converse(
                         let mut ending = projection.fail(format!(
                             "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
                         ));
-                        let _ = journal.record(run_id, &round_events).await;
-                        let _ = journal.record(run_id, &ending).await;
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::Failure,
+                            &mut round_events,
+                        )
+                        .await;
+                        let _ = record_round(journal, run_id, &round_events).await;
+                        let _ = record_round(journal, run_id, &ending).await;
                         emit_live(sink, &ending).await;
                         all.append(&mut round_events);
                         all.append(&mut ending);
@@ -600,7 +710,7 @@ async fn converse(
 
                     // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
                     // dependency chain, so a crash after this point can be picked up.
-                    if let Err(error) = journal.record(run_id, &round_events).await {
+                    if let Err(error) = record_round(journal, run_id, &round_events).await {
                         let failed =
                             projection.fail(format!("the run could not be recorded: {error}"));
                         emit_live(sink, &failed).await;
@@ -613,9 +723,19 @@ async fn converse(
                     // bar_chart/form already painted from TOOL_CALL frames. Another model
                     // round in this HTTP request is what doubled charts on "generate another".
                     if calls.iter().any(|call| is_client_render_tool(&call.name)) {
+                        let mut pin_events = Vec::new();
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::End,
+                            &mut pin_events,
+                        )
+                        .await;
+                        let _ = record_round(journal, run_id, &pin_events).await;
+                        all.append(&mut pin_events);
                         let mut ending = projection.finish();
                         emit_live(sink, &ending).await;
-                        let _ = journal.record(run_id, &ending).await;
+                        let _ = record_round(journal, run_id, &ending).await;
                         all.append(&mut ending);
                         return all;
                     }
@@ -643,8 +763,18 @@ async fn converse(
                         None
                     };
                     if let Some(why) = over {
+                        let mut pin_events = Vec::new();
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::Failure,
+                            &mut pin_events,
+                        )
+                        .await;
+                        let _ = record_round(journal, run_id, &pin_events).await;
+                        all.append(&mut pin_events);
                         let mut ending = projection.fail(why);
-                        let _ = journal.record(run_id, &ending).await;
+                        let _ = record_round(journal, run_id, &ending).await;
                         emit_live(sink, &ending).await;
                         all.append(&mut ending);
                         return all;
@@ -661,6 +791,12 @@ async fn converse(
         // the client cannot tell it from a coworker with nothing to say, and every one of them
         // invented its own placeholder. A run that already failed keeps its own message — `fail`
         // and `finish` are both no-ops once the run has ended.
+        let pin = if any_delta {
+            opengrok_tools::ImageVisibility::End
+        } else {
+            opengrok_tools::ImageVisibility::Failure
+        };
+        pin_last_agent_shot(sink, &mut last_agent_shot, pin, &mut round_events).await;
         let mut ending = if any_delta {
             projection.finish()
         } else {
@@ -668,12 +804,209 @@ async fn converse(
         };
         emit_live(sink, &ending).await;
         round_events.append(&mut ending);
-        let _ = journal.record(run_id, &round_events).await;
+        let _ = record_round(journal, run_id, &round_events).await;
         all.append(&mut round_events);
         return all;
     }
 
     all
+}
+
+/// Computer-step shots are `agent`: live SSE may carry the PNG for the Computer pane, but the
+/// journal drops the bytes so a reconnecting client is not flooded with every click. Missing
+/// `visibility` is a legacy frame — those PNGs were already first-class events and stay.
+/// Accidental `password` keys are dropped here too — site logins must not persist.
+fn strip_agent_png(mut event: Event) -> Event {
+    if event.event_type != opengrok_wire::agui::EventType::ToolCallResult {
+        return event;
+    }
+    let Some(image) = event.extra.get_mut("image") else {
+        return event;
+    };
+    let vis = image
+        .get("visibility")
+        .and_then(|value| value.as_str())
+        .unwrap_or("transcript");
+    if vis == "agent"
+        && let Some(object) = image.as_object_mut()
+    {
+        object.remove("base64");
+    }
+    event
+}
+
+fn scrub_event_secrets(mut event: Event) -> Event {
+    let extra = serde_json::Value::Object(event.extra.clone());
+    if let serde_json::Value::Object(map) = opengrok_tools::credential::scrub_secret_keys(&extra) {
+        event.extra = map;
+    }
+    event
+}
+
+/// Streamed tool-call arguments arrive as `TOOL_CALL_ARGS` fragments — `"password":"s3`
+/// and then `cret"` — and `scrub_secret_keys` can only scrub a value it can parse, so a
+/// real streaming model walked a smuggled secret straight past the per-event scrub. For
+/// the tools whose arguments may carry one, gather each call's fragments, scrub the
+/// whole, and put back ONE fragment holding the scrubbed JSON where the first one was.
+/// Fragments that never assemble into JSON become `{}`: text that cannot be scrubbed
+/// does not get to leave as it is.
+///
+/// The wire shape is kept — one `TOOL_CALL_ARGS` per call rather than none — because
+/// NativeChat builds its live login card by concatenating these very fragments.
+pub fn scrub_streamed_tool_args(events: Vec<Event>) -> Vec<Event> {
+    use opengrok_wire::agui::EventType;
+    use std::collections::{HashMap, HashSet};
+
+    let sensitive: HashSet<String> = events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallStart)
+        .filter(|event| {
+            matches!(
+                event
+                    .extra
+                    .get("toolCallName")
+                    .and_then(serde_json::Value::as_str),
+                Some(opengrok_tools::REQUEST_USER_FORM) | Some(opengrok_tools::REQUEST_CREDENTIAL)
+            )
+        })
+        .filter_map(|event| {
+            event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    if sensitive.is_empty() {
+        return events;
+    }
+    let mut joined: HashMap<String, String> = HashMap::new();
+    for event in &events {
+        if event.event_type == EventType::ToolCallArgs
+            && let Some(id) = event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+            && sensitive.contains(id)
+            && let Some(delta) = event.extra.get("delta").and_then(serde_json::Value::as_str)
+        {
+            joined.entry(id.to_string()).or_default().push_str(delta);
+        }
+    }
+    let scrubbed: HashMap<String, String> = joined
+        .into_iter()
+        .map(|(id, text)| {
+            let clean = serde_json::from_str::<serde_json::Value>(text.trim())
+                .ok()
+                .map(|value| opengrok_tools::credential::scrub_secret_keys(&value))
+                .and_then(|value| serde_json::to_string(&value).ok())
+                .unwrap_or_else(|| "{}".to_string());
+            (id, clean)
+        })
+        .collect();
+    let mut placed: HashSet<String> = HashSet::new();
+    events
+        .into_iter()
+        .filter_map(|mut event| {
+            if event.event_type != EventType::ToolCallArgs {
+                return Some(event);
+            }
+            let Some(id) = event
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+            else {
+                return Some(event);
+            };
+            let Some(clean) = scrubbed.get(&id) else {
+                return Some(event);
+            };
+            if !placed.insert(id) {
+                return None;
+            }
+            event.extra.insert(
+                "delta".to_string(),
+                serde_json::Value::String(clean.clone()),
+            );
+            Some(event)
+        })
+        .collect()
+}
+
+fn for_journal(events: &[Event]) -> Vec<Event> {
+    scrub_streamed_tool_args(events.to_vec())
+        .into_iter()
+        .map(strip_agent_png)
+        .map(scrub_event_secrets)
+        .collect()
+}
+
+async fn record_round(
+    journal: &dyn RunJournal,
+    run_id: &str,
+    events: &[Event],
+) -> Result<(), JournalError> {
+    journal.record(run_id, &for_journal(events)).await
+}
+
+fn is_agent_shot(event: &Event) -> bool {
+    event.event_type == opengrok_wire::agui::EventType::ToolCallResult
+        && event.extra.get("image").is_some()
+        && event
+            .extra
+            .get("image")
+            .and_then(|image| image.get("visibility"))
+            .and_then(|value| value.as_str())
+            == Some("agent")
+}
+
+fn remember_agent_shot(produced: &[Event], slot: &mut Option<Event>) {
+    if let Some(event) = produced.iter().rev().find(|event| is_agent_shot(event)) {
+        *slot = Some(event.clone());
+    }
+}
+
+fn set_image_visibility(event: &mut Event, visibility: opengrok_tools::ImageVisibility) {
+    if let Some(image) = event.extra.get_mut("image")
+        && let Some(object) = image.as_object_mut()
+    {
+        object.insert(
+            "visibility".to_string(),
+            serde_json::Value::String(visibility.as_str().to_string()),
+        );
+    }
+}
+
+fn promote_agent_in(events: &mut [Event], visibility: opengrok_tools::ImageVisibility) -> bool {
+    for event in events.iter_mut().rev() {
+        if is_agent_shot(event) {
+            set_image_visibility(event, visibility);
+            return true;
+        }
+    }
+    false
+}
+
+/// Keep one PNG when the run closes. Prefer promoting a shot still in this unjournaled
+/// batch (journal then stores the bytes). Otherwise append the remembered last step shot
+/// with `end` / `failure` so replay is not a blank Computer pane.
+async fn pin_last_agent_shot(
+    sink: Option<&dyn EventSink>,
+    last_agent_shot: &mut Option<Event>,
+    visibility: opengrok_tools::ImageVisibility,
+    into: &mut Vec<Event>,
+) {
+    if promote_agent_in(into, visibility) {
+        last_agent_shot.take();
+        return;
+    }
+    let Some(mut pin) = last_agent_shot.take() else {
+        return;
+    };
+    set_image_visibility(&mut pin, visibility);
+    emit_live(sink, std::slice::from_ref(&pin)).await;
+    into.push(pin);
 }
 
 /// How many screenshots a request carries. They are the model's eyes and also by far the widest
@@ -716,6 +1049,26 @@ fn keep_recent_images(messages: &mut [ChatMessage], keep: usize) {
             message.images.clear();
         }
     }
+}
+
+/// CUSTOM per waiting call, then `RUN_FINISHED` so the HTTP/SSE turn can close.
+///
+/// NativeChat keys Waiting chrome off `RUN_FINISHED`. The run aggregate still
+/// stays `awaiting-approval` because the journal does not Finish a suspended run.
+fn park_awaiting(
+    projection: &mut Projection,
+    waiting: &[(
+        &opengrok_tools::ToolCall,
+        opengrok_tools::AwaitingReason,
+        &str,
+    )],
+) -> Vec<Event> {
+    let mut events = Vec::new();
+    for (call, reason, why) in waiting {
+        events.extend(projection.awaiting_approval(call, *reason, awaiting_why(why)));
+    }
+    events.extend(projection.finish());
+    events
 }
 
 /// The gate's sentence out of an awaiting result. `ToolResult::awaiting` writes
@@ -1515,6 +1868,7 @@ mod tests {
                 base64: "iVBORw0KGgo=".into(),
                 width: 1280,
                 height: 800,
+                visibility: opengrok_tools::ImageVisibility::Agent,
             })
     }
 
@@ -1782,6 +2136,280 @@ mod tests {
             .count();
         assert_eq!(looks, 12, "{events:?}");
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    /// Step PNGs are `agent` and the journal drops their bytes. The run-end pin keeps one PNG.
+    #[tokio::test]
+    async fn computer_step_shots_are_agent_and_the_journal_keeps_the_end_pin() {
+        let journal = MemoryJournal::new();
+        let runner = screen_runner(true);
+        let events = run_conversation(
+            &LookingDoor(Mutex::new(0), 3),
+            Some(&runner),
+            &journal,
+            request("find the terminal"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let live_shots: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ToolCallResult)
+            .filter_map(|event| event.extra.get("image"))
+            .collect();
+        assert_eq!(
+            live_shots.len(),
+            4,
+            "three steps plus the end pin: {live_shots:?}"
+        );
+        assert!(
+            live_shots.iter().take(3).all(|image| {
+                image["visibility"] == "agent"
+                    && image.get("base64").and_then(|v| v.as_str()).is_some()
+            }),
+            "live SSE still carries step PNGs for the Computer pane: {live_shots:?}"
+        );
+        assert_eq!(live_shots.last().unwrap()["visibility"], "end");
+        assert!(
+            live_shots
+                .last()
+                .unwrap()
+                .get("base64")
+                .and_then(|v| v.as_str())
+                .is_some_and(|b| !b.is_empty()),
+            "the end pin keeps the PNG: {live_shots:?}"
+        );
+
+        let journaled: Vec<_> = journal
+            .batches()
+            .into_iter()
+            .flatten()
+            .filter(|event| event.event_type == EventType::ToolCallResult)
+            .filter_map(|event| event.extra.get("image").cloned())
+            .collect();
+        let agent_without_bytes = journaled
+            .iter()
+            .filter(|image| image["visibility"] == "agent" && image.get("base64").is_none())
+            .count();
+        let end_with_bytes = journaled
+            .iter()
+            .filter(|image| {
+                image["visibility"] == "end"
+                    && image
+                        .get("base64")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| !b.is_empty())
+            })
+            .count();
+        assert_eq!(
+            agent_without_bytes, 3,
+            "journal must drop step PNG bytes: {journaled:?}"
+        );
+        assert_eq!(
+            end_with_bytes, 1,
+            "journal keeps the end pin PNG: {journaled:?}"
+        );
+    }
+
+    /// The case the earlier test could not fail: a real streaming model sends the
+    /// arguments in pieces, and a per-fragment scrub sees no JSON to scrub.
+    #[test]
+    fn streamed_fragments_of_a_smuggled_password_are_assembled_and_scrubbed() {
+        use opengrok_wire::agui::EventType;
+        let ev = |kind: EventType| Event::new(kind, 0);
+        let events = vec![
+            ev(EventType::ToolCallStart)
+                .with("toolCallId", "call-1")
+                .with("toolCallName", opengrok_tools::REQUEST_USER_FORM),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-1")
+                .with(
+                    "delta",
+                    "{\"title\":\"Log in\",\"values\":{\"password\":\"s3",
+                ),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-1")
+                .with("delta", "cret\"}}"),
+            ev(EventType::ToolCallEnd).with("toolCallId", "call-1"),
+            // A tool that carries no secrets keeps its fragments exactly as they were.
+            ev(EventType::ToolCallStart)
+                .with("toolCallId", "call-2")
+                .with("toolCallName", "shell"),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-2")
+                .with("delta", "{\"cmd\":\"ls"),
+            ev(EventType::ToolCallArgs)
+                .with("toolCallId", "call-2")
+                .with("delta", " -la\"}"),
+        ];
+        let out = scrub_streamed_tool_args(events);
+        let text = serde_json::to_string(&out).expect("serialise");
+        assert!(
+            !text.contains("s3cret"),
+            "the smuggled password must not survive: {text}"
+        );
+        assert!(!text.contains("s3"), "not even a fragment of it: {text}");
+        let form_args: Vec<&Event> = out
+            .iter()
+            .filter(|e| {
+                e.event_type == opengrok_wire::agui::EventType::ToolCallArgs
+                    && e.extra
+                        .get("toolCallId")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("call-1")
+            })
+            .collect();
+        assert_eq!(
+            form_args.len(),
+            1,
+            "one assembled fragment stands in for the pieces"
+        );
+        let delta = form_args[0]
+            .extra
+            .get("delta")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(
+            delta.contains("Log in"),
+            "non-secret fields are kept: {delta}"
+        );
+        let shell_args: Vec<&Event> = out
+            .iter()
+            .filter(|e| {
+                e.extra
+                    .get("toolCallId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("call-2")
+            })
+            .collect();
+        assert_eq!(shell_args.len(), 3, "an ordinary tool is untouched");
+        assert!(text.contains("ls"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_journal_scrubs_a_password_off_credential_request() {
+        let journal = MemoryJournal::new();
+        let runner = tool_runner_with(|executor| executor);
+        let events = run_conversation(
+            &MockDoor::asking_for_credential(),
+            Some(&runner),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let custom = events.iter().find(|event| {
+            event.event_type == EventType::Custom
+                && event.extra.get("name").and_then(|v| v.as_str())
+                    == Some(opengrok_tools::REQUEST_CREDENTIAL)
+        });
+        let custom = custom.expect("credential.request CUSTOM");
+        assert_eq!(
+            custom.extra.get("origin").and_then(|v| v.as_str()),
+            Some("accounts.google.com")
+        );
+        assert!(
+            custom
+                .extra
+                .get("arguments")
+                .and_then(|v| v.get("password"))
+                .is_none(),
+            "{custom:?}"
+        );
+        let journaled = serde_json::to_string(&journal.batches()).unwrap_or_default();
+        assert!(
+            !journaled.contains("s3cret-should-never-land"),
+            "journal must not keep a site password: {journaled}"
+        );
+        assert!(journaled.contains("credential.request"), "{journaled}");
+        assert!(
+            !serde_json::to_string(&custom)
+                .unwrap_or_default()
+                .contains("s3cret-should-never-land"),
+            "{custom:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_user_form_in_one_completion_gets_an_awaiting_custom_and_the_stream_closes() {
+        let journal = MemoryJournal::new();
+        let events = run_conversation(
+            &MockDoor::asking_for_stacked_user_forms(),
+            Some(&tool_runner()),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let forms: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str())
+                        == Some("run-awaiting-approval")
+                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
+            })
+            .collect();
+        assert_eq!(
+            forms.len(),
+            3,
+            "one CUSTOM per stacked request_user_form: {events:?}"
+        );
+        let call_ids: Vec<_> = forms
+            .iter()
+            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            call_ids,
+            vec!["mock-form-1", "mock-form-2", "mock-form-3"],
+            "{call_ids:?}"
+        );
+        assert_eq!(
+            events.last().map(|event| event.event_type),
+            Some(EventType::RunFinished),
+            "HITL park must close the SSE or Waiting spins forever: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::RunStarted),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_website_logins_keep_provider_call_ids_on_each_awaiting_custom() {
+        let journal = MemoryJournal::new();
+        let events = run_conversation(
+            &MockDoor::asking_for_two_website_logins(),
+            Some(&tool_runner()),
+            &journal,
+            request("sign in"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let call_ids: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str())
+                        == Some("run-awaiting-approval")
+                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
+            })
+            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            call_ids,
+            vec!["call-42628be6", "call-42628be6-1"],
+            "provider-style parallel ids must each get a CUSTOM: {events:?}"
+        );
     }
 
     /// The same picture four times running is waiting, not working; the run says so.

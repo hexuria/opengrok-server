@@ -267,6 +267,7 @@ async fn main() -> anyhow::Result<()> {
         vault,
         connectors,
         plugins: Arc::new(plugins),
+        host_settings: None,
     };
 
     // Pick up whatever the last process abandoned. Started before the listener, because the most

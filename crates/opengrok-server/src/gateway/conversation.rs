@@ -270,6 +270,11 @@ pub async fn send_prompt(state: &GatewayState, args: &Value, caller: &str) -> (u
     // restart would have their own answer arrive as unread.
     note_viewing(state, &coworker_id, &account.id).await;
 
+    // A new user message while a HITL run is parked is steer, not a second silent turn
+    // beside an unresolved card. Escalate itself does not come through here.
+    abort_in_flight(state, &agent_id);
+    interrupt_parked_hitl(state, &account.id, &coworker_id, caller).await;
+
     live::set_running(state, &agent_id, true, json!({})).await;
 
     // The turn, off this request's clock. `accepted` means accepted, not answered. Keep the task's
@@ -303,18 +308,143 @@ pub async fn stop_agent_turn(state: &GatewayState, args: &Value, _caller: &str) 
     let Some(agent_id) = agent_or_active(state, args) else {
         return (200, Value::Null);
     };
-    // Abort the live turn, if any. The drop-guard inside run_turn clears the flag on the way down;
-    // we also clear it directly below so a PHANTOM flag (no task) is resolved too.
+    abort_in_flight(state, &agent_id);
+    live::set_running(state, &agent_id, false, json!({})).await;
+    (200, json!({ "agentId": agent_id, "isRunning": false }))
+}
+
+/// `interruptAgentRun` — Grok Bot 0.29. Stops an in-flight turn **and** a parked HITL run
+/// (`AwaitingApproval` / UserForm) so a later send is steer rather than a zombie card.
+/// Escalate does not call this; a new user message does (also automatically on `sendPrompt`
+/// / `POST /ag-ui`).
+pub async fn interrupt_agent_run(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
+    let Some(agent_id) = agent_or_active(state, args) else {
+        return (200, Value::Null);
+    };
+    abort_in_flight(state, &agent_id);
+    let coworker_id = CoworkerId::from_stored(agent_id.clone());
+    if let Ok(Some(account)) = state.agui.auth.store.account_by_email(caller).await {
+        interrupt_parked_hitl(state, &account.id, &coworker_id, caller).await;
+    }
+    live::set_running(state, &agent_id, false, json!({})).await;
+    (200, json!({ "agentId": agent_id, "isRunning": false }))
+}
+
+fn abort_in_flight(state: &GatewayState, agent_id: &str) {
     if let Some(handle) = state
         .cancels
         .lock()
         .ok()
-        .and_then(|mut cancels| cancels.remove(&agent_id))
+        .and_then(|mut cancels| cancels.remove(agent_id))
     {
         handle.abort();
     }
-    live::set_running(state, &agent_id, false, json!({})).await;
-    (200, json!({ "agentId": agent_id, "isRunning": false }))
+}
+
+/// Stop every parked HITL run for this coworker and settle unresolved user-form / live
+/// handoff chrome without resuming the model. New user text then starts a fresh turn.
+pub(crate) async fn interrupt_parked_hitl(
+    state: &GatewayState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    by: &str,
+) -> usize {
+    let Ok(run_ids) = state.agui.auth.store.awaiting_approval(account_id).await else {
+        return 0;
+    };
+    let mut stopped = 0usize;
+    for run_id in run_ids {
+        if stop_parked_run(state, account_id, coworker_id, &run_id, by).await {
+            stopped += 1;
+        }
+    }
+    if stopped > 0 {
+        super::user_form::dismiss_unresolved_on_interrupt(
+            state,
+            account_id,
+            coworker_id,
+            coworker_id.as_str(),
+        )
+        .await;
+        live::set_running(state, coworker_id.as_str(), false, json!({})).await;
+    }
+    stopped
+}
+
+async fn stop_parked_run(
+    state: &GatewayState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    run_id: &opengrok_core::id::RunId,
+    by: &str,
+) -> bool {
+    for _ in 0..5 {
+        let Ok((mut run, seq)) = state.agui.auth.store.load_run(run_id).await else {
+            return false;
+        };
+        if !run_belongs_to(&run, coworker_id) {
+            return false;
+        }
+        if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
+            return false;
+        }
+        let at_ms = now_ms();
+        let mut events = Vec::new();
+        let frames = [
+            opengrok_wire::agui::Event::new(opengrok_wire::agui::EventType::Custom, at_ms)
+                .with("name", "run-stopped")
+                .with("threadId", run.thread_id.clone())
+                .with("runId", run_id.as_str()),
+            opengrok_wire::agui::Event::new(opengrok_wire::agui::EventType::RunFinished, at_ms)
+                .with("threadId", run.thread_id.clone())
+                .with("runId", run_id.as_str()),
+        ];
+        for frame in &frames {
+            let Ok(payload) = serde_json::to_value(frame) else {
+                continue;
+            };
+            let Ok(decided) = run.decide(opengrok_core::run::RunCommand::Emit { payload, at_ms })
+            else {
+                continue;
+            };
+            for event in &decided {
+                run.apply(event);
+            }
+            events.extend(decided);
+        }
+        let Ok(stopped) = run.decide(opengrok_core::run::RunCommand::Stop {
+            by: by.to_string(),
+            at_ms,
+        }) else {
+            return false;
+        };
+        for event in &stopped {
+            run.apply(event);
+        }
+        events.extend(stopped);
+        let view = opengrok_core::run::RunView {
+            id: run_id.clone(),
+            thread_id: run.thread_id.clone(),
+            status: run.status,
+            event_count: run.emitted.len() as i64,
+            updated_at_ms: at_ms,
+        };
+        match state
+            .agui
+            .auth
+            .store
+            .append_run(run_id, seq, &events, &view, Some(account_id))
+            .await
+        {
+            Ok(_) => return true,
+            Err(opengrok_store::StoreError::Conflict) => continue,
+            Err(error) => {
+                tracing::error!(%error, run = %run_id, "could not interrupt a parked run");
+                return false;
+            }
+        }
+    }
+    false
 }
 
 /// `getForeverBoxStatus` — the caller's agent's LIVE box health, in the client's `BoxStatus` shape
@@ -930,6 +1060,13 @@ pub(crate) async fn history_for(
                 })
             }
             Some("send-message") => {
+                if let Some(line) = opengrok_tools::user_form::history_line(entry) {
+                    return Some(ChatMessage {
+                        images: Vec::new(),
+                        role: "assistant".to_string(),
+                        content: line,
+                    });
+                }
                 let content = entry
                     .pointer("/message/content")
                     .and_then(Value::as_str)
@@ -960,46 +1097,68 @@ pub(crate) struct Suspension {
     pub(crate) why: Option<String>,
 }
 
+pub(crate) fn is_suspend_custom(name: Option<&str>) -> bool {
+    matches!(
+        name,
+        Some("run-awaiting-approval") | Some(opengrok_tools::REQUEST_CREDENTIAL)
+    )
+}
+
 pub(crate) fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
+    find_suspensions(events).into_iter().next()
+}
+
+/// Every HITL CUSTOM in the batch, in order. Same-completion stacked `request_user_form`
+/// calls each emit one; dropping all but the first is how extra Website login cards
+/// painted without an `entryId`.
+pub(crate) fn find_suspensions(events: &[opengrok_wire::agui::Event]) -> Vec<Suspension> {
+    let mut found = Vec::new();
     for event in events {
-        if event.event_type == opengrok_wire::agui::EventType::Custom
-            && event.extra.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
+        if event.event_type != opengrok_wire::agui::EventType::Custom
+            || !is_suspend_custom(event.extra.get("name").and_then(Value::as_str))
         {
-            let call_id = event
+            continue;
+        }
+        let call_id = event
+            .extra
+            .get("callId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if call_id.is_empty() {
+            continue;
+        }
+        if found
+            .iter()
+            .any(|item: &Suspension| item.call_id == call_id)
+        {
+            continue;
+        }
+        found.push(Suspension {
+            call_id,
+            tool: event
                 .extra
-                .get("callId")
+                .get("tool")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
-                .to_string();
-            if call_id.is_empty() {
-                continue;
-            }
-            return Some(Suspension {
-                call_id,
-                tool: event
+                .to_string(),
+            arguments: event.extra.get("arguments").cloned().unwrap_or(Value::Null),
+            reason: opengrok_core::run::SuspendReason::from_stored(
+                event
                     .extra
-                    .get("tool")
+                    .get("reason")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                arguments: event.extra.get("arguments").cloned().unwrap_or(Value::Null),
-                reason: opengrok_core::run::SuspendReason::from_stored(
-                    event
-                        .extra
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                ),
-                why: event
-                    .extra
-                    .get("why")
-                    .and_then(Value::as_str)
-                    .filter(|why| !why.is_empty())
-                    .map(str::to_string),
-            });
-        }
+                    .unwrap_or_default(),
+            ),
+            why: event
+                .extra
+                .get("why")
+                .and_then(Value::as_str)
+                .filter(|why| !why.is_empty())
+                .map(str::to_string),
+        });
     }
-    None
+    found
 }
 
 /// The card for a suspension, or `None` when this kind of pause has no card yet. requestId =
@@ -1037,7 +1196,13 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             "pending",
             &suspension.tool,
             &suspension.arguments,
-            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            Some(
+                suspension
+                    .why
+                    .as_deref()
+                    .filter(|why| !why.is_empty())
+                    .unwrap_or(opengrok_tools::review::REVIEW_ASK_REASON),
+            ),
             now_ms(),
         )),
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
@@ -1052,6 +1217,14 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             suspension.why.as_deref(),
             now_ms(),
         )),
+        SuspendReason::UserForm => Some(super::cards::user_form_card(
+            &entry_id(),
+            &suspension.arguments,
+            now_ms(),
+            &suspension.call_id,
+        )),
+        // NativeChat paints CUSTOM `credential.request`. No Grok Bot chrome.
+        SuspendReason::Credential => None,
         // Reverse-exec consent on anything but user_machine_shell: nothing renders it.
         _ => None,
     }
@@ -1059,21 +1232,112 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
 
 /// Append a suspension's card and pause the agent. `true` when a card went out; the caller then
 /// returns without finalising the turn as an answer.
-async fn emit_suspension(
+///
+/// Also the AG-UI door (`POST /ag-ui`): NativeChat never calls `sendPrompt` and never watches
+/// the gateway transcript live stream, so `AgUiSink` mints this card **before** the CUSTOM
+/// frame and stamps `entryId` on it. `POST /ag-ui/user-form/submit` uses that same id.
+pub(crate) async fn emit_suspension(
     state: &GatewayState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
     agent_id: &str,
     suspension: &Suspension,
 ) -> bool {
-    let Some(card) = card_for(suspension) else {
+    let card = card_for(suspension);
+    if card.is_none() && suspension.reason != opengrok_core::run::SuspendReason::Credential {
         tracing::warn!(
             tool = %suspension.tool,
             reason = suspension.reason.as_str(),
             "a run suspended for a reason that has no card yet; the turn ends as an answer"
         );
         return false;
-    };
+    }
+    if let Some(card) = card {
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .append_gateway_entry(coworker_id, account, &card, now_ms())
+            .await
+        {
+            tracing::error!(%error, "could not append the suspension card entry");
+        }
+        live::emit_transcript(state, agent_id, account, "appended", card);
+    }
+    // The turn is paused, not running. It resumes when the card is answered.
+    live::set_running(state, agent_id, false, json!({})).await;
+    match suspension.reason {
+        opengrok_core::run::SuspendReason::UserForm => {
+            super::user_form::spawn_form_hold_timeout(
+                state.clone(),
+                account.clone(),
+                coworker_id.clone(),
+                agent_id.to_string(),
+            );
+        }
+        opengrok_core::run::SuspendReason::Credential => {
+            super::credential::spawn_credential_hold_timeout(
+                state.clone(),
+                account.clone(),
+                coworker_id.clone(),
+                agent_id.to_string(),
+            );
+        }
+        _ => {}
+    }
+    true
+}
+
+/// Mint a card for every HITL CUSTOM in the batch. `true` when at least one pause
+/// should hold the turn (a card went out, or a credential CUSTOM with no Grok chrome).
+pub(crate) async fn emit_suspensions(
+    state: &GatewayState,
+    coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+    agent_id: &str,
+    events: &[opengrok_wire::agui::Event],
+) -> bool {
+    let mut held = false;
+    for suspension in find_suspensions(events) {
+        if emit_suspension(state, coworker_id, account, agent_id, &suspension).await {
+            held = true;
+        }
+    }
+    held
+}
+
+/// NativeChat is AG-UI-first and never watches the gateway transcript live stream. When this
+/// CUSTOM is `run-awaiting-approval` / `reason: user-form`, mint the gateway card **first** so
+/// the id is stable, stamp `extra.entryId` (and `formRequest`, the sanitised schema the card
+/// already carries) onto the event, then append + live-emit the card. The SSE frame NativeChat
+/// receives therefore has the same id `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
+/// are left untouched. Idempotent if `entryId` is already present.
+pub(crate) async fn stamp_user_form_entry_id(
+    state: &GatewayState,
+    coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+    event: &mut opengrok_wire::agui::Event,
+) -> Option<String> {
+    if event.event_type != opengrok_wire::agui::EventType::Custom {
+        return None;
+    }
+    if event.extra.get("name").and_then(Value::as_str) != Some("run-awaiting-approval") {
+        return None;
+    }
+    if event.extra.get("reason").and_then(Value::as_str) != Some("user-form") {
+        return None;
+    }
+    if let Some(existing) = event
+        .extra
+        .get("entryId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(existing.to_string());
+    }
+    let suspension = find_suspension(std::slice::from_ref(event))?;
+    let card = card_for(&suspension)?;
+    let entry_id = card.get("id").and_then(Value::as_str)?.to_string();
     if let Err(error) = state
         .agui
         .auth
@@ -1081,12 +1345,42 @@ async fn emit_suspension(
         .append_gateway_entry(coworker_id, account, &card, now_ms())
         .await
     {
-        tracing::error!(%error, "could not append the suspension card entry");
+        tracing::error!(
+            %error,
+            "could not append the user-form card; not stamping entryId"
+        );
+        return None;
     }
-    live::emit_transcript(state, agent_id, account, "appended", card);
-    // The turn is paused, not running. It resumes when the card is answered.
-    live::set_running(state, agent_id, false, json!({})).await;
-    true
+    live::emit_transcript(state, coworker_id.as_str(), account, "appended", card);
+    live::set_running(state, coworker_id.as_str(), false, json!({})).await;
+    super::user_form::spawn_form_hold_timeout(
+        state.clone(),
+        account.clone(),
+        coworker_id.clone(),
+        coworker_id.as_str().to_string(),
+    );
+    apply_user_form_stamp(&mut event.extra, entry_id, true)
+}
+
+/// Stamp CUSTOM extra only after the card is in the transcript. Stamping a ghost
+/// `entryId` is how NativeChat POSTs submit and gets Null (the collapse blocker).
+pub(crate) fn apply_user_form_stamp(
+    extra: &mut opengrok_wire::agui::Extra,
+    entry_id: String,
+    appended: bool,
+) -> Option<String> {
+    if !appended {
+        return None;
+    }
+    extra.insert("entryId".to_string(), json!(entry_id.clone()));
+    // Same sanitised schema the card stores as `message.formRequest`. CUSTOM already has it
+    // as `arguments`; this alias is the field name TurnAssembler / the card already use.
+    if extra.get("formRequest").is_none()
+        && let Some(schema) = extra.get("arguments").cloned()
+    {
+        extra.insert("formRequest".to_string(), schema);
+    }
+    Some(entry_id)
 }
 
 /// The sentence a failed run leaves for the person, from the run's own failure event: the
@@ -1320,7 +1614,7 @@ pub(crate) async fn run_turn(
     // it as the four-button card), and hold the turn. The run aggregate is already suspended by the
     // journal, so resolveLocalToolPermission can resume it. requestId = callId, threaded onto the
     // exec frame when the run resumes so both gates converge on one id.
-    if let Some(suspension) = find_suspension(&events) {
+    if !find_suspensions(&events).is_empty() {
         let answer_entry = answer_entry(&answer_id, &text, reply_to.as_deref());
         let _ = state
             .agui
@@ -1329,7 +1623,7 @@ pub(crate) async fn run_turn(
             .update_gateway_entry(&coworker_id, &account_id, answer_seq, &answer_entry)
             .await;
         live::emit_transcript(&state, &agent_id, &account_id, "updated", answer_entry);
-        if emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await {
+        if emit_suspensions(&state, &coworker_id, &account_id, &agent_id, &events).await {
             finished.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
@@ -2084,7 +2378,7 @@ pub async fn resolve_auto_review_approval(
 /// Whether a run is this agent's to answer: its own, or a member's run inside this ROOM. A
 /// member's turn in a group runs on the room's thread (`gateway-{group}`) under the member's own
 /// id, and its card sits in the room's transcript, so the desktop answers it naming the group.
-fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
     run.coworker_id
         .as_ref()
         .is_some_and(|owner| owner.as_str() == agent.as_str())
@@ -2092,7 +2386,7 @@ fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
 }
 
 /// A run answered under an agent that is not its owner is a member's run inside that room.
-fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
+pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
     run.coworker_id
         .as_ref()
         .is_some_and(|owner| owner.as_str() != agent.as_str())
@@ -2101,7 +2395,7 @@ fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
 /// A resumed run continues where it lives: a coworker's own turn lands in its transcript; a
 /// member's turn goes back to the room, which then finishes its round (`group.rs`).
 #[allow(clippy::too_many_arguments)]
-async fn resume_where_it_lives(
+pub(crate) async fn resume_where_it_lives(
     in_a_room: bool,
     state: GatewayState,
     account_id: opengrok_core::id::AccountId,
@@ -2260,9 +2554,7 @@ async fn resume_gateway_run(
     }
     // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its
     // card exactly like the first turn did; without this the run paused with nothing to press.
-    if let Some(suspension) = find_suspension(&events)
-        && emit_suspension(&state, &coworker_id, &account_id, &agent_id, &suspension).await
-    {
+    if emit_suspensions(&state, &coworker_id, &account_id, &agent_id, &events).await {
         return;
     }
 
@@ -2274,4 +2566,32 @@ async fn resume_gateway_run(
         json!({ "lastMessagePreview": preview, "lastEntry": { "kind": "text", "text": preview } }),
     )
     .await;
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::apply_user_form_stamp;
+    use serde_json::json;
+
+    #[test]
+    fn a_failed_append_does_not_stamp_entry_id() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("name".into(), json!("run-awaiting-approval"));
+        extra.insert("reason".into(), json!("user-form"));
+        extra.insert(
+            "arguments".into(),
+            json!({ "title": "Sign in", "fields": [] }),
+        );
+        assert!(apply_user_form_stamp(&mut extra, "e_ghost".into(), false).is_none());
+        assert!(
+            extra.get("entryId").is_none(),
+            "ghost entryId is the collapse blocker: {extra:?}"
+        );
+        assert_eq!(
+            apply_user_form_stamp(&mut extra, "e_1".into(), true).as_deref(),
+            Some("e_1")
+        );
+        assert_eq!(extra["entryId"], "e_1");
+        assert_eq!(extra["formRequest"], extra["arguments"]);
+    }
 }

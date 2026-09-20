@@ -75,6 +75,11 @@ class Handler(BaseHTTPRequestHandler):
         self._reply({"ok": True})
 
     def do_GET(self):
+        if self.path == "/admin/api/principals":
+            # OAG: no list. GET is 405 by design — a probe must not treat this as down,
+            # and OpenGrok must not use this method.
+            self._reply({"error": "method not allowed"}, 405)
+            return
         if not self._guard():
             return
         if self.path.endswith("/usage"):
@@ -95,7 +100,13 @@ PY
 python3 "$WORK/stand_in.py" "$STAND_IN_PORT" &
 STAND_IN_PID=$!
 for _ in $(seq 1 20); do
-  curl -s -o /dev/null "http://127.0.0.1:$STAND_IN_PORT/admin/api/principals" && break
+  # POST upsert, the method OAG actually serves. GET of the collection is 405 by design
+  # and must not be the readiness probe (or OpenGrok's client).
+  curl -s -o /dev/null -X POST \
+    -H "Authorization: Bearer oag_live_smoke_admin" \
+    -H "content-type: application/json" \
+    -d '{"email":"probe@gateway.local","role":"member"}' \
+    "http://127.0.0.1:$STAND_IN_PORT/admin/api/principals" && break
   sleep 0.5
 done
 ok "stand-in gateway admin on :$STAND_IN_PORT"

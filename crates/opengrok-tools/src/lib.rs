@@ -17,12 +17,17 @@
 
 pub mod review;
 pub use review::{
-    AwaitingReason, Gate, Outcome, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy,
-    ReviewVerdict, ask_first_reason, combine, redact_arguments,
+    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, Outcome, REVIEW_ASK_REASON, ReviewAsk,
+    ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
+    redact_arguments,
 };
+pub mod user_form;
+pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
+pub mod credential;
+pub use credential::{OFFER_SAVE, REQUEST_CREDENTIAL};
 pub mod mcp;
 
-pub use mcp::{Endpoint, McpError, McpTool};
+pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
 pub mod workflow;
@@ -49,6 +54,12 @@ pub struct ToolContext {
     /// A room's shared computer, when this turn is spoken in a group that has one. Reached by
     /// passing `machine: "group"`; without it every call goes to the coworker's own box.
     pub group_box: Option<GroupBox>,
+    /// An unresolved `user-form` **or** a live box handoff is open on this conversation. Screen
+    /// tools must not run: typing or clicking would race the person (and `computer` type would
+    /// PNG a secret). Escalate settles the form but must **keep** this hold until hand-back or
+    /// decline. `request_user_form` itself is not a screen action and is not held — except a
+    /// second raise while this is still true, which would stack cards.
+    pub screen_hold: bool,
 }
 
 /// The shared computer of the group a turn is spoken in.
@@ -68,6 +79,7 @@ impl ToolContext {
             coworker_id: id,
             box_id: coworker.computer().cloned(),
             group_box: None,
+            screen_hold: false,
         }
     }
 }
@@ -96,9 +108,46 @@ pub struct ToolResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_reason: Option<AwaitingReason>,
     /// A picture that goes with the words: the screen after a `computer` action. The model is
-    /// shown it as an image, the client paints it, the journal keeps it.
+    /// shown it as an image. Whether a client must persist it as a chat event is
+    /// [`ToolImage::visibility`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
+}
+
+/// Where a tool-result image may be shown. Rides `TOOL_CALL_RESULT.image.visibility`.
+///
+/// Computer-step shots default to [`Agent`]: the model sees them, the Computer pane may
+/// paint the live SSE, and they are **not** first-class chat events a client must store.
+/// Promote to [`Transcript`] / [`Failure`] / [`End`] when the person should keep the PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageVisibility {
+    /// Model context + Computer pane. Not a transcript chat event.
+    #[default]
+    Agent,
+    /// Persist in the transcript (explicit observe / Open the screen).
+    Transcript,
+    /// Hard-failure pin.
+    Failure,
+    /// End-of-turn success pin.
+    End,
+}
+
+impl ImageVisibility {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Transcript => "transcript",
+            Self::Failure => "failure",
+            Self::End => "end",
+        }
+    }
+
+    #[must_use]
+    pub fn is_agent(self) -> bool {
+        matches!(self, Self::Agent)
+    }
 }
 
 /// An image a tool hands back, base64 so it rides JSON as-is.
@@ -108,6 +157,11 @@ pub struct ToolImage {
     pub base64: String,
     pub width: u32,
     pub height: u32,
+    /// Absent on rows written before this field existed: treat as `transcript` on the
+    /// wire (legacy clients already stored those PNGs). New computer-step shots set
+    /// [`ImageVisibility::Agent`] explicitly.
+    #[serde(default)]
+    pub visibility: ImageVisibility,
 }
 
 impl From<Screenshot> for ToolImage {
@@ -117,7 +171,17 @@ impl From<Screenshot> for ToolImage {
             base64: shot.png_base64,
             width: shot.width,
             height: shot.height,
+            // Step shots are the model's eyes, not a chat event the client must journal.
+            visibility: ImageVisibility::Agent,
         }
+    }
+}
+
+impl ToolImage {
+    #[must_use]
+    pub fn with_visibility(mut self, visibility: ImageVisibility) -> Self {
+        self.visibility = visibility;
+        self
     }
 }
 
@@ -278,6 +342,7 @@ impl RecipeReceipt {
                 base64: shot.get("png_base64")?.as_str()?.to_string(),
                 width: shot.get("width")?.as_u64()? as u32,
                 height: shot.get("height")?.as_u64()? as u32,
+                visibility: ImageVisibility::Agent,
             })
         });
         Self {
@@ -455,6 +520,10 @@ pub struct Executor {
     /// read at the call, so the level a turn runs at is decided once when the turn is built and
     /// cannot change between two calls of the same conversation.
     observe: crate::observe::Observe,
+    /// Prod user-network path: the box agent's egress tunnel. Docker host-network is not this.
+    /// When on, leave-box screen tools raise the Review-an-action card unless a standing
+    /// auto-review allow is already attached.
+    egress_tunnel: bool,
 }
 
 /// The built-ins that need a display.
@@ -516,6 +585,7 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
+            egress_tunnel: false,
         }
     }
 
@@ -536,6 +606,7 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
+            egress_tunnel: false,
         }
     }
 
@@ -551,6 +622,12 @@ impl Executor {
         self.screen
     }
 
+    /// The box this executor talks to. Fill (`user-form`) types here outside `computer_use`.
+    #[must_use]
+    pub fn computer(&self) -> Arc<dyn Computer> {
+        self.computer.clone()
+    }
+
     /// How much of the desktop a recipe run asks the box to report back, when it should not be
     /// the deployment's own setting. The level is a cost paid in playback time, so it is
     /// settable rather than fixed.
@@ -560,13 +637,12 @@ impl Executor {
         self
     }
 
-    /// The recipes this bot was granted, and where their steps come from.
-    #[must_use]
     /// What the person picked in the composer: a recipe, and the values they filled in for it.
     ///
     /// A model that is told a recipe was chosen still has to call it, and it may supply values of
     /// its own — read off the sentence, or guessed. These are neither: they were typed into named
     /// fields, so they override.
+    #[must_use]
     pub fn with_chosen_recipe(
         mut self,
         recipe_id: impl Into<String>,
@@ -576,6 +652,8 @@ impl Executor {
         self
     }
 
+    /// The recipes this bot was granted, and where their steps come from.
+    #[must_use]
     pub fn with_recipes(
         mut self,
         recipes: Vec<RecipeOffer>,
@@ -627,6 +705,14 @@ impl Executor {
         self
     }
 
+    /// Prod traffic reroute: leave-box tools (`computer`, `open_url`, `run_recipe`) raise the
+    /// Review-an-action card before they run. Docker host-network is not this path.
+    #[must_use]
+    pub fn with_egress_tunnel(mut self, on: bool) -> Self {
+        self.egress_tunnel = on;
+        self
+    }
+
     /// Attach live MCP sessions and the tools they offer.
     ///
     /// Taken together because a tool nobody can reach is worse than a tool nobody was offered: the
@@ -652,6 +738,8 @@ impl Executor {
             "write_file",
             "open_url",
             "computer",
+            REQUEST_USER_FORM,
+            REQUEST_CREDENTIAL,
             RUN_RECIPE,
         ]
     }
@@ -687,6 +775,57 @@ impl Executor {
                     .map(|tool| tool.qualified_name.clone()),
             )
             .collect()
+    }
+
+    fn reserved_openai_names() -> impl Iterator<Item = &'static str> {
+        Self::builtin_tool_names()
+            .iter()
+            .copied()
+            .chain(std::iter::once(USER_MACHINE_SHELL))
+    }
+
+    /// Internal dotted `qualified_name` ↔ OpenAI-safe wire name for this coworker's plugins.
+    /// Sorted so two names that sanitise the same way get the same `_2` suffix
+    /// regardless of plugin-list order.
+    fn plugin_wire_names(&self) -> Vec<(String, String)> {
+        let mut qualified: Vec<&str> = self
+            .plugin_tools
+            .iter()
+            .map(|tool| tool.qualified_name.as_str())
+            .collect();
+        qualified.sort_unstable();
+        crate::mcp::openai_unique_tool_names(Self::reserved_openai_names(), qualified)
+    }
+
+    /// Accept the model's OpenAI-safe name or a legacy dotted qualify. Policy, sessions and
+    /// `split_qualified` keep the dotted form. `credential.request` is a builtin with a
+    /// dot — OpenAI rejects it — so the wire name is `credential_request`.
+    fn internal_tool_name(&self, call_name: &str) -> String {
+        if let Some(tool) = self.lookup_plugin_tool(call_name) {
+            return tool.qualified_name.clone();
+        }
+        for builtin in Self::reserved_openai_names() {
+            if call_name == builtin || crate::mcp::openai_safe_tool_name(builtin) == call_name {
+                return builtin.to_string();
+            }
+        }
+        call_name.to_string()
+    }
+
+    fn lookup_plugin_tool(&self, name: &str) -> Option<&crate::mcp::McpTool> {
+        self.plugin_tools
+            .iter()
+            .find(|tool| tool.qualified_name == name)
+            .or_else(|| {
+                let qualified = self
+                    .plugin_wire_names()
+                    .into_iter()
+                    .find(|(_, wire)| wire == name)
+                    .map(|(qualified, _)| qualified)?;
+                self.plugin_tools
+                    .iter()
+                    .find(|tool| tool.qualified_name == qualified)
+            })
     }
 
     /// What the model is told each tool does, so it can choose between them.
@@ -737,7 +876,7 @@ impl Executor {
                 }
                 schemas.push(serde_json::json!({
                     "type": "function",
-                    "function": { "name": name, "description": description, "parameters": parameters },
+                    "function": { "name": crate::mcp::openai_safe_tool_name(name), "description": description, "parameters": parameters },
                 }));
             }
         }
@@ -823,7 +962,7 @@ impl Executor {
             schemas.push(serde_json::json!({
                 "type": "function",
                 "function": {
-                    "name": RUN_RECIPE,
+                    "name": crate::mcp::openai_safe_tool_name(RUN_RECIPE),
                     "description": format!(
                         "Run a task a person taught on THIS BOT'S OWN computer, as one step, instead of \
                          looking and clicking your way through it. Use one when the request matches its \
@@ -847,15 +986,21 @@ impl Executor {
         {
             schemas.push(serde_json::json!({
                 "type": "function",
-                "function": { "name": USER_MACHINE_SHELL, "description": description, "parameters": parameters },
+                "function": { "name": crate::mcp::openai_safe_tool_name(USER_MACHINE_SHELL), "description": description, "parameters": parameters },
             }));
         }
+        let plugin_wires = self.plugin_wire_names();
         for tool in &self.plugin_tools {
             if permitted(&tool.qualified_name) {
+                let wire = plugin_wires
+                    .iter()
+                    .find(|(qualified, _)| qualified == &tool.qualified_name)
+                    .map(|(_, wire)| wire.clone())
+                    .unwrap_or_else(|| crate::mcp::openai_safe_tool_name(&tool.qualified_name));
                 schemas.push(serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": tool.qualified_name,
+                        "name": wire,
                         "description": tool.description.clone().unwrap_or_default(),
                         // The MCP server validates the real arguments; we advertise an open object so
                         // the model can call it, rather than a schema we do not have here.
@@ -880,6 +1025,7 @@ impl Executor {
         // The identity rule, applied once, before anything reads an argument — including the judge
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
+        let tool_name = self.internal_tool_name(&call.name);
         // Two different yeses. The gate's approval (the machine owner's or the policy's card)
         // releases the gate's ask AND skips the judge; a review approval skips only the judge.
         let gate_approved = self.approved_calls.contains(&call.id);
@@ -889,7 +1035,7 @@ impl Executor {
         // command against never/ask/bypass + the standing rules), NOT the per-coworker tool grant —
         // which would Deny it for any coworker whose grant lists only the box tools. It runs on
         // the USER'S machine, so it needs no box.
-        let user_machine_command = if call.name == USER_MACHINE_SHELL {
+        let user_machine_command = if tool_name == USER_MACHINE_SHELL {
             match serde_json::from_value::<ShellArgs>(arguments.clone()) {
                 Ok(args) => Some(args.command),
                 Err(error) => {
@@ -928,7 +1074,7 @@ impl Executor {
             let decision = opengrok_policy::decide(
                 &context.account_id,
                 &context.coworker_id,
-                opengrok_policy::Action::RunTool(&call.name),
+                opengrok_policy::Action::RunTool(&tool_name),
                 &self.policy,
             );
             if decision.needs_approval() {
@@ -943,11 +1089,88 @@ impl Executor {
             }
         };
 
+        // HITL wait, not approve-then-run — and BEFORE the judge. A form is not a tool that
+        // then executes, so auto-review must not steal the card; a `computer` type while a
+        // form is open must not send the secret to another model. Policy Deny still refuses.
+        if tool_name == REQUEST_USER_FORM {
+            if let Gate::Deny(why) = &gate {
+                return ToolResult::refused(&call.id, why.as_str());
+            }
+            if context.screen_hold {
+                return ToolResult::refused(
+                    &call.id,
+                    "a form or computer handoff is already open on this conversation; wait for the person to finish it",
+                );
+            }
+            return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
+        }
+
+        // HITL wait, not fill-then-run. NativeChat brokers a session out of agent view;
+        // we never see the password and must not type one into the box.
+        // A missing origin is a refusal the model can retry, not a hang.
+        if tool_name == REQUEST_CREDENTIAL {
+            if let Gate::Deny(why) = &gate {
+                return ToolResult::refused(&call.id, why.as_str());
+            }
+            if context.screen_hold {
+                return ToolResult::refused(
+                    &call.id,
+                    "a form, saved-login session, or computer handoff is already open on this conversation; wait for the person to finish it",
+                );
+            }
+            if crate::credential::origin_of(&arguments).is_none() {
+                return ToolResult::refused(
+                    &call.id,
+                    "call again with origin set to the page host (e.g. accounts.google.com); do not send a password",
+                );
+            }
+            return ToolResult::awaiting(
+                &call.id,
+                AwaitingReason::Credential,
+                "Waiting for a saved session",
+            );
+        }
+
+        if context.screen_hold && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+        {
+            return ToolResult::refused(
+                &call.id,
+                "a form or computer handoff is open on this conversation; do not type, click, or \
+                 open pages until the person has finished. Secrets must not be typed with `computer`",
+            );
+        }
+
+        // Prod traffic reroute: host wants the tunnel AND the box reports ready (laptop
+        // client attached). Docker host-network is not that. With no standing auto-review
+        // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
+        // subsumes this (one card).
+        if self.egress_tunnel
+            && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+            && !review_approved
+            && self
+                .auto_review
+                .as_ref()
+                .is_none_or(|review| !review.policy.is_active())
+        {
+            match &gate {
+                Gate::Deny(why) => return ToolResult::refused(&call.id, why.clone()),
+                Gate::Ask(_, _) => {}
+                Gate::Allow if !gate_approved => {
+                    return ToolResult::awaiting(
+                        &call.id,
+                        AwaitingReason::AutoReview,
+                        review::EGRESS_TUNNEL_ASK_REASON,
+                    );
+                }
+                Gate::Allow => {}
+            }
+        }
+
         // ONE judge call site, for every tool.
         let review = match (&gate, review_approved, self.auto_review.as_ref()) {
             (Gate::Deny(_), _, _) | (_, true, _) | (_, _, None) => None,
             (_, false, Some(review)) if !review.policy.is_active() => None,
-            (_, false, Some(review)) => Some(review.judge(&call.name, &arguments).await),
+            (_, false, Some(review)) => Some(review.judge(&tool_name, &arguments).await),
         };
 
         match combine(gate, review, gate_approved) {
@@ -1008,7 +1231,7 @@ impl Executor {
             box_id
         };
 
-        match call.name.as_str() {
+        match tool_name.as_str() {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
                 Ok(args) => {
                     let values = args.values.unwrap_or_default();
@@ -1206,7 +1429,8 @@ impl Executor {
         name: &str,
         arguments: serde_json::Value,
     ) -> ToolResult {
-        let Some((plugin, server, remote)) = crate::mcp::split_qualified(name) else {
+        let name = self.internal_tool_name(name);
+        let Some((plugin, server, remote)) = crate::mcp::split_qualified(&name) else {
             return ToolResult::refused(call_id, format!("there is no tool called {name}"));
         };
 
@@ -1343,6 +1567,86 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["action"],
             }),
         )),
+        REQUEST_USER_FORM => Some((
+            "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
+             If a saved login for this origin is likely, call `credential.request` first and wait; \
+             on filled the authenticated session is ready (observe the page — you did not receive \
+             a password and must not type one with `computer`); on denied, missing, or error, \
+             then raise this. \
+             Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
+             attaches a screenshot of what was typed. Raise this instead and wait. The person \
+             fills in chat; the server types into the focused field on the page and never shows \
+             you the secret. After it settles, screenshot and confirm what the page shows — \
+             filling is not login. Auth is one challenge per form: raise email, then observe; \
+             if a password page is next, prefer `credential.request` when a saved login is \
+             likely, otherwise call this again with a password-only form (new entryId, \
+             challengeKind \"password\"). Do not put email and password on the same card unless \
+             they share a page (`samePage`). If another in-sandbox challenge appears (OTP, phone \
+             verification on the same page), call this again with otp fields and \
+             challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
+             passkey, or a page outside this box is not another password form: the person \
+             finishes on the computer (Open the screen). If they dismiss or decline, continue \
+             without those credentials and do not loop.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short title shown on the card." },
+                    "instruction": { "type": "string", "description": "What the person should do." },
+                    "challengeKind": {
+                        "type": "string",
+                        "description": "Optional hint: password, otp, captcha, passkey, outside_sandbox. Captcha/passkey/outside-sandbox must not be another password form."
+                    },
+                    "samePage": {
+                        "type": "boolean",
+                        "description": "Fields share one HTML page: Tab between them. Default false — type only the first focused field (Facebook email then password)."
+                    },
+                    "submit": {
+                        "type": "boolean",
+                        "description": "Press Return after a successful fill. Default false. Combined forms must set this; a single field still Returns."
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "label": { "type": "string" },
+                                "type": { "type": "string", "description": "text, email, password, otp, …" },
+                                "required": { "type": "boolean" },
+                                "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." }
+                            },
+                            "required": ["id", "label"]
+                        }
+                    },
+                    "domain": { "type": "string" },
+                    "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
+                },
+                "required": ["title", "fields"],
+            }),
+        )),
+        REQUEST_CREDENTIAL => Some((
+            "Ask NativeChat to broker a saved login for this origin, out of your view. Prefer \
+             this before a password `request_user_form` when a match is likely (the person saved \
+             this site, or you already collected a username here). Wait. On filled, the \
+             authenticated session is ready: cookies/profile were applied to the box. You did \
+             not receive a password and must not type one with `computer`. Screenshot the page. \
+             On denied, missing, or error, fall back to `request_user_form`. Do not send a \
+             password.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": "Page host, e.g. accounts.google.com. Required."
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Optional username or email to match."
+                    }
+                },
+                "required": ["origin"],
+            }),
+        )),
         USER_MACHINE_SHELL => Some((
             "Run a shell command on the USER'S OWN machine — the real computer they enrolled,              NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
             serde_json::json!({
@@ -1408,6 +1712,7 @@ fn strip_identity(arguments: Value) -> Value {
 fn describe(error: BoxError) -> String {
     match error {
         BoxError::NoSuchBox => "that computer no longer exists".to_string(),
+        BoxError::Secret(reason) => reason.clone(),
         BoxError::Unreachable(detail) => format!("the computer is unreachable: {detail}"),
         BoxError::Refused { status, body } => {
             format!("the computer refused the request ({status}): {body}")
@@ -1420,10 +1725,35 @@ fn describe(error: BoxError) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use opengrok_box::{BoxResult, CommandOutput, StartedCommand};
+    use opengrok_box::{BoxResult, CommandOutput, Screenshot, StartedCommand};
     use opengrok_core::coworker::{BoxMode, CoworkerCommand};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn computer_step_images_default_to_agent_visibility() {
+        let image = ToolImage::from(Screenshot {
+            mime: "image/png".into(),
+            png_base64: "AAAA".into(),
+            width: 8,
+            height: 8,
+        });
+        assert_eq!(image.visibility, ImageVisibility::Agent);
+        let json = serde_json::to_value(&image).unwrap();
+        assert_eq!(json["visibility"], "agent");
+        let back: ToolImage = serde_json::from_value(json!({
+            "mime": "image/png",
+            "base64": "AAAA",
+            "width": 8,
+            "height": 8
+        }))
+        .unwrap();
+        assert_eq!(
+            back.visibility,
+            ImageVisibility::Agent,
+            "serde default for ToolImage is agent; AG-UI frames without visibility stay transcript"
+        );
+    }
 
     /// Records which box it was asked to act on, which is the assertion that matters here.
     #[derive(Default)]
@@ -1453,6 +1783,7 @@ mod tests {
             if let Some(error) = &self.fail_with {
                 return Err(match error {
                     BoxError::NoSuchBox => BoxError::NoSuchBox,
+                    BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
                     BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
                     BoxError::Refused { status, body } => BoxError::Refused {
                         status: *status,
@@ -1732,6 +2063,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         };
         let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
         assert!(
@@ -1748,6 +2080,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         };
         let result = executor
             .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -1843,6 +2176,138 @@ mod tests {
         );
     }
 
+    fn openai_safe_wire(name: &str) -> bool {
+        (1..=64).contains(&name.len())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[test]
+    fn plugin_tool_schemas_advertise_openai_safe_names() {
+        let long = format!("{}.api.{}", "plug".repeat(20), "tool".repeat(20));
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![
+                crate::mcp::McpTool {
+                    qualified_name: "gmail.api.send".to_string(),
+                    remote_name: "send".to_string(),
+                    description: Some("Send a message".to_string()),
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c.d".to_string(),
+                    remote_name: "c.d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c_d".to_string(),
+                    remote_name: "c_d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: long.clone(),
+                    remote_name: "t".to_string(),
+                    description: None,
+                },
+            ],
+        );
+        let account = AccountId::from_stored("acct_1");
+        let coworker = CoworkerId::from_stored("cw_1");
+        let schemas = executor.tool_schemas(&account, &coworker);
+        let names: Vec<String> = schemas
+            .iter()
+            .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        let truncated = crate::mcp::openai_safe_tool_name(&long);
+        assert_eq!(truncated.len(), 64);
+        assert!(
+            names.contains(&truncated),
+            "names longer than 64 must be truncated on the wire: {names:?}"
+        );
+        assert!(names.contains(&"shell".to_string()), "{names:?}");
+        assert!(
+            names.contains(&"credential_request".to_string()),
+            "credential.request is a dotted builtin and must be sanitised: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name == REQUEST_CREDENTIAL),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"gmail_api_send".to_string()),
+            "gmail.api.send must be advertised without dots: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|name| name.contains('.')),
+            "OpenAI function.name must not contain dots: {names:?}"
+        );
+        assert!(names.contains(&"a_b_c_d".to_string()), "{names:?}");
+        assert!(names.contains(&"a_b_c_d_2".to_string()), "{names:?}");
+        for name in &names {
+            assert!(openai_safe_wire(name), "illegal OpenAI name {name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_calling_the_openai_safe_name_reaches_the_plugin() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![crate::mcp::McpTool {
+                qualified_name: "gmail.api.send".to_string(),
+                remote_name: "send".to_string(),
+                description: None,
+            }],
+        );
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail_api_send", json!({})),
+            )
+            .await;
+        assert!(!result.ok);
+        assert!(
+            result.content.contains("not connected"),
+            "safe wire name must resolve to the plugin: {result:?}"
+        );
+        assert!(
+            !result.content.contains("there is no tool called"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_wire_names_round_trip_to_the_matching_plugin() {
+        let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+            BTreeMap::new(),
+            vec![
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c.d".to_string(),
+                    remote_name: "c.d".to_string(),
+                    description: None,
+                },
+                crate::mcp::McpTool {
+                    qualified_name: "a.b.c_d".to_string(),
+                    remote_name: "c_d".to_string(),
+                    description: None,
+                },
+            ],
+        );
+        let first = executor
+            .execute(&context_with_box("box_mine"), &call("a_b_c_d", json!({})))
+            .await;
+        assert!(
+            first.content.contains("a.b.c.d"),
+            "plain sanitised name is the first plugin: {first:?}"
+        );
+        let second = executor
+            .execute(&context_with_box("box_mine"), &call("a_b_c_d_2", json!({})))
+            .await;
+        assert!(
+            second.content.contains("a.b.c_d"),
+            "suffix _2 is the colliding plugin: {second:?}"
+        );
+    }
+
     /// A plugin whose session is gone must say so, rather than reading as "no such tool" — those
     /// send a person to different places.
     #[tokio::test]
@@ -1896,6 +2361,16 @@ mod tests {
             .await;
         assert!(!result.ok);
         assert!(result.content.contains("may never run"), "{result:?}");
+        let via_wire = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("gmail_api_send", json!({})),
+            )
+            .await;
+        assert!(
+            via_wire.content.contains("may never run"),
+            "policy uses the internal dotted name: {via_wire:?}"
+        );
     }
 
     /// Our identity keys are for LOCAL tools. A remote server never asked for them, and a strict
@@ -2047,7 +2522,12 @@ mod tests {
                     &context,
                     &call(
                         &name,
-                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                        json!({
+                            "command": "ls",
+                            "path": "/tmp/a",
+                            "content": "x",
+                            "origin": "accounts.google.com"
+                        }),
                     ),
                 )
                 .await;
@@ -2108,6 +2588,7 @@ mod tests {
             coworker_id: CoworkerId::from_stored("cw_1"),
             box_id: None,
             group_box: None,
+            screen_hold: false,
         }
     }
 
@@ -2332,6 +2813,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn egress_tunnel_asks_before_computer_use() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(result.content.contains("egress tunnel"), "{result:?}");
+        assert_eq!(spy.last_box(), None, "must not run before Review an action");
+    }
+
+    #[tokio::test]
+    async fn egress_tunnel_lets_an_approved_computer_call_through() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_review_approved(["call_1".to_string()]);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+    }
+
+    #[tokio::test]
+    async fn egress_tunnel_does_not_ask_for_box_local_shell() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone()).with_egress_tunnel(true);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert!(!result.awaiting_approval);
+        assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
     async fn an_approved_call_is_never_re_judged() {
         let spy = Arc::new(SpyComputer::default());
         let judge = CountingJudge::new(ReviewVerdict::Block);
@@ -2482,7 +3010,12 @@ mod tests {
                     &context,
                     &call(
                         &name,
-                        json!({"command": "ls", "path": "/tmp/a", "content": "x"}),
+                        json!({
+                            "command": "ls",
+                            "path": "/tmp/a",
+                            "content": "x",
+                            "origin": "accounts.google.com"
+                        }),
                     ),
                 )
                 .await;
@@ -2592,6 +3125,14 @@ mod tests {
         let names = headless.tool_names();
         assert!(!names.iter().any(|name| name == "computer"), "{names:?}");
         assert!(!names.iter().any(|name| name == "open_url"), "{names:?}");
+        assert!(
+            names.iter().any(|name| name == REQUEST_USER_FORM),
+            "the form tool does not need a display: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == REQUEST_CREDENTIAL),
+            "saved-login session does not need a display to be offered: {names:?}"
+        );
         assert!(!headless.has_screen());
 
         let with_screen = allowing(spy).with_screen(true);
@@ -3114,5 +3655,103 @@ mod tests {
             "should mention recipe name"
         );
         assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn request_user_form_awaits_and_does_not_type() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    REQUEST_USER_FORM,
+                    json!({
+                        "title": "Sign in",
+                        "fields": [{
+                            "id": "password",
+                            "label": "Password",
+                            "type": "password",
+                            "required": true
+                        }],
+                        "values": { "password": "s3cret" }
+                    }),
+                ),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::UserForm));
+        assert!(result.content.contains("Waiting for you"), "{result:?}");
+        assert!(result.image.is_none(), "{result:?}");
+        assert_eq!(spy.last_box(), None, "await must not type");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn credential_request_awaits_and_does_not_type() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        let context = context_with_box("box_mine");
+        let result = executor
+            .execute(
+                &context,
+                &call(
+                    REQUEST_CREDENTIAL,
+                    json!({
+                        "origin": "accounts.google.com",
+                        "username": "ada@example.com",
+                        "password": "s3cret"
+                    }),
+                ),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::Credential));
+        assert!(result.content.contains("Waiting"), "{result:?}");
+        assert!(result.image.is_none(), "{result:?}");
+        assert_eq!(spy.last_box(), None, "await must not type");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+
+        let via_wire = executor
+            .execute(
+                &context,
+                &call(
+                    "credential_request",
+                    json!({ "origin": "accounts.google.com" }),
+                ),
+            )
+            .await;
+        assert!(
+            via_wire.awaiting_approval,
+            "OpenAI-safe name must map back to the builtin: {via_wire:?}"
+        );
+        assert_eq!(via_wire.awaiting_reason, Some(AwaitingReason::Credential));
+
+        let missing = executor
+            .execute(&context, &call(REQUEST_CREDENTIAL, json!({})))
+            .await;
+        assert!(!missing.ok, "{missing:?}");
+        assert!(!missing.awaiting_approval, "{missing:?}");
+        assert!(missing.content.contains("origin"), "{missing:?}");
+    }
+
+    #[tokio::test]
+    async fn a_form_open_refuses_computer_type_without_a_png() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone()).with_screen(true);
+        let mut context = context_with_box("box_mine");
+        context.screen_hold = true;
+        let result = executor
+            .execute(
+                &context,
+                &call("computer", json!({ "action": "type", "text": "s3cret" })),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("is open"), "{result:?}");
+        assert!(result.image.is_none(), "must not PNG a secret: {result:?}");
+        assert!(!result.content.contains("s3cret"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
     }
 }

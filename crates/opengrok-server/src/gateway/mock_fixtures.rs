@@ -674,6 +674,7 @@ const CATALOGUE: &[(&str, &str, &str)] = &[
     ),
     ("listener-connect", "cards", "connect-a-listener (github)"),
     ("secret-request", "cards", "a secret prompt"),
+    ("user-form", "cards", "an in-chat form (sign-in / OTP)"),
     ("connector", "cards", "the plugin-connect card"),
     ("connectors", "cards", "the multi-connect card"),
     (
@@ -1274,6 +1275,21 @@ pub fn entries_for(name: &str) -> Option<Vec<Value>> {
                 }
             }),
         )],
+        "user-form" => vec![card(
+            "user-form",
+            json!({
+                "type": "user-form",
+                "formRequest": {
+                    "title": "Google account",
+                    "instruction": "Enter the address. Do not type a real password.",
+                    "fields": [
+                        { "id": "email", "label": "Email", "type": "email", "required": true },
+                        { "id": "password", "label": "Password", "type": "password", "required": true }
+                    ],
+                    "liveHost": "accounts.google.com"
+                }
+            }),
+        )],
         "connector" => vec![card(
             "connector",
             json!({
@@ -1586,6 +1602,17 @@ mod tests {
         assert_eq!(entry["kind"], "send-message");
         assert_eq!(entry["message"]["type"], "local-tool-permission");
         assert!(entry["message"]["ask"].is_object());
+    }
+
+    #[test]
+    fn a_user_form_fixture_is_the_transcribed_card() {
+        let entries = entries_for("user-form").expect("fixture");
+        let entry = &entries[0];
+        assert_eq!(entry["kind"], "send-message");
+        assert_eq!(entry["message"]["type"], "user-form");
+        assert!(entry["message"]["formRequest"]["fields"].is_array());
+        assert!(entry.get("formResolution").is_none());
+        assert!(!entry.to_string().contains("s3cret"));
     }
 
     /// Media has to satisfy BOTH checks: the card classifies on the extension, and the host's

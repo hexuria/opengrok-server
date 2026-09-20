@@ -112,9 +112,11 @@ impl PgStore {
             .await?;
         }
 
-        // Maintain the session index from the same events, in the same transaction. A refresh that
-        // rotated the token must make the OLD hash unfindable at the instant the new one appears —
-        // if these could drift, a rotated token would stay usable for the width of the gap.
+        // Maintain the session index from the same events, in the same transaction. The current
+        // hash is always findable. The just-rotated-away hash stays findable until
+        // `grace_until_ms` (REFRESH_GRACE_MS after the rotation) so a concurrent refresh with
+        // the old cookie can load the account; decide() still refuses it once the window has
+        // passed, and the next rotate drops hashes that are neither current nor previous.
         for event in events {
             match event {
                 AccountEvent::SessionIssued {
@@ -123,8 +125,8 @@ impl PgStore {
                     ..
                 } => {
                     sqlx::query(
-                        "insert into session_view (refresh_token_hash, account_id, session_id)
-                         values ($1, $2, $3)
+                        "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                         values ($1, $2, $3, null)
                          on conflict (refresh_token_hash) do nothing",
                     )
                     .bind(refresh_token_hash)
@@ -136,21 +138,60 @@ impl PgStore {
                 AccountEvent::SessionRefreshed {
                     session_id,
                     refresh_token_hash,
-                    ..
+                    previous_refresh_token_hash,
+                    at_ms,
                 } => {
-                    sqlx::query("delete from session_view where session_id = $1")
-                        .bind(session_id.as_str())
-                        .execute(&mut *tx)
-                        .await?;
                     sqlx::query(
-                        "insert into session_view (refresh_token_hash, account_id, session_id)
-                         values ($1, $2, $3)",
+                        "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                         values ($1, $2, $3, null)
+                         on conflict (refresh_token_hash) do update set
+                           account_id = excluded.account_id,
+                           session_id = excluded.session_id,
+                           grace_until_ms = null",
                     )
                     .bind(refresh_token_hash)
                     .bind(id.as_str())
                     .bind(session_id.as_str())
                     .execute(&mut *tx)
                     .await?;
+                    if let Some(previous) = previous_refresh_token_hash {
+                        let grace_until = *at_ms + opengrok_core::REFRESH_GRACE_MS;
+                        sqlx::query(
+                            "insert into session_view (refresh_token_hash, account_id, session_id, grace_until_ms)
+                             values ($1, $2, $3, $4)
+                             on conflict (refresh_token_hash) do update set
+                               account_id = excluded.account_id,
+                               session_id = excluded.session_id,
+                               grace_until_ms = excluded.grace_until_ms",
+                        )
+                        .bind(previous)
+                        .bind(id.as_str())
+                        .bind(session_id.as_str())
+                        .bind(grace_until)
+                        .execute(&mut *tx)
+                        .await?;
+                        sqlx::query(
+                            "delete from session_view
+                              where session_id = $1
+                                and refresh_token_hash <> $2
+                                and refresh_token_hash <> $3",
+                        )
+                        .bind(session_id.as_str())
+                        .bind(refresh_token_hash)
+                        .bind(previous)
+                        .execute(&mut *tx)
+                        .await?;
+                    } else {
+                        sqlx::query(
+                            "delete from session_view
+                              where session_id = $1
+                                and refresh_token_hash <> $2",
+                        )
+                        .bind(session_id.as_str())
+                        .bind(refresh_token_hash)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
                 AccountEvent::SessionRevoked { session_id, .. } => {
                     sqlx::query("delete from session_view where session_id = $1")
@@ -205,12 +246,23 @@ impl PgStore {
         Ok(seq)
     }
 
-    /// Which account holds this refresh token, if any. The read side of the rotation check.
-    pub async fn account_by_refresh_hash(&self, hash: &str) -> StoreResult<Option<AccountId>> {
-        let row = sqlx::query("select account_id from session_view where refresh_token_hash = $1")
-            .bind(hash)
-            .fetch_optional(&self.pool)
-            .await?;
+    /// Which account holds this refresh token, if any. The current hash, or the just-rotated-away
+    /// hash whose `grace_until_ms` has not passed. After grace the previous hash is invisible here
+    /// even if the row has not been swept yet.
+    pub async fn account_by_refresh_hash(
+        &self,
+        hash: &str,
+        at_ms: i64,
+    ) -> StoreResult<Option<AccountId>> {
+        let row = sqlx::query(
+            "select account_id from session_view
+              where refresh_token_hash = $1
+                and (grace_until_ms is null or grace_until_ms >= $2)",
+        )
+        .bind(hash)
+        .bind(at_ms)
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|row| {
             Ok(AccountId::from_stored(
                 row.try_get::<String, _>("account_id")?,
@@ -3029,5 +3081,73 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+}
+
+/// Site-login matching metadata. Origin + opaque client `credentialId` + username.
+/// NEVER a password — that stays in NativeChat / the person's password manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialHint {
+    pub origin: String,
+    pub username: String,
+    pub credential_id: String,
+}
+
+impl PgStore {
+    /// Remember that this coworker has a saved login at `origin`. Overwrites the previous
+    /// hint for that origin. Callers must not pass a password; the table has no column for one.
+    pub async fn upsert_credential_hint(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &CoworkerId,
+        origin: &str,
+        username: &str,
+        credential_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into credential_hint
+               (account_id, coworker_id, origin, username, credential_id, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (account_id, coworker_id, origin) do update set
+               username = excluded.username,
+               credential_id = excluded.credential_id,
+               updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker_id.as_str())
+        .bind(origin)
+        .bind(username)
+        .bind(credential_id)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn credential_hints(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &CoworkerId,
+    ) -> StoreResult<Vec<CredentialHint>> {
+        let rows = sqlx::query(
+            "select origin, username, credential_id
+               from credential_hint
+              where account_id = $1 and coworker_id = $2
+              order by origin",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut hints = Vec::with_capacity(rows.len());
+        for row in rows {
+            hints.push(CredentialHint {
+                origin: row.try_get("origin")?,
+                username: row.try_get("username")?,
+                credential_id: row.try_get("credential_id")?,
+            });
+        }
+        Ok(hints)
     }
 }

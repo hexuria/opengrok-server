@@ -39,10 +39,18 @@ pub use auth::{AuthState, TokenMinter};
 /// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
 /// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
 /// smoke script was already checking.
-pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
+    if state.host_settings.is_none() {
+        state.host_settings = Some(gateway.settings.clone());
+    }
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
+        .merge(gateway::user_form::agui_router(gateway.clone()))
+        .merge(gateway::credential::agui_router(gateway.clone()))
+        // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
+        // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
+        .merge(agui::run_router(gateway.clone()))
         .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))

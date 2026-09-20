@@ -250,6 +250,7 @@ async fn spawn(store: PgStore, email: &str, public_url: Option<&str>) -> (String
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

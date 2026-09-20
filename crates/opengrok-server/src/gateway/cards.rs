@@ -5,6 +5,7 @@
 use serde_json::{Value, json};
 
 use opengrok_tools::USER_MACHINE_SHELL;
+use opengrok_tools::user_form::sanitize_arguments;
 
 /// The `auto-review-approval` card for the judge's ask. Re-emit with the SAME `entry_id` and a
 /// new `status` to settle it — the renderer dedups on `auto-review-approval:${requestId}:${status}`.
@@ -62,6 +63,64 @@ pub fn policy_approval_card(
 /// What the card says when the grant gave no reason of its own.
 pub const POLICY_ASK_REASON: &str =
     "This coworker's policy needs a person to say yes before it may run this tool.";
+
+/// The in-chat `user-form` card. Transcribed from official 0.29/0.30 `user-form/view.tsx`:
+/// `message.type` is `user-form`, `formRequest` is the field schema, and `formResolution` is a
+/// sibling of `message` (not inside it). Identity keys and any `values` the model smuggled are
+/// dropped so a password cannot sit on the entry waiting for submit.
+pub fn user_form_card(
+    entry_id: &str,
+    arguments: &Value,
+    timestamp_ms: i64,
+    call_id: &str,
+) -> Value {
+    let mut card = json!({
+        "kind": "send-message",
+        "id": entry_id,
+        "timestampMs": timestamp_ms,
+        "message": {
+            "type": "user-form",
+            "formRequest": sanitize_arguments(arguments),
+        },
+    });
+    // Join to the TOOL_CALL / CUSTOM `callId` so stacked same-completion cards
+    // submit independently (only the matching pending call resumes).
+    if !call_id.is_empty()
+        && let Some(map) = card.as_object_mut()
+    {
+        map.insert("callId".to_string(), json!(call_id));
+    }
+    card
+}
+
+/// Grok Bot computer-handoff chrome — transcribed from the recovered renderer:
+/// attachment at `sand://box`, box fields on the **entry** (`boxRequestId`,
+/// `boxInstruction`, `boxResolution`). There is no `computer-handoff` message type
+/// in the shipped contract. A stray `boxRequestId` on any other card (including
+/// user-form) converts that card into a handoff, so escalate MUST emit this as a
+/// **separate** entry. This is not OpenGrok Take over / I'm done / Skip.
+///
+/// `boxResolution` is ABSENT while live (locked NativeChat wire). A string
+/// (`handed_back` | `declined` | `timed_out`) is stamped only on resolve.
+pub fn computer_handoff_card(
+    entry_id: &str,
+    box_request_id: &str,
+    instruction: &str,
+    timestamp_ms: i64,
+) -> Value {
+    json!({
+        "kind": "send-message",
+        "id": entry_id,
+        "timestampMs": timestamp_ms,
+        "message": {
+            "type": "attachment",
+            "url": "sand://box",
+            "alt": "Handed to the computer",
+        },
+        "boxRequestId": box_request_id,
+        "boxInstruction": instruction,
+    })
+}
 
 #[allow(clippy::too_many_arguments)]
 fn approval_card(
@@ -297,5 +356,73 @@ mod tests {
             unexplained["message"]["approval"]["reason"],
             POLICY_ASK_REASON
         );
+    }
+
+    #[test]
+    fn a_user_form_card_is_the_transcribed_shape_and_drops_secrets() {
+        let raw = json!({
+            "title": "Google account",
+            "instruction": "Sign in.",
+            "fields": [{
+                "id": "password",
+                "label": "Password",
+                "type": "password",
+                "required": true
+            }],
+            "values": { "password": "s3cret-pass" },
+            "coworker_id": "cw_x",
+            "liveHost": "accounts.google.com"
+        });
+        let card = user_form_card("e_form", &raw, 11, "mock-form-1");
+        assert_eq!(card["kind"], "send-message");
+        assert_eq!(card["id"], "e_form");
+        assert_eq!(card["callId"], "mock-form-1");
+        assert_eq!(card["timestampMs"], 11);
+        assert_eq!(card["message"]["type"], "user-form");
+        assert_eq!(card["message"]["formRequest"]["title"], "Google account");
+        assert_eq!(
+            card["message"]["formRequest"]["liveHost"],
+            "accounts.google.com"
+        );
+        assert_eq!(
+            card["message"]["formRequest"]["fields"][0]["id"],
+            "password"
+        );
+        assert!(card.get("formResolution").is_none(), "{card}");
+        let dumped = card.to_string();
+        assert!(!dumped.contains("s3cret-pass"), "{dumped}");
+        assert!(!dumped.contains("cw_x"), "{dumped}");
+        assert!(card["message"]["formRequest"].get("values").is_none());
+    }
+
+    #[test]
+    fn a_computer_handoff_card_is_a_separate_sand_box_attachment() {
+        let card = computer_handoff_card(
+            "e_hand",
+            "req_abc",
+            "Google account: Enter the address and password.",
+            12,
+        );
+        assert_eq!(card["kind"], "send-message");
+        assert_eq!(card["id"], "e_hand");
+        assert_eq!(card["message"]["type"], "attachment");
+        assert_eq!(card["message"]["url"], "sand://box");
+        assert_eq!(card["boxRequestId"], "req_abc");
+        assert_eq!(
+            card["boxInstruction"],
+            "Google account: Enter the address and password."
+        );
+        assert!(
+            card.get("boxResolution").is_none(),
+            "boxResolution is absent while live: {card}"
+        );
+        assert!(
+            card.get("formResolution").is_none(),
+            "handoff is not a user-form: {card}"
+        );
+        let dumped = card.to_string();
+        assert!(!dumped.to_lowercase().contains("take over"), "{dumped}");
+        assert!(!dumped.to_lowercase().contains("i'm done"), "{dumped}");
+        assert!(!dumped.to_lowercase().contains("skip"), "{dumped}");
     }
 }

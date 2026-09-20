@@ -2011,6 +2011,7 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "getrandom 0.2.17",
  "grok-box",
  "opengrok-core",
  "reqwest 0.13.4",

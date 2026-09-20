@@ -62,6 +62,11 @@ pub enum AwaitingReason {
     PolicyApproval,
     /// The auto-review judge said "ask".
     AutoReview,
+    /// The bot raised an in-chat `user-form` and is waiting for the person (`request_user_form`).
+    UserForm,
+    /// The bot asked NativeChat to broker a saved site login (`credential.request`). NativeChat
+    /// establishes the session out of agent view; the server never sees the password.
+    Credential,
 }
 
 impl AwaitingReason {
@@ -70,6 +75,8 @@ impl AwaitingReason {
             Self::ExecConsent => "exec-consent",
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
+            Self::UserForm => "user-form",
+            Self::Credential => "credential",
         }
     }
 }
@@ -100,6 +107,10 @@ pub enum Outcome {
 
 /// The paragraph a card shows when the judge itself said "ask".
 pub const REVIEW_ASK_REASON: &str = "Your auto-review instructions did not clearly allow this, so it is being asked rather than allowed.";
+/// Leave-box tools on the prod egress tunnel, before any standing auto-review allow exists.
+/// The Review-an-action card (Always allow / Allow once / Deny) is the Grok Bot chrome.
+pub const EGRESS_TUNNEL_ASK_REASON: &str =
+    "This action would use your network through the egress tunnel. Review it before it runs.";
 /// The paragraph a card shows when the judge matched an Ask-first instruction.
 /// The Settings UI stores those in `blockInstructions` but labels them "Ask first".
 pub fn ask_first_reason(block_instructions: &str) -> String {
