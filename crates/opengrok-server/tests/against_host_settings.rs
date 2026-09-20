@@ -168,7 +168,7 @@ impl Harness {
 
 fn database_url() -> Option<String> {
     match std::env::var("OG_DATABASE_URL") {
-        Ok(url) if !url.trim().is_empty() => Some(url),
+        Ok(url) if !url.trim().is_empty() => Some(opengrok_store::gate_database_or_panic(url)),
         _ => {
             eprintln!("skipping: OG_DATABASE_URL is not set");
             None

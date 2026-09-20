@@ -18,7 +18,7 @@ use opengrok_store::{CoworkerKeyView, PgStore, PointsLimit, PointsScope};
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) if !url.is_empty() => url,
+            Ok(url) if !url.is_empty() => opengrok_store::gate_database_or_panic(url),
             _ => {
                 eprintln!("SKIPPED: set OG_DATABASE_URL to run this test");
                 return;
