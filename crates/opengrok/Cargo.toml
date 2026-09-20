@@ -9,9 +9,6 @@ license.workspace = true
 default = ["jev"]
 # Forwards Jev. Off, this binary has no typesafe-sdk and one HTTP stack.
 jev = ["opengrok-server/jev"]
-# Forwards to opengrok-server; the binary's `mock-cards` door needs the catalogue that feature
-# compiles in, and refuses to boot without it rather than falling back to a real (billed) door.
-mock-fixtures = ["opengrok-server/mock-fixtures"]
 
 [lints]
 workspace = true
