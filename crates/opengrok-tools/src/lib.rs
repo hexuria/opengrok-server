@@ -583,9 +583,13 @@ pub struct Executor {
     /// When on, leave-box screen tools raise the Review-an-action card unless a standing
     /// auto-review allow is already attached.
     egress_tunnel: EgressTunnelMode,
-    /// What the box's guest said about its tunnel once a tool woke it, per box, for the
-    /// `AskTheBoxAfterWake` mode.
-    egress_after_wake: std::sync::Mutex<std::collections::BTreeMap<String, bool>>,
+    /// Boxes whose guest, asked once a tool woke it, said the tunnel is there (the
+    /// `AskTheBoxAfterWake` mode). Only a yes is kept: right after a wake the guest is usually
+    /// not answering yet, and a remembered "no" would skip the consent card for the whole run.
+    egress_after_wake: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// The person already said yes, in this run, to a leave-box action — the tunnel's card, or a
+    /// judge's card on the same kind of action — so the tunnel is not asked about again.
+    egress_consented: bool,
 }
 
 /// The built-ins that need a display.
@@ -651,7 +655,8 @@ impl Executor {
             chosen_recipe: None,
             observe: crate::observe::wanted(),
             egress_tunnel: EgressTunnelMode::Off,
-            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            egress_consented: false,
         }
     }
 
@@ -676,7 +681,8 @@ impl Executor {
             chosen_recipe: None,
             observe: crate::observe::wanted(),
             egress_tunnel: EgressTunnelMode::Off,
-            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            egress_consented: false,
         }
     }
 
@@ -756,7 +762,7 @@ impl Executor {
             && screen_tool
             && review_inactive
             && !review_approved
-            && self.review_approved_calls.is_empty()
+            && !self.egress_consented
         {
             return false;
         }
@@ -833,20 +839,20 @@ impl Executor {
     }
 
     /// Whether the (now awake) box's guest reports the egress tunnel up with a client attached.
-    /// Asked once per box per turn.
+    /// A yes is remembered for the turn; a no is asked again next time, because right after a
+    /// wake the guest and the laptop client are usually still coming back.
     async fn tunnel_is_there(&self, box_id: &str) -> bool {
-        if let Some(known) = self
+        if self
             .egress_after_wake
             .lock()
-            .ok()
-            .and_then(|known| known.get(box_id).copied())
+            .is_ok_and(|known| known.contains(box_id))
         {
-            return known;
+            return true;
         }
         let there =
             opengrok_box::EgressTunnel::advertised(true, self.computer.egress_tunnel(box_id).await);
-        if let Ok(mut known) = self.egress_after_wake.lock() {
-            known.insert(box_id.to_string(), there);
+        if there && let Ok(mut known) = self.egress_after_wake.lock() {
+            known.insert(box_id.to_string());
         }
         there
     }
@@ -958,6 +964,14 @@ impl Executor {
     #[must_use]
     pub fn with_egress_tunnel_mode(mut self, mode: EgressTunnelMode) -> Self {
         self.egress_tunnel = mode;
+        self
+    }
+
+    /// The person already said yes, in this run, to a leave-box action; the tunnel is not asked
+    /// about again. Set by the resume paths from the answered card's own tool, not inferred.
+    #[must_use]
+    pub fn with_egress_consented(mut self, consented: bool) -> Self {
+        self.egress_consented = consented;
         self
     }
 
@@ -1397,11 +1411,10 @@ impl Executor {
             .auto_review
             .as_ref()
             .is_none_or(|review| !review.policy.is_active());
-        // Consent to leave through the tunnel is given once per run, not once per click: when no
-        // judge is active, the only Review-an-action card there is IS the tunnel's, so any review
-        // yes already given in this run is that consent. "Visit facebook" used to cost a card for
-        // the page, another for the screenshot, another for the click (21 Sep 2026).
-        let egress_consented = !self.review_approved_calls.is_empty();
+        // Consent to leave through the tunnel is given once per run, not once per click: "visit
+        // facebook" used to cost a card for the page, another for the screenshot, another for the
+        // click (21 Sep 2026). The resume paths set it from the answered card's own tool.
+        let egress_consented = self.egress_consented;
         if self.egress_tunnel == EgressTunnelMode::On
             && leave_box_tool
             && !review_approved
@@ -3379,15 +3392,35 @@ mod tests {
     }
 
     /// One yes per run: the card for the page is not followed by a card for the screenshot and
-    /// another for the click. Any review yes already given in this run — and with no judge active
-    /// the tunnel's card is the only one there is — is the consent.
+    /// another for the click. The resume path marks the run consented from the answered card's
+    /// own tool; a review yes alone, for some other call, is not consent.
     #[tokio::test]
     async fn egress_consent_given_once_holds_for_the_rest_of_the_run() {
         let spy = Arc::new(SpyComputer::default());
-        let executor = allowing(spy.clone())
+        let unrelated_yes = allowing(spy.clone())
             .with_screen(true)
             .with_egress_tunnel(true)
             .with_review_approved(["call_page".to_string()]);
+        let context = context_with_box("box_mine");
+        let asked = unrelated_yes
+            .execute(
+                &context,
+                &ToolCall {
+                    id: "call_shot".to_string(),
+                    name: "computer".to_string(),
+                    arguments: json!({ "action": "screenshot" }),
+                },
+            )
+            .await;
+        assert!(
+            asked.awaiting_approval,
+            "a yes for another call is not consent: {asked:?}"
+        );
+
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_egress_consented(true);
         let context = context_with_box("box_mine");
         let later = ToolCall {
             id: "call_shot".to_string(),

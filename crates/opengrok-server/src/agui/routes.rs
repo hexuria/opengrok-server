@@ -38,6 +38,12 @@ use std::sync::{Arc, Mutex};
 /// running took 10–15s live (bx_ncfmdpem, 2 Sep 2026); 90s leaves room for a slow restore.
 pub(crate) const TURN_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// The tools whose action leaves the box for the network: the ones the egress tunnel's consent
+/// card is about.
+pub(crate) fn leaves_the_box(tool: &str) -> bool {
+    matches!(tool, "computer" | "open_url" | "run_recipe")
+}
+
 /// What the endpoint needs: a way to reach a model, and which route to ask for.
 ///
 /// The door is a trait object so `OG_MODEL_DOOR=mock` swaps the whole model layer without the
@@ -3336,6 +3342,12 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
+    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click.
+    let runner = runner.with_egress_consented(
+        answered.reason == opengrok_core::run::SuspendReason::AutoReview
+            && leaves_the_box(&answered.tool),
+    );
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled

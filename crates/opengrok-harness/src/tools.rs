@@ -85,6 +85,16 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// The person said yes, in this run, to a leave-box action: the tunnel is not asked about
+    /// again. See `Executor::with_egress_consented`.
+    #[must_use]
+    pub fn with_egress_consented(mut self, consented: bool) -> Self {
+        if let Some((executor, context)) = self.executor.take() {
+            self.executor = Some((executor.with_egress_consented(consented), context));
+        }
+        self
+    }
+
     /// Bring the coworker's own box up before typing into it outside `computer_use`, through the
     /// executor's memo and in-use stamp.
     pub async fn wake_fill_target(&self) -> Result<(), String> {

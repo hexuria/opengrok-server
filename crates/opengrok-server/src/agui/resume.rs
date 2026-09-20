@@ -593,6 +593,12 @@ async fn resume_suspended_run(
     else {
         return;
     };
+    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click.
+    let runner = runner.with_egress_consented(
+        pending.reason == opengrok_core::run::SuspendReason::AutoReview
+            && crate::agui::routes::leaves_the_box(&pending.tool),
+    );
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person was answering the card must not change the coworker halfway through the
     // turn. A run journalled before this was captured has none and composes one, as before.
