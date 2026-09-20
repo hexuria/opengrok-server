@@ -102,6 +102,7 @@ cargo clippy --workspace --all-targets
 cargo test --workspace --features opengrok-server/mock-fixtures   # see below
 scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
+scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
 ```
 
 **`mock-fixtures` is a cargo feature, off by default.** It carries the mock transcript catalogue —

@@ -77,7 +77,7 @@ crates/
 docs/
   setup/ · research/ · box/ (vendor API pages) · verification/ · archive/ · the documents in the table above
 scripts/
-  serve.sh (run the dev server) · gate.sh (the merge gate) · slice*-smoke.sh (the evidence)
+  serve.sh (run the dev server) · gate.sh (the merge gate) · crate-size.sh (the crate-size ceiling) · slice*-smoke.sh (the evidence)
 web/
   the web console (Bun/Vite/React SPA served at /console)
 ```
