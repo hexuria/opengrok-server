@@ -3,6 +3,7 @@
 //! the kept one is untouched, and an allowlist that names nobody deletes nothing.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
@@ -284,7 +285,7 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
 
     // A dry run reports the work and changes nothing.
     let rehearsal = store
-        .purge_accounts_except(&[kept_email.clone()], true)
+        .purge_accounts_except(std::slice::from_ref(&kept_email), true)
         .await
         .expect("dry run");
     assert!(rehearsal.accounts_deleted >= 1, "{rehearsal:?}");
@@ -295,7 +296,7 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
     );
 
     let report = store
-        .purge_accounts_except(&[kept_email.clone()], false)
+        .purge_accounts_except(std::slice::from_ref(&kept_email), false)
         .await
         .expect("purge");
     assert_eq!(
