@@ -27,6 +27,7 @@ pub mod identity;
 pub mod migrations;
 pub mod points;
 pub mod postgres;
+pub mod purge;
 pub mod replica;
 pub mod spend;
 pub mod templates;
@@ -42,6 +43,7 @@ pub use postgres::{
     ArtifactRow, CredentialHint, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow,
     RecipeRunRow, RecipeShareRow, RecipeVersionRow, ThreadRun,
 };
+pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;
