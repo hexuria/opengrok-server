@@ -11,6 +11,7 @@
 //! The route half needs Postgres and skips loudly without OG_DATABASE_URL; the client half does
 //! not touch it, so the SDK wrapper is exercised on a machine with no database.
 
+#![cfg(feature = "jev")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
@@ -120,6 +121,7 @@ fn app_with(store: PgStore, email: &str, jev: Option<Arc<dyn JevDoor>>) -> (Rout
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

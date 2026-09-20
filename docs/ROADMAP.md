@@ -567,6 +567,10 @@ every record that sharing would otherwise break carry whose it is.
   learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
   are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
+## Phase 0
+
+- [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
+
 ## Later — unordered, deliberately
 
 - [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one

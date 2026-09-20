@@ -172,6 +172,7 @@ async fn unreadable_ascii_key_is_an_error_not_absent() {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(agui, Some("test-bearer".into()), email.clone(), None);
 

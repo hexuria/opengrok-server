@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use opengrok_box::Computer;
+use opengrok_box::{Computer, EgressTunnel};
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 
@@ -683,22 +683,66 @@ pub async fn teardown_computer_for(
     }
 }
 
+/// NativeChat (tip `729bdd9`) gates Route traffic from **only** this JSON —
+/// `isEgressTunnelAvailable` or nested `egress_tunnel.ready`. It does not call
+/// Box `/v1/info`. Probe the scoped live `boxId` already in the payload (never
+/// a frozen coworker-row id) on every status read. Do not invent `ready`.
+fn stamp_egress_fields(screen: &mut Value, host_wants: bool, cap: Option<EgressTunnel>) {
+    screen["isEgressTunnelAvailable"] = json!(EgressTunnel::advertised(host_wants, cap));
+    if let Some(cap) = cap {
+        screen["egress_tunnel"] = json!({
+            "enabled": cap.enabled,
+            "ready": cap.ready,
+        });
+    }
+}
+
+/// NativeChat places Route traffic chrome by computer **share**, not on every
+/// bot pane. Internal `scope_for` stays `bot|account|group|org`; sharing-mode
+/// policy stays `per-bot|per-account|per-org`. This is the client-facing
+/// placement name (`dedicated` = bot sidebar, `user` = Settings→Computer,
+/// `group` = group sidebar, `org` = admin console).
+fn share_scope_of(scope: &str) -> &'static str {
+    match scope {
+        "bot" => "dedicated",
+        "account" => "user",
+        "group" => "group",
+        "org" => "org",
+        // Unknown internal scope must not paint dedicated bot-pane chrome.
+        _ => "user",
+    }
+}
+
+fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
+    screen["shareScope"] = json!(share_scope_of(scope));
+    if scope == "group" {
+        screen["groupId"] = json!(scope_id);
+    }
+}
+
 /// Live screen NativeChat paints. Same facts as gateway `getForeverBoxStatus`, on the AG-UI
-/// cookie session so the desktop client does not need the host gateway bearer.
+/// cookie session so the desktop client does not need the host gateway bearer — plus live
+/// egress capability and `shareScope` (where Route traffic chrome belongs). `shareScope` is
+/// omitted on pure `state: absent` (no scoped computer); NativeChat hides the control then.
 pub async fn coworker_screen(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Value {
     let agent_id = coworker_id.as_str();
-    let absent = json!({
-        "agentId": agent_id,
-        "state": "absent",
-        "vncUrl": Value::Null,
-    });
+    let host_wants = state.egress_tunnel_enabled();
+    let absent = || {
+        let mut body = json!({
+            "agentId": agent_id,
+            "state": "absent",
+            "vncUrl": Value::Null,
+        });
+        stamp_egress_fields(&mut body, host_wants, None);
+        body
+    };
     let group = match state.auth.store.load_coworker(coworker_id).await {
         Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
-        _ => return absent,
+        _ => return absent(),
     };
     let (mode, org_id) = resolve_mode(state, account_id).await;
     let (scope, scope_id, _) = scope_for(
@@ -720,14 +764,16 @@ pub async fn coworker_screen(
             .account_computer_error(account_id.as_str())
             .await
         {
-            return json!({
+            let mut body = json!({
                 "agentId": agent_id,
                 "state": "absent",
                 "vncUrl": Value::Null,
                 "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
             });
+            stamp_egress_fields(&mut body, host_wants, None);
+            return body;
         }
-        return absent;
+        return absent();
     };
     let lookup = lookup_provider(state, org_id.as_deref(), &kind).await;
     let Some(provider) = lookup.computer else {
@@ -741,12 +787,15 @@ pub async fn coworker_screen(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as i64)
             .unwrap_or(0);
-        return json!({
+        let mut body = json!({
             "agentId": agent_id,
             "state": if stopped { "stopped" } else { "unknown" },
             "vncUrl": Value::Null,
             "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
         });
+        stamp_egress_fields(&mut body, host_wants, None);
+        stamp_share_scope(&mut body, scope, &scope_id);
+        return body;
     };
     let live_state = provider
         .state(&box_id)
@@ -760,7 +809,9 @@ pub async fn coworker_screen(
     } else {
         (None, None)
     };
-    json!({
+    // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself.
+    let cap = provider.egress_tunnel(&box_id).await;
+    let mut screen = json!({
         "agentId": agent_id,
         "state": live_state,
         "vncUrl": vnc_url,
@@ -773,7 +824,10 @@ pub async fn coworker_screen(
             "latest": image.latest,
             "stale": image.stale(),
         })),
-    })
+    });
+    stamp_egress_fields(&mut screen, host_wants, cap);
+    stamp_share_scope(&mut screen, scope, &scope_id);
+    screen
 }
 
 /// The coworker's screen right now, as the box's PNG — what the Computer pane paints in its
@@ -1188,5 +1242,121 @@ mod tests {
             scope_for("per-org", "acct_1", None, "cw_1", false),
             ("account", "acct_1".to_string(), BoxMode::Shared)
         );
+    }
+
+    #[test]
+    fn computer_json_stamps_live_egress_when_the_guest_is_ready() {
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_egress_fields(
+            &mut screen,
+            true,
+            Some(EgressTunnel {
+                enabled: true,
+                ready: true,
+            }),
+        );
+        assert_eq!(screen["isEgressTunnelAvailable"], true);
+        assert_eq!(screen["egress_tunnel"]["enabled"], true);
+        assert_eq!(screen["egress_tunnel"]["ready"], true);
+    }
+
+    #[test]
+    fn computer_json_available_is_false_when_the_guest_is_not_ready() {
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_egress_fields(
+            &mut screen,
+            true,
+            Some(EgressTunnel {
+                enabled: true,
+                ready: false,
+            }),
+        );
+        assert_eq!(screen["isEgressTunnelAvailable"], false);
+        assert_eq!(screen["egress_tunnel"]["ready"], false);
+        assert_eq!(screen["egress_tunnel"]["enabled"], true);
+    }
+
+    #[test]
+    fn computer_json_does_not_invent_ready_when_info_is_missing() {
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_egress_fields(&mut screen, true, None);
+        assert_eq!(screen["isEgressTunnelAvailable"], false);
+        assert!(
+            screen.get("egress_tunnel").is_none(),
+            "missing /v1/info must not invent a nested capability: {screen}"
+        );
+    }
+
+    #[test]
+    fn share_scope_maps_internal_scope_to_client_placement() {
+        assert_eq!(share_scope_of("bot"), "dedicated");
+        assert_eq!(share_scope_of("account"), "user");
+        assert_eq!(share_scope_of("group"), "group");
+        assert_eq!(share_scope_of("org"), "org");
+        let (scope, id, _) = scope_for("per-bot", "acct_1", Some("org_1"), "cw_1", false);
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_share_scope(&mut screen, scope, &id);
+        assert_eq!(screen["shareScope"], "dedicated");
+        assert!(screen.get("groupId").is_none(), "{screen}");
+
+        let (scope, id, _) = scope_for("per-account", "acct_1", Some("org_1"), "cw_1", false);
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_share_scope(&mut screen, scope, &id);
+        assert_eq!(screen["shareScope"], "user");
+        assert!(screen.get("groupId").is_none(), "{screen}");
+
+        let (scope, id, _) = scope_for("per-org", "acct_1", Some("org_1"), "cw_1", false);
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_share_scope(&mut screen, scope, &id);
+        assert_eq!(screen["shareScope"], "org");
+        assert!(screen.get("groupId").is_none(), "{screen}");
+
+        let (scope, id, _) = scope_for("per-org", "acct_1", None, "cw_1", false);
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_share_scope(&mut screen, scope, &id);
+        assert_eq!(
+            screen["shareScope"], "user",
+            "per-org with no org falls back to account/user, not org: {screen}"
+        );
+
+        let (scope, id, _) = scope_for("per-account", "acct_1", Some("org_1"), "cw_room", true);
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_share_scope(&mut screen, scope, &id);
+        assert_eq!(screen["shareScope"], "group");
+        assert_eq!(screen["groupId"], "cw_room");
+    }
+
+    #[test]
+    fn absent_computer_json_omits_share_scope_and_does_not_fake_ready() {
+        let mut absent = json!({
+            "agentId": "cw_1",
+            "state": "absent",
+            "vncUrl": Value::Null,
+        });
+        stamp_egress_fields(&mut absent, true, None);
+        assert_eq!(absent["isEgressTunnelAvailable"], false);
+        assert!(absent.get("egress_tunnel").is_none(), "{absent}");
+        assert!(
+            absent.get("shareScope").is_none(),
+            "unprovisioned omits shareScope; client hides the control: {absent}"
+        );
+        assert!(absent.get("groupId").is_none(), "{absent}");
+    }
+
+    #[test]
+    fn share_scope_stamp_leaves_egress_fields_in_place() {
+        let mut screen = json!({ "boxId": "bx_live" });
+        stamp_egress_fields(
+            &mut screen,
+            true,
+            Some(EgressTunnel {
+                enabled: true,
+                ready: true,
+            }),
+        );
+        stamp_share_scope(&mut screen, "account", "acct_1");
+        assert_eq!(screen["isEgressTunnelAvailable"], true);
+        assert_eq!(screen["egress_tunnel"]["ready"], true);
+        assert_eq!(screen["shareScope"], "user");
     }
 }

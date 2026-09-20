@@ -118,6 +118,7 @@ fn app_with(store: PgStore, secret: &[u8]) -> axum::Router {
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
     };
     let gateway = GatewayState::new(
         agui.clone(),

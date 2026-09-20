@@ -28,7 +28,7 @@ use opengrok_harness::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// How long a turn waits for a sleeping box to come up before running its first command anyway.
 /// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
@@ -60,6 +60,38 @@ pub struct AgUiState {
     /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
     /// still needs it in their ceiling before its tools run.
     pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
+    /// Shared with `GatewayState.settings` so AG-UI turns see `egressTunnelEnabled`.
+    /// `None` until `GatewayState::new` / `router` attach the Arc; env flags still apply.
+    pub host_settings: Option<Arc<Mutex<serde_json::Value>>>,
+}
+
+impl AgUiState {
+    /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
+    /// or host setting `egressTunnelEnabled`. This is host *intent*. The gateway verb
+    /// and Review-an-action gate also need `/v1/info` `egress_tunnel.ready`.
+    #[must_use]
+    pub fn egress_tunnel_enabled(&self) -> bool {
+        let settings = self
+            .host_settings
+            .as_ref()
+            .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
+            .unwrap_or_else(crate::gateway::default_settings);
+        crate::gateway::egress_tunnel_available(&settings)
+    }
+
+    /// Host intent AND this box's `egress_tunnel.ready`. Failed info → false.
+    /// Review-an-action for leave-box tools uses this, not host intent alone.
+    pub async fn egress_tunnel_for(
+        &self,
+        computer: &dyn opengrok_box::Computer,
+        box_id: &str,
+    ) -> bool {
+        let host_wants = self.egress_tunnel_enabled();
+        if !host_wants {
+            return false;
+        }
+        opengrok_box::EgressTunnel::advertised(true, computer.egress_tunnel(box_id).await)
+    }
 }
 
 /// Which coworker a run belongs to, and therefore whose computer its tools use.
@@ -107,8 +139,15 @@ fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<
         .collect();
     preferred
         .iter()
-        .filter(|name| offered.iter().any(|offered| offered == *name))
-        .cloned()
+        .filter_map(|name| {
+            offered
+                .iter()
+                .find(|offered| {
+                    let offered = offered.as_str();
+                    offered == name || offered == opengrok_tools::openai_safe_tool_name(name)
+                })
+                .cloned()
+        })
         .collect()
 }
 
@@ -268,7 +307,23 @@ pub(crate) async fn tools_for_coworker(
     // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
     // never told about them, so it cannot be sent down a dead end.
     let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
+    let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
+    let transcript_hold = match state
+        .auth
+        .store
+        .gateway_transcript(&coworker_id, account_id)
+        .await
+    {
+        Ok(entries) => entries
+            .iter()
+            .any(opengrok_tools::user_form::holds_the_screen),
+        // A transcript we cannot read must not freeze every screen tool; the form's own
+        // submit path still refuses to log secrets.
+        Err(_) => false,
+    };
+    context.screen_hold =
+        transcript_hold || pending_form_or_credential_hold(state, account_id, &coworker_id).await;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -281,7 +336,8 @@ pub(crate) async fn tools_for_coworker(
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
-        .with_review_approved(review_approved.iter().cloned());
+        .with_review_approved(review_approved.iter().cloned())
+        .with_egress_tunnel(egress_tunnel);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -325,6 +381,36 @@ pub(crate) async fn tools_for_coworker(
     }
 
     Some(ToolRunner::new(executor, context))
+}
+
+/// An unresolved user-form **or** a pending `credential.request` must hold the screen even
+/// when NativeChat never minted a gateway card for the credential wait.
+async fn pending_form_or_credential_hold(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+) -> bool {
+    let Ok(run_ids) = state.auth.store.awaiting_approval(account_id).await else {
+        return false;
+    };
+    for run_id in run_ids {
+        let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
+            continue;
+        };
+        if !crate::gateway::conversation::run_belongs_to(&run, coworker_id) {
+            continue;
+        }
+        if matches!(
+            run.pending.as_ref().map(|pending| pending.reason),
+            Some(
+                opengrok_core::run::SuspendReason::UserForm
+                    | opengrok_core::run::SuspendReason::Credential
+            )
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.
@@ -547,9 +633,15 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
+/// `POST /ag-ui` lives on `GatewayState` so a UserForm CUSTOM can mint the gateway card and
+/// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
+/// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
+pub fn run_router(state: crate::gateway::GatewayState) -> Router {
+    Router::new().route("/ag-ui", post(run)).with_state(state)
+}
+
 pub fn router(state: AgUiState) -> Router {
     Router::new()
-        .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
@@ -1477,8 +1569,10 @@ async fn computer_status(
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
-/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile.
-/// Same shape as the `image` on a `TOOL_CALL_RESULT`, so the client decodes it the same way.
+/// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile
+/// and for an explicit observe / Open the screen. Same shape as `TOOL_CALL_RESULT.image`,
+/// with `visibility: transcript` so a client that fetches this on purpose may persist it.
+/// Step shots on the run are `agent` and must not flood the transcript.
 /// `GET /coworkers/{id}/tools` — what this bot would be offered on a turn RIGHT NOW.
 ///
 /// The set is assembled per turn from the coworker's grant, its computer and its plugins, and
@@ -1519,8 +1613,20 @@ async fn list_tools(
         .filter_map(|schema| {
             let function = schema.get("function")?;
             let name = function.get("name")?.as_str()?.to_string();
-            // A qualified name (`plugin.server.tool`) is a plugin's; a bare one is a built-in.
-            let kind = if name.contains('.') { "plugin" } else { "builtin" };
+            // OpenAI-safe plugin names have no dots (`gmail_api_send`). Kind is
+            // "not a builtin", not "contains a dot".
+            let kind = if opengrok_tools::Executor::builtin_tool_names()
+                .iter()
+                .any(|builtin| {
+                    *builtin == name.as_str()
+                        || opengrok_tools::openai_safe_tool_name(builtin) == name
+                })
+                || name == opengrok_tools::USER_MACHINE_SHELL
+            {
+                "builtin"
+            } else {
+                "plugin"
+            };
             Some(serde_json::json!({
                 "name": name,
                 "description": function.get("description").and_then(serde_json::Value::as_str).unwrap_or(""),
@@ -1551,6 +1657,9 @@ async fn computer_screen(
             "base64": shot.png_base64,
             "width": shot.width,
             "height": shot.height,
+            // Explicit observe / Open the screen: this PNG is a transcript event
+            // the client may persist. Step shots on TOOL_CALL_RESULT are `agent`.
+            "visibility": "transcript",
         }))
         .into_response(),
         Err((status, message)) => (status, message).into_response(),
@@ -1909,10 +2018,15 @@ pub(crate) async fn principal_from_bearer(
 
 /// Start a run and stream its events.
 pub async fn run(
-    State(state): State<AgUiState>,
+    State(gateway): State<crate::gateway::GatewayState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
+    // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
+    // `GatewayState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
+    // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
+    // AG-UI path does.
+    let state = gateway.agui.clone();
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
     //
@@ -1990,6 +2104,13 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
+        crate::gateway::conversation::interrupt_parked_hitl(
+            &gateway,
+            account_id,
+            &coworker_id,
+            account_id.as_str(),
+        )
+        .await;
     }
 
     // Read once. The tool runner needs it to bind the run, and the system prompt needs it to say
@@ -2134,7 +2255,15 @@ pub async fn run(
     // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
     tokio::spawn(async move {
         let _lease = lease;
-        let sink = AgUiSink { tx };
+        // Card mint + `entryId` stamp happen inside the sink, **before** the CUSTOM frame
+        // is forwarded, so NativeChat sees the id on the AG-UI stream.
+        let sink = AgUiSink {
+            tx,
+            gateway,
+            coworker_id: journal.coworker_id.clone(),
+            account_id: journal.account_id.clone(),
+            form_hold: Mutex::new(crate::gateway::user_form::UserFormSseHold::default()),
+        };
         let _ = run_conversation_streaming(
             door.as_ref(),
             tools.as_ref(),
@@ -2287,8 +2416,9 @@ async fn append_events(
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
         if event.event_type == opengrok_wire::agui::EventType::Custom
-            && event.extra.get("name").and_then(|name| name.as_str())
-                == Some("run-awaiting-approval")
+            && crate::gateway::conversation::is_suspend_custom(
+                event.extra.get("name").and_then(|name| name.as_str()),
+            )
         {
             let call_id = event
                 .extra
@@ -2330,10 +2460,19 @@ async fn append_events(
         }
 
         // The run's own ending, recorded once, from the event that carries it.
+        //
+        // HITL park emits `RUN_FINISHED` after CUSTOM `run-awaiting-approval` so NativeChat
+        // Waiting chrome can treat the HTTP turn as not running. That closer is a stream
+        // fact, not an aggregate ending: a suspended run must stay `awaiting-approval` so
+        // Continue can resume. Skip Finish while we are waiting; a later resume answers
+        // first (status Running) and then a real `RUN_FINISHED` Finishes.
         let closing = match event.event_type {
-            opengrok_wire::agui::EventType::RunFinished => {
+            opengrok_wire::agui::EventType::RunFinished
+                if run.status != RunStatus::AwaitingApproval =>
+            {
                 Some(run.decide(RunCommand::Finish { at_ms }))
             }
+            opengrok_wire::agui::EventType::RunFinished => None,
             opengrok_wire::agui::EventType::RunError => Some(
                 run.decide(RunCommand::Fail {
                     reason: event
@@ -2407,15 +2546,53 @@ pub async fn replay_run(
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     }
 
+    let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+    let events = events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await;
+
     Json(serde_json::json!({
         "runId": run_id.as_str(),
         "threadId": run.thread_id,
         "status": run.status.as_str(),
         "failure": run.failure,
         "pending": run.pending,
-        "events": run.emitted,
+        "events": events,
     }))
     .into_response()
+}
+
+fn run_time_window(emitted: &[serde_json::Value]) -> (i64, i64) {
+    let times: Vec<i64> = emitted
+        .iter()
+        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64))
+        .collect();
+    match (times.first(), times.last()) {
+        (Some(&first), Some(&last)) => (first, last),
+        _ => (0, i64::MAX),
+    }
+}
+
+async fn events_for_client(
+    state: &AgUiState,
+    account_id: &AccountId,
+    run: &opengrok_core::run::Run,
+    started_at_ms: i64,
+    updated_at_ms: i64,
+) -> Vec<serde_json::Value> {
+    let forms = match run.coworker_id.as_ref() {
+        Some(coworker_id) => state
+            .auth
+            .store
+            .gateway_transcript(coworker_id, account_id)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    crate::gateway::user_form::hydrate_agui_events(
+        run.emitted.clone(),
+        &forms,
+        started_at_ms,
+        updated_at_ms,
+    )
 }
 
 /// How many runs a thread answers with when the caller does not ask for a number.
@@ -2522,6 +2699,8 @@ pub async fn replay_thread(
     }
 
     let mut runs = Vec::with_capacity(newest_first.len());
+    let mut forms_by_coworker: std::collections::HashMap<CoworkerId, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
     // OLDEST FIRST, which is the other way round from the store. `runs_for_thread_owned_by` hands
     // back the newest runs because that is how a limit has to be counted on a long thread; a
     // transcript is read in the order it happened. Reversing once here, rather than leaving it to
@@ -2541,6 +2720,33 @@ pub async fn replay_thread(
         if !run.started {
             continue;
         }
+        let events = if with_events {
+            let forms = match run.coworker_id.as_ref() {
+                Some(coworker_id) => {
+                    if let Some(cached) = forms_by_coworker.get(coworker_id) {
+                        cached.clone()
+                    } else {
+                        let loaded = state
+                            .auth
+                            .store
+                            .gateway_transcript(coworker_id, &account_id)
+                            .await
+                            .unwrap_or_default();
+                        forms_by_coworker.insert(coworker_id.clone(), loaded.clone());
+                        loaded
+                    }
+                }
+                None => Vec::new(),
+            };
+            Some(crate::gateway::user_form::hydrate_agui_events(
+                run.emitted,
+                &forms,
+                summary.started_at_ms,
+                summary.updated_at_ms,
+            ))
+        } else {
+            None
+        };
         runs.push(ThreadRunReplay {
             run_id: summary.id.as_str().to_string(),
             // The aggregate's status, not the projection's, for the same reason `replay_run` uses
@@ -2552,7 +2758,7 @@ pub async fn replay_thread(
             // The frames are loaded either way: whether a run started and why it failed are only
             // knowable from its log, and answering those two from the projection would mean
             // guessing. `events=false` saves the client the megabytes, not the server the read.
-            events: with_events.then_some(run.emitted),
+            events,
         });
     }
 
@@ -2709,10 +2915,28 @@ fn resume_outcome(
     approved: bool,
     pending: &opengrok_core::run::PendingApproval,
 ) -> opengrok_harness::ResumeOutcome {
-    if approved {
-        return opengrok_harness::ResumeOutcome::Approved;
-    }
     match pending.reason {
+        // Re-running `request_user_form` would raise the card again. Submit/dismiss synthesise
+        // the tool result; `/answer` is the fallback and must do the same.
+        opengrok_core::run::SuspendReason::UserForm => {
+            opengrok_harness::ResumeOutcome::Settled(if approved {
+                "The person submitted the form. It was filled into the page. Secret field values were typed into the page and never shown to you.".to_string()
+            } else {
+                "The person dismissed the form without filling anything. Continue without those credentials; do not type secrets with `computer`.".to_string()
+            })
+        }
+        opengrok_core::run::SuspendReason::Credential => {
+            opengrok_harness::ResumeOutcome::Settled(if approved {
+                opengrok_tools::credential::tool_result_content(
+                    opengrok_tools::credential::CredentialStatus::Filled,
+                )
+            } else {
+                opengrok_tools::credential::tool_result_content(
+                    opengrok_tools::credential::CredentialStatus::Denied,
+                )
+            })
+        }
+        _ if approved => opengrok_harness::ResumeOutcome::Approved,
         opengrok_core::run::SuspendReason::AutoReview => opengrok_harness::ResumeOutcome::Refused(
             "the user declined this on the auto-review card".to_string(),
         ),
@@ -2723,7 +2947,7 @@ fn resume_outcome(
                 pending.tool
             ))
         }
-        // Named rather than caught by a wildcard, so a fourth kind of card has to decide here
+        // Named rather than caught by a wildcard, so a fifth kind of card has to decide here
         // what its refusal says instead of quietly borrowing this one's words.
         opengrok_core::run::SuspendReason::ExecConsent => {
             opengrok_harness::ResumeOutcome::Refused(format!(
@@ -3213,16 +3437,108 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 
 /// Live AG-UI frames, forwarded as they are produced. Dropping the HTTP body closes the
 /// channel; the spawned turn still runs so a disconnect does not abandon the journal.
+///
+/// A UserForm CUSTOM is stamped with `entryId` here, **before** the frame is sent: mint the
+/// gateway card first (same `user_form_card` / sanitize as `sendPrompt`), then forward
+/// `name: run-awaiting-approval` + `reason: user-form` + that id. NativeChat never watches
+/// the transcript live stream, so an after-the-fact append does not unblock them.
+///
+/// `request_user_form` TOOL_CALL frames are held until that stamp: NativeChat paints Website
+/// login from TOOL_CALL and falls back to the raw `toolCallId` (`call-…`) when `entryId` is
+/// missing. Streaming those frames during the model completion is how a second same-title
+/// card stayed `call-*-1` with Continue that could not submit.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
+    gateway: crate::gateway::GatewayState,
+    coworker_id: Option<CoworkerId>,
+    account_id: Option<opengrok_core::id::AccountId>,
+    form_hold: Mutex<crate::gateway::user_form::UserFormSseHold>,
+}
+
+impl AgUiSink {
+    fn send(&self, event: Event) -> bool {
+        self.tx.send(event).is_ok()
+    }
+
+    fn hold_or_pass(&self, event: Event) -> Option<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Some(event);
+        };
+        hold.push(event)
+    }
+
+    fn release_form(&self, call_id: &str, entry_id: Option<&str>) -> Vec<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Vec::new();
+        };
+        hold.release_for(call_id, entry_id)
+    }
+
+    fn release_held_forms(&self) -> Vec<Event> {
+        let Ok(mut hold) = self.form_hold.lock() else {
+            return Vec::new();
+        };
+        hold.release_rest()
+    }
 }
 
 #[async_trait::async_trait]
 impl EventSink for AgUiSink {
     async fn emit(&self, events: &[Event]) {
         for event in events {
-            if self.tx.send(event.clone()).is_err() {
-                break;
+            let mut event = event.clone();
+            if crate::gateway::user_form::is_live_user_form_custom(&event) {
+                if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id)
+                {
+                    crate::gateway::conversation::stamp_user_form_entry_id(
+                        &self.gateway,
+                        coworker_id,
+                        account_id,
+                        &mut event,
+                    )
+                    .await;
+                }
+                let call_id = event
+                    .extra
+                    .get("callId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let entry_id = event
+                    .extra
+                    .get("entryId")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string);
+                for held in self.release_form(&call_id, entry_id.as_deref()) {
+                    if !self.send(held) {
+                        return;
+                    }
+                }
+                if !self.send(event) {
+                    return;
+                }
+                continue;
+            }
+            if matches!(
+                event.event_type,
+                opengrok_wire::agui::EventType::RunFinished
+                    | opengrok_wire::agui::EventType::RunError
+            ) {
+                for held in self.release_held_forms() {
+                    if !self.send(held) {
+                        return;
+                    }
+                }
+                if !self.send(event) {
+                    return;
+                }
+                continue;
+            }
+            if let Some(event) = self.hold_or_pass(event)
+                && !self.send(event)
+            {
+                return;
             }
         }
     }
@@ -3345,6 +3661,7 @@ mod tests {
         let said = |reason| match resume_outcome(false, &pending(reason)) {
             opengrok_harness::ResumeOutcome::Refused(why) => why,
             opengrok_harness::ResumeOutcome::Approved => String::new(),
+            opengrok_harness::ResumeOutcome::Settled(why) => why,
         };
         let consent = said(opengrok_core::run::SuspendReason::ExecConsent);
         assert!(!consent.is_empty(), "a no is not an approval");
@@ -3359,6 +3676,28 @@ mod tests {
         assert!(policy.contains("shell"), "{policy}");
         let review = said(opengrok_core::run::SuspendReason::AutoReview);
         assert!(review.contains("auto-review"), "{review}");
+        let form = said(opengrok_core::run::SuspendReason::UserForm);
+        assert!(
+            form.contains("dismissed") || form.contains("without filling"),
+            "{form}"
+        );
+        assert!(
+            matches!(
+                resume_outcome(true, &pending(opengrok_core::run::SuspendReason::UserForm)),
+                opengrok_harness::ResumeOutcome::Settled(_)
+            ),
+            "a yes on a user-form must not re-run request_user_form"
+        );
+        assert!(
+            matches!(
+                resume_outcome(
+                    true,
+                    &pending(opengrok_core::run::SuspendReason::Credential)
+                ),
+                opengrok_harness::ResumeOutcome::Settled(_)
+            ),
+            "a yes on credential.request must not re-run the tool"
+        );
 
         // None of them blames the model or reads as an error. A refusal is a decision somebody
         // made, and a sentence that sounds like a fault invites an apology and a retry.
@@ -3555,5 +3894,58 @@ mod tests {
             assert!(frame.starts_with("data: "));
             assert_eq!(frame.matches("\n\n").count(), 1, "{frame:?}");
         }
+    }
+
+    /// NativeChat mounts CUSTOM `run-awaiting-approval` + `reason: user-form`. `entryId` is a
+    /// flattened extra field (same envelope as `callId` / `reason`), not a nested object.
+    #[test]
+    fn a_user_form_custom_frame_carries_entry_id_at_the_top_level() {
+        let event = Event::new(EventType::Custom, 42)
+            .with("name", "run-awaiting-approval")
+            .with("threadId", "thr-1")
+            .with("runId", "run-1")
+            .with("callId", "mock-form-1")
+            .with("tool", "request_user_form")
+            .with("reason", "user-form")
+            .with("why", "Waiting for you")
+            .with("entryId", "e_form")
+            .with(
+                "arguments",
+                json!({
+                    "title": "Google account",
+                    "instruction": "Enter the address and password.",
+                    "liveHost": "accounts.google.com",
+                    "fields": [{
+                        "id": "email",
+                        "label": "Email",
+                        "type": "email",
+                        "required": true,
+                        "secret": false
+                    }]
+                }),
+            )
+            .with(
+                "formRequest",
+                json!({
+                    "title": "Google account",
+                    "instruction": "Enter the address and password.",
+                    "liveHost": "accounts.google.com",
+                    "fields": [{
+                        "id": "email",
+                        "label": "Email",
+                        "type": "email",
+                        "required": true,
+                        "secret": false
+                    }]
+                }),
+            );
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "CUSTOM");
+        assert_eq!(wire["name"], "run-awaiting-approval");
+        assert_eq!(wire["reason"], "user-form");
+        assert_eq!(wire["entryId"], "e_form");
+        assert_eq!(wire["formRequest"]["title"], "Google account");
+        assert_eq!(wire["arguments"]["title"], "Google account");
+        assert!(wire.get("values").is_none());
     }
 }

@@ -97,10 +97,11 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 
 ```sh
 cargo check --workspace          # must stay clean — this is the DEFAULT build, the one that ships
+cargo check -p opengrok --no-default-features  # one reqwest, one hyper; `jev` is typesafe-sdk
 cargo clippy --workspace --all-targets
 cargo test --workspace --features opengrok-server/mock-fixtures   # see below
 scripts/serve.sh                 # build + (re)start the dev server from .env
-scripts/gate.sh --smoke          # the merge gate (CI is billing-blocked); docs/setup/gate.md
+scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
 scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
 ```
 

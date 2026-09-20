@@ -70,7 +70,24 @@ answers with a calibrated probability for each option — see `crates/opengrok-s
 | `OG_BOX_IDLE_STOP_SECONDS` | `0` (off) | stop an idle box after this many seconds |
 | `OG_RECIPE_OBSERVE` | `input` | how much of the desktop a recipe run asks the box to report back (hexuria/box#29): `off` \| `input` \| `page`. `input` is the window under each pointer step and where the keys were about to go — about ten X round trips on a connection the box already holds, bounded by the box at 400 ms and well under the pacing a click already pays, so it does not measurably change playback. `page` adds two loopback DevTools reads either side of every navigating step, each capped at 250 ms, up to 512 of them on a 256-step recipe — seconds to minutes on a long tape, which is why it is not the default. What comes back is summarised into the tool result a model reads and into a workflow's `last.observe` / `last.targets` / `last.focus` / `last.urls` facts; it is **not** kept in the run history, because a recipe's runs are read by everyone it was shared to and a run happens on the box of whoever played it. Read once at boot; an unrecognised word logs a warning and falls back to `input` |
 | `OG_DOCKER_IMAGE` | `debian:stable-slim` | the image a Docker computer is built from; any image with a shell |
+| `OG_EGRESS_TUNNEL_ENABLED` | unset (off) | `1` = host wants the box egress tunnel (NativeChat "Review an action"). Same word as Grok host `SAND_EGRESS_TUNNEL_ENABLED === "1"` and the in-app `egressTunnelEnabled` toggle: any one is *intent*. The verb `isEgressTunnelAvailable` is intent **and** guest `/v1/info` `capabilities.egress_tunnel.ready`. On a Docker desktop, intent at **create** also publishes `127.0.0.1::8790` and sets `BOX_EGRESS_TUNNEL=1` plus a long `BOX_EGRESS_TUNNEL_BEARER` — Docker cannot add that publish later. Existing containers without 8790 must be **recreated**. See attach steps below |
+| `SAND_EGRESS_TUNNEL_ENABLED` | unset (off) | Grok host spelling of the same flag; `1` is on, `"true"` is not |
 | `OG_HOSTED` | unset | `1` = hosted/multi-tenant: local Docker is never advertised or used (untrusted bot containers must not run on the API host) |
+
+A Docker desktop created with egress on listens for the laptop client on the published
+host port of guest 8790. Discover it and attach (bearer must match create's container env;
+OpenGrok does not dial this WS):
+
+```sh
+docker port <box> 8790
+# 127.0.0.1:NNNN
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <box> \
+  | sed -n 's/^BOX_EGRESS_TUNNEL_BEARER=//p' > /tmp/box-egress.bearer
+box-egress-tunnel client --url ws://127.0.0.1:NNNN --bearer-file /tmp/box-egress.bearer
+```
+
+The image must ship the `box-egress-tunnel` binary (`grok-box:local` rebuild). `ready` stays
+false until that client is attached. Never publish 8791/8792.
 
 ## Identity, email, console
 

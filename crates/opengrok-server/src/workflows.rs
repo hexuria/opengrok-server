@@ -35,14 +35,15 @@ use axum::routing::post;
 use axum::{Json, Router};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_recipes::Values;
-use opengrok_tools::workflow::{
-    Ending, Judge, JudgeAsk, JudgeError, Judging, Verdict, Walker, Workflow,
-};
+use opengrok_tools::workflow::{Ending, Judging, Walker, Workflow};
+#[cfg(feature = "jev")]
+use opengrok_tools::workflow::{Judge, JudgeAsk, JudgeError, Verdict};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
 use crate::agui::routes::owned_coworker;
+#[cfg(feature = "jev")]
 use crate::jev::{Answer, Ask, JevError, JsonContent, NoulCriteria, Question};
 use crate::recipes::{Action, StoreRecipes, permitted};
 
@@ -72,6 +73,7 @@ pub fn router(state: AgUiState) -> Router {
 /// put a question to TypeSafe and bring back what was said, with the four ways it can fail kept
 /// apart; the engine's job is to take one branch. This is the translation between them, and it is
 /// the only place the three answer kinds are turned into one word.
+#[cfg(feature = "jev")]
 pub struct JevJudge {
     pub jev: crate::jev::SharedJev,
     /// The Jev model for this run's questions. `None` uses the deployment's configured default,
@@ -79,6 +81,7 @@ pub struct JevJudge {
     pub model: Option<String>,
 }
 
+#[cfg(feature = "jev")]
 #[async_trait::async_trait]
 impl Judge for JevJudge {
     async fn judge(&self, ask: JudgeAsk<'_>) -> Result<Verdict, JudgeError> {
@@ -125,6 +128,7 @@ impl Judge for JevJudge {
 /// One of the engine's questions as the SDK's. The refusals are the sentences `/jev/ask` gives for
 /// the same shapes; the tree's lint has already applied them at write time, so reaching one of
 /// these means a body got past the lint and that is worth stopping the walk for.
+#[cfg(feature = "jev")]
 fn question_for(question: &opengrok_tools::workflow::Question) -> Result<Question, String> {
     use opengrok_tools::workflow::Question as Asked;
     let instructions = question.instructions().trim();
@@ -179,6 +183,7 @@ fn question_for(question: &opengrok_tools::workflow::Question) -> Result<Questio
 }
 
 /// What Jev said, as the one word the engine branches on.
+#[cfg(feature = "jev")]
 fn verdict_for(
     question: &opengrok_tools::workflow::Question,
     answer: Answer,
@@ -227,6 +232,21 @@ fn verdict_for(
                 Answer::Score(_) => "a score",
             }
         ))),
+    }
+}
+
+#[cfg(not(feature = "jev"))]
+fn ask_refused_without_jev() -> &'static str {
+    "this build was compiled without the cargo feature `jev`, so there is nobody to ask"
+}
+
+/// `Ok` only when the caller switched Jev off. Any other switch would have asked the classifier,
+/// and this build has no classifier to ask.
+#[cfg(not(feature = "jev"))]
+fn jev_wanted_on_this_build(jev_switch: Option<bool>) -> Result<(), &'static str> {
+    match jev_switch {
+        Some(false) => Ok(()),
+        _ => Err(ask_refused_without_jev()),
     }
 }
 
@@ -460,6 +480,7 @@ async fn run(
     // sentence: one is a decision somebody made for this run, the other is a deployment with no
     // key at all, and a person reading a run full of default answers has to be able to tell which
     // — so the reason travels into the trail rather than a bare "no judge".
+    #[cfg(feature = "jev")]
     let judge = match (request.jev, state.auth.jev.clone()) {
         (Some(false), _) => Err("Jev was switched off for this run".to_string()),
         // `None` for the model: the deployment's own (`OG_JEV_MODEL`, read once at boot into the
@@ -471,9 +492,17 @@ async fn run(
                 .to_string(),
         ),
     };
+    #[cfg(feature = "jev")]
     let judging = match &judge {
         Ok(judge) => Judging::Ask(judge),
         Err(because) => Judging::Off(because.clone()),
+    };
+    #[cfg(not(feature = "jev"))]
+    let judging = match jev_wanted_on_this_build(request.jev) {
+        Ok(()) => Judging::Off("Jev was switched off for this run".to_string()),
+        Err(why) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+        }
     };
 
     let recipes = StoreRecipes {
@@ -599,4 +628,31 @@ async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
         .await
         .ok()
         .and_then(|(account, _)| account.org_id)
+}
+
+#[cfg(all(test, not(feature = "jev")))]
+mod without_jev {
+    #[test]
+    fn an_ask_with_kind_noul_refuses_when_jev_is_not_compiled() {
+        let why = super::ask_refused_without_jev();
+        assert!(
+            why.contains("cargo feature `jev`"),
+            "the refusal must name the missing feature, got {why}"
+        );
+        assert!(
+            matches!(super::jev_wanted_on_this_build(None), Err(sentence) if sentence == why),
+            "an ask that needs Jev must refuse"
+        );
+        assert!(
+            matches!(
+                super::jev_wanted_on_this_build(Some(true)),
+                Err(sentence) if sentence == why
+            ),
+            "jev true still needs the feature"
+        );
+        assert!(
+            super::jev_wanted_on_this_build(Some(false)).is_ok(),
+            "an explicit off stays a walk without a judge"
+        );
+    }
 }

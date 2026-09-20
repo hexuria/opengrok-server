@@ -22,6 +22,40 @@ pub mod docker;
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
 pub use docker::DockerComputer;
 
+/// Guest `/v1/info` `capabilities.egress_tunnel` (hexuria/box).
+///
+/// `enabled` is `BOX_EGRESS_TUNNEL=1`: the guest started the CONNECT proxy on
+/// `127.0.0.1:8791` (guest-internal; never published) and launched Chromium
+/// with `--proxy-server`. The laptop client attaches to the WS on guest
+/// `0.0.0.0:8790`, which Docker publishes as `127.0.0.1::8790` only when the
+/// host wants the tunnel. `ready` means that client is attached. OpenGrok does
+/// not dial that WS; we only report availability and gate leave-box tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgressTunnel {
+    pub enabled: bool,
+    pub ready: bool,
+}
+
+impl EgressTunnel {
+    /// `None` when the capability is absent or malformed. Both booleans must be
+    /// present; a partial object is not `ready: false` and is not available.
+    pub fn from_info(info: &serde_json::Value) -> Option<Self> {
+        let cap = info.get("capabilities")?.get("egress_tunnel")?;
+        Some(Self {
+            enabled: cap.get("enabled").and_then(serde_json::Value::as_bool)?,
+            ready: cap.get("ready").and_then(serde_json::Value::as_bool)?,
+        })
+    }
+
+    /// Gateway verb: host wants the tunnel AND `capabilities.egress_tunnel.ready`.
+    /// No box, failed `/v1/info`, or `enabled` without a laptop client → false.
+    /// NativeChat must not paint the toggle live until a client is attached.
+    #[must_use]
+    pub fn advertised(host_wants: bool, box_cap: Option<Self>) -> bool {
+        host_wants && box_cap.is_some_and(|cap| cap.ready)
+    }
+}
+
 /// What a command did. `truncated` is carried rather than dropped: a tail is not the output, and a
 /// coworker reasoning over a silently clipped log reaches confident wrong conclusions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +86,9 @@ pub enum BoxError {
     Refused { status: u16, body: String },
     #[error("no box with that id")]
     NoSuchBox,
+    /// The host could not mint a secret for the box (no OS randomness).
+    #[error("could not mint a box secret: {0}")]
+    Secret(String),
 }
 
 impl BoxError {
@@ -66,6 +103,7 @@ impl BoxError {
             }
             BoxError::Refused { .. } => "provider_error",
             BoxError::NoSuchBox => "provider_error",
+            BoxError::Secret(_) => "provider_error",
         }
     }
 }
@@ -361,6 +399,14 @@ pub trait Computer: Send + Sync {
     fn kind(&self) -> &'static str {
         "local-docker"
     }
+
+    /// Guest `GET /v1/info` `capabilities.egress_tunnel`, or `None` when the
+    /// guest cannot be asked or does not advertise the capability. Default
+    /// `None` (not available). A Docker desktop probes box-host; it does not
+    /// dial the tunnel WS or `GET /v1/egress`.
+    async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +479,56 @@ mod tests {
     #[test]
     fn no_screen_is_a_refusal_not_an_outage() {
         assert!(matches!(no_screen(), BoxError::Refused { status: 501, .. }));
+    }
+
+    #[test]
+    fn egress_tunnel_from_info_reads_enabled_and_ready() {
+        let info = serde_json::json!({
+            "capabilities": {
+                "exec": { "enabled": true, "ready": true },
+                "egress_tunnel": { "enabled": true, "ready": false }
+            }
+        });
+        assert_eq!(
+            EgressTunnel::from_info(&info),
+            Some(EgressTunnel {
+                enabled: true,
+                ready: false
+            })
+        );
+        assert!(
+            EgressTunnel::from_info(&serde_json::json!({"capabilities": {"exec": {}}})).is_none(),
+            "old guests without the capability are not ready"
+        );
+        assert!(
+            EgressTunnel::from_info(&serde_json::json!({
+                "capabilities": { "egress_tunnel": { "enabled": true } }
+            }))
+            .is_none(),
+            "partial objects are unavailable, not ready:false"
+        );
+    }
+
+    #[test]
+    fn advertised_is_host_wants_and_box_ready() {
+        let ready = EgressTunnel {
+            enabled: true,
+            ready: true,
+        };
+        let not_ready = EgressTunnel {
+            enabled: true,
+            ready: false,
+        };
+        assert!(!EgressTunnel::advertised(false, None));
+        assert!(
+            !EgressTunnel::advertised(true, None),
+            "no /v1/info → not available; do not claim reroute works"
+        );
+        assert!(EgressTunnel::advertised(true, Some(ready)));
+        assert!(
+            !EgressTunnel::advertised(true, Some(not_ready)),
+            "enabled guest with no laptop client is not available"
+        );
+        assert!(!EgressTunnel::advertised(false, Some(ready)));
     }
 }

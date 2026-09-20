@@ -613,8 +613,15 @@ async fn command(
         // ---- trays and feature gates: honest empties, correct container types ----
         "getTrays" => reply(StatusCode::OK, json!([])),
         "dismissTray" | "clearTrays" => reply(StatusCode::OK, Value::Null),
-        "isAgentNetworkEnabled" | "isGlobalSearchEnabled" | "isEgressTunnelAvailable" => {
-            reply(StatusCode::OK, json!(false))
+        "isAgentNetworkEnabled" | "isGlobalSearchEnabled" => reply(StatusCode::OK, json!(false)),
+        "isEgressTunnelAvailable" => {
+            // Host intent AND `/v1/info` `egress_tunnel.ready`. No box / failed
+            // info → false (NativeChat must not show the toggle live). Docker
+            // host-network is not the prod path; we do not dial the guest WS.
+            reply(
+                StatusCode::OK,
+                json!(super::is_egress_tunnel_available(&state).await),
+            )
         }
 
         // ---- host settings: set must echo the whole record, the resync chain reads it back ----
@@ -675,8 +682,44 @@ async fn command(
                 body,
             )
         }
+        "submitUserForm" => {
+            let (code, body) = super::user_form::submit_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "dismissUserForm" => {
+            let (code, body) = super::user_form::dismiss_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "resolveBoxHandoff" => {
+            let (code, body) = super::user_form::resolve_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "submitCredentialResult" => {
+            let (code, body) = super::credential::result_for_caller(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
         "stopAgentTurn" => {
             let (code, body) = super::conversation::stop_agent_turn(&state, &args, &caller).await;
+            reply(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                body,
+            )
+        }
+        "interruptAgentRun" => {
+            let (code, body) =
+                super::conversation::interrupt_agent_run(&state, &args, &caller).await;
             reply(
                 StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 body,
@@ -1291,7 +1334,11 @@ fn never_heard_of_it(method: &str) -> (u16, Value) {
         | "setAgentUnread"
         | "discardDraft"
         | "sendDraft"
-        | "submitSecret" => (200, Value::Null),
+        | "submitSecret"
+        | "submitUserForm"
+        | "dismissUserForm"
+        | "resolveBoxHandoff"
+        | "submitCredentialResult" => (200, Value::Null),
         "getAgentAvatar" => (200, json!({ "dataUrl": null, "version": null })),
         _ => (404, json!({ "error": "no such agent" })),
     }

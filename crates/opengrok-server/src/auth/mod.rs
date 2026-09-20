@@ -11,6 +11,7 @@ pub mod oauth_mcp;
 pub mod pages;
 pub mod password;
 pub mod password_reset;
+pub mod refresh_grace;
 pub mod resend;
 pub mod routes;
 pub mod token;

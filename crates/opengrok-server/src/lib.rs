@@ -17,7 +17,21 @@ pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
 pub mod grpc;
+#[cfg(feature = "jev")]
 pub mod jev;
+#[cfg(not(feature = "jev"))]
+pub mod jev {
+    /// AuthState holds `Option<SharedJev>`. Uninhabited so a door cannot be built when the SDK
+    /// is not in the graph.
+    pub type SharedJev = std::convert::Infallible;
+
+    pub fn from_env() -> Option<SharedJev> {
+        tracing::info!(
+            "this build was compiled without the cargo feature `jev`, so Jev is unavailable"
+        );
+        None
+    }
+}
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;
@@ -39,10 +53,18 @@ pub use auth::{AuthState, TokenMinter};
 /// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
 /// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
 /// smoke script was already checking.
-pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
+pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
+    if state.host_settings.is_none() {
+        state.host_settings = Some(gateway.settings.clone());
+    }
     let app = Router::new()
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
+        .merge(gateway::user_form::agui_router(gateway.clone()))
+        .merge(gateway::credential::agui_router(gateway.clone()))
+        // `POST /ag-ui` needs `GatewayState` so a UserForm CUSTOM can mint the gateway
+        // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
+        .merge(agui::run_router(gateway.clone()))
         .merge(seamb::router(gateway.clone()))
         .merge(auth::router(state.auth.clone()))
         .merge(auth::oauth_mcp::router(state.auth.clone()))
@@ -51,8 +73,10 @@ pub fn router(state: AgUiState, gateway: gateway::GatewayState) -> Router {
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
         .merge(workflows::router(state.clone()))
-        .merge(artifacts::router(state.clone()))
-        .merge(jev::routes::router(state.clone()))
+        .merge(artifacts::router(state.clone()));
+    #[cfg(feature = "jev")]
+    let app = app.merge(jev::routes::router(state.clone()));
+    let app = app
         .merge(local_exec::router(state.auth.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))

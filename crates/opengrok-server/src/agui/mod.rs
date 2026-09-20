@@ -7,4 +7,4 @@ pub mod chat_ui;
 pub mod provision;
 pub mod routes;
 
-pub use routes::{AgUiState, router, to_chat_messages};
+pub use routes::{AgUiState, router, run_router, to_chat_messages};
