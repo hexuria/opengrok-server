@@ -462,6 +462,32 @@ impl PgStore {
         rows.into_iter().map(thread_run_from_row).collect()
     }
 
+    /// How many of this thread's runs have not ended.
+    ///
+    /// The webhook door caps firings on this: whoever holds a hook's key can press it as fast as
+    /// they like, and every press would otherwise open a run that is billed and holds a recovery
+    /// lease. Counted in the database rather than from `runs_for_thread`, because that reader is
+    /// bounded by a limit and orders by when a run last MOVED — a run waiting days on a card
+    /// would fall off the end of the page and out of the count.
+    ///
+    /// The terminal words come from `RunStatus` rather than being spelled here, so a sixth status
+    /// cannot be invented in one place and forgotten in this query.
+    pub async fn unfinished_runs_in_thread(&self, thread_id: &str) -> StoreResult<i64> {
+        let ended: Vec<&str> = [RunStatus::Finished, RunStatus::Failed, RunStatus::Stopped]
+            .iter()
+            .map(RunStatus::as_str)
+            .collect();
+        let row = sqlx::query(
+            "select count(*) as unfinished from run_view
+             where thread_id = $1 and not (status = any($2))",
+        )
+        .bind(thread_id)
+        .bind(&ended)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.try_get("unfinished")?)
+    }
+
     /// The runs of one thread that THIS ACCOUNT may read, newest first.
     ///
     /// LAYER 4 (`docs/PLAN.md` §4.5) in the shape a thread needs it: the owner is a condition of

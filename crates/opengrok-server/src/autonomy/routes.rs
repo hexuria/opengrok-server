@@ -124,11 +124,20 @@ async fn may_use(
     Ok(())
 }
 
+/// Every reply on this door that carries a webhook key. A bearer must not sit in a proxy, a
+/// browser cache or a `curl` on somebody's disk — the same rule the OAuth door applies to the
+/// tokens it mints (`auth/oauth_mcp.rs`). It is set on the cron replies too: a header that is
+/// sometimes absent is a header a reader has to think about, and "which routines exist" is not
+/// cacheable either.
+const NO_STORE: (axum::http::HeaderName, &str) = (axum::http::header::CACHE_CONTROL, "no-store");
+
 /// One routine as the wire carries it — built from the aggregate on create and from the
 /// projection on list, which is why it is a shape of its own rather than a method on either.
 struct RoutineRow<'a> {
     id: &'a str,
     coworker_id: Option<&'a str>,
+    /// What the person called it, or the prompt's first words when they did not.
+    name: &'a str,
     prompt: &'a str,
     kind: WakeKind,
     /// Empty on a webhook wake, which answers `null` rather than `""`.
@@ -150,6 +159,7 @@ impl RoutineRow<'_> {
         let mut row = serde_json::json!({
             "id": self.id,
             "coworkerId": self.coworker_id,
+            "name": self.name,
             "cron": match self.kind {
                 WakeKind::Cron => serde_json::json!(self.cron),
                 WakeKind::Webhook => serde_json::Value::Null,
@@ -190,9 +200,12 @@ fn wake_from(body: &mut CreateSchedule) -> Result<Wake, (StatusCode, String)> {
                 webhook_key: key,
             })
         }
-        other => Err((
+        // NAMED, NOT ECHOED. Handing the caller's own bytes back is how a refusal becomes a
+        // reflector: whatever they sent lands in our log line, in their console and in anything
+        // that renders this message.
+        _ => Err((
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("a routine wakes on \"cron\" or \"webhook\", not {other:?}"),
+            "kind must be \"cron\" or \"webhook\"".to_string(),
         )),
     }
 }
@@ -256,10 +269,12 @@ async fn create_schedule(
 
     (
         StatusCode::CREATED,
+        [NO_STORE],
         Json(
             RoutineRow {
                 id: id.as_str(),
                 coworker_id: state_after.coworker_id.as_ref().map(|c| c.as_str()),
+                name: &state_after.name,
                 prompt: &state_after.prompt,
                 kind: state_after.kind,
                 cron: &state_after.cron,
@@ -290,23 +305,38 @@ async fn list_schedules(
     };
     let mut rows = Vec::with_capacity(schedules.len());
     for view in schedules {
-        // The projection indexes the hook id; the plaintext key lives only in the aggregate, so a
-        // webhook row costs one stream read. A deployment with no webhooks reads nothing extra.
+        // The projection carries the key for every routine written since it was projected, so a
+        // listing is one query. A webhook row from before that column existed carries an empty
+        // key and is read from its stream instead — once, because the next write to it projects
+        // the key like any other.
         let key = match view.kind {
             WakeKind::Cron => String::new(),
-            WakeKind::Webhook => state
-                .agui
-                .auth
-                .store
-                .load_schedule(&ScheduleId::from_stored(view.id.clone()))
-                .await
-                .map(|(schedule, _)| schedule.webhook_key)
-                .unwrap_or_default(),
+            WakeKind::Webhook if !view.webhook_key.is_empty() => view.webhook_key.clone(),
+            WakeKind::Webhook => {
+                match state
+                    .agui
+                    .auth
+                    .store
+                    .load_schedule(&ScheduleId::from_stored(view.id.clone()))
+                    .await
+                {
+                    Ok((schedule, _)) => schedule.webhook_key,
+                    // NOT AN EMPTY KEY. A storage failure answered with `"key": ""` would show
+                    // the owner a hook they could not fire and no reason why — and they would
+                    // rotate a perfectly good key to try to fix it.
+                    Err(error) => {
+                        tracing::error!(%error, routine = %view.id, "could not read a routine's key");
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed")
+                            .into_response();
+                    }
+                }
+            }
         };
         rows.push(
             RoutineRow {
                 id: &view.id,
                 coworker_id: Some(view.coworker_id.as_str()),
+                name: &view.name,
                 prompt: &view.prompt,
                 kind: view.kind,
                 cron: &view.cron,
@@ -318,7 +348,7 @@ async fn list_schedules(
             .json(&state),
         );
     }
-    Json(rows).into_response()
+    ([NO_STORE], Json(rows)).into_response()
 }
 
 /// Load a schedule the caller owns, or answer the 404 that hides whether it exists.
@@ -522,12 +552,20 @@ async fn rotate_schedule_key(
                 .into_response();
         }
     };
-    Json(serde_json::json!({
-        "id": id.as_str(),
-        "kind": after.kind.as_str(),
-        "webhook": crate::hooks::webhook_trigger_json(&state, &after.hook_id, &after.webhook_key),
-    }))
-    .into_response()
+    (
+        [NO_STORE],
+        Json(serde_json::json!({
+            "id": id.as_str(),
+            "name": after.name,
+            "kind": after.kind.as_str(),
+            "webhook": crate::hooks::webhook_trigger_json(
+                &state,
+                &after.hook_id,
+                &after.webhook_key,
+            ),
+        })),
+    )
+        .into_response()
 }
 
 async fn create_monitor(
