@@ -3,8 +3,10 @@
 #
 # The mission is "keeps working when the laptop is off", and until this slice every run began with
 # a client POST. This watches a schedule fire a run by itself, watches firing survive a SIGKILL,
-# watches pause actually stop it, and watches a monitor react to the event log exactly once — the
-# loop guard being the difference between "reacts to events" and "fires forever at its own echo".
+# watches pause actually stop it, watches a monitor react to the event log exactly once — the
+# loop guard being the difference between "reacts to events" and "fires forever at its own echo" —
+# and watches an outside app wake a routine through its own minted key, which is the one run in
+# here that begins with a POST from somebody holding no account token at all.
 #
 # Usage:  OG_PORT=1461 OG_DATABASE_URL=… scripts/slice10-autonomy-smoke.sh
 set -euo pipefail
@@ -159,10 +161,42 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/monitors" \
 [ "$code" = "422" ] || fail "watching monitor-fired answered $code, expected 422"
 ok "the cross-monitor cascade cannot be configured"
 
+echo "11. an outside app wakes a routine with the key we minted for it"
+hook=$(curl -fsS -X POST "$BASE/schedules" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' \
+  -d "{\"coworkerId\":\"$cw\",\"kind\":\"webhook\",\"name\":\"Inbox\",\"prompt\":\"a webhook arrived: report in\"}")
+hsid=$(echo "$hook" | jq -r '.id')
+[ -n "$hsid" ] && [ "$hsid" != "null" ] || fail "no webhook schedule id: $hook"
+echo "$hook" | jq -e '.kind == "webhook"' >/dev/null || fail "not a webhook routine: $hook"
+echo "$hook" | jq -e '.cron == null' >/dev/null || fail "a webhook routine has no cron: $hook"
+key=$(echo "$hook" | jq -r '.webhook.key')
+url=$(echo "$hook" | jq -r '.webhook.url')
+case "$key" in og_*) ;; *) fail "the minted key is not one of ours: $hook" ;; esac
+hid="${url##*/}"
+case "$hid" in hook_*) ;; *) fail "no hook id in the minted URL: $hook" ;; esac
+# The wrong key FIRST, so a run appearing after cannot be credited to it.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/$hid" \
+  -H 'authorization: Bearer og_not_the_minted_key' -H 'content-type: application/json' -d '{}')
+[ "$code" = "401" ] || fail "a wrong key answered $code, expected 401"
+[ "$(runs_in_thread "$hsid")" = "0" ] || fail "a wrong key started something"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/$hid" \
+  -H "authorization: Bearer $key" -H 'content-type: application/json' -d '{"item":"milk"}')
+[ "$code" = "202" ] || fail "the hook answered $code, expected 202"
+hfired=0
+for _ in $(seq 1 15); do
+  hfired=$(runs_in_thread "$hsid")
+  [ "$hfired" -ge 1 ] && break
+  sleep 1
+done
+[ "$hfired" -ge 1 ] || fail "the webhook never woke the routine"
+ok "POST /hooks/$hid woke $hsid, and the wrong key could not"
+
 # Leave nothing running for the next smoke's counting windows.
 curl -fsS -X DELETE "$BASE/schedules/$sid" -H "authorization: Bearer $token" -o /dev/null || true
+curl -fsS -X DELETE "$BASE/schedules/$hsid" -H "authorization: Bearer $token" -o /dev/null || true
 curl -fsS -X DELETE "$BASE/monitors/$mon" -H "authorization: Bearer $token" -o /dev/null || true
 
 echo
-echo "PASS — slice 10: the server starts runs on its own clock and its own events, survives a"
-echo "       SIGKILL, stops when paused, and cannot be talked into a loop."
+echo "PASS — slice 10: the server starts runs on its own clock, on its own events and on an"
+echo "       inbound webhook, survives a SIGKILL, stops when paused, and cannot be talked"
+echo "       into a loop."
