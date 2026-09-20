@@ -14,7 +14,9 @@ use crate::StoreResult;
 const MIGRATION_LOCK_KEY: i64 = 0x0_6E_67_72_6F_6B; // "ngrok" in hex, the tail of opengrok
 
 const SCHEMA: &str = r#"
--- The log. Append-only: no UPDATE or DELETE is ever issued against this table.
+-- The log. Append-only in normal operation: no UPDATE is ever issued, and the only DELETE is
+-- the operator purge (`purge_accounts_except`), which removes whole streams of aggregates that
+-- no longer exist.
 create table if not exists events (
     id          bigserial primary key,
     stream_id   text        not null,
