@@ -129,9 +129,9 @@ const REPLY_QUOTE_CHARS: usize = 1_000;
 /// context is not said twice.
 pub(crate) const REPLY_QUOTE_OPENING: &str = "[Replying to";
 
-/// The one sentence a quote is written as, wherever the reply came from: the desktop's transcript
-/// or an AG-UI message with a `replyTo` on it. Shared so the two cannot drift, and so a message
-/// that carries the sentence already can be told apart from one that does not.
+/// The one sentence a quote is written as: an AG-UI message with a `replyTo` on it. Shared with
+/// the AG-UI door so the two cannot drift, and so a message that carries the sentence already can
+/// be told apart from one that does not.
 ///
 /// `None` when the quoted message had no words to quote.
 pub(crate) fn reply_quote_line(who: &str, text: &str) -> Option<String> {
@@ -159,31 +159,6 @@ fn answer_entry(id: &str, text: &str, reply_to: Option<&str>) -> Value {
         entry["replyTo"] = json!(reply_to);
     }
     entry
-}
-
-/// The reply link of the turn in progress: the latest user message's `replyTo`. For the path
-/// that answers after an approval card, which has no `sendPrompt` arguments in hand.
-async fn reply_link_of_the_turn(
-    state: &GatewayState,
-    coworker: &CoworkerId,
-    account: &opengrok_core::id::AccountId,
-) -> Option<String> {
-    let entries = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker, account)
-        .await
-        .ok()?;
-    entries
-        .iter()
-        .rev()
-        .find(|entry| {
-            entry.get("kind").and_then(Value::as_str) == Some("message")
-                && entry.get("role").and_then(Value::as_str) == Some("user")
-        })
-        .and_then(|entry| entry.get("replyTo").and_then(Value::as_str))
-        .map(str::to_string)
 }
 
 /// The suspension a run's events carry, if any: which call is waiting, with what, and WHY. The
@@ -403,10 +378,10 @@ pub(crate) async fn emit_suspensions(
 }
 
 /// NativeChat is AG-UI-first and never watches the gateway transcript live stream. When this
-/// CUSTOM is `run-awaiting-approval` / `reason: user-form`, mint the gateway card **first** so
-/// the id is stable, stamp `extra.entryId` (and `formRequest`, the sanitised schema the card
-/// already carries) onto the event, then append + live-emit the card. The SSE frame NativeChat
-/// receives therefore has the same id `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
+/// CUSTOM is `run-awaiting-approval` / `reason: user-form`, append the gateway card **first** so
+/// the id is stable, then stamp `extra.entryId` (and `formRequest`, the sanitised schema the card
+/// already carries) onto the event. The SSE frame NativeChat receives therefore has the same id
+/// `POST /ag-ui/user-form/submit` needs. Other CUSTOM reasons
 /// are left untouched. Idempotent if `entryId` is already present.
 pub(crate) async fn stamp_user_form_entry_id(
     state: &GatewayState,
@@ -683,8 +658,9 @@ async fn resume_gateway_run(
         text = format!("The turn failed: {why}");
     }
     if !text.is_empty() {
-        let reply_to = reply_link_of_the_turn(&state, &coworker_id, &account_id).await;
-        let answer = answer_entry(&entry_id(), &text, reply_to.as_deref());
+        // No reply link: the AG-UI door journals the person's message on the RUN, not into the
+        // gateway transcript, so a resumed answer has no transcript row to point back at.
+        let answer = answer_entry(&entry_id(), &text, None);
         if let Ok(_seq) = state
             .agui
             .auth

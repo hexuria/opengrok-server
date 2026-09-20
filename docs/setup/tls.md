@@ -56,7 +56,7 @@ https://192.168.100.24:1447 {
     bind 192.168.100.24
     tls internal
     reverse_proxy 127.0.0.1:1447 {
-        # /events is a server-sent stream and /ag-ui streams too: never buffer a response.
+        # POST /ag-ui answers as a server-sent stream: never buffer a response.
         flush_interval -1
     }
 }
@@ -74,10 +74,18 @@ caddy trust                                  # prompts for the Mac password: ins
 Check from the Mac:
 
 ```sh
-curl -sS https://192.168.100.24:1447/health -H "authorization: Bearer $OG_GATEWAY_BEARER"
-curl -sSN --max-time 2 "https://192.168.100.24:1447/events?channels=agents" \
-  -H "authorization: Bearer $OG_GATEWAY_BEARER" -H 'accept: text/event-stream' | head -1
-# → retry: 1000
+# Liveness, unauthenticated on purpose — `ok === true` is all any probe reads.
+curl -sS https://192.168.100.24:1447/health
+# → {"ok":true,…}
+
+# Token-free is not origin-free: a browser page gets nothing, not even "I am up".
+curl -sS -o /dev/null -w '%{http_code}\n' https://192.168.100.24:1447/health \
+  -H 'origin: https://evil.example'
+# → 403
+
+# And one authenticated read, to prove the account token survives the proxy.
+curl -sS https://192.168.100.24:1447/ag-ui/host-settings -H "authorization: Bearer $ACCESS"
+# → the host settings record
 ```
 
 If `curl` refuses the certificate, `caddy trust` did not land in the keychain the shell uses;
@@ -97,21 +105,19 @@ the address `EnsureSandBox` mints to clients, the base of every emailed link, an
 lands — the OAuth issuer and the `resource` a token is issued for; it must be the HTTPS address
 the clients actually reach. Restart with `scripts/serve.sh`.
 
-The smokes and the gate need nothing: they run their own server on their own port and check
-`OG_PUBLIC_GATEWAY_URL` only for being non-loopback (`slice13-seamb-smoke.sh`), which an HTTPS LAN
-address satisfies. Keep running the gate with a clean environment as before.
+The smokes and the gate need nothing: they run their own server on their own port and set their
+own `OG_PUBLIC_GATEWAY_URL`, so an HTTPS LAN address here changes nothing for them. Keep running
+the gate with a clean environment as before.
 
-## Desktop side
+## Client side
 
-Do this BEFORE any OAuth work: the app must already be on the https address, or the OAuth
-issuer (`OG_PUBLIC_GATEWAY_URL`) and the address the app talks to disagree.
+Do this BEFORE any OAuth work: a client must already be on the https address, or the OAuth
+issuer (`OG_PUBLIC_GATEWAY_URL`) and the address it talks to disagree.
 
-1. Quit the app. In the client's data root, `sand-data/settings.json`: set `openGrokGatewayUrl`
-   to `https://192.168.100.24:1447` (both places the desktop-client doc names).
-2. The CA root from `caddy trust` is what the app's Chromium checks; nothing else to install.
-3. Relaunch `/Applications/Open Grok.app` and confirm the roster paints and `/events` opens on
-   the new address — the server's request log shows every call with its `X-Request-Id` and
-   `events: stream opened`.
+1. Point the client at `https://192.168.100.24:1447`.
+2. The CA root from `caddy trust` is what a Chromium-based client checks; nothing else to install.
+3. Confirm a turn lands on the new address — the server's request log shows every call with its
+   `X-Request-Id`.
 4. Sign in through the browser. The dev sign-in shortcut
    (`GET /auth/cursor_dev_session_token`) answers only when the request's `Host` is a loopback
    address (`auth/routes.rs::is_loopback`); through the HTTPS LAN address, or from any other

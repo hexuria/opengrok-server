@@ -29,7 +29,12 @@ pub struct GatewayState {
     pub settings: Arc<Mutex<serde_json::Value>>,
     /// When this process started — `/health`'s `startedAt`.
     pub started_at_ms: i64,
-    /// The address a client is handed for this host. `None` means we do not invent one.
+    /// The address this host advertises for itself. WRITE-ONLY TODAY: its one reader was
+    /// `hooks::hook_url`, which minted the POST URL for a webhook-triggered routine, and the only
+    /// door that ever minted one went with seam A. Kept — field and constructor parameter both —
+    /// because giving the AG-UI schedules door a webhook wake is the follow-up that reads it
+    /// again, and dropping the parameter would churn every test that builds a `GatewayState`.
+    /// `None` means we do not invent an address.
     pub public_gateway_url: Option<String>,
 }
 

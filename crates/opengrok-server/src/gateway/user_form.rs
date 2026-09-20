@@ -1,8 +1,10 @@
 //! `submitUserForm` / `dismissUserForm` / box-handoff resolve — gateway verbs and AG-UI REST twins.
 //!
-//! WHY THIS IS NOT `submitSecret`. That verb stamps `secretProvided` and DROPS the value
-//! (connector vault). This path types into the live page. Mixing them would either vault a
-//! Google password or fill a connector secret into Chromium.
+//! WHY THIS IS NOT A SECRET DROP. The desktop's `submitSecret` (deleted with seam A) stamped
+//! `secretProvided` and DROPPED the value into the connector vault. This path types into the live
+//! page. Mixing the two would either vault a Google password or fill a connector secret into
+//! Chromium — the reason they were never one path, and the reason this one did not follow that
+//! verb out.
 //!
 //! WHY ESCALATE IS NOT A RESUME. Official `dismissUserForm` mode `escalated` is Grok Bot
 //! "Open the screen": emit a **separate** `sand://box` attachment with `boxRequestId` and keep
