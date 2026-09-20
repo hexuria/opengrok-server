@@ -323,6 +323,20 @@ impl Projection {
     /// travels as a `CUSTOM` frame — the same way `run-awaiting-approval` does — and `RUN_FINISHED`
     /// follows it to close the stream, because a consumer holds its spinner open on that promise
     /// and a stop that leaves the dots turning is not a stop anybody can see.
+    /// One frame before the first box-bound tool of a turn starts a sleeping box, so a client
+    /// can say "waking the computer" for the wait instead of "working".
+    pub fn box_waking(&mut self, coworker_id: &str) -> Vec<Event> {
+        let mut events = self.start();
+        events.push(
+            self.event(EventType::Custom)
+                .with("name", "box-waking")
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone())
+                .with("coworkerId", coworker_id.to_string()),
+        );
+        events
+    }
+
     pub fn stopped(&mut self) -> Vec<Event> {
         let mut events = self.start();
         if self.finished {

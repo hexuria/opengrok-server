@@ -99,6 +99,12 @@ impl Computer for AsciiBoxes {
         "ascii"
     }
 
+    /// box.ascii.dev provisions a desktop for any box on the first `desktop` call, so every box
+    /// of this provider can have a screen.
+    fn offers_a_screen(&self) -> bool {
+        true
+    }
+
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
         let created = self
             .client

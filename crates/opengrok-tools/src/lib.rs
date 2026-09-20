@@ -471,9 +471,40 @@ impl ComputerArgs {
     }
 }
 
+/// What a box-bound tool answers when the box cannot be brought up. The model relays it in its
+/// own words; the person is the one who can look at the computer.
+pub const COMPUTER_DOWN: &str = "my computer is down; ask them to check it";
+
+/// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
+const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The tools that run on the box (as opposed to plugin tools and the person's own machine).
+fn needs_the_box(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        RUN_RECIPE | "shell" | "read_file" | "write_file" | "open_url" | "computer"
+    )
+}
+
+/// Which box a call targets: the room's shared one when `machine` is `group`, else the
+/// coworker's own. `None` when that box does not exist.
+fn target_box<'a>(context: &'a ToolContext, arguments: &Value) -> Option<&'a BoxId> {
+    if arguments.get("machine").and_then(Value::as_str) == Some("group") {
+        context.group_box.as_ref().map(|group| &group.box_id)
+    } else {
+        context.box_id.as_ref()
+    }
+}
+
 /// Runs tool calls on the caller's own computer, if policy allows.
 pub struct Executor {
     computer: Arc<dyn Computer>,
+    /// How long the first box-bound call of a turn waits for a sleeping box to come up. A turn
+    /// no longer waits before the model is asked; it waits here, once, when a tool needs the box.
+    wake_patience: std::time::Duration,
+    /// Boxes this executor has already found running (or woken) this turn, so the state is
+    /// asked once per box per turn, not once per call.
+    woken: std::sync::Mutex<std::collections::BTreeSet<String>>,
     /// What this principal may make this coworker do. Consulted before EVERY call, never once at
     /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
     /// (CLAUDE.md #6).
@@ -573,6 +604,8 @@ impl Executor {
         Self {
             computer,
             policy: opengrok_policy::Context::default(),
+            wake_patience: DEFAULT_WAKE_PATIENCE,
+            woken: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -594,6 +627,8 @@ impl Executor {
         Self {
             computer,
             policy,
+            wake_patience: DEFAULT_WAKE_PATIENCE,
+            woken: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -620,6 +655,75 @@ impl Executor {
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.screen
+    }
+
+    /// How long the first box-bound tool call of a turn waits for a sleeping box.
+    #[must_use]
+    pub fn with_wake_patience(mut self, patience: std::time::Duration) -> Self {
+        self.wake_patience = patience;
+        self
+    }
+
+    /// Whether running `call` would first have to wake the box it targets: the call is box-bound,
+    /// the box is known, and it is not running yet as far as this turn has seen. The harness asks
+    /// before running a round so it can say "waking the computer" on the stream.
+    pub async fn box_needs_wake(&self, context: &ToolContext, call: &ToolCall) -> bool {
+        if !needs_the_box(&call.name) {
+            return false;
+        }
+        let Some(box_id) = target_box(context, &call.arguments) else {
+            return false;
+        };
+        if self.already_woken(box_id.as_str()) {
+            return false;
+        }
+        match self.computer.state(box_id.as_str()).await {
+            Ok(state) if state == "running" => {
+                self.remember_woken(box_id.as_str());
+                false
+            }
+            _ => true,
+        }
+    }
+
+    fn already_woken(&self, box_id: &str) -> bool {
+        self.woken
+            .lock()
+            .map(|woken| woken.contains(box_id))
+            .unwrap_or(false)
+    }
+
+    fn remember_woken(&self, box_id: &str) {
+        if let Ok(mut woken) = self.woken.lock() {
+            woken.insert(box_id.to_string());
+        }
+    }
+
+    /// The box is running by the time this returns `Ok`, woken if it was asleep. Asked once per
+    /// box per turn. `Err` carries the sentence the model is told — and relays — when the box
+    /// cannot be brought up: it is the person's computer, and only they can look at it.
+    async fn ensure_awake(&self, box_id: &str) -> Result<(), String> {
+        if self.already_woken(box_id) {
+            return Ok(());
+        }
+        let state = match self.computer.state(box_id).await {
+            Ok(state) => state,
+            Err(error) => return Err(format!("{COMPUTER_DOWN} ({error})")),
+        };
+        let reached = if state == "running" {
+            state
+        } else {
+            match self.computer.wake(box_id, self.wake_patience).await {
+                Ok(reached) => reached,
+                Err(error) => return Err(format!("{COMPUTER_DOWN} ({error})")),
+            }
+        };
+        if reached == "running" {
+            self.remember_woken(box_id);
+            Ok(())
+        } else {
+            Err(format!("{COMPUTER_DOWN} (it is {reached})"))
+        }
     }
 
     /// The box this executor talks to. Fill (`user-form`) types here outside `computer_use`.
@@ -1230,6 +1334,14 @@ impl Executor {
             };
             box_id
         };
+
+        // The box is brought up here, by the first tool that needs it, not before the model was
+        // asked: a turn that never touches the box never waits for it.
+        if needs_the_box(&tool_name)
+            && let Err(down) = self.ensure_awake(box_id.as_str()).await
+        {
+            return ToolResult::refused(&call.id, down);
+        }
 
         match tool_name.as_str() {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
@@ -1896,6 +2008,164 @@ mod tests {
 
     fn allowing(computer: Arc<dyn Computer>) -> Executor {
         Executor::with_policy(computer, permissive())
+    }
+
+    /// A box whose reported states are scripted (the last repeats), counting resumes and the
+    /// commands that reached it.
+    struct SleepyComputer {
+        states: Mutex<std::collections::VecDeque<&'static str>>,
+        resumes: std::sync::atomic::AtomicUsize,
+        ran: Mutex<Vec<String>>,
+    }
+
+    impl SleepyComputer {
+        fn new(states: &[&'static str]) -> Self {
+            Self {
+                states: Mutex::new(states.iter().copied().collect()),
+                resumes: std::sync::atomic::AtomicUsize::new(0),
+                ran: Mutex::new(Vec::new()),
+            }
+        }
+        fn resumes(&self) -> usize {
+            self.resumes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn ran(&self) -> usize {
+            self.ran.lock().map(|ran| ran.len()).unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl Computer for SleepyComputer {
+        async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+            Ok("box_new".to_string())
+        }
+        async fn run(&self, _b: &str, command: &str, _t: u32) -> BoxResult<CommandOutput> {
+            if let Ok(mut ran) = self.ran.lock() {
+                ran.push(command.to_string());
+            }
+            Ok(CommandOutput {
+                exit_code: 0,
+                stdout: format!("ran `{command}`"),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                timed_out: false,
+            })
+        }
+        async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn stop(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn resume(&self, _b: &str) -> BoxResult<()> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn destroy(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            let mut states = self.states.lock().unwrap();
+            let next = if states.len() > 1 {
+                states.pop_front().unwrap()
+            } else {
+                states.front().copied().unwrap_or("absent")
+            };
+            Ok(next.to_string())
+        }
+    }
+
+    /// The first box-bound call of a turn wakes a sleeping box; the second finds it awake and
+    /// does not ask again.
+    #[tokio::test]
+    async fn a_sleeping_box_is_woken_by_the_first_tool_that_needs_it_and_not_again() {
+        // The probe, the executor and the wake each read the state once before the start lands.
+        let sleepy = Arc::new(SleepyComputer::new(&[
+            "exited", "exited", "exited", "running",
+        ]));
+        let executor = allowing(sleepy.clone());
+        let context = context_with_box("box_mine");
+        assert!(
+            executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+
+        let first = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(first.ok, "{first:?}");
+        let second = executor
+            .execute(&context, &call("shell", json!({"command": "pwd"})))
+            .await;
+        assert!(second.ok, "{second:?}");
+        assert_eq!(sleepy.resumes(), 1, "one start for the whole turn");
+        assert_eq!(sleepy.ran(), 2);
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await,
+            "a box seen running is not asked about again"
+        );
+    }
+
+    /// A box that will not come up ends the call with the sentence the model relays, and the
+    /// command never runs. The wake gives up in two polls, not the full patience.
+    #[tokio::test]
+    async fn a_box_that_will_not_come_up_answers_that_the_computer_is_down() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited", "exited", "exited"]));
+        let executor =
+            allowing(sleepy.clone()).with_wake_patience(std::time::Duration::from_secs(60));
+        let context = context_with_box("box_mine");
+        let began = std::time::Instant::now();
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains(COMPUTER_DOWN), "{result:?}");
+        assert_eq!(sleepy.ran(), 0, "nothing ran on a box that is down");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "gave up after {:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A running box is never resumed, and a plugin tool never asks about the box at all.
+    #[tokio::test]
+    async fn a_running_box_is_left_alone_and_only_box_tools_ask_about_it() {
+        let awake = Arc::new(SleepyComputer::new(&["running"]));
+        let executor = allowing(awake.clone());
+        let context = context_with_box("box_mine");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("some_plugin_tool", json!({})))
+                .await
+        );
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(awake.resumes(), 0);
     }
 
     fn context_with_box(box_id: &str) -> ToolContext {

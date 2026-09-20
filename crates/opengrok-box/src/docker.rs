@@ -295,6 +295,10 @@ impl DockerComputer {
 
 #[async_trait]
 impl Computer for DockerComputer {
+    fn offers_a_screen(&self) -> bool {
+        self.wants_desktop()
+    }
+
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
         let args = self.create_args(ttl_seconds)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();

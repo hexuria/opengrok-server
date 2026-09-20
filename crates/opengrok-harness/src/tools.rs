@@ -63,6 +63,22 @@ impl ToolRunner {
 
     /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
     /// offer. The prompt must say the same thing the offering does.
+    /// Whether running `call` would first wake the coworker's box — asked before a round so the
+    /// stream can say so (`box-waking`) instead of going quiet for the wait.
+    pub async fn box_needs_wake(&self, call: &ToolCall) -> bool {
+        match self.executor.as_ref() {
+            Some((executor, context)) => executor.box_needs_wake(context, call).await,
+            None => false,
+        }
+    }
+
+    /// The coworker whose tools these are, for the frames that name one.
+    pub fn coworker_id(&self) -> Option<String> {
+        self.executor
+            .as_ref()
+            .map(|(_, context)| context.coworker_id.to_string())
+    }
+
     pub fn has_screen(&self) -> bool {
         self.executor
             .as_ref()
@@ -239,14 +255,29 @@ pub mod tests_support {
     #[derive(Default)]
     pub struct RecordingComputer {
         boxes: Mutex<Vec<String>>,
+        /// Scripted states, the last repeating; empty means "running" from the start.
+        states: Mutex<std::collections::VecDeque<&'static str>>,
+        resumes: std::sync::atomic::AtomicUsize,
     }
 
     impl RecordingComputer {
+        /// A box that reports these states in order (the last one repeats).
+        pub fn sleeping(states: &[&'static str]) -> Self {
+            Self {
+                states: Mutex::new(states.iter().copied().collect()),
+                ..Self::default()
+            }
+        }
+
         pub fn last_box(&self) -> Option<String> {
             self.boxes
                 .lock()
                 .ok()
                 .and_then(|calls| calls.last().cloned())
+        }
+
+        pub fn resumes(&self) -> usize {
+            self.resumes.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -293,10 +324,21 @@ pub mod tests_support {
             Ok(())
         }
         async fn resume(&self, _b: &str) -> BoxResult<()> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
         async fn state(&self, _b: &str) -> BoxResult<String> {
-            Ok("running".to_string())
+            let mut states = self
+                .states
+                .lock()
+                .map_err(|_| opengrok_box::BoxError::NoSuchBox)?;
+            let next = if states.len() > 1 {
+                states.pop_front().unwrap_or("running")
+            } else {
+                states.front().copied().unwrap_or("running")
+            };
+            Ok(next.to_string())
         }
         async fn destroy(&self, _b: &str) -> BoxResult<()> {
             Ok(())

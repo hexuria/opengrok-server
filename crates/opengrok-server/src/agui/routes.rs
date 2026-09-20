@@ -31,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// How long a turn waits for a sleeping box to come up before running its first command anyway.
+/// How long the first box-bound tool call of a turn waits for a sleeping box to come up before
+/// answering that the computer is down. The wait moved from before the model was asked (every
+/// turn paid it) to the tool that needs the box (only those turns pay it).
 /// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
 /// running took 10–15s live (bx_ncfmdpem, 2 Sep 2026); 90s leaves room for a slow restore.
 pub(crate) const TURN_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
@@ -239,44 +241,36 @@ pub(crate) async fn tools_for_coworker(
         .ok()
         .flatten()?;
     let mut computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
-    // A sleeping box is woken before this turn runs (disk was kept, so it comes back where it was),
-    // and its last-used stamp is refreshed so the sweep leaves it running while it is in use. Ask
-    // the provider rather than trusting our `stopped` flag: box.ascii.dev archives a box on its own
-    // TTL, and that box is `archived` with our flag still clear. `wake` also WAITS — a resumed ascii
-    // box is `provisioning` for a while and refuses commands (409 `box_starting`) until `ready`.
-    // Best-effort — a wake failure still lets the turn try.
-    let live = computer.state(&box_id).await.ok();
-    if stopped || live.as_deref() != Some("running") {
-        match computer.wake(&box_id, wake_patience).await {
-            Ok(reached) if reached != "running" => {
-                tracing::warn!(box_id, state = %reached, "the box did not come up in time; the turn may fail");
+    // The box is NOT woken here. A turn used to wait up to `wake_patience` for a sleeping box
+    // before the model was even asked, and a plain "hi" paid for it (90 s with a dead box, 21 Sep
+    // 2026). The executor wakes the box the first time a tool needs it, and the stream says so.
+    // What stays is one cheap look at the box: a provider that refuses to say (401/403 — an ascii
+    // key revoked, a computer this deployment may no longer reach) is taken over by local Docker
+    // now, as it was when the wake found the same refusal.
+    let _ = stopped;
+    if let Err(error) = computer.state(&box_id).await {
+        let forbidden = matches!(
+            &error,
+            opengrok_box::BoxError::Refused {
+                status: 401 | 403,
+                ..
             }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
-                let forbidden = matches!(
-                    &error,
-                    opengrok_box::BoxError::Refused {
-                        status: 401 | 403,
-                        ..
-                    }
-                ) || error.to_string().contains("forbidden");
-                if forbidden {
-                    match super::provision::take_over_with_local_docker(
-                        state,
-                        scope,
-                        &scope_id,
-                        org_id.as_deref(),
-                    )
-                    .await
-                    {
-                        Some((local, new_id)) => {
-                            computer = local;
-                            box_id = new_id;
-                        }
-                        None => return None,
-                    }
+        ) || error.to_string().contains("forbidden");
+        if forbidden {
+            tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
+            match super::provision::take_over_with_local_docker(
+                state,
+                scope,
+                &scope_id,
+                org_id.as_deref(),
+            )
+            .await
+            {
+                Some((local, new_id)) => {
+                    computer = local;
+                    box_id = new_id;
                 }
+                None => return None,
             }
         }
     }
@@ -307,7 +301,9 @@ pub(crate) async fn tools_for_coworker(
     );
     // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
     // never told about them, so it cannot be sent down a dead end.
-    let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
+    // Whether the coworker has a screen is how its box is made, not whether the box happens to be
+    // awake: the prompt and the tool list then say the same thing on every turn.
+    let screen = computer.offers_a_screen();
     let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
@@ -333,6 +329,7 @@ pub(crate) async fn tools_for_coworker(
         Vec::new()
     };
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_wake_patience(wake_patience)
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
