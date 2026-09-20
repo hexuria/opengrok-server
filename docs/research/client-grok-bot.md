@@ -1,5 +1,9 @@
 # The grok-bot client contract — what OpenGrok must serve
 
+> **History, not a contract in force.** The doors that served this client (seam A under
+> `gateway/`, seam B in `seamb.rs` and `crates/opengrok-proto`) were deleted on 20 Sep 2026.
+> The operator discontinued the Electron desktop client the same day.
+
 **Audience:** an engineer/agent who has never opened either repository and must implement
 the OpenGrok backend so the shipped Grok Bot desktop app boots against it.
 

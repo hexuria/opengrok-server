@@ -34,18 +34,30 @@ the same messages — Anysphere's own message definitions, recovered from the bi
 
 ## What OpenGrok does
 
-**We implement the client-facing contract for interoperability.** The desktop app emits a JSON
-command surface (`SAND_GATEWAY_COMMANDS`) and renders a documented transcript format. OpenGrok
-answers those calls. The brain behind them — the agent loop, the tools, the routing, the storage —
-is entirely ours and shares no lineage with the vendor's server, which does not exist in any tree
-here and therefore cannot be and is not copied.
+**OpenGrok serves its own doors.** AG-UI (`/ag-ui`), the host API (`/coworkers`, `/account`,
+`/admin`), the MCP door (`/mcp`) and the web console. The brain behind them (the agent loop, the
+tools, the routing, the storage) is entirely ours and shares no lineage with the vendor's server,
+which does not exist in any tree here and therefore cannot be and is not copied.
+
+**What was removed, 20 Sep 2026.** The two doors that existed only to boot the reconstructed
+desktop app are gone from the tree. Seam A was the transcribed JSON command surface
+(`SAND_GATEWAY_COMMANDS`, 55 verbs under `crates/opengrok-server/src/gateway/`). Seam B was the
+Connect-over-HTTP/1.1 surface (`seamb.rs`, `seamb_send.rs`) and its transcribed protobuf messages
+(`crates/opengrok-proto`). Their smokes, tests, fixtures and the `mock-fixtures` cargo feature
+went with them. The operator discontinued the Electron desktop client on 20 Sep 2026.
+
+**What transcribed material remains.** `crates/opengrok-wire` still holds the transcript entry
+shapes and the AG-UI event shapes, each with a provenance comment naming the file it was read
+from. The harness, the store and the AG-UI door depend on them. The rights review below covers
+that crate as it covered the seams.
 
 ## What OpenGrok does not do
 
 1. **No vendored generated protobuf stubs.** `source/packages/proto/generated/**` is never copied
    into this repository, nor `@connectrpc`/`@bufbuild` runtime dependencies added to serve them.
    Where a message shape is genuinely needed, it is **transcribed** into `crates/opengrok-wire` in Rust,
-   with a provenance comment naming the file it was read from.
+   with a provenance comment naming the file it was read from. The repo no longer carries any
+   `.proto` text or prost output; `crates/opengrok-proto` was deleted with seam B on 20 Sep 2026.
 2. **No reimplementation "from the proto" as a goal in itself.** The target is the *client's
    behaviour*, not the vendor's backend. If a command is not needed for the client to work, we do
    not implement it to be faithful to something we cannot see.

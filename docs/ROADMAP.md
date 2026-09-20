@@ -570,7 +570,37 @@ every record that sharing would otherwise break carry whose it is.
 ## Phase 0
 
 - [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
-- [x] **Host settings on the AG-UI door.** `GET/PUT /ag-ui/host-settings` (+ `egressTunnelAvailable` for `?coworker=`) under the account token — the three seam-A verbs NativeChat still called (`getHostSettings`, `setHostSettings`, `isEgressTunnelAvailable`), re-homed so seam A can close. Step 1 of the seam deletion (P0-E); step 2 is the NativeChat switch, step 3 the deletion itself. 20 Sep 2026.
+- [x] **Host settings on the AG-UI door.** `GET/PUT /ag-ui/host-settings` (+ `egressTunnelAvailable` for `?coworker=`) under the account token — the three seam-A verbs NativeChat still called (`getHostSettings`, `setHostSettings`, `isEgressTunnelAvailable`), re-homed so seam A can close. Step 1 of the seam deletion (P0-E, #148); step 2 is NativeChat #71; step 3 is the deletion below. 20 Sep 2026.
+
+## Seam A and seam B deleted (20 Sep 2026)
+
+The two doors that existed only to boot the reconstructed Electron desktop client are out of the
+tree. The operator discontinued that client on 20 Sep 2026. Slices 7 to 9 above stay as the
+record of what was built. NativeChat talks `GET/PUT /ag-ui/host-settings` (#148, nativechat #71);
+this is the deletion those two PRs made possible.
+
+- [x] **Seam B.** `seamb.rs`, `seamb_send.rs`, `grpc.rs` and `crates/opengrok-proto` deleted;
+  `prost`, `tonic` and `protoc` leave the build. The tonic gRPC listener (`OG_GRPC_BIND`) served
+  the same transcribed messages to the same client and went with it, overturning the 30 Aug 2026
+  decision recorded in the workspace `Cargo.toml`. (`d067dca`)
+- [x] **Shared helpers rehomed.** `/health` to `health.rs`, the card composers to `cards.rs`,
+  HITL (interrupt, resume, stamp, quote line, `failure_sentence`) to `hitl.rs`, host-settings
+  defaults next to the AG-UI door; user_form and credential take `AgUiState`; the autonomy
+  sweep and the MCP door take `AgUiState` directly. Needed because #139 made AG-UI depend on
+  gateway/ by function, not by file. (`dc662f3`)
+- [x] **Seam A.** `gateway/` (55 verbs, the live bus, the fixture catalogue), the
+  `ACCOUNT_HEADER` middleware, `GatewayState`, the three smokes that spoke only seam A
+  (slice11, slice12, slice15) and the `against_*.rs` files that drove the door.
+  `against_spend_caps.rs` drives its turns through `/ag-ui` instead. (`9e477d9`)
+- [x] **`mock-fixtures` and `OG_MODEL_DOOR=mock-cards`.** The feature, the door, the two fixture
+  generators; `gate.sh`, `serve.sh` and `ci.yml` build one configuration. `mock-cards` refuses to
+  boot rather than falling through to a billed door. (`c3309bb`)
+- [ ] A surface that answers an MCP door's approval card. The desktop's
+  `resolveAutoReviewApproval` was the only door that finished the synthesized `mcp-` run and
+  remembered the yes; `POST /ag-ui/runs/{id}/answer` resumes a run as a model turn, which an
+  `mcp-` run must not do. Phase 6.
+- [ ] `MockDoor::serving_fixtures` in `opengrok-harness` has no caller; `OG_GRPC_BIND` in
+  `.env.example` names a listener that no longer exists. Both outside this deletion's scope.
 
 ## Later — unordered, deliberately
 

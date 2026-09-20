@@ -1,5 +1,9 @@
 # Pointing the desktop client at this server
 
+> **History, not setup.** The doors this page connects to (seam A under `gateway/`, seam B in
+> `seamb.rs`) were deleted on 20 Sep 2026; the operator discontinued the Electron desktop client
+> the same day, and the server no longer answers it.
+
 The packaged Grok Bot reconstruction (`/Volumes/goldcoders/OSS/opengrok`, installed as
 `/Applications/Open Grok.app`) connects through its own **OpenGrok server mode** — an in-app
 runtime, not an environment variable.
