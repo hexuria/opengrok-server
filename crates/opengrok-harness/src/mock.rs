@@ -38,17 +38,9 @@ pub struct MockDoor {
     /// starts with `JUDGE_MARKER`). Ordinary requests are unaffected, so a mock-driven turn can
     /// reach every rung of the ladder with no provider and no spend.
     judge_verdict: Option<String>,
-    /// A group member: on a room turn (a system prompt that begins "You are …, one participant")
-    /// it says "{name} here" through the `SendMessage` tool, then stops. Outside a room it
-    /// echoes. What a test needs to see two members speak in turn, distinguishably.
-    room_speaker: bool,
     /// Answers with the system prompt it was given, so a test can assert what the model was
     /// actually told rather than what the code meant to tell it.
     echo_system: bool,
-    /// The one room member (by the name the system prompt gives it) that reaches for the shell
-    /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
-    /// round continue after the answer. The others behave as `room_speaker`.
-    room_tool_asker: Option<String>,
     /// Wait this long before EACH delta, so a mock turn takes observable time.
     ///
     /// WITHOUT THIS THE MOCK DOOR CANNOT SHOW A RUNNING STATE AT ALL. Every path here ends in
@@ -233,32 +225,11 @@ impl MockDoor {
         }
     }
 
-    /// A door that behaves as a group member: on a room turn it delivers "{name} here" with the
-    /// room's `SendMessage` tool and then stops; anywhere else it echoes. The name comes from the
-    /// system prompt the orchestrator wrote, so two members speak distinguishably from ONE door.
     /// A door that says back its own system prompt. The composition of identity, standing role
     /// and machine discipline is only correct if it ARRIVES, and every other door hides it.
     pub fn echoing_the_system_prompt() -> Self {
         Self {
             echo_system: true,
-            ..Self::default()
-        }
-    }
-
-    pub fn room_speaker() -> Self {
-        Self {
-            room_speaker: true,
-            ..Self::default()
-        }
-    }
-
-    /// `room_speaker`, except that the member named `asker` asks to run `asking_for_a_tool`'s
-    /// shell command first and speaks — "{name} here, after the tool" — only once that call's
-    /// result is in the conversation. A refusal is a result too: the member speaks after a no.
-    pub fn room_speaker_asking_for_a_tool(asker: impl Into<String>) -> Self {
-        Self {
-            room_speaker: true,
-            room_tool_asker: Some(asker.into()),
             ..Self::default()
         }
     }
@@ -282,25 +253,6 @@ impl MockDoor {
                 id: "mock-call-1".to_string(),
             },
         ]
-    }
-
-    /// Whether the conversation already holds the result of this call (`[tool <id> result]`).
-    fn saw_result(request: &ModelRequest, call_id: &str) -> bool {
-        let marker = format!("[tool {call_id} result]");
-        request
-            .messages
-            .iter()
-            .any(|message| message.content.contains(&marker))
-    }
-
-    /// "You are Ada, one participant in a group chat …" → `Ada`.
-    fn room_member_name(request: &ModelRequest) -> Option<String> {
-        let system = request.system.as_deref()?;
-        let rest = system.strip_prefix("You are ")?;
-        let (name, tail) = rest.split_once(',')?;
-        tail.trim_start()
-            .starts_with("one participant")
-            .then(|| name.to_string())
     }
 
     /// A door that asks to run a shell command, then stops.
@@ -544,35 +496,7 @@ impl ModelDoor for MockDoor {
             return Ok(self.emit(&request, vec![ModelDelta::Text(said)]));
         }
 
-        let script = if self.room_speaker
-            && let Some(name) = Self::room_member_name(&request)
-        {
-            let send_id = format!("room-{}", name.to_lowercase());
-            let asks_first = self.room_tool_asker.as_deref() == Some(name.as_str());
-            if Self::saw_result(&request, &send_id) {
-                // Its own message is delivered; the turn is over.
-                vec![ModelDelta::Text("(that is all from me)".to_string())]
-            } else if asks_first && !Self::saw_result(&request, "mock-call-1") {
-                Self::shell_script()
-            } else {
-                let line = if asks_first {
-                    format!("{name} here, after the tool")
-                } else {
-                    format!("{name} here")
-                };
-                vec![
-                    ModelDelta::ToolCallStart {
-                        id: send_id.clone(),
-                        name: "SendMessage".to_string(),
-                    },
-                    ModelDelta::ToolCallArgs {
-                        id: send_id.clone(),
-                        delta: serde_json::json!({ "content": line }).to_string(),
-                    },
-                    ModelDelta::ToolCallEnd { id: send_id },
-                ]
-            }
-        } else if self.script.is_empty()
+        let script = if self.script.is_empty()
             || (self.echo_steer
                 && !Self::last_user_message(&request)
                     .to_ascii_lowercase()
