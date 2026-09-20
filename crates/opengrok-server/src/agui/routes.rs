@@ -3351,10 +3351,21 @@ pub async fn list_awaiting(
     match state.auth.store.awaiting_approval(&account_id).await {
         Ok(runs) => {
             let mut waiting = Vec::new();
+            // One transcript read per COWORKER, not per run: the card's own sentence is what the
+            // person was shown, and one coworker can have several calls waiting at once.
+            let mut transcripts: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
             for run_id in runs {
                 if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
                     && let Some(pending) = run.pending
                 {
+                    let why = why_of_card(
+                        &state,
+                        &account_id,
+                        run.coworker_id.as_ref(),
+                        &pending,
+                        &mut transcripts,
+                    )
+                    .await;
                     waiting.push(serde_json::json!({
                         "runId": run_id.as_str(),
                         "threadId": run.thread_id,
@@ -3363,6 +3374,13 @@ pub async fn list_awaiting(
                         // What is actually being approved. A person asked to approve "shell"
                         // without seeing the command is being asked to approve nothing.
                         "arguments": pending.arguments,
+                        // WHICH QUESTION IS BEING ASKED. The judge's ask, a policy grant's, the
+                        // machine owner's consent and a form are four different things that all
+                        // land in this one queue, and a client that cannot tell them apart can
+                        // only offer one word for all four. The run's own word, not a new one.
+                        "reason": pending.reason.as_str(),
+                        // And why, in the sentence the card carries.
+                        "why": why,
                     }));
                 }
             }
@@ -3371,6 +3389,47 @@ pub async fn list_awaiting(
         }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
+}
+
+/// What the card SAYS, for the queue: the reason it was raised with, else its summary line, else
+/// a sentence built from the tool and its arguments — the same one the card itself would have
+/// used. The card is the person's own copy of the question, so the queue quotes it rather than
+/// paraphrasing; a transcript that cannot be read falls back rather than leaving the entry mute.
+async fn why_of_card(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: Option<&CoworkerId>,
+    pending: &opengrok_core::run::PendingApproval,
+    transcripts: &mut BTreeMap<String, Vec<serde_json::Value>>,
+) -> String {
+    if let Some(coworker_id) = coworker_id {
+        if !transcripts.contains_key(coworker_id.as_str()) {
+            let entries = state
+                .auth
+                .store
+                .gateway_transcript(coworker_id, account_id)
+                .await
+                .unwrap_or_default();
+            transcripts.insert(coworker_id.as_str().to_string(), entries);
+        }
+        if let Some(entries) = transcripts.get(coworker_id.as_str())
+            && let Some(approval) = entries
+                .iter()
+                .map(|entry| &entry["message"]["approval"])
+                .find(|approval| approval["requestId"] == pending.call_id.as_str())
+        {
+            for key in ["reason", "summary"] {
+                if let Some(said) = approval[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|said| !said.is_empty())
+                {
+                    return said.to_string();
+                }
+            }
+        }
+    }
+    crate::gateway::cards::summary_for(&pending.tool, &pending.arguments)
 }
 
 /// `?coworker=cw_…`: whose computer the egress-tunnel question is about.
