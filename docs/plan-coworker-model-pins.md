@@ -27,7 +27,7 @@ desktop "New Bot"
 
 | Path | File | Which model is stored |
 |---|---|---|
-| Desktop / gateway `createAgent` | `crates/opengrok-server/src/gateway/lifecycle.rs` `hire()` | **always** `state.agui.model` (`OG_MODEL`). `args.model` is ignored. Profile `description` is whatever the client sent (usually empty). |
+| Desktop / gateway `createAgent` | *(deleted with seam A — no surviving file; `gateway/lifecycle.rs` held it until then)* | **always** `state.agui.model` (`OG_MODEL`). `args.model` is ignored. Profile `description` is whatever the client sent (usually empty). |
 | Seam B `CreateGrokBotAgent` | `crates/opengrok-server/src/seamb.rs` | same: `state.agui.model`. No model field on the client's create request (`host-gateway-api.ts` `mintAgent` sends name/description/title/avatar only). |
 | REST `POST /coworkers` | `crates/opengrok-server/src/agui/routes.rs` `HireRequest` | `request.model.unwrap_or(state.model)` — **the only path that already accepts a pin**. Not used by the desktop UI or the web console. |
 
@@ -132,7 +132,7 @@ in the same change that points `OG_GATEWAY_URL` at real OAG.
 | Gap | Evidence |
 |---|---|
 | No `Repin` command | `CoworkerCommand` is Hire / Rename / AssignComputer / ReleaseComputer / Retire (`opengrok-core/src/coworker.rs`). Model is write-once at hire. |
-| Gateway `createAgent` ignores a pin | `lifecycle.rs` always clones `state.agui.model`. |
+| Gateway `createAgent` ignores a pin | deleted with seam A; while it lived, `lifecycle.rs` always cloned `state.agui.model`. |
 | `updateAgent` cannot change the pin | writes name + profile (`description`, `title`, avatar). |
 | No REST patch for the pin | `/coworkers` is POST hire + GET list; per-id routes are approvals and bot keys. |
 | Desktop create payload has no model | `host-gateway-api.ts` `mintAgent`: name, description, title, avatarShape, avatarColor. |

@@ -93,7 +93,7 @@ next person can act, and deliberately not started:
 
 - **#61 — chat renders in one burst.** The app's answer arrives all at once. The bubble is
   already marked `"streaming": true` and the two calls that would grow it already exist and run
-  ONCE (`gateway/conversation.rs`). The journal guarantee is per-ROUND and about the server's own
+  ONCE (`agui/resume.rs`). The journal guarantee is per-ROUND and about the server's own
   ordering, so streaming does not weaken it — and the comment defending the buffering describes a
   property the code does not have. **A restart mid-answer leaves an empty bubble marked
   "typing" forever**; nothing anywhere flips that flag off. That last part is broken today,

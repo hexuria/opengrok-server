@@ -19,14 +19,14 @@ tool `needs_approval` (`opengrok-policy` `Decision::NeedsApproval`). The executo
 `Gate::Ask(AwaitingReason::PolicyApproval)` (`opengrok-tools/src/lib.rs:489`), the run suspends
 with `SuspendReason::PolicyApproval`, and then:
 
-- `card_for` in `gateway/conversation.rs:720` returns `None` for that reason — no card is
+- `card_for` in `agui/resume.rs` returns `None` for that reason — no card is
   appended, the agent is paused, and nothing is ever answerable. Recovery skips awaiting runs.
-- `resolveAutoReviewApproval` (`conversation.rs:1406`) only matches a pending suspension whose
+- `resolveAutoReviewApproval` (`agui/resume.rs`) only matches a pending suspension whose
   reason is `AutoReview`, so even a hand-crafted answer would not find it.
 - On the MCP door (`mcp_door.rs:518`) the same reason fails closed with a message and no card.
 
 So today a `needs_approval` grant behaves like a deny that also leaves a suspended run behind.
-The resume machinery for a *gate* yes already exists and is reason-aware: `conversation.rs:1584`
+The resume machinery for a *gate* yes already exists and is reason-aware: `agui/resume.rs`
 and `agui/routes.rs:1539` route any non-AutoReview reason to `gate_yes`. Only the card and the
 resolve gate are missing.
 
@@ -77,10 +77,10 @@ added" note exists only for a settled `always`, which cannot happen without a ru
 
 Changes, in order:
 
-1. `gateway/cards.rs`: `auto_review_card` gains the reason text as a parameter it already takes
+1. `cards.rs`: `auto_review_card` gains the reason text as a parameter it already takes
    (`Some(REVIEW_ASK_REASON)` today) — no new card builder. `card_for` grows a
    `SuspendReason::PolicyApproval` arm that calls it with the grant's reason and no proposed rule.
-   `Suspension` (`conversation.rs:676`) carries only the reason *enum* today, not the grant's
+   `Suspension` (`agui/resume.rs`) carries only the reason *enum* today, not the grant's
    text (*review*); the awaiting `ToolResult` has the text, so thread it through the
    `run-awaiting-approval` event payload into the suspension.
 2. `resolve_auto_review_approval`: match `pending.reason ∈ {AutoReview, PolicyApproval}`. The

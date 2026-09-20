@@ -4,7 +4,8 @@ Status (2026-08-31): **implemented end to end.** Storage/resolution/API (§2, §
 `crates/opengrok-store/src/auto_review.rs` + `crates/opengrok-server/src/auto_review.rs`; the
 judge at the tool seam (§4) in `crates/opengrok-tools/src/review.rs` (`combine`, the ladder) and
 `crates/opengrok-harness/src/review.rs` (`ModelJudge`, `parse_verdict`); the card and the real
-`resolveAutoReviewApproval` (§5) in `crates/opengrok-server/src/gateway/{cards,conversation}.rs`.
+`resolveAutoReviewApproval` (§5) in `crates/opengrok-server/src/cards.rs` and
+`crates/opengrok-server/src/agui/resume.rs`.
 Tests: unit (ladder, redaction, judge parsing, cards) and Postgres-backed (tiers, resolve verb).
 `OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask`
 cans the judge under a mock door. The audit of what existed before is §1; the consent model this
