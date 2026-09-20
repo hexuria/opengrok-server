@@ -110,9 +110,9 @@ The milestone that proves the port; everything after it is breadth, not risk.
 ## Slice 9 — Seam B: identity and the mint (P0 + P1)
 
 Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two services,
-18 methods, transcribed from `source/mock/`** with provenance comments (LEGAL.md stands —
-no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the Axum edge; a bare
-tonic gRPC server cannot answer the client.
+18 methods, transcribed from `source/mock/`** with provenance comments (the transcription
+rule stands — no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the
+Axum edge; a bare tonic gRPC server cannot answer the client.
 
 - [x] **9.1** Auth at the mock's own surface (`source/mock/auth-http.ts`): `/auth/poll` minting
   the `{accessToken, refreshToken}` pair, on top of slice 1's `/auth/cursor_dev_session_token`
@@ -630,7 +630,7 @@ every record that sharing would otherwise break carry whose it is.
 - [x] GitHub Actions CI — resolved 1 Sep 2026 by the repo going public: the workflow now runs
   `scripts/gate.sh --smoke` itself, green. *(this commit)*
 - [ ] **Rights review — now OVERDUE rather than blocking**: the operator published the repo on
-  1 Sep 2026 with the review still outstanding (`LEGAL.md` status note).
+  1 Sep 2026 with the review still outstanding.
 - [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway. **And it does not tool-call through the gateway**
   (found 2 Sep 2026 capturing the policy card: five runs, zero `TOOL_*` events, shell requests

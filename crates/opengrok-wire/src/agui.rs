@@ -6,8 +6,9 @@
 //!
 //! UNLIKE `transcript` AND `command`, THIS IS A SPECIFICATION, NOT A RECONSTRUCTION. AG-UI is
 //! published, versioned and MIT-licensed, so implementing it is ordinary interop work with none of
-//! `LEGAL.md`'s constraints. The discipline is the same anyway — the names here are the wire's
-//! names, in SCREAMING_SNAKE_CASE because that is what the enum on the wire uses.
+//! the transcription rule's constraints (provenance comment per shape). The discipline is the same
+//! anyway — the names here are the wire's names, in SCREAMING_SNAKE_CASE because that is what the
+//! enum on the wire uses.
 //!
 //! THE SPEC ITSELF SAYS "PASSTHROUGH". `BaseEventSchema` is declared passthrough in zod, meaning a
 //! conforming producer may add fields and a conforming consumer must not choke on them. So the

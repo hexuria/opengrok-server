@@ -12,8 +12,7 @@ what is already decided, and your first task.
 → [`docs/WHY.md`](docs/WHY.md) (what we built before, and why a working app wasn't enough)
 → [`docs/ROADMAP.md`](docs/ROADMAP.md) (what is done, with commits, and what is left)
 → [`docs/setup/`](docs/setup/README.md) (how to actually stand it up)
-→ [`docs/LEGAL.md`](docs/LEGAL.md) → the reference doc for whatever you are about to touch,
-in `docs/research/`.
+→ the reference doc for whatever you are about to touch, in `docs/research/`.
 
 ## Three facts that each cost a day if you learn them the hard way
 
@@ -41,9 +40,8 @@ in `docs/research/`.
    Every shape carries a provenance comment naming the file it was read from.
 2. **Unknown wire shapes round-trip untouched.** An entry kind we do not recognise is preserved and
    re-emitted, never dropped — dropping one deletes somebody's message from their own history.
-3. **No vendored generated protobuf stubs, ever.** See [`docs/LEGAL.md`](docs/LEGAL.md). The repo
-   was made public by the operator on 1 Sep 2026 with the rights review still outstanding — which
-   makes this rule harder, not softer.
+3. **No vendored generated protobuf stubs, ever.** Generated stubs are never vendored; wire shapes
+   are transcribed with a provenance comment naming their source.
 4. **Every model call exits through open-ai-gateway.** A coworker's pin (`xai/grok-4.6@sub`) is a
    route, not a key. Provider credentials never touch a coworker's row, a client payload, or a log.
 5. **Nothing that matters lives in a client.** If losing a tab, a process or a machine loses work,

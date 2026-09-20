@@ -46,11 +46,11 @@ by drift.
 |---|---|
 | Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
 | Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2 |
-| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, `LEGAL.md` |
+| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, #3 |
 | Every model call exits through open-ai-gateway; a pin is a route, not a key | `CLAUDE.md` #4 |
 | Port from the client's own mock (2 services, 18 methods), never the proto inventory | `PORT-PRIORITY.md` §3 |
 | One consent model: the server decides, cards never expire, judge failure = ask | `AUTO-REVIEW.md` §0 |
-| Repo went public 1 Sep 2026 with the rights review still outstanding — transcription rule is harder, not softer | `LEGAL.md` |
+| Repo went public 1 Sep 2026 with the rights review still outstanding — transcription rule is harder, not softer | this page |
 | Redis only after a measured hot query; artifacts land with the harness's first real files | `ROADMAP.md` Later |
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
@@ -150,7 +150,7 @@ The desktop app you verify against is **`/Applications/Open Grok.app`** (`bot.op
 
 ## Blocked on the operator, not on code
 
-The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding — `LEGAL.md`), and gpt-5.6-luna is on an upstream spending limit (5.5 / 5.4-mini work through the same gateway). GitHub Actions CI runs `scripts/gate.sh --smoke` itself since the repo went public. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
+The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding), and gpt-5.6-luna is on an upstream spending limit (5.5 / 5.4-mini work through the same gateway). GitHub Actions CI runs `scripts/gate.sh --smoke` itself since the repo went public. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
 
 ## The map
 
@@ -162,7 +162,6 @@ The rights review is **overdue** (repo public 1 Sep 2026 with it still outstandi
 | [`ROADMAP.md`](ROADMAP.md) | what is done (with commits) and what is left |
 | [`setup/`](setup/README.md) | standing the server up, end to end |
 | [`AUTO-REVIEW.md`](AUTO-REVIEW.md) | the consent model and the judge |
-| [`LEGAL.md`](LEGAL.md) | the line, before touching the client contract |
 | [`research/`](research/README.md) | the client, the gateway, the sandbox, connectors, the prior product |
 | [`box/`](box/README.md) | local copy of box.ascii.dev Public API v1 (vendor pages; live site wins) |
 | [`verification/`](verification/) | the evidence behind the ticked boxes |
