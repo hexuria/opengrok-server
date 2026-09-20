@@ -730,45 +730,6 @@ impl PgStore {
         Ok(row.is_some())
     }
 
-    /// The roster: this person's own coworkers, plus the ones their org-mates have shared with
-    /// the org. Each row carries its owner, because a shared row has to be able to say whose it
-    /// is. SEPARATE from `coworkers_for` on purpose — that one is the authorisation primitive
-    /// for management, and widening it would hand every org member every other member's write
-    /// surface.
-    pub async fn roster_for(
-        &self,
-        account_id: &AccountId,
-    ) -> StoreResult<Vec<(CoworkerView, RosterOwner)>> {
-        let rows = sqlx::query(
-            "select c.id, c.name, c.model, c.box_id, c.retired, c.updated_at_ms, c.members,
-                    c.role, c.visibility,
-                    owner.id as owner_id, owner.first_name as owner_first,
-                    owner.last_name as owner_last
-             from coworker_view c
-             join account_view owner on owner.id = c.account_id
-             join account_view caller on caller.id = $1
-             where c.retired = false
-               and (c.account_id = $1
-                    or (c.visibility = 'org'
-                        and coalesce(owner.org_id, '') <> ''
-                        and owner.org_id = caller.org_id))
-             order by c.updated_at_ms desc",
-        )
-        .bind(account_id.as_str())
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let owner = RosterOwner {
-                    id: AccountId::from_stored(row.try_get::<String, _>("owner_id")?),
-                    first_name: row.try_get("owner_first")?,
-                    last_name: row.try_get("owner_last")?,
-                };
-                Ok((coworker_view_row(&row)?, owner))
-            })
-            .collect()
-    }
-
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
             "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility
@@ -2184,14 +2145,6 @@ impl PgStore {
         }
         Ok(openable)
     }
-}
-
-/// Who hired a coworker, for a roster row that may not be the reader's own.
-#[derive(Debug, Clone)]
-pub struct RosterOwner {
-    pub id: AccountId,
-    pub first_name: String,
-    pub last_name: String,
 }
 
 fn coworker_view_row(row: &sqlx::postgres::PgRow) -> StoreResult<CoworkerView> {

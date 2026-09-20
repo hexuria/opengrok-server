@@ -28,7 +28,6 @@ pub mod migrations;
 pub mod points;
 pub mod postgres;
 pub mod replica;
-pub mod room;
 pub mod spend;
 pub mod templates;
 pub mod vault;
@@ -36,12 +35,12 @@ pub mod vault;
 pub use autonomy::{DueSchedule, LogEvent};
 pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
-    RefreshTokenRow, RowPreview, UnreadState,
+    RefreshTokenRow,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
     ArtifactRow, CredentialHint, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow,
-    RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, ThreadRun,
+    RecipeRunRow, RecipeShareRow, RecipeVersionRow, ThreadRun,
 };
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
