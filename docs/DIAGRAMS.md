@@ -41,8 +41,6 @@ is. Door A — reimplement the vendor's private gRPC/proto server — is marked 
 repo's own `NOTICE.md` and disparity inventory forbid exactly that. Door B — keep the shell, speak
 our own contract — is the chosen path.
 
-See [`LEGAL.md`](LEGAL.md) for the position this diagram encodes.
-
 ---
 
 ## 3. The Desk and the Door — *why the agent endpoint and the gateway are different layers*

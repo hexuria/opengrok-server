@@ -63,7 +63,6 @@ postgres → environment → running → gate.
 | **Standing it up** | [`docs/setup/`](docs/setup/README.md) |
 | **The consent model** | [`docs/AUTO-REVIEW.md`](docs/AUTO-REVIEW.md) — policy tiers, the judge, the cards |
 | **The invariants** | [`CLAUDE.md`](CLAUDE.md) — ten rules that are not up for negotiation |
-| **The rights line** | [`docs/LEGAL.md`](docs/LEGAL.md) — read before touching the client contract |
 | **Reference docs** | [`docs/research/`](docs/research/README.md) — the client, the gateway, the sandbox, connectors, the prior product |
 
 ## Layout
@@ -90,11 +89,8 @@ web/
 ## A note on rights
 
 The operator made this repository **public on 1 Sep 2026 with the rights review still
-outstanding**. [`docs/LEGAL.md`](docs/LEGAL.md) records the line the project does not cross —
-transcription with provenance, no vendored stubs, no third-party marks — and why the review
-matters more now, not less.
+outstanding**.
 
 ## Licence
 
-MIT for the code authored here. Third-party material is not relicensed by that grant; see
-`docs/LEGAL.md`.
+MIT for the code authored here. Third-party material is not relicensed by that grant.

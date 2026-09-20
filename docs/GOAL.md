@@ -9,8 +9,8 @@ remote computer and keeps working when the person's laptop is off. Clients are w
 is the product.
 
 The rights line still applies in full: message shapes are **transcribed with provenance, never
-vendored** (`LEGAL.md`). The operator published the repo on 1 Sep 2026 with the rights review
-still outstanding — `LEGAL.md` records that decision.
+vendored**. The operator published the repo on 1 Sep 2026 with the rights review still
+outstanding.
 
 ## Stack (operator decisions)
 
@@ -68,7 +68,7 @@ endpoint, and openbot already knows how to talk to it.
 The desktop-client work is **not deleted and not wasted** — `opengrok-wire` and the auth slice are
 the record of how a real client behaves, and they are what a Grok Bot compatibility mode would be
 built from. But grok-bot is no longer the thing we are racing to satisfy, and it is the reason this
-repo cannot be published (`LEGAL.md`). Treat it as a second, optional client.
+repo cannot be published. Treat it as a second, optional client.
 
 > **Superseded in practice, 30 Aug 2026.** The port plan (`PORT-PRIORITY.md`, an operator
 > decision) inverted this: the reconstructed desktop client became the driving client — the
