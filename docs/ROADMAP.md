@@ -299,8 +299,9 @@ the proof, not construction.
   output IS the container id. Evidence: `docs/verification/door1/README.md`. (`2502deb`)
 - [x] **16.cards** An MCP Ask synthesizes a durable run and a real `auto-review-approval`
   card (`requestId` = the tool call id); the MCP error names it and does not wait. The person
-  answers in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run;
-  the MCP client retries under the remembered call id. PolicyApproval got its card in 16.policy;
+  answers in OpenGrok (`POST /ag-ui/runs/{id}/answer`), which flips the card, remembers the yes
+  and Finishes the synthesized run rather than resuming it; the MCP client retries under the
+  remembered call id. PolicyApproval got its card in 16.policy;
   reverse-exec stays excluded. *(this commit)*
 - [x] **16.policy** A policy grant's "needs a human yes" has a card. It was a stuck run: `card_for`
   returned nothing for `PolicyApproval`, the resolve verb matched only auto-review, so a
@@ -309,11 +310,10 @@ the proof, not construction.
   reason (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule`
   — so the client's "Always" is a plain approve that writes nothing
   (`transcript-card/auto-review-actions.ts:149-150`); a policy is widened in policy, never from a
-  card. `resolveAutoReviewApproval` settles both reasons and the resume routes a policy yes to
-  the gate; `resolveLocalToolPermission` settles exec-consent only. The MCP door raises the same
-  card for a policy ask and remembers its yes as a GATE yes for the retry.
-  `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → desktop verb → finished
-  run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
+  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes
+  to the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE
+  yes for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the
+  AG-UI answer → finished run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
   computer: hire → grant → turn suspends → card in the transcript → approved runs the command
   on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
   runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in

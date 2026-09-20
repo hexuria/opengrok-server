@@ -4,6 +4,10 @@
 # computer. Also the two refusals that make the door safe: a tool outside the grant is refused
 # with the reason, and an identity argument in the request is overwritten, not honoured.
 #
+# And the third answer a call can get, which is neither yes nor no but "ask somebody": a tool the
+# policy says needs a human yes raises a real card, the PERSON answers it in OpenGrok (the MCP
+# client cannot answer its own card), and the client's retry is let through.
+#
 # Needs a Docker daemon. Skips rather than fails without one.
 #
 # Usage:  OG_PORT=1447 scripts/slice20-mcp-door-smoke.sh
@@ -106,6 +110,66 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/mcp" \
   -d '{"jsonrpc":"2.0","id":8,"method":"tools/list","params":{}}')
 [ "$code" = "401" ] || fail "a person's token was not refused with 401 (got $code)"
 ok "a person's access token is refused 401 with mint guidance"
+
+echo "8. a call that needs a person's yes is held, and the MCP client is given a requestId"
+# The grant stays; `shell` is now marked as needing a human yes. That is the POLICY's ask — the
+# same card the auto-review judge raises, carrying the grant's reason instead of the judge's.
+marked=$(curl -fsS -X POST "$BASE/coworkers/$coworker/approvals" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' -d '{"tools":["shell"]}')
+echo "$marked" | jq -e '.needsApproval | index("shell")' >/dev/null || fail "shell was not marked: $marked"
+
+marker3="/tmp/mcp-door-after-the-yes-$(date +%s)"
+args="{\"command\":\"echo after-the-yes > $marker3\"}"
+asked=$(mcp "$key" 9 tools/call "{\"name\":\"shell\",\"arguments\":$args}")
+echo "$asked" | jq -e '.result.isError == true' >/dev/null || fail "a call needing a person ran anyway: $asked"
+text=$(echo "$asked" | jq -r '.result.content[0].text')
+request_id=$(printf '%s' "$text" | sed -n 's/.*requestId: \([^)]*\)).*/\1/p')
+[ -n "$request_id" ] || fail "the client was not told where to answer: $text"
+# The waiting call must not have run. A pending approval that already happened is the one failure
+# mode this whole layer exists to prevent.
+docker exec "$BOX_ID" sh -c "[ ! -e $marker3 ]" || fail "the command ran before anybody said yes"
+ok "held on requestId $request_id, and nothing ran"
+
+echo "9. the card is in the person's queue, and says WHICH question is being asked"
+queue=$(curl -fsS "$BASE/ag-ui/approvals" -H "authorization: Bearer $token")
+entry=$(echo "$queue" | jq -c --arg c "$request_id" '.[] | select(.callId == $c)')
+[ -n "$entry" ] || fail "the MCP card is not in the approvals queue: $queue"
+echo "$entry" | jq -e '.reason == "policy-approval"' >/dev/null \
+  || fail "the queue does not name the ask: $entry"
+echo "$entry" | jq -e '.why | type == "string" and length > 0' >/dev/null \
+  || fail "the queue does not say why: $entry"
+# EXACTLY the thread the door mints for THIS coworker, not merely one that starts `mcp-`.
+# `threadId` is whatever the client sent, so a prefix would let a conversation pose as one.
+echo "$entry" | jq -e --arg t "mcp-$coworker" '.threadId == $t' >/dev/null \
+  || fail "an MCP card should be on its own mcp-<coworker> thread: $entry"
+run_id=$(echo "$entry" | jq -r '.runId')
+ok "queued as $(echo "$entry" | jq -r '.reason'), because: $(echo "$entry" | jq -r '.why' | cut -c1-60)"
+
+echo "10. the person says yes, and the run FINISHES rather than resuming as a turn"
+# An MCP run is one call's audit row, not a conversation. Resuming it would run the tool here
+# while the client is being told to retry — the same call, twice.
+answered=$(curl -fsS -X POST "$BASE/ag-ui/runs/$run_id/answer" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' -d "{\"call_id\":\"$request_id\",\"approved\":true}")
+echo "$answered" | jq -e '.settling == true and .continuing == false' >/dev/null \
+  || fail "the MCP card was not taken for settling: $answered"
+# The settle runs in the background — it holds the door's per-coworker lock, which a tools/call
+# can hold for minutes — so the RUN is what says it is done, not the reply.
+state=""
+for _ in $(seq 1 40); do
+  state=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token" | jq -r '.status')
+  case "$state" in finished|failed|stopped) break ;; esac
+  sleep 1
+done
+[ "$state" = "finished" ] || fail "the answered MCP run is $state, not finished"
+ok "answered, and its run is finished"
+
+echo "11. the retry spends the yes, and the approved command runs"
+retry=$(mcp "$key" 10 tools/call "{\"name\":\"shell\",\"arguments\":$args}")
+echo "$retry" | jq -e '.result.content[0].text != null and (.result.isError // false) == false' >/dev/null \
+  || fail "the retry after the yes was not let through: $retry"
+docker exec "$BOX_ID" cat "$marker3" | grep -q "after-the-yes" \
+  || fail "the approved command never ran on the coworker's box"
+ok "the approved call ran, after the yes and not before"
 
 echo
 echo "SLICE 20 SMOKE PASSED — the MCP door serves the coworker's toolbox, and only that"

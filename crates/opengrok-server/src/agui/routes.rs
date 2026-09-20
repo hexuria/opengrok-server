@@ -2815,12 +2815,72 @@ pub async fn answer_run(
     let resumed_seq = run.emitted.len() as u32;
 
     let at_ms = now_ms();
-    let events = match run.decide(RunCommand::Answer {
+    let answer = RunCommand::Answer {
         call_id: request.call_id.clone(),
         approved: request.approved,
         by: account_id.to_string(),
         at_ms,
-    }) {
+    };
+
+    // AN MCP AUDIT RUN IS NOT A CONVERSATION, so it does not carry on: answering its card finishes
+    // it, and a yes is remembered for the MCP client's own retry instead. Resuming it would run
+    // the tool here while the client is being told to retry, and the retry would run it again.
+    //
+    // THE WHOLE SETTLE GOES TO THE BACKGROUND, Answer and all. It has to hold the door's
+    // per-coworker lock, and `dispatch` holds that lock across a real tool call — minutes, on a
+    // slow box — so doing it here would park somebody's approve on a request that cannot finish.
+    // Journalling the Answer inside that lock is also stricter than doing it here would be: it
+    // closes the window where a `tools/call` arriving between the append and the lock finds no
+    // pending ask, runs the call and raises a second card.
+    //
+    // The aggregate still decides the answer synchronously first, so a retried press still gets
+    // `alreadyAnswered` and a wrong call id still gets a 409 — `decide` is pure, so this costs
+    // nothing and settles nothing.
+    if crate::mcp_door::is_mcp_audit_run(&run)
+        && let Some(pending) = pending.clone()
+    {
+        if let Err(error) = run.decide(answer) {
+            return match error {
+                opengrok_core::run::RunError::AlreadyAnswered => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "runId": run_id.as_str(),
+                        "callId": request.call_id,
+                        "alreadyAnswered": true,
+                    })),
+                )
+                    .into_response(),
+                error => (StatusCode::CONFLICT, error.to_string()).into_response(),
+            };
+        }
+        let store = state.auth.store.clone();
+        let settling = crate::mcp_door::McpCardAnswer {
+            run_id: run_id.clone(),
+            run,
+            seq,
+            pending,
+            approved: request.approved,
+            at_ms,
+        };
+        let account = account_id.clone();
+        tokio::spawn(async move {
+            crate::mcp_door::settle_mcp_answer(store, account, settling).await;
+        });
+        return Json(serde_json::json!({
+            "runId": run_id.as_str(),
+            "callId": request.call_id,
+            "approved": request.approved,
+            "alreadyAnswered": false,
+            // Nothing follows on this run — the MCP client's retry is what happens next.
+            "continuing": false,
+            // And the ending is on its way rather than already done: a client that needs to know
+            // reads the run back until it is `finished`.
+            "settling": true,
+        }))
+        .into_response();
+    }
+
+    let events = match run.decide(answer) {
         Ok(events) => events,
         // A second answer is not an error the caller needs to fix; it is the same answer arriving
         // twice. Reporting the settled state is what makes a retry safe to send.
@@ -3325,6 +3385,13 @@ pub async fn list_awaiting(
                         // What is actually being approved. A person asked to approve "shell"
                         // without seeing the command is being asked to approve nothing.
                         "arguments": pending.arguments,
+                        // WHICH QUESTION IS BEING ASKED. The judge's ask, a policy grant's, the
+                        // machine owner's consent and a form are four different things that all
+                        // land in this one queue, and a client that cannot tell them apart can
+                        // only offer one word for all four. The run's own word, not a new one.
+                        "reason": pending.reason.as_str(),
+                        // And why, in a sentence. Built from the run alone — see `why_of`.
+                        "why": why_of(&pending),
                     }));
                 }
             }
@@ -3333,6 +3400,32 @@ pub async fn list_awaiting(
         }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
+}
+
+/// Why this call is waiting, in a sentence: which question is being asked, and what the call
+/// would do if the answer is yes.
+///
+/// FROM THE RUN AND NOTHING ELSE. The card in the transcript carries the ask's own words, but
+/// reading it would mean a transcript scan per waiting coworker on a queue a client polls — and
+/// the run already holds the reason, the tool and the arguments, which is what the sentence is
+/// made of. The opening line says which of the four questions this is; `cards::summary_for`
+/// writes the rest, the same words the card itself uses for what is about to happen.
+fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
+    use opengrok_core::run::SuspendReason;
+    let what = crate::gateway::cards::summary_for(&pending.tool, &pending.arguments);
+    let asking = match pending.reason {
+        SuspendReason::PolicyApproval => crate::gateway::cards::POLICY_ASK_REASON,
+        // Deliberately not the judge's default reason text: the ask's own sentence lives on the
+        // card, and an egress-tunnel ask has a different one. Saying which judge instruction
+        // fired, from a run that does not know, would be a guess printed as a fact.
+        SuspendReason::AutoReview => "Auto-review asked about this rather than allowing it.",
+        SuspendReason::ExecConsent => {
+            "This would run on your own computer, so it needs your consent."
+        }
+        SuspendReason::UserForm => "The coworker is asking you to fill something in.",
+        SuspendReason::Credential => "The coworker is asking for a saved login to be brokered.",
+    };
+    format!("{asking} {what}")
 }
 
 /// `?coworker=cw_…`: whose computer the egress-tunnel question is about.

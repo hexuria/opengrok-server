@@ -252,12 +252,24 @@ impl Harness {
     /// One turn on the AG-UI door, the way NativeChat drives one. The reply is the whole SSE
     /// stream; a turn that pauses for a card ends it with `run-awaiting-approval`.
     async fn turn(&self, token: &str, agent: &str, prompt: &str) -> String {
+        self.turn_on(
+            token,
+            agent,
+            &format!("thr-{}", uuid::Uuid::now_v7()),
+            prompt,
+        )
+        .await
+    }
+
+    /// The same, on a thread the caller names — the client picks `threadId` and the server takes
+    /// it verbatim, which is the whole reason the MCP test below exists.
+    async fn turn_on(&self, token: &str, agent: &str, thread: &str, prompt: &str) -> String {
         let res = self
             .client
             .post(format!("{}/ag-ui", self.base))
             .header("authorization", format!("Bearer {token}"))
             .json(&json!({
-                "threadId": format!("thr-{}", uuid::Uuid::now_v7()),
+                "threadId": thread,
                 "runId": uuid::Uuid::now_v7().to_string(),
                 "messages": [{ "id": "m1", "role": "user", "content": prompt }],
                 "forwardedProps": { "coworkerId": agent },
@@ -399,5 +411,184 @@ async fn a_no_on_the_desktop_card_is_told_to_the_model_and_ends_the_run() {
     assert!(
         emitted.contains("shell"),
         "the refusal names the tool: {emitted}"
+    );
+}
+
+/// AN ORDINARY RUN IS STILL CARRIED ON, and this test exists to keep it that way.
+///
+/// The same route now has a second reading: a run on an `mcp-{coworker}` thread is one MCP call's
+/// audit row, and answering its card FINISHES it rather than resuming it — resuming would run the
+/// tool here while the MCP client is being told to retry. A conversation must never fall down that
+/// branch. If it did, the person would be left with a turn that stopped mid-sentence, a tool call
+/// with no result for the next turn to replay, and a `continuing: false` telling their client to
+/// stop watching a run that had simply been abandoned.
+#[tokio::test]
+async fn an_ordinary_run_answered_on_the_same_route_is_carried_on() {
+    let database_url = database_or_skip!();
+    let email = format!("ordinary-yes-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn(&token, &agent, "run a command").await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let (suspended, _) = h.store.load_run(&run_id).await.expect("run");
+    assert!(
+        !suspended.thread_id.starts_with("mcp-"),
+        "a conversation turn is not an MCP audit row: {}",
+        suspended.thread_id
+    );
+
+    let answered: Value = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer")
+        .json()
+        .await
+        .expect("answer json");
+    assert_eq!(
+        answered["continuing"], true,
+        "the turn goes on after the yes: {answered}"
+    );
+    assert!(
+        answered.get("finished").is_none(),
+        "`finished` is the MCP branch's word; a conversation is not settled here: {answered}"
+    );
+
+    // And it really is carried on: the approved command runs, and the run reaches an ending with
+    // nobody asking it to.
+    let mut ended = None;
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            ended = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let run = ended.expect("the approved run never ended, so nothing picked it back up");
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        !h.stub.ran().is_empty(),
+        "the approved command never ran, so the run was finished rather than resumed"
+    );
+}
+
+/// A THREAD CALLED `mcp-…` IS NOT AN MCP RUN, and anybody can name one.
+///
+/// `POST /ag-ui` takes `threadId` from the client verbatim. While the answer route tested the
+/// thread by PREFIX, a person could open an ordinary turn on `mcp-anything`, answer their own
+/// approval card, and have the server mint an MCP allow-once from it — a yes the door would
+/// spend on the next `tools/call`, for a call nobody at the door ever made. The test is exact
+/// now: the run's thread must be the one the door would have minted for THIS run's coworker.
+#[tokio::test]
+async fn a_conversation_on_a_look_alike_thread_is_not_an_mcp_run() {
+    let database_url = database_or_skip!();
+    let email = format!("look-alike-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn_on(&token, &agent, "mcp-not-mine", "run a command")
+        .await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let (suspended, _) = h.store.load_run(&run_id).await.expect("run");
+    assert_eq!(
+        suspended.thread_id, "mcp-not-mine",
+        "the client's thread name was taken verbatim, which is the point"
+    );
+    let pending = suspended.pending.clone().expect("a pending call");
+
+    let answered: Value = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer")
+        .json()
+        .await
+        .expect("answer json");
+    assert_eq!(
+        answered["continuing"], true,
+        "a conversation on a look-alike thread is still a conversation: {answered}"
+    );
+    assert!(
+        answered.get("settling").is_none(),
+        "it must not be settled as an MCP card: {answered}"
+    );
+
+    // AND NOTHING WAS MINTED. A yes remembered here would be spendable by the coworker's own bot
+    // key on a call the MCP door never asked about.
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &h.store,
+            &opengrok_core::id::CoworkerId::from_stored(agent.clone()),
+            Some(h.account.as_str()),
+            &pending.tool,
+            &pending.arguments,
+        )
+        .await,
+        None,
+        "an ordinary run must not mint an MCP allow-once"
+    );
+
+    let mut ended = None;
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            ended = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        ended
+            .expect("the run never ended, so nothing resumed it")
+            .status,
+        RunStatus::Finished
     );
 }
