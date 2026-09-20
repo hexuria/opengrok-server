@@ -480,6 +480,10 @@ pub const COMPUTER_DOWN: &str = "my computer is down; ask them to check it";
 /// than telling the person the computer is broken.
 pub const COMPUTER_STARTING: &str = "my computer is still starting; try again in a moment";
 
+/// Told the box id after an executor woke a box (or first found it running), so the server can
+/// stamp it as in use for the idle sweep.
+pub type OnWoken = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
@@ -512,7 +516,7 @@ pub struct Executor {
     /// once per call — a box that is down costs one wait, not one per call.
     woken: std::sync::Mutex<std::collections::BTreeMap<String, Result<(), String>>>,
     /// Told the box id after this executor woke a box, so the server can stamp it as in use.
-    on_woken: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_woken: Option<OnWoken>,
     /// What this principal may make this coworker do. Consulted before EVERY call, never once at
     /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
     /// (CLAUDE.md #6).
@@ -781,7 +785,7 @@ impl Executor {
     /// Called with the box id after this executor brought a box up (or found it up), so the
     /// server can stamp it as in use for the idle sweep.
     #[must_use]
-    pub fn with_on_woken(mut self, on_woken: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+    pub fn with_on_woken(mut self, on_woken: OnWoken) -> Self {
         self.on_woken = Some(on_woken);
         self
     }

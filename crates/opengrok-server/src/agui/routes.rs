@@ -294,7 +294,7 @@ pub(crate) async fn tools_for_coworker(
     }
     let stamp_store = state.auth.store.clone();
     let stamp_scope_id = scope_id.clone();
-    let on_woken: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |_| {
+    let on_woken: opengrok_tools::OnWoken = std::sync::Arc::new(move |_| {
         let store = stamp_store.clone();
         let scope_id = stamp_scope_id.clone();
         tokio::spawn(async move {
