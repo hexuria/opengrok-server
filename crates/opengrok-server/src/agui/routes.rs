@@ -10,6 +10,7 @@
 //! placeholder body; slice 3 replaces the middle with the harness, and the framing does not change.
 
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -647,6 +648,10 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
+        .route(
+            "/ag-ui/host-settings",
+            get(host_settings).put(patch_host_settings),
+        )
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/models", get(list_models))
         // The org's coworker templates, for the hire picker. Written by the admin
@@ -3328,6 +3333,119 @@ pub async fn list_awaiting(
         }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
+}
+
+/// `?coworker=cw_…`: whose computer the egress-tunnel question is about.
+#[derive(Deserialize)]
+pub struct HostSettingsQuery {
+    coworker: Option<String>,
+}
+
+/// The host's settings record, plus whether the egress tunnel is live for the coworker asked
+/// about. What the desktop verbs `getHostSettings` and `isEgressTunnelAvailable` answered, on
+/// the door NativeChat already uses and under its own account token — so the seam-A door can
+/// close without the settings page losing its host.
+///
+/// `egressTunnelAvailable` is host intent AND that coworker's box advertising the tunnel. No
+/// coworker named, not this account's, no computer, or no box report → false: a client must not
+/// paint the toggle live until a laptop client is attached.
+pub async fn host_settings(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HostSettingsQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
+}
+
+/// A partial record: the keys given replace the host's and the rest stay, the merge
+/// `setHostSettings` did. Answers the whole record, so the client reads back what it set.
+pub async fn patch_host_settings(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HostSettingsQuery>,
+    Json(patch): Json<serde_json::Value>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let Some(patch) = patch.as_object() else {
+        return (StatusCode::BAD_REQUEST, "a settings patch is a JSON object").into_response();
+    };
+    let Some(lock) = state.host_settings.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host keeps no settings",
+        )
+            .into_response();
+    };
+    if let Ok(mut settings) = lock.lock() {
+        if !settings.is_object() {
+            *settings = crate::gateway::default_settings();
+        }
+        if let Some(record) = settings.as_object_mut() {
+            for (key, value) in patch {
+                record.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
+}
+
+async fn host_settings_reply(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker: Option<&str>,
+) -> Response {
+    let mut record = state
+        .host_settings
+        .as_ref()
+        .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
+        .unwrap_or_else(crate::gateway::default_settings);
+    let available = egress_tunnel_available_for(state, account_id, coworker).await;
+    if let Some(record) = record.as_object_mut() {
+        record.insert(
+            "egressTunnelAvailable".to_string(),
+            serde_json::Value::Bool(available),
+        );
+    }
+    Json(record).into_response()
+}
+
+/// Host intent, then the coworker: it must be named, be this account's, have a computer, and
+/// that box must say the tunnel is ready. Each miss is a plain false, never an error — the
+/// settings page still has its record to show.
+async fn egress_tunnel_available_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker: Option<&str>,
+) -> bool {
+    if !state.egress_tunnel_enabled() {
+        return false;
+    }
+    let (Some(coworker), Some(computer)) = (coworker, state.computer.as_ref()) else {
+        return false;
+    };
+    let coworker_id = CoworkerId::from_stored(coworker.to_string());
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(account_id)
+        .await
+        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
+        .unwrap_or(false);
+    if !owns {
+        return false;
+    }
+    let Ok((loaded, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return false;
+    };
+    let Some(box_id) = loaded.computer().map(|id| id.as_str().to_string()) else {
+        return false;
+    };
+    state.egress_tunnel_for(computer.as_ref(), &box_id).await
 }
 
 /// The message a reply points at, as the one bracketed line `reply_context` writes for the

@@ -570,6 +570,7 @@ every record that sharing would otherwise break carry whose it is.
 ## Phase 0
 
 - [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
+- [x] **Host settings on the AG-UI door.** `GET/PUT /ag-ui/host-settings` (+ `egressTunnelAvailable` for `?coworker=`) under the account token — the three seam-A verbs NativeChat still called (`getHostSettings`, `setHostSettings`, `isEgressTunnelAvailable`), re-homed so seam A can close. Step 1 of the seam deletion (P0-E); step 2 is the NativeChat switch, step 3 the deletion itself. 20 Sep 2026.
 
 ## Later — unordered, deliberately
 
