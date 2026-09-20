@@ -29,28 +29,20 @@ if [ -n "${OG_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
   fi
 fi
 
-# THE MOCK CATALOGUE IS A FEATURE, AND BOTH CONFIGURATIONS HAVE TO COMPILE.
-# `mock-fixtures` is off by default so it cannot reach production; developers, tests and CI turn
-# it on. That means there are two builds, and a gate that only ever exercises one of them is how
-# the other quietly stops compiling — most likely the DEFAULT one, which is the one that ships.
-# So: check the default build first (that is a release), then do everything else with the feature
-# on (that is a desk, and it is where the catalogue's own tests live).
-MOCK_FEATURE="opengrok-server/mock-fixtures"
-
 step "cargo fmt --all --check"
 cargo fmt --all --check || fail "formatting (run: cargo fmt --all)"
 
 step "scripts/crate-size.sh"
 scripts/crate-size.sh || fail "crate size (a crate grew past its ceiling)"
 
-step "cargo check --workspace (default build — no mock catalogue, the one that ships)"
-cargo check --workspace || fail "check (default build)"
+step "cargo check --workspace --all-targets"
+cargo check --workspace --all-targets || fail "check"
 
-step "cargo clippy --workspace --all-targets --features $MOCK_FEATURE -- -D warnings"
-cargo clippy --workspace --all-targets --features "$MOCK_FEATURE" -- -D warnings || fail "clippy"
+step "cargo clippy --workspace --all-targets -- -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 
-step "cargo test --workspace --features $MOCK_FEATURE"
-cargo test --workspace --features "$MOCK_FEATURE" || fail "tests"
+step "cargo test --workspace"
+cargo test --workspace || fail "tests"
 
 if [ "${1:-}" != "--smoke" ]; then
   echo
@@ -63,10 +55,8 @@ fi
 # whatever binary the developer last built — found 2 Sep 2026 when a box carried no run tag
 # because the server was 40 minutes older than the code. CI always built first (ci.yml); now
 # the script does too, so the two agree.
-# WITH the feature: the smokes drive mock doors, and `OG_MODEL_DOOR=mock-cards` now refuses to
-# boot a binary that has no catalogue rather than falling back to a real, billed door.
-step "cargo build -p opengrok --features $MOCK_FEATURE"
-cargo build -p opengrok --features "$MOCK_FEATURE" || fail "build"
+step "cargo build -p opengrok"
+cargo build -p opengrok || fail "build"
 
 : "${OG_DATABASE_URL:?--smoke needs OG_DATABASE_URL, e.g. postgres://oag:oag@127.0.0.1:5452/opengrok}"
 
@@ -127,7 +117,7 @@ for _ in $(seq 1 30); do
 done
 curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 || fail "the server did not come up"
 
-for script in slice1-auth slice2-agui slice3-harness slice5-roster slice7-policy slice11-gateway slice12-conversation slice14-botkey slice15-lifecycle slice22-model-pins; do
+for script in slice1-auth slice2-agui slice3-harness slice5-roster slice7-policy slice14-botkey slice22-model-pins; do
   step "scripts/$script-smoke.sh"
   OG_BASE="$BASE" OG_PORT="$PORT" "scripts/$script-smoke.sh" >/dev/null || fail "$script"
   echo "  passed"
@@ -186,12 +176,7 @@ step "scripts/slice10-autonomy-smoke.sh"
 OG_PORT="$PORT" scripts/slice10-autonomy-smoke.sh >/dev/null || fail "autonomy"
 echo "  passed"
 
-# Starts its own server too: it needs OG_GATEWAY_BEARER and OG_PUBLIC_GATEWAY_URL in its env.
-step "scripts/slice13-seamb-smoke.sh"
-OG_PORT="$PORT" scripts/slice13-seamb-smoke.sh >/dev/null || fail "seamb"
-echo "  passed"
-
-# Also its own server: it configures OG_PUBLIC_GATEWAY_URL + OG_GATEWAY_BEARER internally, and
+# Also its own server: it configures OG_PUBLIC_GATEWAY_URL internally, and
 # proves the browser login leg AND that the blind LAN token-mint hole is closed.
 step "scripts/slice16-browser-login-smoke.sh"
 OG_PORT="$((PORT + 3))" scripts/slice16-browser-login-smoke.sh >/dev/null || fail "browser-login"

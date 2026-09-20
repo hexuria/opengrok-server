@@ -149,12 +149,7 @@ async fn spawn(store: PgStore) -> String {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some(base.clone()),
-    );
+    let gateway = GatewayState::new(agui.clone(), Some(base.clone()));
     let app = opengrok_server::router(agui, gateway);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");

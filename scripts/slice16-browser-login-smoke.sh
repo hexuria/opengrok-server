@@ -24,11 +24,11 @@ command -v python3 >/dev/null || fail "python3 is required"
 start_server() {
   OG_BIND=127.0.0.1:$PORT OG_DATABASE_URL="$OG_DATABASE_URL" \
   OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
-  OG_MODEL_DOOR=mock OG_PUBLIC_GATEWAY_URL="http://opengrok.lan:$PORT" OG_GATEWAY_BEARER=slice16-bearer \
+  OG_MODEL_DOOR=mock OG_PUBLIC_GATEWAY_URL="http://opengrok.lan:$PORT" \
   RUST_LOG=warn "$BIN" >/dev/null 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 30); do
-    curl -fsS --max-time 2 "$BASE/health" -H 'authorization: Bearer slice16-bearer' >/dev/null 2>&1 && return 0
+    curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 && return 0
     sleep 1
   done
   fail "the server did not come up"

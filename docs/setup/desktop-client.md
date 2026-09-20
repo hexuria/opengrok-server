@@ -1,5 +1,10 @@
 # Pointing the desktop client at this server
 
+> **The door this describes was removed on 20 Sep 2026.** The Grok Bot desktop client is
+> discontinued, and seam A and seam B went with it; nothing on this server answers
+> `POST /api/{method}`, `GET /events` or `/aiserver.v1.*` any more. Kept as the record of how the
+> two were wired together.
+
 The packaged Grok Bot reconstruction (`/Volumes/goldcoders/OSS/opengrok`, installed as
 `/Applications/Open Grok.app`) connects through its own **OpenGrok server mode** — an in-app
 runtime, not an environment variable.

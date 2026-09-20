@@ -70,13 +70,12 @@ crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
   opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
   opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
-  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint
+  opengrok-server   Axum: the host-facing API, the AG-UI endpoint, the MCP door, /console
 ```
 
 Mirrors open-ai-gateway's crate-per-concern layout on purpose — the two ship together and a reader
@@ -99,20 +98,16 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 cargo check --workspace          # must stay clean — this is the DEFAULT build, the one that ships
 cargo check -p opengrok --no-default-features  # one reqwest, one hyper; `jev` is typesafe-sdk
 cargo clippy --workspace --all-targets
-cargo test --workspace --features opengrok-server/mock-fixtures   # see below
+cargo test --workspace          # many tests need Postgres; they skip loudly without it
 scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
 scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
 ```
 
-**`mock-fixtures` is a cargo feature, off by default.** It carries the mock transcript catalogue —
-~65 KB of embedded sample documents and a filesystem read verb — which is development surface and
-must not reach a production binary, so a release cannot ship it by forgetting to switch something
-off. Turn it on for local dev, tests and CI; `scripts/serve.sh` and `scripts/gate.sh` already do.
-Without it `cargo test --workspace` silently skips the catalogue's own tests, and a binary built
-without it REFUSES TO START under `OG_MODEL_DOOR=mock-cards` rather than quietly falling back to
-a real, billed door. `enabled()` additionally refuses when `OG_HOSTED=1`, the same way
-`provision::local_docker_allowed` does.
+**`OG_MODEL_DOOR=mock-cards` REFUSES TO START.** It served the mock transcript catalogue, which
+was deleted on 20 Sep 2026 with the desktop client's door it rendered into. It fails closed and
+names the doors that do exist rather than quietly falling back to a real, billed one. `mock` and
+`mock-tools` are what the smokes drive.
 
 ## Writing style in this repo
 

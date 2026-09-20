@@ -5,8 +5,13 @@
 //! here, we check a bearer we minted, and we fire the same `autonomy::fire` path Test run and
 //! the cron sweep already use.
 //!
-//! The route is deliberately NOT behind the gateway's shared bearer or its Origin refusal. The
-//! caller is a todo app (or a curl), not the desktop. Auth is the hook's own key.
+//! The route is deliberately NOT behind any account token: the caller is a todo app (or a curl),
+//! not a signed-in person. Auth is the hook's own key.
+//!
+//! MINTING A HOOK WENT WITH SEAM A. The only door that ever created a webhook wake — and handed
+//! back the URL and the bearer — was the desktop's `createAgentAutomation`. This route still
+//! serves the rows that door wrote; nothing on this server writes a new one. Giving the AG-UI
+//! schedules door a webhook wake is the follow-up.
 
 use axum::Router;
 use axum::body::Bytes;
@@ -18,11 +23,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use opengrok_core::id::{HookId, RunId};
+use opengrok_core::id::RunId;
 use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
 use super::GatewayState;
-use super::lifecycle::{emit_automations, mutate_schedule};
+use super::lifecycle::mutate_schedule;
 
 /// Largest JSON body we will attach to a wake. A webhook is a ping-or-payload, not a file drop.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -31,18 +36,6 @@ pub fn router(state: GatewayState) -> Router {
     Router::new()
         .route("/hooks/{hook_id}", post(inbound))
         .with_state(state)
-}
-
-/// A fresh inbound bearer. `og_` matches the placeholder NativeChat already shows; 32 random
-/// bytes is the same entropy as a refresh token.
-pub(crate) fn mint_webhook_key() -> String {
-    use rand::RngExt;
-    let bytes: [u8; 32] = rand::rng().random();
-    format!("og_{}", hex(&bytes))
-}
-
-pub(crate) fn mint_hook_id() -> String {
-    HookId::new().as_str().to_string()
 }
 
 pub(crate) fn hash_webhook_key(key: &str) -> String {
@@ -64,36 +57,6 @@ pub(crate) fn key_matches(secret_hash: &str, presented: &str) -> bool {
             .as_bytes()
             .ct_eq(secret_hash.as_bytes())
             .into()
-}
-
-/// The POST URL the editor shows. Prefers the advertised public gateway address so a loopback
-/// bind never leaks into a URL a phone or a SaaS app would POST to.
-pub(crate) fn hook_url(state: &GatewayState, hook_id: &str) -> String {
-    let advertised = state
-        .public_gateway_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-        .or_else(|| {
-            let url = state.agui.auth.public_url.as_str();
-            (!url.is_empty()).then_some(url)
-        })
-        .unwrap_or("");
-    let base = advertised.trim_end_matches('/');
-    if base.is_empty() {
-        format!("/hooks/{hook_id}")
-    } else {
-        format!("{base}/hooks/{hook_id}")
-    }
-}
-
-pub(crate) fn webhook_trigger_json(state: &GatewayState, hook_id: &str, key: &str) -> Value {
-    let url = hook_url(state, hook_id);
-    json!({
-        "type": "webhook",
-        "url": url,
-        "key": key,
-        "header": format!("Authorization: Bearer {key}"),
-    })
 }
 
 fn now_ms() -> i64 {
@@ -188,7 +151,6 @@ async fn inbound(
             }),
         },
     ));
-    emit_automations(&state, coworker_id.as_str(), &account_id).await;
     (
         StatusCode::ACCEPTED,
         [(axum::http::header::CONTENT_TYPE, "application/json")],

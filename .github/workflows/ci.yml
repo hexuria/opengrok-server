@@ -40,10 +40,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # `opengrok-proto`'s build script compiles our own transcribed .proto with prost-build, which
-      # shells out to protoc. Without this the workspace does not build at all.
-      - name: install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       # Four smokes are handed their own database so they cannot race the shared one; the gate
       # derives the names and expects them to exist.
       - name: create the databases the gate expects
@@ -56,10 +52,8 @@ jobs:
       - name: crate size ceilings
         run: bash scripts/crate-size.sh
       # The gate does not build; a stale binary is the classic way to test yesterday's code.
-      # `--features` matches what gate.sh itself builds with: the smokes run mock doors, and the
-      # mock catalogue is off by default so it cannot reach a production binary.
       - name: build the server the smokes run
-        run: cargo build -p opengrok --features opengrok-server/mock-fixtures
+        run: cargo build -p opengrok
       - name: scripts/gate.sh --smoke
         run: scripts/gate.sh --smoke
 

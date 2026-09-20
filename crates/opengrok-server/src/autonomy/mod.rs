@@ -127,17 +127,6 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.
     let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
 
-    if let Some(announce) = &announce {
-        // The roster shows the coworker thinking while its routine runs, the same as a turn.
-        crate::gateway::live::set_running(
-            &announce.gateway,
-            coworker_id.as_str(),
-            true,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-
     let events = run_conversation(
         state.door.as_ref(),
         tools.as_ref(),
@@ -156,9 +145,9 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     }
 }
 
-/// Post the finished routine into the coworker's chat and refresh the Routines pane. The chat
-/// line carries the routine's name and the answer's head (the run's own thread has the whole
-/// thing); it is appended to the gateway transcript like any coworker message and emitted live.
+/// Post the finished routine into the coworker's chat. The chat line carries the routine's name
+/// and the answer's head (the run's own thread has the whole thing); it is appended to the
+/// transcript like any coworker message.
 async fn announce_finished(
     announce: &Announce,
     coworker_id: &CoworkerId,
@@ -202,28 +191,9 @@ async fn announce_finished(
         .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
         .await
     {
-        Ok(_) => {
-            crate::gateway::live::emit_transcript(
-                gateway,
-                coworker_id.as_str(),
-                account_id,
-                "appended",
-                entry,
-            );
-        }
+        Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
         }
     }
-    let preview: String = text.chars().take(120).collect();
-    crate::gateway::live::set_running(
-        gateway,
-        coworker_id.as_str(),
-        false,
-        serde_json::json!({ "lastMessagePreview": preview }),
-    )
-    .await;
-    // The firing's own account: a routine acting on its schedule acts for whoever set it,
-    // and that is whose Routines pane this frame refreshes.
-    crate::gateway::lifecycle::emit_automations(gateway, coworker_id.as_str(), account_id).await;
 }

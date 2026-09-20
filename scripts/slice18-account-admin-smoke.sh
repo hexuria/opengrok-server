@@ -11,9 +11,9 @@ SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}"
 admin_cli() { OG_DATABASE_URL="$OG_DATABASE_URL" OG_TOKEN_SECRET="$SECRET" "$BIN" admin "$@"; }
 start_server() {
   OG_BIND=127.0.0.1:$PORT OG_DATABASE_URL="$OG_DATABASE_URL" OG_TOKEN_SECRET="$SECRET" \
-  OG_MODEL_DOOR=mock OG_PUBLIC_GATEWAY_URL="http://opengrok.lan:$PORT" OG_GATEWAY_BEARER=s18 \
+  OG_MODEL_DOOR=mock OG_PUBLIC_GATEWAY_URL="http://opengrok.lan:$PORT" \
   RUST_LOG=warn "$BIN" >/dev/null 2>&1 & SERVER_PID=$!
-  for _ in $(seq 1 30); do curl -fsS --max-time 2 "$BASE/health" -H 'authorization: Bearer s18' >/dev/null 2>&1 && return 0; sleep 1; done
+  for _ in $(seq 1 30); do curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 && return 0; sleep 1; done
   fail "server did not come up"
 }
 trap 'kill "${SERVER_PID:-0}" 2>/dev/null || true' EXIT

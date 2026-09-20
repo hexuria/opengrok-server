@@ -120,12 +120,7 @@ fn app_with(store: PgStore, secret: &[u8]) -> axum::Router {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     opengrok_server::router(agui, gateway)
 }
 

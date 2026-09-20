@@ -64,12 +64,8 @@ export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-600}"
 export OG_MOCK_MAX_TURN_MS="${OG_MOCK_MAX_TURN_MS:-3000}"
 echo "=== mock doors: ${OG_MOCK_DELTA_MS}ms/delta, floor ${OG_MOCK_MIN_TURN_MS}ms/call, pacing capped at ${OG_MOCK_MAX_TURN_MS}ms/call (floor is extra)"
 
-# WITH the mock catalogue. It is off by default so it cannot ship (see opengrok-server's
-# Cargo.toml), but a dev server is exactly where it is wanted — and `OG_MODEL_DOOR=mock-cards`
-# refuses to start without it, so a plain `cargo build -p opengrok` would leave you with a binary
-# that will not boot from this .env.
-echo "=== cargo build -p opengrok --features mock-fixtures"
-cargo build -p opengrok --features mock-fixtures
+echo "=== cargo build -p opengrok"
+cargo build -p opengrok
 
 # -x, never -f: -f matches this script's own command line.
 if pids=$(pgrep -x opengrok); then

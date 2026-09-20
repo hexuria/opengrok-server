@@ -144,15 +144,7 @@ fn app_with(store: PgStore, host_email: &str) -> (axum::Router, AgUiState, Gatew
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (
         opengrok_server::router(agui.clone(), gateway.clone()),
         agui,
@@ -437,12 +429,18 @@ async fn only_a_live_bot_key_opens_the_door() {
     );
 }
 
-/// An MCP Ask has no in-flight run. The door synthesizes one and a real auto-review card;
-/// the desktop verb that already answers conversation Asks settles it. Driven through
-/// `reply_to_ask` (the shipped Ask path), not `tools/call`: that only Asks after the
-/// toolbox is Ready (a computer).
+/// An MCP Ask has no in-flight run. The door synthesizes one and a real auto-review card, and
+/// holds every retry on the same requestId until it is answered. Driven through `reply_to_ask`
+/// (the shipped Ask path), not `tools/call`: that only Asks after the toolbox is Ready (a
+/// computer).
+///
+/// ANSWERING THE CARD IS NO LONGER ASSERTED HERE. The one door that settled an MCP card — the
+/// desktop's `resolveAutoReviewApproval` — went with seam A, and it carried the MCP-shaped
+/// answer with it: flip the card, remember the allow-once, finish the run rather than resume it
+/// as a conversation. `POST /ag-ui/runs/{id}/answer` does not do those three things yet. Teaching
+/// it to is the follow-up; until then there is nothing here to assert.
 #[tokio::test]
-async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
+async fn an_mcp_ask_raises_a_real_card_and_holds_every_retry_on_it() {
     let database_url = database_or_skip!();
     let store = store_from(&database_url).await;
     let host_email = format!("mcp-ask-{}@og.local", uuid::Uuid::now_v7().simple());
@@ -545,97 +543,22 @@ async fn an_mcp_ask_raises_a_real_card_the_desktop_can_answer() {
     assert_eq!(card["message"]["approval"]["requestId"], call.id);
     assert_eq!(card["message"]["approval"]["status"], "pending");
     assert_eq!(card["message"]["approval"]["surface"], "box_shell");
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-
-    let res = reqwest::Client::new()
-        .post(format!("{base}/api/resolveAutoReviewApproval"))
-        .header("Authorization", "Bearer test-bearer")
-        .json(&json!({
-            "entryId": entry_id,
-            "requestId": call.id,
-            "resolution": "approved",
-            "agentId": coworker.as_str(),
-        }))
-        .send()
-        .await
-        .expect("resolve");
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "the desktop verb answers the MCP card"
-    );
-    let body: Value = res.json().await.expect("body");
-    assert_eq!(body["ok"], true, "{body}");
-
-    let flipped = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript")
-        .into_iter()
-        .find(|entry| entry["id"] == entry_id)
-        .expect("card still present");
-    assert_eq!(flipped["message"]["approval"]["status"], "approved");
-
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(
-        run.status,
-        RunStatus::Finished,
-        "an MCP run is finished on the card, not resumed as a conversation"
-    );
-    assert!(run.answered.contains(&call.id));
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &json!({ "path": "/tmp/other", "content": "nope" }),
-        )
-        .await,
-        None,
-        "a different command of the same tool cannot spend this yes"
-    );
-    // Arguments round-tripped through jsonb (key order not preserved). Take with the
-    // other key order so a string-hash of to_string would miss and Value equality hits.
-    let reordered = json!({ "content": "hi", "path": "/tmp/from-mcp" });
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &reordered
-        )
-        .await,
-        Some((call.id.clone(), false)),
-        "allow-once matches by Value equality, not key insertion order; a judge yes is not a gate yes"
-    );
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "write_file",
-            &call.arguments
-        )
-        .await,
-        None,
-        "the yes is one-shot"
-    );
 }
 
 /// A policy grant's "needs a human yes" over MCP raises the SAME card as the judge's ask, with
-/// the grant's reason and no proposed rule; the desktop's verb answers it, and the remembered
-/// yes is a GATE yes for the retry — not a judge skip.
+/// the grant's reason and no proposed rule.
+///
+/// The yes is not asserted here any more — see the note on the test above: the door that
+/// answered an MCP card went with seam A.
 #[tokio::test]
-async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
+async fn a_policy_approval_ask_raises_the_card_with_the_grants_reason() {
     let database_url = database_or_skip!();
     let store = store_from(&database_url).await;
     let host_email = format!("mcp-policy-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&store, &host_email).await;
     let coworker = seed_computerless_coworker(&store, &account).await;
     let (app, _state, gateway) = app_with(store.clone(), &host_email);
-    let base = spawn(app).await;
+    let _base = spawn(app).await;
 
     let call = ToolCall {
         id: format!("mcp_{}", uuid::Uuid::now_v7().simple()),
@@ -685,8 +608,6 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
         approval.get("proposedRule").is_none(),
         "a policy card offers no rule to write: {approval}"
     );
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-
     // A retry before the answer reuses the pending card rather than raising a second one.
     let again =
         opengrok_server::mcp_door::reply_to_ask(&gateway, &account, &coworker, &call, &result)
@@ -694,47 +615,5 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
     assert!(
         again.contains(&format!("requestId: {}", call.id)),
         "{again}"
-    );
-
-    let res = reqwest::Client::new()
-        .post(format!("{base}/api/resolveAutoReviewApproval"))
-        .header("Authorization", "Bearer test-bearer")
-        .json(&json!({
-            "entryId": entry_id,
-            "requestId": call.id,
-            "resolution": "approved",
-            "agentId": coworker.as_str(),
-        }))
-        .send()
-        .await
-        .expect("resolve");
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "the desktop verb answers a policy card too"
-    );
-
-    let flipped = store
-        .gateway_transcript(&coworker, &account)
-        .await
-        .expect("transcript")
-        .into_iter()
-        .find(|entry| entry["id"] == entry_id)
-        .expect("card still present");
-    assert_eq!(flipped["message"]["approval"]["status"], "approved");
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(run.status, RunStatus::Finished);
-
-    assert_eq!(
-        opengrok_server::mcp_door::take_mcp_allow_once(
-            &store,
-            &coworker,
-            Some(account.as_str()),
-            "shell",
-            &call.arguments
-        )
-        .await,
-        Some((call.id.clone(), true)),
-        "a policy yes is remembered as a GATE yes for the retry"
     );
 }

@@ -18,10 +18,16 @@ A coworker keeps working when you close the tab, because the work was never in t
 ## Status
 
 Slices 1–14 are done and the server is real: auth, the AG-UI endpoint, the durable harness,
-computers, connectors, the scheduler/monitor autonomy pair, the gateway port that boots the
-packaged desktop client, seam B, orgs and invites, the web console, and the consent model with
-model-judged auto-review. **[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is
-ticked only in the commit that makes it true, and its unticked boxes are the remaining work.
+computers, connectors, the scheduler/monitor autonomy pair, the MCP door, orgs and invites, the
+web console, and the consent model with model-judged auto-review.
+**[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is ticked only in the commit that
+makes it true, and its unticked boxes are the remaining work.
+
+The two doors built for the discontinued Grok Bot desktop client — seam A (`POST /api/{method}`
+and the `/events` stream) and seam B (ConnectRPC + its gRPC mirror) — were **deleted on
+20 Sep 2026**. What a client talks to now is AG-UI, the REST routes beside it, `/mcp` and
+`/health`. `docs/research/client-grok-bot.md` and `docs/setup/desktop-client.md` are kept as the
+record of what was there.
 
 ## Quick start
 
@@ -43,7 +49,7 @@ cargo build -p opengrok && OG_PORT=1449 \
 ```
 
 The full chain, one file per topic: **[`docs/setup/`](docs/setup/README.md)** —
-postgres → environment → running → gate → desktop-client.
+postgres → environment → running → gate.
 
 ## Start here
 
@@ -67,13 +73,12 @@ crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-proto    seam B transcribed: Connect-over-HTTP/1.1 messages (prost). Read its lib.rs before touching it.
   opengrok-harness  the agent loop: turns, tool calls, streaming, durability; the auto-review judge
   opengrok-box      the coworker's computer — a trait; local Docker and box.ascii.dev (typed v1 client) today
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
-  opengrok-server   Axum: the host-facing API, the SSE event stream, the AG-UI endpoint, /console
+  opengrok-server   Axum: the host-facing API, the AG-UI endpoint, the MCP door, /console
 docs/
   setup/ · research/ · box/ (vendor API pages) · verification/ · archive/ · the documents in the table above
 scripts/

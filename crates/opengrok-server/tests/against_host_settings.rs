@@ -2,9 +2,8 @@
 //!
 //! NativeChat's settings page read `getHostSettings` and `isEgressTunnelAvailable` and wrote
 //! `setHostSettings` through the desktop client's JSON door (`POST /api/{method}`). That door is
-//! closing with the client it was built for, so the same record answers at
-//! `GET /ag-ui/host-settings` and a partial record is merged by `PUT` — under the account token
-//! every other AG-UI route takes, not the shared host bearer.
+//! gone, and the same record answers at `GET /ag-ui/host-settings`; a partial record is merged by
+//! `PUT` — under the account token every other AG-UI route takes, not the shared host bearer.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -101,13 +100,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         // the one record both doors read, so the two answers cannot drift apart.
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    .allowing_identity_fallback();
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -171,21 +164,6 @@ impl Harness {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
     }
-
-    /// The desktop door's own reading of the same record, for as long as that door stands.
-    async fn seam_a(&self, method: &str) -> Value {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body("{}")
-            .send()
-            .await
-            .expect("api call");
-        assert_eq!(res.status().as_u16(), 200);
-        res.json().await.expect("json body")
-    }
 }
 
 fn database_url() -> Option<String> {
@@ -201,8 +179,11 @@ fn database_url() -> Option<String> {
 #[tokio::test]
 async fn the_record_reads_back_whole_and_a_patch_keeps_the_rest() {
     let Some(url) = database_url() else { return };
-    let h = harness(&url, "host-settings@test.local").await;
-    let access = h.person("host-settings@test.local").await;
+    // Unique per run: this file is run against a database that keeps its rows, and a second run
+    // on a fixed address fails at `append_account` with `Conflict` rather than at an assertion.
+    let email = format!("host-settings-{}@test.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&url, &email).await;
+    let access = h.person(&email).await;
 
     let (status, record) = h.get(Some(&access), "").await;
     assert_eq!(status, 200);
@@ -248,43 +229,17 @@ async fn the_record_reads_back_whole_and_a_patch_keeps_the_rest() {
 }
 
 #[tokio::test]
-async fn both_doors_read_the_one_record() {
-    let Some(url) = database_url() else { return };
-    let h = harness(&url, "host-settings-parity@test.local").await;
-    let access = h.person("host-settings-parity@test.local").await;
-
-    h.put(
-        &access,
-        &json!({ "egressTunnelEnabled": true, "extra": "kept" }),
-    )
-    .await;
-    let desktop = h.seam_a("getHostSettings").await;
-    assert_eq!(
-        desktop["egressTunnelEnabled"],
-        json!(true),
-        "the desktop verb sees what the AG-UI door wrote: it is the same Arc"
-    );
-    assert_eq!(desktop["extra"], json!("kept"));
-    let (_, agui) = h.get(Some(&access), "").await;
-    let mut desktop_keys: Vec<_> = desktop.as_object().unwrap().keys().cloned().collect();
-    let mut agui_keys: Vec<_> = agui.as_object().unwrap().keys().cloned().collect();
-    desktop_keys.sort();
-    agui_keys.sort();
-    agui_keys.retain(|k| k != "egressTunnelAvailable");
-    assert_eq!(
-        desktop_keys, agui_keys,
-        "same record, plus the one field the AG-UI door adds"
-    );
-}
-
-#[tokio::test]
 async fn a_stranger_and_a_bad_patch_are_refused() {
     let Some(url) = database_url() else { return };
-    let h = harness(&url, "host-settings-refuse@test.local").await;
+    let email = format!(
+        "host-settings-refuse-{}@test.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&url, &email).await;
     let (status, _) = h.get(None, "").await;
     assert_eq!(status, 401, "no token: the record is not public");
 
-    let access = h.person("host-settings-refuse@test.local").await;
+    let access = h.person(&email).await;
     let (status, body) = h.put(&access, &json!(["not", "an", "object"])).await;
     assert_eq!(status, 400, "a patch is an object: {body}");
     let (status, record) = h.get(Some(&access), "").await;

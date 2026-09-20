@@ -47,7 +47,7 @@ running `scripts/serve.sh` again without the overrides.
 
 | Port | What | Why this number |
 |---|---|---|
-| `1447` | everything: Sand gateway, AG-UI, auth, `/console` | 1337 (the compiled default) clashes with grok-bot's local-docker box host |
+| `1447` | everything: AG-UI, auth, `/mcp`, `/console` | 1337 (the compiled default) clashes with grok-bot's local-docker box host |
 | `1449`+ | the gate's smoke servers (`OG_PORT=1449` recommended when a live server holds 1447) | the gate **kills whatever holds its port** before starting — point it away from a server you care about |
 | `29080` | open-ai-gateway's inference listener (a separate process today; embedding it is designed, `PLAN.md` §3) | its own default |
 | `5452` | the dev Postgres | the gateway's compose |
@@ -55,16 +55,15 @@ running `scripts/serve.sh` again without the overrides.
 ## Logs
 
 Tracing goes to stdout under `RUST_LOG`. Request-level visibility is on by default: one line per
-request (path, status, ms, and the ones that can never match — a 0-length bearer, an Origin the
-gateway refuses), and one line each when an `/events` stream opens and closes, with how many
-subscribers are left. `OG_TRACE_REQUESTS=0` turns it off.
+request — method, path, status, ms, the request id, whether an `Origin` header was present, and
+the *length* of the presented bearer (never its value), so a 0-length or wrong-length token that
+can never match is visible. `OG_TRACE_REQUESTS=0` turns it off.
 
-Every request has an `X-Request-Id`. The desktop client sends one per gateway call and per SSE
-connect; the server mints a UUID when a caller does not, and echoes it on the response either way.
-The handler runs inside a span carrying it, so the request line and everything logged while
-serving it share one key:
+Every request has an `X-Request-Id`: the caller's when it sends one, a UUID minted here when it
+does not, echoed on the response either way. The handler runs inside a span carrying it, so the
+request line and everything logged while serving it share one key:
 
 ```sh
-grep 'id=desk-0x1f' server.log          # one call, start to finish
-grep 'events: stream' server.log        # was the stream up at 03:16, and for whom
+grep 'id=ac-0x1f' server.log            # one call, start to finish
+grep '"request"' server.log | grep ' 5' # every 5xx, with the id to follow each one by
 ```

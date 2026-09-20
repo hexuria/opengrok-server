@@ -1,9 +1,9 @@
 //! In-chat `user-form`: the field schema, secret stripping, and the fill that types into the
 //! box **outside** `computer_use`.
 //!
-//! WHY THIS IS NOT `submitSecret`. That verb stamps `secretProvided: true` and DROPS the value
-//! (connector vault). This path types into the live page. Mixing them would either vault a
-//! Google password or fill a connector secret into Chromium.
+//! WHY THIS IS NOT A SECRET DROP. The desktop's `submitSecret` (gone with seam A) stamped
+//! `secretProvided: true` and DROPPED the value into the connector vault; this path types into
+//! the live page. Mixing the two would vault a Google password or fill a secret into Chromium.
 //!
 //! WHY THIS IS NOT `computer` type. `computer_use` always attaches a PNG after the action, so a
 //! password typed that way lands in the model payload. Fill calls `Computer::act(Type)` and

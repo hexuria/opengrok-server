@@ -16,17 +16,15 @@ literals), and a variable that exists in code but not here is a documentation bu
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** — or `127.0.0.1:1447` behind Caddy | where everything listens: the Sand gateway, AG-UI, auth, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server). With TLS in front (`setup/tls.md`) the server binds loopback and Caddy takes the LAN address on the same port |
-| `OG_GRPC_BIND` | unset (off) | opt-in tonic listener for seam-B gRPC. Unset means no gRPC socket — an unused open port is a liability |
-| `OG_PUBLIC_GATEWAY_URL` | unset | the address `EnsureSandBox` mints to clients, and the MCP door's OAuth issuer + resource (`<url>/mcp`) (e.g. `http://192.168.100.24:1447`). Unset ⇒ the mint refuses. Must be non-loopback because the *client* refuses a loopback host — the mint itself does not check that (`seamb.rs`; `slice13-seamb-smoke.sh` is the loopback assertion) |
-| `OG_GATEWAY_BEARER` | unset | the shared bearer the desktop client presents on every gateway call. The client-side counterpart is the token field beside its OpenGrok gateway URL setting |
+| `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** — or `127.0.0.1:1447` behind Caddy | where everything listens: AG-UI, auth, `/mcp`, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server). With TLS in front (`setup/tls.md`) the server binds loopback and Caddy takes the LAN address on the same port |
+| `OG_PUBLIC_GATEWAY_URL` | `http://<OG_BIND>` | the address this host advertises for itself (e.g. `http://192.168.100.24:1447`): the base of every emailed link and of the browser-login redirect (`crates/opengrok/src/main.rs:70`), and the MCP door's OAuth issuer + `resource` (`<url>/mcp`). Behind TLS it must be the HTTPS address clients actually reach. `GatewayState` also keeps it for the webhook mint, which has no door today — see `gateway/mod.rs` |
 | `OG_COOKIE_SECURE` | unset | `1` marks the console's auth cookies `Secure` — set it behind HTTPS |
 
 ## The model door
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_MODEL_DOOR` | gateway | **which door every model call leaves by — see the table below.** `mock` scripts a stream (CI, no spend); `mock-cards` serves the fixture catalogue; `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); anything else — including unset — is the direct `GatewayDoor` |
+| `OG_MODEL_DOOR` | gateway | **which door every model call leaves by — see the table below.** `mock` scripts a stream (CI, no spend); `mock-tools` asks for one shell call per turn (drives the tool path and consent cards deterministically); anything else — including unset — is the direct `GatewayDoor`. `mock-cards` is **gone**: it refuses to boot |
 | `OG_GATEWAY_URL` | `http://127.0.0.1:29080` | open-ai-gateway's inference listener |
 | `OG_GATEWAY_TOKEN` | — | an `oag_live_…` key. **Never a provider key** — a pin is a route, not a credential (CLAUDE.md #4) |
 | `OG_MODEL` | `gpt-5.6-luna` | the route a NEW coworker is hired on when none is named. Each coworker then keeps its own pin (changeable in the console at `/console/coworkers`), so changing this retargets nothing existing. Dialect: `provider/model` (`openai/gpt-5.5`), `@api`/`@sub`, or a ladder id (`oag/auto`); a bare name works on a passthrough route. **Servable and advertised are independent, in both directions.** An advertised id is not necessarily servable — `oag/auto` is refused on a route with no credential for the rung it picks; `POST /models/probe` proves a pin before it is saved. And the reverse: a **servable id need not be advertised** — `/v1/models` is built from each provider's own model listing, and xAI's returns quota with no model list, so `xai/grok-4.6` serves perfectly while never appearing in the picker. Do not "fix" a working default because the picker does not list it |
@@ -40,7 +38,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 | `OG_MODEL_DOOR` | Real models? | Use it for |
 |---|---|---|
 | unset / `gateway` | yes | **the default, and the one to use.** Speaks the gateway's OpenAI-compatible route directly and sends `"model": request.model`, so a coworker's pin is honoured and the gateway logs `reason=Passthrough` |
-| `mock-cards` | no | UI and card-rendering work. Serves the fixture catalogue (`help` lists it). Needs the `mock-fixtures` feature or it refuses to boot |
+| `mock-cards` | — | **removed 20 Sep 2026.** It served the mock transcript catalogue, which was deleted with the desktop client's door it rendered into. The binary REFUSES TO START on it rather than falling through to a real, billed door, and names `mock` / `mock-tools` instead |
 | `mock` / `mock-tools` | no | CI, and the consent-card path with no spend |
 
 **The one-line check that tells you which you are on:** ask the gateway what it logged. A real
@@ -93,7 +91,7 @@ false until that client is attached. Never publish 8791/8792.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_LOGIN_EMAIL` | `OG_GATEWAY_EMAIL`, then `host@opengrok.local` | the host account the desktop roster and sign-in bind to on a single-user deployment |
+| `OG_LOGIN_EMAIL` | `host@opengrok.local` | the host account a browser login binds to on a single-user deployment |
 | `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
 | `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
 
@@ -120,6 +118,6 @@ throwaway signup addresses.
 | Variable | What it is |
 |---|---|
 | `RUST_LOG` | tracing filter, e.g. `opengrok=debug,opengrok_server=debug,opengrok_harness=debug` |
-| `OG_TRACE_REQUESTS` | **on by default**: one INFO line per request (method, path, status, ms, request id, Origin presence, bearer *length*, never its value), plus `/events` stream open/close with the subscriber count. `0` turns it off. Every request carries an `X-Request-Id` — the client's if it sent one, a UUID otherwise — echoed on the response and stamped on every log line the handler writes |
+| `OG_TRACE_REQUESTS` | **on by default**: one INFO line per request (method, path, status, ms, request id, Origin presence, bearer *length*, never its value). `0` turns it off. Every request carries an `X-Request-Id` — the client's if it sent one, a UUID otherwise — echoed on the response and stamped on every log line the handler writes |
 
-Retired: `SAND_GATEWAY_TOKEN` is read by nothing — the client bearer is `OG_GATEWAY_BEARER`.
+Retired, read by nothing: `SAND_GATEWAY_TOKEN`, and — since the seam A/B deletion of 20 Sep 2026 — `OG_GATEWAY_BEARER`, `OG_GATEWAY_EMAIL`, `OG_GATEWAY_IDENTITY_FALLBACK` and `OG_GRPC_BIND`.
