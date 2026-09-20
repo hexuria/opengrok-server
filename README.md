@@ -37,7 +37,7 @@ cp .env.example .env       # then fill the secrets — docs/setup/environment.md
 scripts/serve.sh
 curl -fsS http://127.0.0.1:1447/health
 
-# 4. the gate (what CI would run; CI is billing-blocked, so this IS the gate)
+# 4. the gate (local and CI both run scripts/gate.sh --smoke)
 cargo build -p opengrok && OG_PORT=1449 \
   OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate scripts/gate.sh --smoke
 ```
