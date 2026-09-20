@@ -495,8 +495,12 @@ mod tests {
         );
 
         let review = review(&jev, text, asking, DEFAULT_THRESHOLD).await.unwrap();
-        let scrubbed =
-            cloak.scrub_findings(text, merge(rules, review.findings), |_| Decision::Replace);
+        let merged = merge(rules, review.findings);
+        assert_eq!(
+            merged.displaced, 0,
+            "a verdict was displaced without the test noticing"
+        );
+        let scrubbed = cloak.scrub_findings(text, merged.findings, |_| Decision::Replace);
 
         assert!(
             !scrubbed.text.contains("Avery Sinclair"),
