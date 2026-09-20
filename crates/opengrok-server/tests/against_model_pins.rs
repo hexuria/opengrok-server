@@ -180,12 +180,8 @@ fn app_with(store: PgStore, host_email: &str, gateway: &str) -> (Router, AgUiSta
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway_state = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway_state =
+        GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (opengrok_server::router(agui.clone(), gateway_state), agui)
 }
 

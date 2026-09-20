@@ -123,12 +123,7 @@ fn app_with(store: PgStore, email: &str, jev: Option<Arc<dyn JevDoor>>) -> (Rout
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (opengrok_server::router(agui.clone(), gateway), agui)
 }
 

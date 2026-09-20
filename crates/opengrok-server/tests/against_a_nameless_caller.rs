@@ -123,12 +123,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email,
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

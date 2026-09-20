@@ -44,24 +44,6 @@ async fn agui_result(
         .into_response()
 }
 
-pub async fn result_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = state
-        .agui
-        .auth
-        .store
-        .account_by_email(caller)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    submit_credential_result(state, args, &account.id).await
-}
-
 /// `POST /ag-ui/credential/result` and gateway `submitCredentialResult`.
 /// `{ status: filled|denied|missing|error, credentialId?, requestId?, agentId }`.
 /// Status only. A password in the body is dropped, never stored.

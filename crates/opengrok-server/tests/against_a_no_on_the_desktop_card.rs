@@ -1,4 +1,4 @@
-//! A no on the desktop's approval card reaches the model, and the run ends.
+//! A no on the approval card reaches the model, and the run ends.
 //!
 //! THE BUG THIS EXISTS FOR, seen on 18 Sep 2026 in NativeChat: a person denied a `shell` card and
 //! the composer went on offering to stop a turn that nothing was doing. The working line had gone
@@ -14,10 +14,11 @@
 //! reached this one and ended it with "we do not know whether it ran" — a sentence about a crash,
 //! written over a refusal somebody made on purpose.
 //!
-//! The gateway's door has resumed refusals from the start (see `against_policy_card`, which is
-//! this test's twin on that side). Two doors on to the same run disagreed; this is the one that
-//! was wrong. So this asserts what only a resumed refusal can be: the run REACHES AN ENDING, the
-//! tool never ran, and the refusal the model was handed names the tool it may not use.
+//! The desktop's door resumed refusals from the start; the two doors on to the same run
+//! disagreed, and this one was wrong. That door has since been deleted, so this file is now the
+//! only place the rule is written down. It asserts what only a resumed refusal can be: the run
+//! REACHES AN ENDING, the tool never ran, and the refusal the model was handed names the tool it
+//! may not use.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -213,15 +214,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
+    let gateway = GatewayState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -256,49 +249,44 @@ impl Harness {
             .expect("mint access")
     }
 
-    /// `POST /api/{method}` with the gateway bearer — how the desktop's coordinator calls.
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
+    /// One turn on the AG-UI door, the way NativeChat drives one. The reply is the whole SSE
+    /// stream; a turn that pauses for a card ends it with `run-awaiting-approval`.
+    async fn turn(&self, token: &str, agent: &str, prompt: &str) -> String {
         let res = self
             .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
+            .post(format!("{}/ag-ui", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "threadId": format!("thr-{}", uuid::Uuid::now_v7()),
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": "m1", "role": "user", "content": prompt }],
+                "forwardedProps": { "coworkerId": agent },
+            }))
             .send()
             .await
-            .expect("api call");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
+            .expect("ag-ui turn");
+        assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+        res.text().await.expect("sse")
     }
 
-    /// Poll the coworker's transcript for a pending approval card with this request id or, when
-    /// none is named, the first pending one.
-    async fn wait_for_card(&self, agent: &str) -> Value {
+    /// The run this person is waiting on, and the call id its card is for.
+    async fn wait_for_pending(&self) -> (opengrok_core::id::RunId, String) {
         for _ in 0..100 {
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 100 }),
-                )
-                .await;
-            if let Some(card) = tail["entries"].as_array().and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|entry| {
-                        entry["message"]["type"] == "auto-review-approval"
-                            && entry["message"]["approval"]["status"] == "pending"
-                    })
-                    .cloned()
-            }) {
-                return card;
+            for id in self
+                .store
+                .awaiting_approval(&self.account)
+                .await
+                .expect("awaiting")
+            {
+                if let Ok((run, _)) = self.store.load_run(&id).await
+                    && let Some(pending) = run.pending.as_ref()
+                {
+                    return (id, pending.call_id.clone());
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("no pending approval card appeared in 10s");
+        panic!("no run suspended for an approval in 10s");
     }
 }
 
@@ -343,39 +331,11 @@ async fn a_no_on_the_desktop_card_is_told_to_the_model_and_ends_the_run() {
     );
 
     // A turn the mock door answers by reaching for shell, which the policy says to ask about.
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "run a command", "clientNonce": "n-desktop-no" }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
-    let card = h.wait_for_card(&agent).await;
-    let call_id = card["message"]["approval"]["requestId"]
-        .as_str()
-        .expect("request id")
-        .to_string();
+    h.turn(&token, &agent, "run a command").await;
+    let (run_id, call_id) = h.wait_for_pending().await;
     assert!(h.stub.ran().is_empty(), "nothing ran before the answer");
 
-    // The run the card belongs to, found the way the desktop finds it: off the queue of runs
-    // waiting on this person.
-    let mut run_id = None;
-    for id in h
-        .store
-        .awaiting_approval(&h.account)
-        .await
-        .expect("awaiting")
-    {
-        if let Ok((run, _)) = h.store.load_run(&id).await
-            && run.pending.as_ref().is_some_and(|p| p.call_id == call_id)
-        {
-            run_id = Some(id);
-            break;
-        }
-    }
-    let run_id = run_id.expect("the suspended run");
-
-    // THE DESKTOP'S DOOR, and a no.
+    // THE ANSWER, and it is a no.
     let answered: Value = h
         .client
         .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))

@@ -41,7 +41,7 @@ use opengrok_tools::user_form::{
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
 
-use super::{GatewayState, conversation, live};
+use super::{GatewayState, conversation};
 
 /// How long an unanswered form or live handoff may block the turn. Tests call the settlers
 /// directly rather than waiting this out. Facebook hang: password fill reported submitted and
@@ -104,48 +104,6 @@ async fn agui_resolve_handoff(
         .into_response()
 }
 
-pub async fn submit_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    submit_user_form(state, args, &account).await
-}
-
-pub async fn dismiss_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    dismiss_user_form(state, args, &account).await
-}
-
-pub async fn resolve_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    resolve_box_handoff(state, args, &account).await
-}
-
-async fn account_of(state: &GatewayState, caller: &str) -> Option<AccountId> {
-    state
-        .agui
-        .auth
-        .store
-        .account_by_email(caller)
-        .await
-        .ok()
-        .flatten()
-        .map(|account| account.id)
-}
-
 /// `submitUserForm {entryId, values, agentId, platform?}`. Types into the box, settles
 /// `formResolution` plus `formFieldOutcomes`, resumes with a secret-free tool result that says
 /// the values were filled into the page — not that login succeeded.
@@ -188,7 +146,6 @@ pub async fn submit_user_form(
         tracing::error!(%error, "could not settle a user-form entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
     if resolution == FormResolution::Submitted {
         super::credential::offer_save_after_submit(
@@ -265,7 +222,6 @@ pub async fn dismiss_user_form(
         tracing::error!(%error, "could not settle a user-form entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     if resolution == FormResolution::Escalated {
@@ -339,7 +295,7 @@ pub async fn resolve_box_handoff(
     }
 
     let settled_siblings =
-        settle_live_handoffs(state, account_id, &coworker_id, &agent_id, word, timed_out).await;
+        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
     // Name the call this resume answers. Passing `None` lets it land on whichever
     // call happens to be parked, which for stacked forms is the sibling's -- the
     // twin then gets this form's tool result.
@@ -453,7 +409,6 @@ pub async fn timeout_unresolved_form(
             tracing::error!(%error, "could not time out a user-form");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
         journal_settled_form(state, account_id, coworker_id, &settled).await;
         form_for_result = Some(form);
         settled_any = true;
@@ -529,7 +484,6 @@ async fn start_box_handoff(
         tracing::error!(%error, "could not append the box handoff entry");
         return None;
     }
-    live::emit_transcript(state, agent_id, account_id, "appended", card.clone());
     spawn_handoff_hold_timeout(
         state.clone(),
         account_id.clone(),
@@ -546,9 +500,8 @@ pub(crate) async fn dismiss_unresolved_on_interrupt(
     state: &GatewayState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
 ) {
-    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
     let Ok(entries) = state
         .agui
         .auth
@@ -595,7 +548,6 @@ pub(crate) async fn dismiss_unresolved_on_interrupt(
             tracing::error!(%error, "could not dismiss a form on interrupt");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
         journal_settled_form(state, account_id, coworker_id, &settled).await;
     }
 }
@@ -721,7 +673,6 @@ async fn settle_live_handoffs(
     state: &GatewayState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     resolution: &str,
     timed_out: bool,
 ) -> Vec<Value> {
@@ -765,7 +716,6 @@ async fn settle_live_handoffs(
             tracing::error!(%error, "could not settle a box handoff");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", card.clone());
         settled.push(card);
     }
     settled
@@ -781,7 +731,7 @@ async fn abandon_escalated_form(
     agent_id: &str,
     entry: Value,
 ) -> (u16, Value) {
-    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
     // Name the call this Skip answers; with `None` a stacked sibling's parked
     // call would take the declined result instead.
     resume_user_form(

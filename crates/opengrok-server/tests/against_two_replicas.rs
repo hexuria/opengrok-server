@@ -254,8 +254,6 @@ async fn spawn(store: PgStore, email: &str, public_url: Option<&str>) -> (String
     };
     let gateway = GatewayState::new(
         agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
         Some(public_url.map_or_else(|| base.clone(), str::to_string)),
     );
     let app = opengrok_server::router(agui, gateway);

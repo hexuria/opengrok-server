@@ -66,12 +66,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("migrations failed: {error}"))?;
 
-    // Who a browser login signs in as — the single user of a self-hosted OpenGrok. Defaults to
-    // the gateway's own account so the desktop's roster and its sign-in are the same person.
-    let login_email = std::env::var("OG_LOGIN_EMAIL")
-        .ok()
-        .or_else(|| std::env::var("OG_GATEWAY_EMAIL").ok())
-        .unwrap_or_else(|| "host@opengrok.local".to_string());
+    // Who a browser login signs in as — the single user of a self-hosted OpenGrok.
+    let login_email =
+        std::env::var("OG_LOGIN_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string());
     let public_url = std::env::var("OG_PUBLIC_GATEWAY_URL")
         .ok()
         .filter(|url| !url.is_empty())
@@ -297,18 +294,10 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
-    // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
-    // the shipped host's own fallback — and the email names whose coworkers are the roster.
-    //
-    // OG_GATEWAY_BEARER, deliberately not OG_GATEWAY_TOKEN: that name already means the key WE
-    // present to the model gateway. One name meaning "what we show upstream" and "what clients
-    // must show us" is how a model key ends up handed to every desktop client.
+    // What the surviving doors share beyond `AgUiState`: the host settings record, this
+    // process's start time (`/health`), and the address a client is handed for this host.
     let gateway = opengrok_server::gateway::GatewayState::new(
         state.clone(),
-        std::env::var("OG_GATEWAY_BEARER")
-            .ok()
-            .filter(|token| !token.is_empty()),
-        std::env::var("OG_GATEWAY_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string()),
         std::env::var("OG_PUBLIC_GATEWAY_URL")
             .ok()
             .filter(|url| !url.is_empty()),

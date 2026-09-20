@@ -382,12 +382,6 @@ pub async fn drain_into(
         Err(_) => return,
     };
     for entry in entries {
-        // APPEND THEN EMIT, in that order, exactly as every other append path does
-        // (`conversation.rs` user message, placeholder, final answer). Appending alone put the
-        // fixture in history and nowhere else, so every card needed a reload to appear — which is
-        // why the whole catalogue was verified "after Cmd+R" and never live. The append is the
-        // durable half and the frame is the visible one; a fixture that only half-arrives teaches
-        // the reader that the catalogue is unreliable rather than that a card is wrong.
         if let Err(error) = state
             .agui
             .auth
@@ -396,9 +390,7 @@ pub async fn drain_into(
             .await
         {
             tracing::warn!(%error, "mock fixture could not be appended");
-            continue;
         }
-        super::live::emit_transcript(state, coworker.as_str(), account, "appended", entry);
     }
 }
 
