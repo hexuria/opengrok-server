@@ -174,11 +174,18 @@ url=$(echo "$hook" | jq -r '.webhook.url')
 case "$key" in og_*) ;; *) fail "the minted key is not one of ours: $hook" ;; esac
 hid="${url##*/}"
 case "$hid" in hook_*) ;; *) fail "no hook id in the minted URL: $hook" ;; esac
-# The wrong key FIRST, so a run appearing after cannot be credited to it.
+# Every refusal FIRST. Counting straight after one would only prove nothing had fired YET, which
+# a slow spawn satisfies too; the honest check is the count after a fire known to have landed —
+# a refusal that secretly fired would make it two.
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/$hid" \
   -H 'authorization: Bearer og_not_the_minted_key' -H 'content-type: application/json' -d '{}')
 [ "$code" = "401" ] || fail "a wrong key answered $code, expected 401"
-[ "$(runs_in_thread "$hsid")" = "0" ] || fail "a wrong key started something"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/$hid" \
+  -H 'content-type: application/json' -d '{}')
+[ "$code" = "401" ] || fail "no key at all answered $code, expected 401"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/hook_00000000-0000-7000-8000-000000000000" \
+  -H "authorization: Bearer $key" -H 'content-type: application/json' -d '{}')
+[ "$code" = "401" ] || fail "an unknown hook answered $code, expected 401 — 404 would let the id space be walked"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/hooks/$hid" \
   -H "authorization: Bearer $key" -H 'content-type: application/json' -d '{"item":"milk"}')
 [ "$code" = "202" ] || fail "the hook answered $code, expected 202"
@@ -188,8 +195,8 @@ for _ in $(seq 1 15); do
   [ "$hfired" -ge 1 ] && break
   sleep 1
 done
-[ "$hfired" -ge 1 ] || fail "the webhook never woke the routine"
-ok "POST /hooks/$hid woke $hsid, and the wrong key could not"
+[ "$hfired" = "1" ] || fail "expected exactly one run in $hsid, got $hfired"
+ok "POST /hooks/$hid woke $hsid exactly once, and no refusal started anything"
 
 # Leave nothing running for the next smoke's counting windows.
 curl -fsS -X DELETE "$BASE/schedules/$sid" -H "authorization: Bearer $token" -o /dev/null || true

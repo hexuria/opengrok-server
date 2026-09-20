@@ -21,7 +21,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, CoworkerId, RunId};
+use opengrok_core::run::{Run, RunCommand, RunView};
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
@@ -83,6 +84,13 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         .await
         .expect("append account");
     id
+}
+
+/// A reply, with the one header this door has a rule about.
+struct Response {
+    status: u16,
+    cache_control: String,
+    body: Value,
 }
 
 struct Harness {
@@ -178,37 +186,64 @@ impl Harness {
             .expect("mint access")
     }
 
-    async fn post(&self, path: &str, body: Value) -> (u16, Value) {
-        let res = self
-            .client
-            .post(format!("{}{path}", self.base))
-            .header("authorization", format!("Bearer {}", self.token()))
-            .json(&body)
-            .send()
-            .await
-            .expect("post");
+    /// A second signed-in account on the same server, for the checks that one account's routines
+    /// are invisible to another.
+    async fn stranger(&self) -> String {
+        let email = format!(
+            "routine-stranger-{}@og.local",
+            uuid::Uuid::now_v7().simple()
+        );
+        let account = seed_account(&self.store, &email).await;
+        self.agui
+            .auth
+            .minter
+            .mint_access(
+                account.as_str(),
+                "sess-stranger",
+                &email,
+                "ultra",
+                chrono::Utc::now().timestamp(),
+                3600,
+            )
+            .expect("mint access")
+    }
+
+    /// `None` is a request with no `Authorization` header at all, which is its own case.
+    async fn call(&self, method: &str, path: &str, token: Option<&str>, body: Value) -> Response {
+        let url = format!("{}{path}", self.base);
+        let mut request = match method {
+            "GET" => self.client.get(url),
+            _ => self.client.post(url).json(&body),
+        };
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let res = request.send().await.expect("request");
         let status = res.status().as_u16();
+        let cache_control = res
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let text = res.text().await.expect("body");
-        (
+        Response {
             status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
+            cache_control,
+            body: serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        }
+    }
+
+    async fn post(&self, path: &str, body: Value) -> (u16, Value) {
+        let res = self.call("POST", path, Some(&self.token()), body).await;
+        (res.status, res.body)
     }
 
     async fn get(&self, path: &str) -> (u16, Value) {
         let res = self
-            .client
-            .get(format!("{}{path}", self.base))
-            .header("authorization", format!("Bearer {}", self.token()))
-            .send()
-            .await
-            .expect("get");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
+            .call("GET", path, Some(&self.token()), Value::Null)
+            .await;
+        (res.status, res.body)
     }
 
     async fn hire(&self) -> String {
@@ -236,19 +271,52 @@ impl Harness {
         (body["id"].as_str().expect("id").to_string(), body)
     }
 
-    /// The outside world's call: NO account token, only the hook's own key.
-    async fn fire_hook(&self, hook_id: &str, key: &str) -> u16 {
-        self.client
+    /// The outside world's call: NO account token, only the hook's own key. `None` sends no
+    /// `Authorization` header at all.
+    async fn fire_hook(&self, hook_id: &str, key: Option<&str>) -> u16 {
+        let mut request = self
+            .client
             .post(format!("{}/hooks/{hook_id}", self.base))
-            .header("authorization", format!("Bearer {key}"))
             .header("content-type", "application/json")
-            .json(&json!({ "item": "milk" }))
-            .send()
-            .await
-            .expect("post a hook")
-            .status()
-            .as_u16()
+            .json(&json!({ "item": "milk" }));
+        if let Some(key) = key {
+            request = request.header("authorization", format!("Bearer {key}"));
+        }
+        request.send().await.expect("post a hook").status().as_u16()
     }
+}
+
+/// A run in flight on this thread, written straight to the store.
+///
+/// The cap reads the projection, and racing three real firings to prove a cap is a test about
+/// timing rather than about the cap.
+async fn seed_running_run(store: &PgStore, account: &AccountId, thread: &str) {
+    let id = RunId::new();
+    let mut run = Run::default();
+    let at_ms = now_ms();
+    let events = run
+        .decide(RunCommand::Start {
+            thread_id: thread.to_string(),
+            coworker_id: Some(CoworkerId::from_stored("cw_in_flight")),
+            model: Some("oag/cheap".to_string()),
+            system: None,
+            at_ms,
+        })
+        .expect("start");
+    for event in &events {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: id.clone(),
+        thread_id: thread.to_string(),
+        status: run.status,
+        event_count: 0,
+        updated_at_ms: at_ms,
+    };
+    store
+        .append_run(&id, 0, &events, &view, Some(account))
+        .await
+        .expect("append run");
 }
 
 /// The last path segment of the minted URL — what `POST /hooks/{id}` is addressed to.
@@ -353,23 +421,252 @@ async fn an_inbound_post_with_the_key_fires_a_run() {
     let key = created["webhook"]["key"].as_str().expect("key").to_string();
     let hook = hook_id_of(created["webhook"]["url"].as_str().expect("url")).to_string();
 
-    // The wrong key first, so a run appearing later cannot be credited to it.
+    // Every refusal first. A count taken here could only ever prove that nothing had fired YET,
+    // which a slow spawn would satisfy too; the honest check is the count AFTER a fire that is
+    // known to have landed — a refusal that secretly fired would make it two.
     assert_eq!(
-        h.fire_hook(&hook, "og_not_the_minted_key").await,
+        h.fire_hook(&hook, Some("og_not_the_minted_key")).await,
         401,
         "a wrong bearer must not fire somebody's coworker"
     );
     assert_eq!(
-        runs_in_thread(&h.store, &id).await,
-        0,
-        "and it must not have started anything"
+        h.fire_hook(&hook, None).await,
+        401,
+        "and neither must no bearer at all"
+    );
+    assert_eq!(
+        h.fire_hook("hook_01a00000-0000-7000-8000-000000000000", Some(&key))
+            .await,
+        401,
+        "an unknown hook id answers exactly what a wrong key does, or the id space can be walked"
     );
 
-    assert_eq!(h.fire_hook(&hook, &key).await, 202);
+    assert_eq!(h.fire_hook(&hook, Some(&key)).await, 202);
     assert!(
         run_appears(&h.store, &id).await,
         "a run must be journaled under the routine's own id as its thread — that is how the \
          pane shows a routine's history"
+    );
+    assert_eq!(
+        runs_in_thread(&h.store, &id).await,
+        1,
+        "exactly one run: the three refusals above started nothing"
+    );
+}
+
+/// A ROUTINE MAY NOT BE PRESSED INTO UNBOUNDED WORK. Whoever holds the key can POST as fast as
+/// they like — a retry loop, a SaaS app redelivering — and every press would otherwise open a run
+/// that is billed and holds a recovery lease.
+#[tokio::test]
+async fn a_hook_with_too_much_already_running_is_refused() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-cap-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+    let (id, created) = h.webhook_routine(&coworker).await;
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+    let hook = hook_id_of(created["webhook"]["url"].as_str().expect("url")).to_string();
+
+    for _ in 0..3 {
+        seed_running_run(&h.store, &h.account, &id).await;
+    }
+    assert_eq!(
+        h.fire_hook(&hook, Some(&key)).await,
+        429,
+        "three in flight is the cap, and the key being right does not raise it"
+    );
+    assert_eq!(
+        runs_in_thread(&h.store, &id).await,
+        3,
+        "and the refusal really refused: no fourth run"
+    );
+
+    // A wrong key is still a 401 and not a 429 — how much work a routine has in flight is not
+    // something an unauthenticated caller may learn by watching which refusal they get.
+    assert_eq!(h.fire_hook(&hook, Some("og_wrong")).await, 401);
+}
+
+/// A paused routine does not run because a todo app POSTed. Pause is the person's word, and an
+/// inbound webhook is not their "run now".
+#[tokio::test]
+async fn a_paused_routine_refuses_an_inbound_post() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-paused-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+    let (id, created) = h.webhook_routine(&coworker).await;
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+    let hook = hook_id_of(created["webhook"]["url"].as_str().expect("url")).to_string();
+
+    let (status, body) = h.post(&format!("/schedules/{id}/pause"), json!({})).await;
+    assert_eq!(status, 204, "{body}");
+
+    assert_eq!(
+        h.fire_hook(&hook, Some(&key)).await,
+        409,
+        "the key is right and the routine is stopped: that is a conflict, not a bad token"
+    );
+    assert_eq!(runs_in_thread(&h.store, &id).await, 0);
+
+    // Resumed, the same POST works — so the 409 was the pause and not a broken key.
+    let (status, body) = h.post(&format!("/schedules/{id}/resume"), json!({})).await;
+    assert_eq!(status, 204, "{body}");
+    assert_eq!(h.fire_hook(&hook, Some(&key)).await, 202);
+    assert!(run_appears(&h.store, &id).await);
+}
+
+/// SOMEBODY ELSE'S ROUTINE IS SOMEBODY ELSE'S KEY. A listing that leaked one would hand over the
+/// bearer for a coworker the reader may not use at all.
+#[tokio::test]
+async fn another_account_sees_neither_the_routine_nor_its_key() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-owner-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+    let (id, created) = h.webhook_routine(&coworker).await;
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+
+    let stranger = h.stranger().await;
+    let theirs = h
+        .call("GET", "/schedules", Some(&stranger), Value::Null)
+        .await;
+    assert_eq!(theirs.status, 200, "{}", theirs.body);
+    let rows = theirs.body.as_array().expect("an array").clone();
+    assert!(
+        !rows.iter().any(|row| row["id"] == json!(id)),
+        "a stranger must not see the routine at all: {rows:?}"
+    );
+    assert!(
+        !theirs.body.to_string().contains(&key),
+        "and the key must not appear anywhere in what they are shown"
+    );
+
+    let refused = h
+        .call(
+            "POST",
+            &format!("/schedules/{id}/rotate-key"),
+            Some(&stranger),
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        refused.status, 404,
+        "not-yours is no-such, or the id space can be probed: {}",
+        refused.body
+    );
+
+    // No token at all is 401 on both, and the key still works afterwards — nothing above moved it.
+    assert_eq!(
+        h.call("GET", "/schedules", None, Value::Null).await.status,
+        401
+    );
+    assert_eq!(
+        h.call(
+            "POST",
+            &format!("/schedules/{id}/rotate-key"),
+            None,
+            json!({})
+        )
+        .await
+        .status,
+        401
+    );
+    let hook = hook_id_of(created["webhook"]["url"].as_str().expect("url")).to_string();
+    assert_eq!(h.fire_hook(&hook, Some(&key)).await, 202);
+}
+
+/// A BEARER MUST NOT SIT IN A CACHE. Every reply on this door that carries a key says so, the way
+/// the OAuth door does for the tokens it mints.
+#[tokio::test]
+async fn every_reply_that_carries_a_key_forbids_caching() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-cache-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+
+    let created = h
+        .call(
+            "POST",
+            "/schedules",
+            Some(&h.token()),
+            json!({
+                "coworkerId": coworker,
+                "kind": "webhook",
+                "name": "Inbox",
+                "prompt": "a webhook arrived; report in",
+            }),
+        )
+        .await;
+    assert_eq!(created.status, 201, "{}", created.body);
+    assert_eq!(created.cache_control, "no-store", "on create");
+    let id = created.body["id"].as_str().expect("id").to_string();
+
+    let listed = h
+        .call("GET", "/schedules", Some(&h.token()), Value::Null)
+        .await;
+    assert_eq!(listed.cache_control, "no-store", "on list");
+
+    let rotated = h
+        .call(
+            "POST",
+            &format!("/schedules/{id}/rotate-key"),
+            Some(&h.token()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(rotated.status, 200, "{}", rotated.body);
+    assert_eq!(rotated.cache_control, "no-store", "on rotate");
+}
+
+/// The name the person gave the routine comes back. It was accepted and dropped, so the pane had
+/// no way to show what it had just been told.
+#[tokio::test]
+async fn the_name_is_echoed_back() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-name-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+
+    let (status, created) = h
+        .post(
+            "/schedules",
+            json!({
+                "coworkerId": coworker,
+                "kind": "webhook",
+                "name": "  Inbox sweeper  ",
+                "prompt": "a webhook arrived; report in",
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["name"], json!("Inbox sweeper"), "{created}");
+    let id = created["id"].as_str().expect("id").to_string();
+
+    let (_, rows) = h.get("/schedules").await;
+    let mine = rows
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|row| row["id"] == json!(id))
+        .expect("the routine")
+        .clone();
+    assert_eq!(mine["name"], json!("Inbox sweeper"), "{mine}");
+
+    // Unnamed still falls back to the prompt's first words, which is this API's older shape.
+    let (_, unnamed) = h
+        .post(
+            "/schedules",
+            json!({
+                "coworkerId": coworker,
+                "kind": "webhook",
+                "prompt": "watch the shared inbox and summarise anything urgent for me",
+            }),
+        )
+        .await;
+    assert_eq!(
+        unnamed["name"],
+        json!("watch the shared inbox and summarise"),
+        "{unnamed}"
     );
 }
 
@@ -401,13 +698,18 @@ async fn a_rotated_key_works_and_the_old_one_stops() {
     );
 
     assert_eq!(
-        h.fire_hook(&hook, &old).await,
+        h.fire_hook(&hook, Some(&old)).await,
         401,
         "the old key stops at once: a grace period is a window in which the reason for \
          rotating still holds"
     );
-    assert_eq!(h.fire_hook(&hook, new).await, 202);
+    assert_eq!(h.fire_hook(&hook, Some(new)).await, 202);
     assert!(run_appears(&h.store, &id).await, "the new key really fires");
+    assert_eq!(
+        runs_in_thread(&h.store, &id).await,
+        1,
+        "exactly one run: the old key's 401 started nothing"
+    );
 
     // And the listing shows the key that works now, not the one that was minted at create.
     let (_, rows) = h.get("/schedules").await;
@@ -498,6 +800,11 @@ async fn a_body_without_a_kind_is_still_a_cron_routine() {
         status, 422,
         "a misspelled kind must not install a clock routine with no clock: {refused}"
     );
+    assert!(
+        !refused.to_string().contains("webhok"),
+        "a refusal names the field, it does not hand the caller's own bytes back to be rendered \
+         somewhere else: {refused}"
+    );
 }
 
 /// WHICH ADDRESS THE HOOK URL CARRIES. A URL is handed to a phone or a SaaS app, so the host's
@@ -536,6 +843,28 @@ async fn the_hook_url_prefers_the_address_this_host_advertises() {
          {created}"
     );
 
+    // THE BRANCH THAT WAS WRONG. `auth.public_url` defaults to `http://{bind}`, so a deployment
+    // that never set `OG_PUBLIC_GATEWAY_URL` handed out a loopback or wildcard address — one that
+    // resolves to the CALLER's own machine, or to nothing at all.
+    for bound in [
+        "http://127.0.0.1:1337",
+        "http://0.0.0.0:1337",
+        "http://localhost:1337",
+        "http://[::1]:1337",
+    ] {
+        let email = format!("routine-url-{}@og.local", uuid::Uuid::now_v7().simple());
+        let h = harness(&database_url, &email, None, bound).await;
+        let coworker = h.hire().await;
+        let (_, created) = h.webhook_routine(&coworker).await;
+        let url = created["webhook"]["url"].as_str().expect("url");
+        assert_eq!(
+            url,
+            format!("/hooks/{}", hook_id_of(url)),
+            "{bound} is not an address an outside caller can dial, so it must not be handed \
+             out as one: {created}"
+        );
+    }
+
     let silent = format!("routine-url-c-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness(&database_url, &silent, None, "").await;
     let coworker = h.hire().await;
@@ -546,5 +875,24 @@ async fn the_hook_url_prefers_the_address_this_host_advertises() {
         format!("/hooks/{}", hook_id_of(url)),
         "told no address, we give the path and let the reader supply the host — inventing one \
          would hand somebody a URL that resolves to the wrong machine: {created}"
+    );
+
+    // And an advertised address still wins even when the bind is a loopback one, which is the
+    // ordinary production shape: bound to 127.0.0.1 behind a proxy that is the public name.
+    let proxied = format!("routine-url-d-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(
+        &database_url,
+        &proxied,
+        Some("https://hooks.example.com"),
+        "http://127.0.0.1:1337",
+    )
+    .await;
+    let coworker = h.hire().await;
+    let (_, created) = h.webhook_routine(&coworker).await;
+    let url = created["webhook"]["url"].as_str().expect("url");
+    assert_eq!(
+        url,
+        format!("https://hooks.example.com/hooks/{}", hook_id_of(url)),
+        "{created}"
     );
 }
