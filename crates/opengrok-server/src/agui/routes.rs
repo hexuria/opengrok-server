@@ -2849,15 +2849,16 @@ pub async fn answer_run(
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    if let Err(error) = state
+    let seq = match state
         .auth
         .store
         .append_run(&run_id, seq, &events, &view, Some(&account_id))
         .await
     {
+        Ok(seq) => seq,
         // A conflict here means somebody answered between our read and our write. The answer that
         // won is as good as ours, so this is not a failure to report as one.
-        if matches!(error, opengrok_store::StoreError::Conflict) {
+        Err(opengrok_store::StoreError::Conflict) => {
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -2868,7 +2869,44 @@ pub async fn answer_run(
             )
                 .into_response();
         }
-        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+
+    // AN MCP AUDIT RUN IS NOT A CONVERSATION, so it does not carry on: answering its card finishes
+    // it, and a yes is remembered for the MCP client's own retry instead. Resuming it would run
+    // the tool here while the client is being told to retry, and the retry would run it again.
+    // `mcp_door` owns both halves of that bargain; this is the door the answer arrives at.
+    if crate::mcp_door::is_mcp_audit_thread(&run.thread_id)
+        && let Some(pending) = pending.as_ref()
+    {
+        let settled = crate::mcp_door::settle_mcp_answer(
+            &state.auth.store,
+            &account_id,
+            crate::mcp_door::AnsweredMcpCard {
+                run_id: &run_id,
+                run: &run,
+                seq,
+                pending,
+                approved: request.approved,
+                at_ms,
+            },
+        )
+        .await;
+        if let Err(error) = settled.as_ref() {
+            // The answer landed; only the ending did not. Said plainly rather than as a 503, which
+            // would invite a retry of an answer the aggregate will refuse as already given.
+            tracing::error!(%error, run = %run_id.as_str(), "the answered MCP run could not be finished");
+        }
+        return Json(serde_json::json!({
+            "runId": run_id.as_str(),
+            "callId": request.call_id,
+            "approved": request.approved,
+            "alreadyAnswered": false,
+            // Nothing follows on this run — the MCP client's retry is what happens next.
+            "continuing": false,
+            "finished": settled.is_ok(),
+        }))
+        .into_response();
     }
 
     // The answer is durable; now carry the run on. In the background, because a model call can

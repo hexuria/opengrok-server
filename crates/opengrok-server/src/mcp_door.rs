@@ -62,7 +62,7 @@ const MCP_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(20
 use crate::gateway::GatewayState;
 use opengrok_core::CoworkerId;
 use opengrok_core::id::{AccountId, RunId};
-use opengrok_core::run::{Run, RunCommand, RunStatus, RunView, SuspendReason};
+use opengrok_core::run::{PendingApproval, Run, RunCommand, RunStatus, RunView, SuspendReason};
 use opengrok_harness::tools::ToolRunner;
 use opengrok_tools::{AwaitingReason, ToolCall, USER_MACHINE_SHELL, redact_arguments};
 
@@ -787,6 +787,23 @@ pub async fn reply_to_ask(
     }
 }
 
+/// The thread an MCP Ask's run lives on. DISTINCT from `gateway-{coworker}` on purpose: this
+/// run is one MCP call's audit row, not a conversation turn. The literal is written here once —
+/// every reader of it goes through `is_mcp_audit_thread`, so the door that mints these runs and
+/// the door that answers their cards cannot come to disagree about which runs are which.
+const MCP_AUDIT_THREAD_PREFIX: &str = "mcp-";
+
+fn mcp_audit_thread(coworker: &CoworkerId) -> String {
+    format!("{MCP_AUDIT_THREAD_PREFIX}{}", coworker.as_str())
+}
+
+/// Is this run an MCP call's audit row? THE ONE TEST, because answering one as a conversation
+/// would resume it: the tool would run on this side while the MCP client is told to retry, and
+/// the retry would run it again under a call id that cannot spend the yes.
+pub fn is_mcp_audit_thread(thread_id: &str) -> bool {
+    thread_id.starts_with(MCP_AUDIT_THREAD_PREFIX)
+}
+
 /// Synthesize a durable run + auto-review card for an MCP Ask so the person can answer it
 /// in OpenGrok. Returns the `requestId` (the tool call id). A retry of the same tool+args
 /// while a card is already pending reuses that requestId — a second persist would flood cards.
@@ -804,9 +821,7 @@ async fn persist_mcp_ask(
 
     let at_ms = chrono::Utc::now().timestamp_millis();
     let run_id = RunId::new();
-    // Distinct from `gateway-{coworker}`: this run is the MCP call's audit row, not a
-    // conversation turn. Answering it Finishes the run; it must not resume as a model turn.
-    let thread_id = format!("mcp-{}", coworker.as_str());
+    let thread_id = mcp_audit_thread(coworker);
     let model = state
         .agui
         .auth
@@ -916,6 +931,138 @@ async fn persist_mcp_ask(
     Ok(call.id.clone())
 }
 
+/// An MCP card whose answer is already journalled on its run — everything settling it needs.
+/// `run` and `seq` are what the Answer append left behind; `pending` is the card, captured
+/// BEFORE the Answer cleared it.
+pub struct AnsweredMcpCard<'a> {
+    pub run_id: &'a RunId,
+    pub run: &'a Run,
+    pub seq: i64,
+    pub pending: &'a PendingApproval,
+    pub approved: bool,
+    pub at_ms: i64,
+}
+
+/// Settle an answered MCP card: flip it in the transcript, remember a yes for the retry, and
+/// FINISH the run instead of resuming it.
+///
+/// AN MCP-SYNTHESIZED RUN IS NOT A CONVERSATION. Resuming it would execute the tool on this side
+/// while the MCP client is being told to retry — the same call twice, the second time under a new
+/// call id that cannot spend this yes. So the run ends here, and what the client's retry needs
+/// instead is the remembered allow-once this writes.
+///
+/// A NO REMEMBERS NOTHING. The card reads `denied`, the run finishes, and the client's next
+/// `tools/call` raises a fresh card. A remembered no would be a standing refusal with nowhere to
+/// lift it; a person who said "not this time" said exactly that.
+///
+/// `Err` means the run did not reach an ending — the answer itself is already durable either way,
+/// so the caller reports what happened rather than failing the request.
+pub async fn settle_mcp_answer(
+    store: &opengrok_store::PgStore,
+    account: &AccountId,
+    card: AnsweredMcpCard<'_>,
+) -> Result<(), String> {
+    let Some(coworker) = card.run.coworker_id.clone() else {
+        return Err("an MCP audit run with no coworker cannot be settled".to_string());
+    };
+    // The door's own lock, held across remember and Finish: without it a `tools/call` arriving in
+    // this window finds no pending ask (the Answer already cleared it), runs the call, raises a
+    // second card — and then our yes is a leftover nobody asked for, waiting for whoever retries
+    // next. Narrower than the deleted desktop verb's hold, which covered the Answer too; this is
+    // the part of that window that can still write a yes.
+    let lock = coworker_lock(&coworker);
+    let _guard = lock.lock().await;
+
+    // Flip the card the person pressed, on its own entry — the renderer dedups on
+    // requestId:status, so the same id with a new status settles it. A card that cannot be found
+    // is not a reason to leave the run suspended forever: say so and finish it anyway.
+    let status = if card.approved { "approved" } else { "denied" };
+    match pending_card_entry_for(store, &coworker, account, &card.pending.call_id).await {
+        Ok(Some(entry_id)) => {
+            if let Err(error) = store
+                .set_gateway_approval_status(&coworker, account, &entry_id, status)
+                .await
+            {
+                tracing::warn!(%error, entry_id, "mcp ask: the answered card could not be flipped; finishing the run anyway");
+            }
+        }
+        Ok(None) => tracing::warn!(
+            call_id = %card.pending.call_id,
+            "mcp ask: no pending card for this answer; finishing the run anyway"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "mcp ask: the transcript could not be read; finishing the run anyway")
+        }
+    }
+
+    if card.approved
+        && let Err(error) = remember_mcp_allow_once(
+            store,
+            &coworker,
+            // The person who answered owns the yes, so only their retry can spend it. PAIRED WITH
+            // the take in `dispatch`, which binds the account off the MCP session: if these two
+            // ever resolve to different people the yes is written and never spendable — narrow,
+            // not unsafe, but it would present as "approvals do not work on shared coworkers".
+            // Check the pairing when the roster widens past the owner.
+            Some(account.as_str()),
+            &card.pending.tool,
+            &card.pending.arguments,
+            &card.pending.call_id,
+            // A policy yes releases the GATE on the retry; a judge yes skips the judge.
+            card.pending.reason != SuspendReason::AutoReview,
+        )
+        .await
+    {
+        // The card is answered either way; a lost yes only means the retry asks again.
+        tracing::error!(%error, call_id = %card.pending.call_id, "mcp ask: the yes could not be remembered for the retry");
+    }
+
+    let mut run = card.run.clone();
+    let finished = run
+        .decide(RunCommand::Finish { at_ms: card.at_ms })
+        .map_err(|error| error.to_string())?;
+    for event in &finished {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: card.run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: card.at_ms,
+    };
+    match store
+        .append_run(card.run_id, card.seq, &finished, &view, Some(account))
+        .await
+    {
+        Ok(_) => {}
+        // Somebody ended it between our read and our write. The ending that won is as good as
+        // ours — the same reading `answer_run` gives an answer that lost its race.
+        Err(opengrok_store::StoreError::Conflict) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    if card.approved {
+        tracing::info!(
+            run = %card.run_id.as_str(),
+            coworker = %coworker.as_str(),
+            call_id = %card.pending.call_id,
+            tool = %card.pending.tool,
+            reason = card.pending.reason.as_str(),
+            "mcp ask: approved — the run is finished and the retry may spend the yes"
+        );
+    } else {
+        tracing::info!(
+            run = %card.run_id.as_str(),
+            coworker = %coworker.as_str(),
+            call_id = %card.pending.call_id,
+            tool = %card.pending.tool,
+            reason = card.pending.reason.as_str(),
+            "mcp ask: denied — the run is finished and nothing is remembered"
+        );
+    }
+    Ok(())
+}
+
 async fn existing_mcp_ask(
     state: &GatewayState,
     account: &AccountId,
@@ -923,12 +1070,13 @@ async fn existing_mcp_ask(
     call: &ToolCall,
 ) -> Result<Option<String>, opengrok_store::StoreError> {
     let waiting = state.agui.auth.store.awaiting_approval(account).await?;
+    let thread_id = mcp_audit_thread(coworker);
     for run_id in waiting {
         let (run, seq) = match state.agui.auth.store.load_run(&run_id).await {
             Ok(pair) => pair,
             Err(error) => return Err(error),
         };
-        if run.thread_id != format!("mcp-{}", coworker.as_str()) {
+        if run.thread_id != thread_id {
             continue;
         }
         let Some(pending) = run.pending.as_ref() else {
@@ -946,32 +1094,36 @@ async fn existing_mcp_ask(
         // and append_gateway_entry would otherwise promise a requestId nobody can answer.
         // A transcript READ error must not look like "no card": the card may already be
         // there, and Fail would leave the original press hitting 410.
-        match card_pending_for(state, coworker, account, &pending.call_id).await {
-            Ok(true) => return Ok(Some(pending.call_id.clone())),
-            Ok(false) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await?,
+        match pending_card_entry_for(&state.agui.auth.store, coworker, account, &pending.call_id)
+            .await
+        {
+            Ok(Some(_)) => return Ok(Some(pending.call_id.clone())),
+            Ok(None) => fail_stuck_mcp_run(state, account, &run_id, run, seq).await?,
             Err(error) => return Err(error),
         }
     }
     Ok(None)
 }
 
-async fn card_pending_for(
-    state: &GatewayState,
+/// The entry id of the PENDING approval card for this request id, if the transcript holds one.
+/// Two callers and one scan: the door reuses a requestId only when its card is really there, and
+/// settling an answer needs that same card's id to flip it.
+async fn pending_card_entry_for(
+    store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
     account: &AccountId,
     request_id: &str,
-) -> Result<bool, opengrok_store::StoreError> {
-    let entries = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker, account)
-        .await?;
-    Ok(entries.iter().any(|entry| {
-        entry["message"]["type"] == "auto-review-approval"
-            && entry["message"]["approval"]["requestId"] == request_id
-            && entry["message"]["approval"]["status"] == "pending"
-    }))
+) -> Result<Option<String>, opengrok_store::StoreError> {
+    let entries = store.gateway_transcript(coworker, account).await?;
+    Ok(entries
+        .iter()
+        .find(|entry| {
+            entry["message"]["type"] == "auto-review-approval"
+                && entry["message"]["approval"]["requestId"] == request_id
+                && entry["message"]["approval"]["status"] == "pending"
+        })
+        .and_then(|entry| entry["id"].as_str())
+        .map(str::to_string))
 }
 
 async fn fail_stuck_mcp_run(
