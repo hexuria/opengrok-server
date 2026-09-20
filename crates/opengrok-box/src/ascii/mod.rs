@@ -99,10 +99,11 @@ impl Computer for AsciiBoxes {
         "ascii"
     }
 
-    /// box.ascii.dev provisions a desktop for any box on the first `desktop` call, so every box
-    /// of this provider can have a screen.
-    fn offers_a_screen(&self) -> bool {
-        true
+    /// `false` on purpose: this provider does not implement `act` or `screenshot`, so a screen
+    /// offered here could only ever refuse. (The desktop link a person opens is `screen_url`,
+    /// which is a different thing from the model driving it.)
+    async fn offers_a_screen(&self, _box_id: &str) -> bool {
+        false
     }
 
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
@@ -210,6 +211,13 @@ impl Computer for AsciiBoxes {
         // and reported EVERY running box as "stopped". Read the actual state instead.
         match self.client.get_box(box_id).await {
             Err(BoxError::NoSuchBox) => Ok("absent".to_string()),
+            // A revoked or wrong key is not a stopped box: the caller that takes a refused
+            // provider over with local Docker needs to see the refusal.
+            Err(
+                error @ BoxError::Refused {
+                    status: 401 | 403, ..
+                },
+            ) => Err(error),
             Err(BoxError::Refused { .. }) => Ok("stopped".to_string()),
             Err(error) => Err(error),
             Ok(info) => Ok(match info.box_.state.as_str() {

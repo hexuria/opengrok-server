@@ -61,8 +61,6 @@ impl ToolRunner {
         self
     }
 
-    /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
-    /// offer. The prompt must say the same thing the offering does.
     /// Whether running `call` would first wake the coworker's box — asked before a round so the
     /// stream can say so (`box-waking`) instead of going quiet for the wait.
     pub async fn box_needs_wake(&self, call: &ToolCall) -> bool {
@@ -79,6 +77,8 @@ impl ToolRunner {
             .map(|(_, context)| context.coworker_id.to_string())
     }
 
+    /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
+    /// offer. The prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.executor
             .as_ref()

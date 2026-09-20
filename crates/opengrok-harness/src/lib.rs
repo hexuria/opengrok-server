@@ -316,7 +316,13 @@ pub async fn resume_conversation(
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
     let results = match outcome {
-        ResumeOutcome::Approved => tools.run_all(std::slice::from_ref(&approved)).await,
+        ResumeOutcome::Approved => {
+            // The person may have answered the card long after the box went to sleep.
+            all.extend(
+                box_wake_frame(tools, &mut projection, std::slice::from_ref(&approved)).await,
+            );
+            tools.run_all(std::slice::from_ref(&approved)).await
+        }
         ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
         ResumeOutcome::Settled(content) => {
             vec![opengrok_tools::ToolResult::ok(&approved.id, content)]
@@ -2189,7 +2195,7 @@ mod tests {
         async fn state(&self, _b: &str) -> opengrok_box::BoxResult<String> {
             Ok("running".into())
         }
-        fn offers_a_screen(&self) -> bool {
+        async fn offers_a_screen(&self, _box_id: &str) -> bool {
             true
         }
         async fn screen_url(&self, _b: &str) -> opengrok_box::BoxResult<Option<String>> {

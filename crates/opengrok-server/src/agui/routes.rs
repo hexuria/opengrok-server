@@ -206,9 +206,10 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
-/// `wake_patience` bounds how long a sleeping box is waited on before the first command is tried
-/// anyway: a turn can afford `TURN_WAKE_PATIENCE`; the MCP door, whose caller (Claude Code) has
-/// its own request timeout, passes a shorter one and lets the tool result say "still starting".
+/// `wake_patience` bounds how long the first box-bound tool call waits for a sleeping box before
+/// answering that the computer is down or still starting: a turn can afford `TURN_WAKE_PATIENCE`;
+/// the MCP door, whose caller (Claude Code) has its own request timeout, passes a shorter one and
+/// lets the tool result say "still starting".
 pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
@@ -248,37 +249,60 @@ pub(crate) async fn tools_for_coworker(
     // key revoked, a computer this deployment may no longer reach) is taken over by local Docker
     // now, as it was when the wake found the same refusal.
     let _ = stopped;
-    if let Err(error) = computer.state(&box_id).await {
-        let forbidden = matches!(
-            &error,
-            opengrok_box::BoxError::Refused {
-                status: 401 | 403,
-                ..
-            }
-        ) || error.to_string().contains("forbidden");
-        if forbidden {
-            tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
-            match super::provision::take_over_with_local_docker(
-                state,
-                scope,
-                &scope_id,
-                org_id.as_deref(),
-            )
-            .await
-            {
-                Some((local, new_id)) => {
-                    computer = local;
-                    box_id = new_id;
+    let mut running = false;
+    match computer.state(&box_id).await {
+        Ok(state) => running = state == "running",
+        Err(error) => {
+            let forbidden = matches!(
+                &error,
+                opengrok_box::BoxError::Refused {
+                    status: 401 | 403,
+                    ..
                 }
-                None => return None,
+            ) || error.to_string().contains("forbidden");
+            if forbidden {
+                tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
+                match super::provision::take_over_with_local_docker(
+                    state,
+                    scope,
+                    &scope_id,
+                    org_id.as_deref(),
+                )
+                .await
+                {
+                    Some((local, new_id)) => {
+                        computer = local;
+                        box_id = new_id;
+                        running = true;
+                    }
+                    None => return None,
+                }
+            } else {
+                tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so");
             }
         }
     }
-    let _ = state
-        .auth
-        .store
-        .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
-        .await;
+    // The in-use stamp keeps the idle sweep off a box while it is used. A box that is asleep is
+    // not in use by a turn that never touches it, so it is stamped only when running now — and by
+    // the executor, through `on_woken`, the moment a tool brings it up.
+    if running {
+        let _ = state
+            .auth
+            .store
+            .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+            .await;
+    }
+    let stamp_store = state.auth.store.clone();
+    let stamp_scope_id = scope_id.clone();
+    let on_woken: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(move |_| {
+        let store = stamp_store.clone();
+        let scope_id = stamp_scope_id.clone();
+        tokio::spawn(async move {
+            let _ = store
+                .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+                .await;
+        });
+    });
 
     let policy = state
         .auth
@@ -303,8 +327,15 @@ pub(crate) async fn tools_for_coworker(
     // never told about them, so it cannot be sent down a dead end.
     // Whether the coworker has a screen is how its box is made, not whether the box happens to be
     // awake: the prompt and the tool list then say the same thing on every turn.
-    let screen = computer.offers_a_screen();
-    let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
+    let screen = computer.offers_a_screen(&box_id).await;
+    // The tunnel probe asks the box's guest, which only answers when the box is up. A box that is
+    // asleep now will have its tunnel once a tool wakes it, so the consent card must be raised as
+    // if it were up: the host's wish decides until the box can be asked.
+    let egress_tunnel = if running {
+        state.egress_tunnel_for(computer.as_ref(), &box_id).await
+    } else {
+        state.egress_tunnel_enabled()
+    };
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -330,6 +361,7 @@ pub(crate) async fn tools_for_coworker(
     };
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
         .with_wake_patience(wake_patience)
+        .with_on_woken(on_woken)
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)

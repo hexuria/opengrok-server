@@ -475,6 +475,11 @@ impl ComputerArgs {
 /// own words; the person is the one who can look at the computer.
 pub const COMPUTER_DOWN: &str = "my computer is down; ask them to check it";
 
+/// What a box-bound tool answers when the box is still on its way up after the patience — a
+/// box.ascii.dev restore can take longer than a short patience — so the caller retries rather
+/// than telling the person the computer is broken.
+pub const COMPUTER_STARTING: &str = "my computer is still starting; try again in a moment";
+
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
@@ -502,9 +507,12 @@ pub struct Executor {
     /// How long the first box-bound call of a turn waits for a sleeping box to come up. A turn
     /// no longer waits before the model is asked; it waits here, once, when a tool needs the box.
     wake_patience: std::time::Duration,
-    /// Boxes this executor has already found running (or woken) this turn, so the state is
-    /// asked once per box per turn, not once per call.
-    woken: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// What this turn learnt about each box it needed: `Ok` once found running (or woken), `Err`
+    /// with the sentence to answer once it would not come up. Asked once per box per turn, not
+    /// once per call — a box that is down costs one wait, not one per call.
+    woken: std::sync::Mutex<std::collections::BTreeMap<String, Result<(), String>>>,
+    /// Told the box id after this executor woke a box, so the server can stamp it as in use.
+    on_woken: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     /// What this principal may make this coworker do. Consulted before EVERY call, never once at
     /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
     /// (CLAUDE.md #6).
@@ -605,7 +613,8 @@ impl Executor {
             computer,
             policy: opengrok_policy::Context::default(),
             wake_patience: DEFAULT_WAKE_PATIENCE,
-            woken: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            woken: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            on_woken: None,
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -628,7 +637,8 @@ impl Executor {
             computer,
             policy,
             wake_patience: DEFAULT_WAKE_PATIENCE,
-            woken: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            woken: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            on_woken: None,
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -668,62 +678,112 @@ impl Executor {
     /// the box is known, and it is not running yet as far as this turn has seen. The harness asks
     /// before running a round so it can say "waking the computer" on the stream.
     pub async fn box_needs_wake(&self, context: &ToolContext, call: &ToolCall) -> bool {
-        if !needs_the_box(&call.name) {
+        let tool_name = self.internal_tool_name(&call.name);
+        if !needs_the_box(&tool_name) || !self.would_reach_the_box(context, call, &tool_name) {
             return false;
         }
         let Some(box_id) = target_box(context, &call.arguments) else {
             return false;
         };
-        if self.already_woken(box_id.as_str()) {
+        if self.box_outcome(box_id.as_str()).is_some() {
             return false;
         }
         match self.computer.state(box_id.as_str()).await {
             Ok(state) if state == "running" => {
-                self.remember_woken(box_id.as_str());
+                self.remember_box(box_id.as_str(), Ok(()));
                 false
             }
+            Ok(state) if state == "absent" => false,
             _ => true,
         }
     }
 
-    fn already_woken(&self, box_id: &str) -> bool {
+    /// The cheap half of `execute`'s admission, for the frame that says "waking": a call the
+    /// policy denies or parks on a card, a screen tool while a form holds the screen, or a screen
+    /// tool the egress tunnel will ask about first, never reaches the box, so nothing wakes.
+    fn would_reach_the_box(&self, context: &ToolContext, call: &ToolCall, tool_name: &str) -> bool {
+        let decision = opengrok_policy::decide(
+            &context.account_id,
+            &context.coworker_id,
+            opengrok_policy::Action::RunTool(tool_name),
+            &self.policy,
+        );
+        let approved = self.approved_calls.contains(&call.id);
+        if !approved && (decision.needs_approval() || decision.reason().is_some()) {
+            return false;
+        }
+        let screen_tool = matches!(tool_name, "computer" | "open_url" | RUN_RECIPE);
+        if context.screen_hold && screen_tool {
+            return false;
+        }
+        let review_inactive = self
+            .auto_review
+            .as_ref()
+            .is_none_or(|review| !review.policy.is_active());
+        if self.egress_tunnel && screen_tool && review_inactive && !approved {
+            return false;
+        }
+        true
+    }
+
+    fn box_outcome(&self, box_id: &str) -> Option<Result<(), String>> {
         self.woken
             .lock()
-            .map(|woken| woken.contains(box_id))
-            .unwrap_or(false)
+            .ok()
+            .and_then(|woken| woken.get(box_id).cloned())
     }
 
-    fn remember_woken(&self, box_id: &str) {
+    fn remember_box(&self, box_id: &str, outcome: Result<(), String>) {
         if let Ok(mut woken) = self.woken.lock() {
-            woken.insert(box_id.to_string());
+            woken.insert(box_id.to_string(), outcome);
         }
     }
 
-    /// The box is running by the time this returns `Ok`, woken if it was asleep. Asked once per
-    /// box per turn. `Err` carries the sentence the model is told — and relays — when the box
-    /// cannot be brought up: it is the person's computer, and only they can look at it.
+    /// The box was seen running, or woken, by the time this returns `Ok` — once per box per
+    /// turn; the answer is remembered either way, so a box that is down costs one wait and every
+    /// later call in the turn gets the same sentence at once. `Err` is what the model is told and
+    /// relays: the computer is down (only the person can look at it), or still starting (retry).
     async fn ensure_awake(&self, box_id: &str) -> Result<(), String> {
-        if self.already_woken(box_id) {
-            return Ok(());
+        if let Some(outcome) = self.box_outcome(box_id) {
+            return outcome;
         }
+        let outcome = self.wake_now(box_id).await;
+        self.remember_box(box_id, outcome.clone());
+        if outcome.is_ok()
+            && let Some(on_woken) = &self.on_woken
+        {
+            on_woken(box_id);
+        }
+        outcome
+    }
+
+    async fn wake_now(&self, box_id: &str) -> Result<(), String> {
         let state = match self.computer.state(box_id).await {
             Ok(state) => state,
             Err(error) => return Err(format!("{COMPUTER_DOWN} ({error})")),
         };
-        let reached = if state == "running" {
-            state
-        } else {
-            match self.computer.wake(box_id, self.wake_patience).await {
-                Ok(reached) => reached,
-                Err(error) => return Err(format!("{COMPUTER_DOWN} ({error})")),
-            }
+        if state == "running" {
+            return Ok(());
+        }
+        let reached = match self.computer.wake(box_id, self.wake_patience).await {
+            Ok(reached) => reached,
+            Err(error) => return Err(format!("{COMPUTER_DOWN} ({error})")),
         };
         if reached == "running" {
-            self.remember_woken(box_id);
             Ok(())
+        } else if opengrok_box::is_starting(&reached) {
+            Err(format!("{COMPUTER_STARTING} (it is {reached})"))
         } else {
             Err(format!("{COMPUTER_DOWN} (it is {reached})"))
         }
+    }
+
+    /// Called with the box id after this executor brought a box up (or found it up), so the
+    /// server can stamp it as in use for the idle sweep.
+    #[must_use]
+    pub fn with_on_woken(mut self, on_woken: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.on_woken = Some(on_woken);
+        self
     }
 
     /// The box this executor talks to. Fill (`user-form`) types here outside `computer_use`.
@@ -2143,6 +2203,64 @@ mod tests {
             "gave up after {:?}",
             began.elapsed()
         );
+    }
+
+    /// A box that is down costs one wait per turn: the second call answers at once with the same
+    /// sentence, and the frame is not announced again.
+    #[tokio::test]
+    async fn a_box_that_is_down_costs_one_wait_per_turn() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited", "exited", "exited"]));
+        let executor =
+            allowing(sleepy.clone()).with_wake_patience(std::time::Duration::from_secs(60));
+        let context = context_with_box("box_mine");
+        let first = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(first.content.contains(COMPUTER_DOWN), "{first:?}");
+        let began = std::time::Instant::now();
+        let second = executor
+            .execute(&context, &call("shell", json!({"command": "pwd"})))
+            .await;
+        assert!(second.content.contains(COMPUTER_DOWN), "{second:?}");
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(sleepy.resumes(), 1, "one start for the whole turn");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await,
+            "a box already answered for is not announced as waking"
+        );
+    }
+
+    /// A call that will park on a card or be refused before it reaches the box does not announce
+    /// a wake — nothing is going to wake.
+    #[tokio::test]
+    async fn a_call_that_never_reaches_the_box_does_not_announce_a_wake() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited"]));
+        let mut policy = permissive();
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.needs_approval = opengrok_policy::ToolSet::All;
+        }
+        let executor = Executor::with_policy(sleepy.clone(), policy);
+        let context = context_with_box("box_mine");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+        let held = allowing(sleepy.clone()).with_screen(true);
+        let mut holding = context_with_box("box_mine");
+        holding.screen_hold = true;
+        assert!(
+            !held
+                .box_needs_wake(&holding, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        assert_eq!(sleepy.resumes(), 0);
     }
 
     /// A running box is never resumed, and a plugin tool never asks about the box at all.

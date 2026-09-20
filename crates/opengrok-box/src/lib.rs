@@ -287,9 +287,11 @@ pub trait Computer: Send + Sync {
     /// way up is not an error. A transport error from `state` ends the wake with that error —
     /// callers treat a wake as best-effort and go on to try the box — rather than retrying inside.
     ///
-    /// A box that was resumed and is asleep again on two polls in a row started and died — a
+    /// A box that was resumed and is `exited` again on two polls in a row started and died — a
     /// container whose entrypoint exits at once — and waiting the full patience for it would only
-    /// delay saying so: the wake ends there with that state.
+    /// delay saying so: the wake ends there with that state. Only `exited` counts: `stopped` is
+    /// also what box.ascii.dev's `state` says for a transient refusal, and `archived` can lag a
+    /// resume the provider has already accepted.
     async fn wake(&self, box_id: &str, patience: std::time::Duration) -> BoxResult<String> {
         let started = std::time::Instant::now();
         let mut resumed = false;
@@ -299,7 +301,7 @@ pub trait Computer: Send + Sync {
             if state == "running" || state == "absent" || state == "error" {
                 return Ok(state);
             }
-            if resumed && is_asleep(&state) {
+            if resumed && state == "exited" {
                 asleep_since_resume += 1;
                 if asleep_since_resume >= 2 {
                     return Ok(state);
@@ -344,17 +346,19 @@ pub trait Computer: Send + Sync {
     /// poll. Never errors on a missing box — that is `"absent"`, not a failure.
     async fn state(&self, box_id: &str) -> BoxResult<String>;
 
+    /// Whether this box has a desktop — decided from how the box is made (Docker: the desktop
+    /// ports it was created with), not from whether it is awake right now. A turn offers screen
+    /// tools on the strength of this and wakes the box the first time one is used. `false` by
+    /// default: a provider that cannot `act` or `screenshot` must not offer a screen it cannot
+    /// serve.
+    async fn offers_a_screen(&self, _box_id: &str) -> bool {
+        false
+    }
+
     /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
     /// is the default, because most of our computers are headless (shell + files, no desktop). A
     /// provider that can surface a graphical desktop (box.ascii.dev) overrides this; the client draws
     /// the screen when it is `Some`, and says "no screen" when it is `None`, so we never invent one.
-    /// Whether this provider's boxes have a desktop — decided from how the box is made, not
-    /// from whether it is awake right now. A turn offers screen tools on the strength of this
-    /// and wakes the box the first time one is used.
-    fn offers_a_screen(&self) -> bool {
-        false
-    }
-
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Ok(None)
     }
@@ -508,8 +512,26 @@ mod tests {
         assert_eq!(boxes.resumes.load(Ordering::SeqCst), 1);
     }
 
+    /// A provider word other than `exited` — box.ascii.dev says `stopped` for a transient
+    /// refusal — does not end the wake early: the patience is what rides that out.
+    #[tokio::test]
+    async fn a_box_that_only_says_stopped_after_a_start_is_waited_for() {
+        let boxes = Scripted::new(&["stopped", "stopped", "stopped"]);
+        let began = std::time::Instant::now();
+        let reached = boxes
+            .wake("box", std::time::Duration::from_secs(4))
+            .await
+            .unwrap();
+        assert_eq!(reached, "stopped");
+        assert!(
+            began.elapsed() >= std::time::Duration::from_secs(4),
+            "gave up after {:?}, before the patience ran out",
+            began.elapsed()
+        );
+    }
+
     /// A box that starts and dies at once — the stale-lock crash of 20 Sep 2026 — used to cost
-    /// the whole patience (90 s per turn). Two asleep polls after the start end the wake.
+    /// the whole patience (90 s per turn). Two `exited` polls after the start end the wake.
     #[tokio::test]
     async fn a_box_that_dies_right_after_starting_is_given_up_on_in_two_polls() {
         let boxes = Scripted::new(&["exited", "exited", "exited"]);

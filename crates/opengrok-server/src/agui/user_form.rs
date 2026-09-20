@@ -781,6 +781,11 @@ async fn fill_on_box(
     let Some((computer, box_id)) = runner.fill_target() else {
         return failed();
     };
+    // The person may press Submit long after the box went to sleep; this path types straight
+    // into the box, outside the executor that would otherwise wake it.
+    let _ = computer
+        .wake(&box_id, crate::agui::routes::TURN_WAKE_PATIENCE)
+        .await;
     fill_into_focus(computer.as_ref(), &box_id, form, values).await
 }
 
