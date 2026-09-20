@@ -1,3 +1,4 @@
+#![cfg(feature = "jev")]
 //! `POST /jev/ask` — put questions to Jev and get typed answers back.
 //!
 //! The body is the state Jev judges and the questions to ask about it; the reply is one answer

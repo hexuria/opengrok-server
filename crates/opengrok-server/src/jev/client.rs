@@ -1,3 +1,4 @@
+#![cfg(feature = "jev")]
 //! The live door: TypeSafe's own SDK, configured once at boot.
 //!
 //! RETRIES AND TIMEOUTS ARE THE SDK'S, NOT OURS. It already retries a connection failure, a
