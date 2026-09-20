@@ -16,6 +16,7 @@ pub mod connections;
 pub mod domain_proof;
 pub mod gateway;
 pub mod gateway_admin;
+pub mod health;
 #[cfg(feature = "jev")]
 pub mod jev;
 #[cfg(not(feature = "jev"))]
@@ -46,15 +47,12 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 
 /// Everything the server serves today.
-///
-/// `/health` belongs to the gateway now: the desktop client's supervisor is its most demanding
-/// reader (1500 ms deadline, `ok === true`), and its reply shape is a superset of what every
-/// smoke script was already checking.
 pub fn router(mut state: AgUiState, gateway: gateway::GatewayState) -> Router {
     if state.host_settings.is_none() {
         state.host_settings = Some(gateway.settings.clone());
     }
     let app = Router::new()
+        .merge(health::router(gateway.clone()))
         .merge(gateway::routes::router(gateway.clone()))
         .merge(gateway::hooks::router(gateway.clone()))
         .merge(gateway::user_form::agui_router(gateway.clone()))
