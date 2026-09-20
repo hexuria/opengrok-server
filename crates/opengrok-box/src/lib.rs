@@ -286,13 +286,29 @@ pub trait Computer: Send + Sync {
     /// once it is `archived`. A resume refused while the provider already reports the box on its
     /// way up is not an error. A transport error from `state` ends the wake with that error —
     /// callers treat a wake as best-effort and go on to try the box — rather than retrying inside.
+    ///
+    /// A box that was resumed and is `exited` again on two polls in a row started and died — a
+    /// container whose entrypoint exits at once — and waiting the full patience for it would only
+    /// delay saying so: the wake ends there with that state. Only `exited` counts: `stopped` is
+    /// also what box.ascii.dev's `state` says for a transient refusal, and `archived` can lag a
+    /// resume the provider has already accepted. So the early end is Docker's; an ascii box that
+    /// never comes up costs the patience, once per turn, and then says the computer is down.
     async fn wake(&self, box_id: &str, patience: std::time::Duration) -> BoxResult<String> {
         let started = std::time::Instant::now();
         let mut resumed = false;
+        let mut asleep_since_resume = 0u8;
         let mut state = self.state(box_id).await?;
         loop {
             if state == "running" || state == "absent" || state == "error" {
                 return Ok(state);
+            }
+            if resumed && state == "exited" {
+                asleep_since_resume += 1;
+                if asleep_since_resume >= 2 {
+                    return Ok(state);
+                }
+            } else {
+                asleep_since_resume = 0;
             }
             if is_starting(&state) {
                 // On its way (or still archiving): nothing to send, only patience.
@@ -330,6 +346,15 @@ pub trait Computer: Send + Sync {
     /// signal that lets a dead box say it is dead instead of spinning "Booting up" forever. Cheap to
     /// poll. Never errors on a missing box — that is `"absent"`, not a failure.
     async fn state(&self, box_id: &str) -> BoxResult<String>;
+
+    /// Whether this box has a desktop — decided from how the box is made (Docker: the desktop
+    /// ports it was created with), not from whether it is awake right now. A turn offers screen
+    /// tools on the strength of this and wakes the box the first time one is used. `false` by
+    /// default: a provider that cannot `act` or `screenshot` must not offer a screen it cannot
+    /// serve.
+    async fn offers_a_screen(&self, _box_id: &str) -> bool {
+        false
+    }
 
     /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
     /// is the default, because most of our computers are headless (shell + files, no desktop). A
@@ -413,6 +438,117 @@ pub trait Computer: Send + Sync {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A box whose reported states are scripted: the last one repeats forever.
+    struct Scripted {
+        states: Mutex<VecDeque<&'static str>>,
+        resumes: AtomicUsize,
+    }
+
+    impl Scripted {
+        fn new(states: &[&'static str]) -> Self {
+            Self {
+                states: Mutex::new(states.iter().copied().collect()),
+                resumes: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Computer for Scripted {
+        async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+            Ok("box".into())
+        }
+        async fn run(&self, _b: &str, _c: &str, _t: u32) -> BoxResult<CommandOutput> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn stop(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn resume(&self, _b: &str) -> BoxResult<()> {
+            self.resumes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn destroy(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            let mut states = self.states.lock().unwrap();
+            let next = if states.len() > 1 {
+                states.pop_front().unwrap()
+            } else {
+                states.front().copied().unwrap_or("absent")
+            };
+            Ok(next.to_string())
+        }
+    }
+
+    /// A stopped box is started once and the wake returns as soon as it is running.
+    #[tokio::test]
+    async fn a_sleeping_box_is_started_once_and_the_wake_ends_when_it_runs() {
+        let boxes = Scripted::new(&["exited", "running"]);
+        let reached = boxes
+            .wake("box", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(reached, "running");
+        assert_eq!(boxes.resumes.load(Ordering::SeqCst), 1);
+    }
+
+    /// A provider word other than `exited` — box.ascii.dev says `stopped` for a transient
+    /// refusal — does not end the wake early: the patience is what rides that out.
+    #[tokio::test]
+    async fn a_box_that_only_says_stopped_after_a_start_is_waited_for() {
+        let boxes = Scripted::new(&["stopped", "stopped", "stopped"]);
+        let began = std::time::Instant::now();
+        let reached = boxes
+            .wake("box", std::time::Duration::from_secs(4))
+            .await
+            .unwrap();
+        assert_eq!(reached, "stopped");
+        assert!(
+            began.elapsed() >= std::time::Duration::from_secs(4),
+            "gave up after {:?}, before the patience ran out",
+            began.elapsed()
+        );
+    }
+
+    /// A box that starts and dies at once — the stale-lock crash of 20 Sep 2026 — used to cost
+    /// the whole patience (90 s per turn). Two `exited` polls after the start end the wake.
+    #[tokio::test]
+    async fn a_box_that_dies_right_after_starting_is_given_up_on_in_two_polls() {
+        let boxes = Scripted::new(&["exited", "exited", "exited"]);
+        let began = std::time::Instant::now();
+        let reached = boxes
+            .wake("box", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(reached, "exited");
+        assert_eq!(boxes.resumes.load(Ordering::SeqCst), 1);
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "gave up after {:?}, not within two polls",
+            began.elapsed()
+        );
+    }
 
     /// The action names and fields are the box's own request bodies; a rename here would be a
     /// silent 400 from every box.

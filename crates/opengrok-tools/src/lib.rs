@@ -471,9 +471,75 @@ impl ComputerArgs {
     }
 }
 
+/// What a box-bound tool answers when the box cannot be brought up. The model relays it in its
+/// own words; the person is the one who can look at the computer.
+pub const COMPUTER_DOWN: &str = "my computer is down; ask them to check it";
+
+/// What a box-bound tool answers when the box is still on its way up after the patience — a
+/// box.ascii.dev restore can take longer than a short patience — so the caller retries rather
+/// than telling the person the computer is broken.
+pub const COMPUTER_STARTING: &str = "my computer is still starting; try again in a moment";
+
+/// Told the box id after an executor woke a box (or first found it running), so the server can
+/// stamp it as in use for the idle sweep.
+pub type OnWoken = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// Whether leave-box tools (`computer`, `open_url`, `run_recipe`) raise the Review-an-action card
+/// for the egress tunnel before they run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EgressTunnelMode {
+    /// No tunnel: nothing to ask about.
+    Off,
+    /// The box's guest said the tunnel is up with a client attached: ask before the first leave-box
+    /// tool.
+    On,
+    /// The host wants the tunnel but the box was asleep when the turn started, so the guest could
+    /// not be asked. Ask it right after the first leave-box tool wakes the box, and raise the card
+    /// only if it says the tunnel is really there — a card that asserts a tunnel that is not
+    /// attached would be a lie.
+    AskTheBoxAfterWake,
+}
+
+/// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
+const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// The tools whose action leaves the box for the network — the ones the egress tunnel's consent
+/// card is about. One list, used by the ask, the frame's admission check and the server's
+/// resume paths.
+pub fn leaves_the_box(tool_name: &str) -> bool {
+    matches!(tool_name, "computer" | "open_url" | RUN_RECIPE)
+}
+
+/// The tools that run on the box (as opposed to plugin tools and the person's own machine).
+fn needs_the_box(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        RUN_RECIPE | "shell" | "read_file" | "write_file" | "open_url" | "computer"
+    )
+}
+
+/// Which box a call targets: the room's shared one when `machine` is `group`, else the
+/// coworker's own. `None` when that box does not exist.
+fn target_box<'a>(context: &'a ToolContext, arguments: &Value) -> Option<&'a BoxId> {
+    if arguments.get("machine").and_then(Value::as_str) == Some("group") {
+        context.group_box.as_ref().map(|group| &group.box_id)
+    } else {
+        context.box_id.as_ref()
+    }
+}
+
 /// Runs tool calls on the caller's own computer, if policy allows.
 pub struct Executor {
     computer: Arc<dyn Computer>,
+    /// How long the first box-bound call of a turn waits for a sleeping box to come up. A turn
+    /// no longer waits before the model is asked; it waits here, once, when a tool needs the box.
+    wake_patience: std::time::Duration,
+    /// What this turn learnt about each box it needed: `Ok` once found running (or woken), `Err`
+    /// with the sentence to answer once it would not come up. Asked once per box per turn, not
+    /// once per call — a box that is down costs one wait, not one per call.
+    woken: std::sync::Mutex<std::collections::BTreeMap<String, Result<(), String>>>,
+    /// Told the box id after this executor woke a box, so the server can stamp it as in use.
+    on_woken: Option<OnWoken>,
     /// What this principal may make this coworker do. Consulted before EVERY call, never once at
     /// the start: a grant revoked mid-conversation must stop the next tool, not the next session
     /// (CLAUDE.md #6).
@@ -523,7 +589,14 @@ pub struct Executor {
     /// Prod user-network path: the box agent's egress tunnel. Docker host-network is not this.
     /// When on, leave-box screen tools raise the Review-an-action card unless a standing
     /// auto-review allow is already attached.
-    egress_tunnel: bool,
+    egress_tunnel: EgressTunnelMode,
+    /// Boxes whose guest, asked once a tool woke it, said the tunnel is there (the
+    /// `AskTheBoxAfterWake` mode). Only a yes is kept: right after a wake the guest is usually
+    /// not answering yet, and a remembered "no" would skip the consent card for the whole run.
+    egress_after_wake: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// The person already said yes, in this run, to a leave-box action — the tunnel's card, or a
+    /// judge's card on the same kind of action — so the tunnel is not asked about again.
+    egress_consented: bool,
 }
 
 /// The built-ins that need a display.
@@ -573,6 +646,9 @@ impl Executor {
         Self {
             computer,
             policy: opengrok_policy::Context::default(),
+            wake_patience: DEFAULT_WAKE_PATIENCE,
+            woken: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            on_woken: None,
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -585,7 +661,9 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
-            egress_tunnel: false,
+            egress_tunnel: EgressTunnelMode::Off,
+            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            egress_consented: false,
         }
     }
 
@@ -594,6 +672,9 @@ impl Executor {
         Self {
             computer,
             policy,
+            wake_patience: DEFAULT_WAKE_PATIENCE,
+            woken: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            on_woken: None,
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
@@ -606,7 +687,9 @@ impl Executor {
             recipe_source: None,
             chosen_recipe: None,
             observe: crate::observe::wanted(),
-            egress_tunnel: false,
+            egress_tunnel: EgressTunnelMode::Off,
+            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            egress_consented: false,
         }
     }
 
@@ -620,6 +703,173 @@ impl Executor {
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.screen
+    }
+
+    /// How long the first box-bound tool call of a turn waits for a sleeping box.
+    #[must_use]
+    pub fn with_wake_patience(mut self, patience: std::time::Duration) -> Self {
+        self.wake_patience = patience;
+        self
+    }
+
+    /// Whether running `call` would first have to wake the box it targets: the call is box-bound,
+    /// the box is known, and it is not running yet as far as this turn has seen. The harness asks
+    /// before running a round so it can say "waking the computer" on the stream.
+    pub async fn box_needs_wake(&self, context: &ToolContext, call: &ToolCall) -> bool {
+        let tool_name = self.internal_tool_name(&call.name);
+        if !needs_the_box(&tool_name) || !self.would_reach_the_box(context, call, &tool_name) {
+            return false;
+        }
+        let Some(box_id) = target_box(context, &call.arguments) else {
+            return false;
+        };
+        if self.box_outcome(box_id.as_str()).is_some() {
+            return false;
+        }
+        match self.computer.state(box_id.as_str()).await {
+            Ok(state) if state == "running" => {
+                self.remember_box(box_id.as_str(), Ok(()));
+                false
+            }
+            Ok(state) if state == "absent" => false,
+            _ => true,
+        }
+    }
+
+    /// The cheap half of `execute`'s admission, for the frame that says "waking": a call the
+    /// policy denies or parks on a card, a screen tool while a form holds the screen, or a screen
+    /// tool the egress tunnel will ask about first, never reaches the box, so nothing wakes.
+    fn would_reach_the_box(&self, context: &ToolContext, call: &ToolCall, tool_name: &str) -> bool {
+        let decision = opengrok_policy::decide(
+            &context.account_id,
+            &context.coworker_id,
+            opengrok_policy::Action::RunTool(tool_name),
+            &self.policy,
+        );
+        let gate_approved = self.approved_calls.contains(&call.id);
+        let review_approved = gate_approved || self.review_approved_calls.contains(&call.id);
+        // A deny is a deny, approved or not; an ask is released by the gate's own yes.
+        if decision.reason().is_some() && !decision.needs_approval() {
+            return false;
+        }
+        if decision.needs_approval() && !gate_approved {
+            return false;
+        }
+        let screen_tool = leaves_the_box(tool_name);
+        if context.screen_hold && screen_tool {
+            return false;
+        }
+        let review_inactive = self
+            .auto_review
+            .as_ref()
+            .is_none_or(|review| !review.policy.is_active());
+        // In the after-wake mode the box is woken before the tunnel is asked about, so the frame
+        // is right either way.
+        if self.egress_tunnel == EgressTunnelMode::On
+            && screen_tool
+            && review_inactive
+            && !review_approved
+            && !self.egress_consented
+        {
+            return false;
+        }
+        true
+    }
+
+    fn box_outcome(&self, box_id: &str) -> Option<Result<(), String>> {
+        self.woken
+            .lock()
+            .ok()
+            .and_then(|woken| woken.get(box_id).cloned())
+    }
+
+    fn remember_box(&self, box_id: &str, outcome: Result<(), String>) {
+        if let Ok(mut woken) = self.woken.lock() {
+            woken.insert(box_id.to_string(), outcome);
+        }
+    }
+
+    /// The box was seen running, or woken, by the time this returns `Ok` — once per box per
+    /// turn; the answer is remembered either way, so a box that is down costs one wait and every
+    /// later call in the turn gets the same sentence at once. `Err` is what the model is told and
+    /// relays: the computer is down (only the person can look at it), or still starting (retry).
+    async fn ensure_awake(&self, box_id: &str) -> Result<(), String> {
+        if let Some(outcome) = self.box_outcome(box_id) {
+            return outcome;
+        }
+        let (outcome, woke) = self.wake_now(box_id).await;
+        // "Still starting" invites a retry, so it is the one answer not remembered: the next
+        // call asks the provider again and finds the box up, instead of being told the same
+        // sentence at once and giving up on it.
+        if !outcome
+            .as_ref()
+            .is_err_and(|why| why.starts_with(COMPUTER_STARTING))
+        {
+            self.remember_box(box_id, outcome.clone());
+        }
+        if woke && let Some(on_woken) = &self.on_woken {
+            on_woken(box_id);
+        }
+        outcome
+    }
+
+    /// The outcome, and whether this call actually brought the box up (as opposed to finding it
+    /// running), which is what the in-use stamp is for.
+    async fn wake_now(&self, box_id: &str) -> (Result<(), String>, bool) {
+        let state = match self.computer.state(box_id).await {
+            Ok(state) => state,
+            Err(error) => return (Err(format!("{COMPUTER_DOWN} ({error})")), false),
+        };
+        if state == "running" {
+            return (Ok(()), false);
+        }
+        let reached = match self.computer.wake(box_id, self.wake_patience).await {
+            Ok(reached) => reached,
+            Err(error) => return (Err(format!("{COMPUTER_DOWN} ({error})")), false),
+        };
+        if reached == "running" {
+            (Ok(()), true)
+        } else if opengrok_box::is_starting(&reached) {
+            (Err(format!("{COMPUTER_STARTING} (it is {reached})")), false)
+        } else {
+            (Err(format!("{COMPUTER_DOWN} (it is {reached})")), false)
+        }
+    }
+
+    /// Bring the coworker's own box up for something that types into it outside `execute` — the
+    /// user-form fill — through the same memo and in-use stamp as a tool call.
+    pub async fn wake_own_box(&self, context: &ToolContext) -> Result<(), String> {
+        let Some(box_id) = context.box_id.as_ref() else {
+            return Err("this coworker has no computer yet".to_string());
+        };
+        self.ensure_awake(box_id.as_str()).await
+    }
+
+    /// Whether the (now awake) box's guest reports the egress tunnel up with a client attached.
+    /// A yes is remembered for the turn; a no is asked again next time, because right after a
+    /// wake the guest and the laptop client are usually still coming back.
+    async fn tunnel_is_there(&self, box_id: &str) -> bool {
+        if self
+            .egress_after_wake
+            .lock()
+            .is_ok_and(|known| known.contains(box_id))
+        {
+            return true;
+        }
+        let there =
+            opengrok_box::EgressTunnel::advertised(true, self.computer.egress_tunnel(box_id).await);
+        if there && let Ok(mut known) = self.egress_after_wake.lock() {
+            known.insert(box_id.to_string());
+        }
+        there
+    }
+
+    /// Called with the box id after this executor brought a box up (or found it up), so the
+    /// server can stamp it as in use for the idle sweep.
+    #[must_use]
+    pub fn with_on_woken(mut self, on_woken: OnWoken) -> Self {
+        self.on_woken = Some(on_woken);
+        self
     }
 
     /// The box this executor talks to. Fill (`user-form`) types here outside `computer_use`.
@@ -709,7 +959,26 @@ impl Executor {
     /// Review-an-action card before they run. Docker host-network is not this path.
     #[must_use]
     pub fn with_egress_tunnel(mut self, on: bool) -> Self {
-        self.egress_tunnel = on;
+        self.egress_tunnel = if on {
+            EgressTunnelMode::On
+        } else {
+            EgressTunnelMode::Off
+        };
+        self
+    }
+
+    /// See [`EgressTunnelMode`].
+    #[must_use]
+    pub fn with_egress_tunnel_mode(mut self, mode: EgressTunnelMode) -> Self {
+        self.egress_tunnel = mode;
+        self
+    }
+
+    /// The person already said yes, in this run, to a leave-box action; the tunnel is not asked
+    /// about again. Set by the resume paths from the answered card's own tool, not inferred.
+    #[must_use]
+    pub fn with_egress_consented(mut self, consented: bool) -> Self {
+        self.egress_consented = consented;
         self
     }
 
@@ -1144,13 +1413,20 @@ impl Executor {
         // client attached). Docker host-network is not that. With no standing auto-review
         // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
         // subsumes this (one card).
-        if self.egress_tunnel
-            && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
+        let leave_box_tool = leaves_the_box(&tool_name);
+        let review_inactive = self
+            .auto_review
+            .as_ref()
+            .is_none_or(|review| !review.policy.is_active());
+        // Consent to leave through the tunnel is given once per run, not once per click: "visit
+        // facebook" used to cost a card for the page, another for the screenshot, another for the
+        // click (21 Sep 2026). The resume paths set it from the answered card's own tool.
+        let egress_consented = self.egress_consented;
+        if self.egress_tunnel == EgressTunnelMode::On
+            && leave_box_tool
             && !review_approved
-            && self
-                .auto_review
-                .as_ref()
-                .is_none_or(|review| !review.policy.is_active())
+            && !egress_consented
+            && review_inactive
         {
             match &gate {
                 Gate::Deny(why) => return ToolResult::refused(&call.id, why.clone()),
@@ -1230,6 +1506,30 @@ impl Executor {
             };
             box_id
         };
+
+        // The box is brought up here, by the first tool that needs it, not before the model was
+        // asked: a turn that never touches the box never waits for it.
+        if needs_the_box(&tool_name)
+            && let Err(down) = self.ensure_awake(box_id.as_str()).await
+        {
+            return ToolResult::refused(&call.id, down);
+        }
+        // The box was asleep when the turn started, so the guest could not say whether the
+        // tunnel is really there. It is awake now: ask it, once, and raise the card only if it is.
+        if self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
+            && leave_box_tool
+            && !review_approved
+            && !egress_consented
+            && review_inactive
+            && !gate_approved
+            && self.tunnel_is_there(box_id.as_str()).await
+        {
+            return ToolResult::awaiting(
+                &call.id,
+                AwaitingReason::AutoReview,
+                review::EGRESS_TUNNEL_ASK_REASON,
+            );
+        }
 
         match tool_name.as_str() {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
@@ -1896,6 +2196,257 @@ mod tests {
 
     fn allowing(computer: Arc<dyn Computer>) -> Executor {
         Executor::with_policy(computer, permissive())
+    }
+
+    /// A box whose reported states are scripted (the last repeats), counting resumes and the
+    /// commands that reached it.
+    struct SleepyComputer {
+        states: Mutex<std::collections::VecDeque<&'static str>>,
+        resumes: std::sync::atomic::AtomicUsize,
+        ran: Mutex<Vec<String>>,
+    }
+
+    impl SleepyComputer {
+        fn new(states: &[&'static str]) -> Self {
+            Self {
+                states: Mutex::new(states.iter().copied().collect()),
+                resumes: std::sync::atomic::AtomicUsize::new(0),
+                ran: Mutex::new(Vec::new()),
+            }
+        }
+        fn resumes(&self) -> usize {
+            self.resumes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn ran(&self) -> usize {
+            self.ran.lock().map(|ran| ran.len()).unwrap_or(0)
+        }
+    }
+
+    #[async_trait]
+    impl Computer for SleepyComputer {
+        async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+            Ok("box_new".to_string())
+        }
+        async fn run(&self, _b: &str, command: &str, _t: u32) -> BoxResult<CommandOutput> {
+            if let Ok(mut ran) = self.ran.lock() {
+                ran.push(command.to_string());
+            }
+            Ok(CommandOutput {
+                exit_code: 0,
+                stdout: format!("ran `{command}`"),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                timed_out: false,
+            })
+        }
+        async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
+            Err(BoxError::NoSuchBox)
+        }
+        async fn stop(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn resume(&self, _b: &str) -> BoxResult<()> {
+            self.resumes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn destroy(&self, _b: &str) -> BoxResult<()> {
+            Ok(())
+        }
+        async fn state(&self, _b: &str) -> BoxResult<String> {
+            let mut states = self.states.lock().unwrap();
+            let next = if states.len() > 1 {
+                states.pop_front().unwrap()
+            } else {
+                states.front().copied().unwrap_or("absent")
+            };
+            Ok(next.to_string())
+        }
+    }
+
+    /// The first box-bound call of a turn wakes a sleeping box; the second finds it awake and
+    /// does not ask again.
+    #[tokio::test]
+    async fn a_sleeping_box_is_woken_by_the_first_tool_that_needs_it_and_not_again() {
+        // The probe, the executor and the wake each read the state once before the start lands.
+        let sleepy = Arc::new(SleepyComputer::new(&[
+            "exited", "exited", "exited", "running",
+        ]));
+        let executor = allowing(sleepy.clone());
+        let context = context_with_box("box_mine");
+        assert!(
+            executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+
+        let first = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(first.ok, "{first:?}");
+        let second = executor
+            .execute(&context, &call("shell", json!({"command": "pwd"})))
+            .await;
+        assert!(second.ok, "{second:?}");
+        assert_eq!(sleepy.resumes(), 1, "one start for the whole turn");
+        assert_eq!(sleepy.ran(), 2);
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await,
+            "a box seen running is not asked about again"
+        );
+    }
+
+    /// A box that will not come up ends the call with the sentence the model relays, and the
+    /// command never runs. The wake gives up in two polls, not the full patience.
+    #[tokio::test]
+    async fn a_box_that_will_not_come_up_answers_that_the_computer_is_down() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited", "exited", "exited"]));
+        let executor =
+            allowing(sleepy.clone()).with_wake_patience(std::time::Duration::from_secs(60));
+        let context = context_with_box("box_mine");
+        let began = std::time::Instant::now();
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains(COMPUTER_DOWN), "{result:?}");
+        assert_eq!(sleepy.ran(), 0, "nothing ran on a box that is down");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "gave up after {:?}",
+            began.elapsed()
+        );
+    }
+
+    /// A box that is down costs one wait per turn: the second call answers at once with the same
+    /// sentence, and the frame is not announced again.
+    #[tokio::test]
+    async fn a_box_that_is_down_costs_one_wait_per_turn() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited", "exited", "exited"]));
+        let executor =
+            allowing(sleepy.clone()).with_wake_patience(std::time::Duration::from_secs(60));
+        let context = context_with_box("box_mine");
+        let first = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(first.content.contains(COMPUTER_DOWN), "{first:?}");
+        let began = std::time::Instant::now();
+        let second = executor
+            .execute(&context, &call("shell", json!({"command": "pwd"})))
+            .await;
+        assert!(second.content.contains(COMPUTER_DOWN), "{second:?}");
+        assert!(
+            began.elapsed() < std::time::Duration::from_millis(500),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(sleepy.resumes(), 1, "one start for the whole turn");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await,
+            "a box already answered for is not announced as waking"
+        );
+    }
+
+    /// A call that will park on a card or be refused before it reaches the box does not announce
+    /// a wake — nothing is going to wake.
+    #[tokio::test]
+    async fn a_call_that_never_reaches_the_box_does_not_announce_a_wake() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited"]));
+        let mut policy = permissive();
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.needs_approval = opengrok_policy::ToolSet::All;
+        }
+        let executor = Executor::with_policy(sleepy.clone(), policy);
+        let context = context_with_box("box_mine");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+        let held = allowing(sleepy.clone()).with_screen(true);
+        let mut holding = context_with_box("box_mine");
+        holding.screen_hold = true;
+        assert!(
+            !held
+                .box_needs_wake(&holding, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        assert_eq!(sleepy.resumes(), 0);
+    }
+
+    /// "Still starting" invites a retry, so the next call asks again and finds the box up; the
+    /// in-use stamp fires only for the call that actually woke it.
+    #[tokio::test]
+    async fn a_box_still_starting_is_asked_about_again_and_stamped_once_woken() {
+        // state reads: executor, wake start, wake poll → "provisioning" past a 1 s patience;
+        // then the retry: executor, wake start, poll → running.
+        let sleepy = Arc::new(SleepyComputer::new(&[
+            "archived",
+            "archived",
+            "provisioning",
+            "provisioning",
+            "archived",
+            "running",
+        ]));
+        let stamped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = stamped.clone();
+        let executor = allowing(sleepy.clone())
+            .with_wake_patience(std::time::Duration::from_secs(1))
+            .with_on_woken(Arc::new(move |_| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        let context = context_with_box("box_mine");
+        let first = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(first.content.contains(COMPUTER_STARTING), "{first:?}");
+        assert_eq!(stamped.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let second = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(second.ok, "the retry found the box up: {second:?}");
+        assert_eq!(stamped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(sleepy.ran(), 1);
+    }
+
+    /// A running box is never resumed, and a plugin tool never asks about the box at all.
+    #[tokio::test]
+    async fn a_running_box_is_left_alone_and_only_box_tools_ask_about_it() {
+        let awake = Arc::new(SleepyComputer::new(&["running"]));
+        let executor = allowing(awake.clone());
+        let context = context_with_box("box_mine");
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
+                .await
+        );
+        assert!(
+            !executor
+                .box_needs_wake(&context, &call("some_plugin_tool", json!({})))
+                .await
+        );
+        let result = executor
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(result.ok, "{result:?}");
+        assert_eq!(awake.resumes(), 0);
     }
 
     fn context_with_box(box_id: &str) -> ToolContext {
@@ -2844,6 +3395,47 @@ mod tests {
             )
             .await;
         assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+    }
+
+    /// One yes per run: the card for the page is not followed by a card for the screenshot and
+    /// another for the click. The resume path marks the run consented from the answered card's
+    /// own tool; a review yes alone, for some other call, is not consent.
+    #[tokio::test]
+    async fn egress_consent_given_once_holds_for_the_rest_of_the_run() {
+        let spy = Arc::new(SpyComputer::default());
+        let unrelated_yes = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_review_approved(["call_page".to_string()]);
+        let context = context_with_box("box_mine");
+        let asked = unrelated_yes
+            .execute(
+                &context,
+                &ToolCall {
+                    id: "call_shot".to_string(),
+                    name: "computer".to_string(),
+                    arguments: json!({ "action": "screenshot" }),
+                },
+            )
+            .await;
+        assert!(
+            asked.awaiting_approval,
+            "a yes for another call is not consent: {asked:?}"
+        );
+
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_egress_consented(true);
+        let context = context_with_box("box_mine");
+        let later = ToolCall {
+            id: "call_shot".to_string(),
+            name: "computer".to_string(),
+            arguments: json!({ "action": "screenshot" }),
+        };
+        let result = executor.execute(&context, &later).await;
+        assert!(!result.awaiting_approval, "asked again: {result:?}");
         assert_eq!(result.awaiting_reason, None);
     }
 

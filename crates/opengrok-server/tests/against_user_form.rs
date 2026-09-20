@@ -127,6 +127,9 @@ impl Computer for FillStub {
     async fn state(&self, _box_id: &str) -> BoxResult<String> {
         Ok("running".to_string())
     }
+    async fn offers_a_screen(&self, _box_id: &str) -> bool {
+        true
+    }
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
     }

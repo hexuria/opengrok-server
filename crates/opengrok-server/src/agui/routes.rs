@@ -31,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// How long a turn waits for a sleeping box to come up before running its first command anyway.
+/// How long the first box-bound tool call of a turn waits for a sleeping box to come up before
+/// answering that the computer is down. The wait moved from before the model was asked (every
+/// turn paid it) to the tool that needs the box (only those turns pay it).
 /// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
 /// running took 10–15s live (bx_ncfmdpem, 2 Sep 2026); 90s leaves room for a slow restore.
 pub(crate) const TURN_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
@@ -204,9 +206,10 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
-/// `wake_patience` bounds how long a sleeping box is waited on before the first command is tried
-/// anyway: a turn can afford `TURN_WAKE_PATIENCE`; the MCP door, whose caller (Claude Code) has
-/// its own request timeout, passes a shorter one and lets the tool result say "still starting".
+/// `wake_patience` bounds how long the first box-bound tool call waits for a sleeping box before
+/// answering that the computer is down or still starting: a turn can afford `TURN_WAKE_PATIENCE`;
+/// the MCP door, whose caller (Claude Code) has its own request timeout, passes a shorter one and
+/// lets the tool result say "still starting".
 pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
@@ -239,52 +242,68 @@ pub(crate) async fn tools_for_coworker(
         .ok()
         .flatten()?;
     let mut computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
-    // A sleeping box is woken before this turn runs (disk was kept, so it comes back where it was),
-    // and its last-used stamp is refreshed so the sweep leaves it running while it is in use. Ask
-    // the provider rather than trusting our `stopped` flag: box.ascii.dev archives a box on its own
-    // TTL, and that box is `archived` with our flag still clear. `wake` also WAITS — a resumed ascii
-    // box is `provisioning` for a while and refuses commands (409 `box_starting`) until `ready`.
-    // Best-effort — a wake failure still lets the turn try.
-    let live = computer.state(&box_id).await.ok();
-    if stopped || live.as_deref() != Some("running") {
-        match computer.wake(&box_id, wake_patience).await {
-            Ok(reached) if reached != "running" => {
-                tracing::warn!(box_id, state = %reached, "the box did not come up in time; the turn may fail");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
-                let forbidden = matches!(
-                    &error,
-                    opengrok_box::BoxError::Refused {
-                        status: 401 | 403,
-                        ..
-                    }
-                ) || error.to_string().contains("forbidden");
-                if forbidden {
-                    match super::provision::take_over_with_local_docker(
-                        state,
-                        scope,
-                        &scope_id,
-                        org_id.as_deref(),
-                    )
-                    .await
-                    {
-                        Some((local, new_id)) => {
-                            computer = local;
-                            box_id = new_id;
-                        }
-                        None => return None,
-                    }
+    // The box is NOT woken here. A turn used to wait up to `wake_patience` for a sleeping box
+    // before the model was even asked, and a plain "hi" paid for it (90 s with a dead box, 21 Sep
+    // 2026). The executor wakes the box the first time a tool needs it, and the stream says so.
+    // What stays is one cheap look at the box: a provider that refuses to say (401/403 — an ascii
+    // key revoked, a computer this deployment may no longer reach) is taken over by local Docker
+    // now, as it was when the wake found the same refusal.
+    let _ = stopped;
+    let mut running = false;
+    match computer.state(&box_id).await {
+        Ok(state) => running = state == "running",
+        Err(error) => {
+            let forbidden = matches!(
+                &error,
+                opengrok_box::BoxError::Refused {
+                    status: 401 | 403,
+                    ..
                 }
+            ) || error.to_string().contains("forbidden");
+            if forbidden {
+                tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
+                match super::provision::take_over_with_local_docker(
+                    state,
+                    scope,
+                    &scope_id,
+                    org_id.as_deref(),
+                )
+                .await
+                {
+                    Some((local, new_id)) => {
+                        computer = local;
+                        box_id = new_id;
+                        running = true;
+                    }
+                    None => return None,
+                }
+            } else {
+                tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so");
             }
         }
     }
-    let _ = state
-        .auth
-        .store
-        .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
-        .await;
+    // The in-use stamp keeps the idle sweep off a box while it is used. A box that is asleep is
+    // not in use by a turn that never touches it, so it is stamped only when running now — and by
+    // the executor, through `on_woken`, the moment a tool (or a form fill) brings it up; a box
+    // the executor merely finds running is not stamped twice.
+    if running {
+        let _ = state
+            .auth
+            .store
+            .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+            .await;
+    }
+    let stamp_store = state.auth.store.clone();
+    let stamp_scope_id = scope_id.clone();
+    let on_woken: opengrok_tools::OnWoken = std::sync::Arc::new(move |_| {
+        let store = stamp_store.clone();
+        let scope_id = stamp_scope_id.clone();
+        tokio::spawn(async move {
+            let _ = store
+                .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+                .await;
+        });
+    });
 
     let policy = state
         .auth
@@ -307,8 +326,23 @@ pub(crate) async fn tools_for_coworker(
     );
     // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
     // never told about them, so it cannot be sent down a dead end.
-    let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
-    let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
+    // Whether the coworker has a screen is how its box is made, not whether the box happens to be
+    // awake: the prompt and the tool list then say the same thing on every turn.
+    let screen = computer.offers_a_screen(&box_id).await;
+    // The tunnel probe asks the box's guest, which only answers when the box is up. For a box
+    // that is asleep now, the executor asks the guest right after the first leave-box tool wakes
+    // it, and raises the consent card only if the tunnel is really there.
+    let egress_tunnel = if running {
+        if state.egress_tunnel_for(computer.as_ref(), &box_id).await {
+            opengrok_tools::EgressTunnelMode::On
+        } else {
+            opengrok_tools::EgressTunnelMode::Off
+        }
+    } else if state.egress_tunnel_enabled() {
+        opengrok_tools::EgressTunnelMode::AskTheBoxAfterWake
+    } else {
+        opengrok_tools::EgressTunnelMode::Off
+    };
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -333,12 +367,14 @@ pub(crate) async fn tools_for_coworker(
         Vec::new()
     };
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_wake_patience(wake_patience)
+        .with_on_woken(on_woken)
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel(egress_tunnel);
+        .with_egress_tunnel_mode(egress_tunnel);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -3300,6 +3336,12 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
+    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click.
+    let runner = runner.with_egress_consented(
+        answered.reason == opengrok_core::run::SuspendReason::AutoReview
+            && opengrok_tools::leaves_the_box(&answered.tool),
+    );
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled

@@ -123,7 +123,9 @@ pub async fn run_turn_with_tools(
     // Anything the model asked for, run on the coworker's own computer. The results are emitted as
     // AG-UI tool-result events so a person watching sees what happened, and so the log holds it.
     if let Some(runner) = tools {
-        for result in runner.run_all(&collect_tool_calls(&events)).await {
+        let calls = collect_tool_calls(&events);
+        events.extend(box_wake_frame(runner, &mut projection, &calls).await);
+        for result in runner.run_all(&calls).await {
             events.extend(projection.push_tool_result(&result));
         }
     }
@@ -314,7 +316,13 @@ pub async fn resume_conversation(
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
     let results = match outcome {
-        ResumeOutcome::Approved => tools.run_all(std::slice::from_ref(&approved)).await,
+        ResumeOutcome::Approved => {
+            // The person may have answered the card long after the box went to sleep.
+            all.extend(
+                box_wake_frame(tools, &mut projection, std::slice::from_ref(&approved)).await,
+            );
+            tools.run_all(std::slice::from_ref(&approved)).await
+        }
         ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
         ResumeOutcome::Settled(content) => {
             vec![opengrok_tools::ToolResult::ok(&approved.id, content)]
@@ -384,6 +392,22 @@ async fn stop_here(
 
 /// Forward a batch to a live watcher. Empty batches are skipped so a no-op `finish` after
 /// `fail` does not wake the sink.
+/// The `box-waking` frame, when a call in this round is about to wake the coworker's box; empty
+/// otherwise. The executor remembers a box it has seen running, so the frame comes once per turn.
+async fn box_wake_frame(
+    runner: &ToolRunner,
+    projection: &mut Projection,
+    calls: &[opengrok_tools::ToolCall],
+) -> Vec<Event> {
+    for call in calls {
+        if runner.box_needs_wake(call).await {
+            let coworker = runner.coworker_id().unwrap_or_default();
+            return projection.box_waking(&coworker);
+        }
+    }
+    Vec::new()
+}
+
 async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
     if let Some(sink) = sink
         && !events.is_empty()
@@ -576,6 +600,9 @@ async fn converse_raw(
                         );
                         return all;
                     }
+                    let waking = box_wake_frame(runner, &mut projection, &calls).await;
+                    emit_live(sink, &waking).await;
+                    round_events.extend(waking);
                     let results = runner.run_all(&calls).await;
 
                     for result in &results {
@@ -1316,9 +1343,129 @@ mod tests {
         // The identity rule, end to end: the model named another box and got its own.
         assert_eq!(computer.last_box().as_deref(), Some("box_ada"));
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str()) == Some("box-waking")),
+            "a running box is not announced as waking"
+        );
     }
 
     /// Without tools wired in, a tool call is still well-formed — it simply produces no result.
+    /// A sleeping box is woken by the first tool of the turn that needs it, and the stream says
+    /// so with one `box-waking` frame before that tool's result — once, even when the round has
+    /// two box-bound calls. A box already running gets no frame (the test above).
+    #[tokio::test]
+    async fn a_turn_says_it_is_waking_the_box_once_before_the_first_tool_that_needs_it() {
+        use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
+        use opengrok_core::id::{BoxId, CoworkerId};
+        use opengrok_tools::{Executor, ToolContext};
+        use opengrok_wire::agui::EventType;
+        use std::sync::Arc;
+
+        let mut coworker = Coworker::default();
+        for command in [
+            CoworkerCommand::Hire {
+                name: "Ada".to_string(),
+                model: "m".to_string(),
+                at_ms: 1,
+            },
+            CoworkerCommand::AssignComputer {
+                box_id: BoxId::from_stored("box_ada"),
+                mode: BoxMode::Dedicated,
+                at_ms: 2,
+            },
+        ] {
+            for event in coworker.decide(command).unwrap() {
+                coworker.apply(&event);
+            }
+        }
+
+        // The probe, the executor and the wake each read the state once before the start lands.
+        let computer = Arc::new(crate::tools::tests_support::RecordingComputer::sleeping(&[
+            "exited", "exited", "exited", "running",
+        ]));
+        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
+        let policy = opengrok_policy::Context {
+            grant: Some(opengrok_policy::Grant {
+                principal: account.clone(),
+                coworker: CoworkerId::from_stored("cw_ada"),
+                profile: opengrok_policy::ToolSet::All,
+                needs_approval: opengrok_policy::ToolSet::None,
+                revoked: false,
+            }),
+            ceiling: Some(opengrok_policy::Ceiling {
+                coworker: CoworkerId::from_stored("cw_ada"),
+                tools: opengrok_policy::ToolSet::All,
+            }),
+        };
+        let runner = ToolRunner::new(
+            Executor::with_policy(computer.clone(), policy),
+            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
+        );
+
+        let door = MockDoor::with_script(vec![
+            ModelDelta::ToolCallStart {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "c1".to_string(),
+                delta: r#"{"command":"whoami"}"#.to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+            ModelDelta::ToolCallStart {
+                id: "c2".to_string(),
+                name: "shell".to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: "c2".to_string(),
+                delta: r#"{"command":"uptime"}"#.to_string(),
+            },
+            ModelDelta::ToolCallEnd {
+                id: "c2".to_string(),
+            },
+        ]);
+
+        let events = run_turn_with_tools(&door, Some(&runner), request("go"), "t1", "r1", 1).await;
+
+        let waking: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                event.event_type == EventType::Custom
+                    && event.extra.get("name").and_then(|v| v.as_str()) == Some("box-waking")
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let first_result = events
+            .iter()
+            .position(|event| event.event_type == EventType::ToolCallResult)
+            .expect("a tool result");
+        assert_eq!(waking.len(), 1, "one waking frame per turn: {events:?}");
+        assert!(
+            waking[0] < first_result,
+            "the frame comes before the first tool result"
+        );
+        assert_eq!(
+            events[waking[0]]
+                .extra
+                .get("coworkerId")
+                .and_then(|v| v.as_str()),
+            Some("cw_ada")
+        );
+        assert_eq!(computer.resumes(), 1, "the box was started once");
+        let results = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ToolCallResult)
+            .count();
+        assert_eq!(results, 2, "both commands ran after the one wake");
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
     #[tokio::test]
     async fn a_run_without_a_tool_runner_still_ends_cleanly() {
         use opengrok_wire::agui::EventType;
@@ -2047,6 +2194,9 @@ mod tests {
         }
         async fn state(&self, _b: &str) -> opengrok_box::BoxResult<String> {
             Ok("running".into())
+        }
+        async fn offers_a_screen(&self, _box_id: &str) -> bool {
+            true
         }
         async fn screen_url(&self, _b: &str) -> opengrok_box::BoxResult<Option<String>> {
             Ok(Some("http://127.0.0.1:1/vnc.html".into()))
