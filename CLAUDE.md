@@ -105,8 +105,10 @@ scripts/gate.sh --smoke          # the merge gate; CI runs the same script. docs
 scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
 ```
 
-**The workspace no longer has a `mock-fixtures` feature.** The catalogue left with the desktop
-client's doors on 20 Sep 2026, so the gate builds and tests the default configuration.
+**The mock doors need nothing compiled in.** The `mock-fixtures` feature and its catalogue left
+with the desktop client's doors on 20 Sep 2026, so the gate builds and tests the default
+configuration; the mock doors that remain (`OG_MODEL_DOOR=mock`, `mock-tools`) live in
+`opengrok-harness`.
 
 ## Writing style in this repo
 
