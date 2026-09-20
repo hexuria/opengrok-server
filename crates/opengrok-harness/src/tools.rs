@@ -85,6 +85,15 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// Bring the coworker's own box up before typing into it outside `computer_use`, through the
+    /// executor's memo and in-use stamp.
+    pub async fn wake_fill_target(&self) -> Result<(), String> {
+        match self.executor.as_ref() {
+            Some((executor, context)) => executor.wake_own_box(context).await,
+            None => Err("this coworker has no computer".to_string()),
+        }
+    }
+
     /// The live box to type into outside `computer_use`. `None` when this runner has no computer.
     #[must_use]
     pub fn fill_target(&self) -> Option<(std::sync::Arc<dyn opengrok_box::Computer>, String)> {

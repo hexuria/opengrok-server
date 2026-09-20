@@ -291,7 +291,8 @@ pub trait Computer: Send + Sync {
     /// container whose entrypoint exits at once — and waiting the full patience for it would only
     /// delay saying so: the wake ends there with that state. Only `exited` counts: `stopped` is
     /// also what box.ascii.dev's `state` says for a transient refusal, and `archived` can lag a
-    /// resume the provider has already accepted.
+    /// resume the provider has already accepted. So the early end is Docker's; an ascii box that
+    /// never comes up costs the patience, once per turn, and then says the computer is down.
     async fn wake(&self, box_id: &str, patience: std::time::Duration) -> BoxResult<String> {
         let started = std::time::Instant::now();
         let mut resumed = false;

@@ -284,7 +284,8 @@ pub(crate) async fn tools_for_coworker(
     }
     // The in-use stamp keeps the idle sweep off a box while it is used. A box that is asleep is
     // not in use by a turn that never touches it, so it is stamped only when running now — and by
-    // the executor, through `on_woken`, the moment a tool brings it up.
+    // the executor, through `on_woken`, the moment a tool (or a form fill) brings it up; a box
+    // the executor merely finds running is not stamped twice.
     if running {
         let _ = state
             .auth
@@ -328,13 +329,19 @@ pub(crate) async fn tools_for_coworker(
     // Whether the coworker has a screen is how its box is made, not whether the box happens to be
     // awake: the prompt and the tool list then say the same thing on every turn.
     let screen = computer.offers_a_screen(&box_id).await;
-    // The tunnel probe asks the box's guest, which only answers when the box is up. A box that is
-    // asleep now will have its tunnel once a tool wakes it, so the consent card must be raised as
-    // if it were up: the host's wish decides until the box can be asked.
+    // The tunnel probe asks the box's guest, which only answers when the box is up. For a box
+    // that is asleep now, the executor asks the guest right after the first leave-box tool wakes
+    // it, and raises the consent card only if the tunnel is really there.
     let egress_tunnel = if running {
-        state.egress_tunnel_for(computer.as_ref(), &box_id).await
+        if state.egress_tunnel_for(computer.as_ref(), &box_id).await {
+            opengrok_tools::EgressTunnelMode::On
+        } else {
+            opengrok_tools::EgressTunnelMode::Off
+        }
+    } else if state.egress_tunnel_enabled() {
+        opengrok_tools::EgressTunnelMode::AskTheBoxAfterWake
     } else {
-        state.egress_tunnel_enabled()
+        opengrok_tools::EgressTunnelMode::Off
     };
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
@@ -367,7 +374,7 @@ pub(crate) async fn tools_for_coworker(
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel(egress_tunnel);
+        .with_egress_tunnel_mode(egress_tunnel);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.

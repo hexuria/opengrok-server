@@ -309,6 +309,7 @@ impl Computer for DockerComputer {
             .await
         {
             Ok(bindings) => bindings.contains("\"6080/tcp\""),
+            Err(BoxError::NoSuchBox) => false,
             Err(_) => self.wants_desktop(),
         }
     }

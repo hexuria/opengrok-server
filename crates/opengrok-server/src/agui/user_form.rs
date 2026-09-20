@@ -782,10 +782,10 @@ async fn fill_on_box(
         return failed();
     };
     // The person may press Submit long after the box went to sleep; this path types straight
-    // into the box, outside the executor that would otherwise wake it.
-    let _ = computer
-        .wake(&box_id, crate::agui::routes::TURN_WAKE_PATIENCE)
-        .await;
+    // into the box, so it wakes it the way a tool call would — same memo, same in-use stamp.
+    if runner.wake_fill_target().await.is_err() {
+        return failed();
+    }
     fill_into_focus(computer.as_ref(), &box_id, form, values).await
 }
 
