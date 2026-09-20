@@ -401,3 +401,86 @@ async fn a_no_on_the_desktop_card_is_told_to_the_model_and_ends_the_run() {
         "the refusal names the tool: {emitted}"
     );
 }
+
+/// AN ORDINARY RUN IS STILL CARRIED ON, and this test exists to keep it that way.
+///
+/// The same route now has a second reading: a run on an `mcp-{coworker}` thread is one MCP call's
+/// audit row, and answering its card FINISHES it rather than resuming it — resuming would run the
+/// tool here while the MCP client is being told to retry. A conversation must never fall down that
+/// branch. If it did, the person would be left with a turn that stopped mid-sentence, a tool call
+/// with no result for the next turn to replay, and a `continuing: false` telling their client to
+/// stop watching a run that had simply been abandoned.
+#[tokio::test]
+async fn an_ordinary_run_answered_on_the_same_route_is_carried_on() {
+    let database_url = database_or_skip!();
+    let email = format!("ordinary-yes-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn(&token, &agent, "run a command").await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let (suspended, _) = h.store.load_run(&run_id).await.expect("run");
+    assert!(
+        !suspended.thread_id.starts_with("mcp-"),
+        "a conversation turn is not an MCP audit row: {}",
+        suspended.thread_id
+    );
+
+    let answered: Value = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer")
+        .json()
+        .await
+        .expect("answer json");
+    assert_eq!(
+        answered["continuing"], true,
+        "the turn goes on after the yes: {answered}"
+    );
+    assert!(
+        answered.get("finished").is_none(),
+        "`finished` is the MCP branch's word; a conversation is not settled here: {answered}"
+    );
+
+    // And it really is carried on: the approved command runs, and the run reaches an ending with
+    // nobody asking it to.
+    let mut ended = None;
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            ended = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let run = ended.expect("the approved run never ended, so nothing picked it back up");
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        !h.stub.ran().is_empty(),
+        "the approved command never ran, so the run was finished rather than resumed"
+    );
+}
