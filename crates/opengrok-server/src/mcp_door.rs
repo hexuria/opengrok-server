@@ -15,10 +15,10 @@
 //!   in-flight run to suspend, so the door synthesizes one (Start + Suspend) and emits the same
 //!   `auto-review-approval` card a shell Ask would; a policy ask carries the grant's reason and
 //!   no proposed rule. The MCP reply names `requestId` and does **not** wait; the person answers
-//!   in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run; the MCP
-//!   client retries under the remembered call id, and the remembered yes releases the gate or
-//!   skips the judge by the ask's reason. Reverse-exec is excluded before execute, so ExecConsent
-//!   cannot arrive here.
+//!   in OpenGrok (`POST /ag-ui/runs/{id}/answer`), which flips the card, remembers the yes and
+//!   FINISHES the synthesized run rather than resuming it as a turn; the MCP client retries under
+//!   the remembered call id, and the remembered yes releases the gate or skips the judge by the
+//!   ask's reason. Reverse-exec is excluded before execute, so ExecConsent cannot arrive here.
 //! - **The reverse-exec channel (`user_machine_shell`) is not carried over MCP in v1.** It reaches
 //!   the account owner's real machine; a leaked bot key must not widen from "this coworker's box"
 //!   to "the owner's laptop" through a new external ingress. It is excluded from the listing and
@@ -254,8 +254,8 @@ impl McpDoor {
 /// Serialize tool calls per coworker: the executor runs one call, but concurrent MCP requests would
 /// race on the same box (a `write_file` and the `shell` that reads it arriving together). `run_all`
 /// serializes a run's calls for exactly this reason; the door has no run, so it holds the line here.
-/// Per-coworker mutex shared with `resolveAutoReviewApproval` so remember/take/execute
-/// cannot interleave a leftover yes.
+/// Per-coworker mutex shared with `settle_mcp_answer` so remember/take/execute cannot
+/// interleave a leftover yes.
 pub fn coworker_lock(coworker: &CoworkerId) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -538,10 +538,10 @@ impl McpDoor {
         let lock = coworker_lock(&principal.coworker);
         let _guard = lock.lock().await;
         let store = &self.state.agui.auth.store;
-        // PAIRED WITH the remember in `gateway/conversation.rs`, which writes the account of
-        // whoever pressed approve. A yes is spendable only by the account that gave it, so if
-        // these two ever resolve to different people the yes is silently lost and the retry
-        // asks again. See the note at that call site before sharing goes live.
+        // PAIRED WITH the remember in `settle_mcp_answer`, which writes the account of whoever
+        // pressed approve. A yes is spendable only by the account that gave it, so if these two
+        // ever resolve to different people the yes is silently lost and the retry asks again.
+        // See the note at that call site before sharing goes live.
         let once = take_mcp_allow_once_stamped(
             store,
             &principal.coworker,
@@ -800,8 +800,16 @@ fn mcp_audit_thread(coworker: &CoworkerId) -> String {
 /// Is this run an MCP call's audit row? THE ONE TEST, because answering one as a conversation
 /// would resume it: the tool would run on this side while the MCP client is told to retry, and
 /// the retry would run it again under a call id that cannot spend the yes.
-pub fn is_mcp_audit_thread(thread_id: &str) -> bool {
-    thread_id.starts_with(MCP_AUDIT_THREAD_PREFIX)
+///
+/// EXACT, AND AGAINST THE RUN'S OWN COWORKER — never a prefix on the thread alone. `POST /ag-ui`
+/// takes `threadId` from the client verbatim, so a prefix test would let anybody open a turn on
+/// `mcp-anything`, answer their own card, and mint an allow-once the MCP door would spend. Only
+/// a run whose thread is the one `mcp_audit_thread` would have minted for its own coworker is
+/// one of ours; the door mints both halves together and nothing else can.
+pub fn is_mcp_audit_run(run: &Run) -> bool {
+    run.coworker_id
+        .as_ref()
+        .is_some_and(|coworker| run.thread_id == mcp_audit_thread(coworker))
 }
 
 /// Synthesize a durable run + auto-review card for an MCP Ask so the person can answer it
@@ -885,13 +893,20 @@ async fn persist_mcp_ask(
             why,
             at_ms,
         ),
+        // The ask's OWN sentence, the way `conversation::card_for` does it. Hardcoding the
+        // judge's default reason here overwrote the real one: an egress-tunnel ask says "this
+        // would use your network through the egress tunnel", and the person was shown "your
+        // auto-review instructions did not clearly allow this" instead.
         _ => crate::gateway::cards::auto_review_card(
             &entry_id,
             &call.id,
             "pending",
             &call.name,
             &call.arguments,
-            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            Some(
+                why.filter(|why| !why.is_empty())
+                    .unwrap_or(opengrok_tools::review::REVIEW_ASK_REASON),
+            ),
             at_ms,
         ),
     };
@@ -931,20 +946,24 @@ async fn persist_mcp_ask(
     Ok(call.id.clone())
 }
 
-/// An MCP card whose answer is already journalled on its run — everything settling it needs.
-/// `run` and `seq` are what the Answer append left behind; `pending` is the card, captured
-/// BEFORE the Answer cleared it.
-pub struct AnsweredMcpCard<'a> {
-    pub run_id: &'a RunId,
-    pub run: &'a Run,
+/// An answered MCP card, on its way to the background task that settles it. Owned, because the
+/// settle is spawned: it has to hold the door's per-coworker lock, and the door holds that lock
+/// across a real tool call — minutes, on a slow box. Nobody's HTTP request waits for that.
+///
+/// `run` and `seq` are the run AS LOADED — not yet answered. The Answer is journalled inside the
+/// lock, which also closes the window where a `tools/call` arriving between the Answer's append
+/// and the lock would find no pending ask, run the call, and raise a second card.
+pub struct McpCardAnswer {
+    pub run_id: RunId,
+    pub run: Run,
     pub seq: i64,
-    pub pending: &'a PendingApproval,
+    pub pending: PendingApproval,
     pub approved: bool,
     pub at_ms: i64,
 }
 
-/// Settle an answered MCP card: flip it in the transcript, remember a yes for the retry, and
-/// FINISH the run instead of resuming it.
+/// Settle an answered MCP card: journal the Answer, flip the card in the transcript, remember a
+/// yes for the retry, and FINISH the run instead of resuming it.
 ///
 /// AN MCP-SYNTHESIZED RUN IS NOT A CONVERSATION. Resuming it would execute the tool on this side
 /// while the MCP client is being told to retry — the same call twice, the second time under a new
@@ -955,49 +974,102 @@ pub struct AnsweredMcpCard<'a> {
 /// `tools/call` raises a fresh card. A remembered no would be a standing refusal with nowhere to
 /// lift it; a person who said "not this time" said exactly that.
 ///
-/// `Err` means the run did not reach an ending — the answer itself is already durable either way,
-/// so the caller reports what happened rather than failing the request.
+/// Nothing is returned: this runs detached, so every step that can fail says so in the log and
+/// the run's own status is the record. A caller that wants to know reads the run back.
 pub async fn settle_mcp_answer(
-    store: &opengrok_store::PgStore,
-    account: &AccountId,
-    card: AnsweredMcpCard<'_>,
-) -> Result<(), String> {
-    let Some(coworker) = card.run.coworker_id.clone() else {
-        return Err("an MCP audit run with no coworker cannot be settled".to_string());
+    store: opengrok_store::PgStore,
+    account: AccountId,
+    answer: McpCardAnswer,
+) {
+    let run_id = answer.run_id;
+    let pending = answer.pending;
+    let Some(coworker) = answer.run.coworker_id.clone() else {
+        tracing::error!(run = %run_id.as_str(), "mcp ask: a run with no coworker cannot be settled");
+        return;
     };
-    // The door's own lock, held across remember and Finish: without it a `tools/call` arriving in
-    // this window finds no pending ask (the Answer already cleared it), runs the call, raises a
-    // second card — and then our yes is a leftover nobody asked for, waiting for whoever retries
-    // next. Narrower than the deleted desktop verb's hold, which covered the Answer too; this is
-    // the part of that window that can still write a yes.
     let lock = coworker_lock(&coworker);
     let _guard = lock.lock().await;
 
-    // Flip the card the person pressed, on its own entry — the renderer dedups on
-    // requestId:status, so the same id with a new status settles it. A card that cannot be found
-    // is not a reason to leave the run suspended forever: say so and finish it anyway.
-    let status = if card.approved { "approved" } else { "denied" };
-    match pending_card_entry_for(store, &coworker, account, &card.pending.call_id).await {
-        Ok(Some(entry_id)) => {
-            if let Err(error) = store
-                .set_gateway_approval_status(&coworker, account, &entry_id, status)
-                .await
-            {
-                tracing::warn!(%error, entry_id, "mcp ask: the answered card could not be flipped; finishing the run anyway");
-            }
+    // The Answer, inside the lock. Decided again rather than trusting the validation the route
+    // already did: a second press that got past it lands here too, and the aggregate is what
+    // makes an approval exactly-once.
+    let mut run = answer.run;
+    let events = match run.decide(RunCommand::Answer {
+        call_id: pending.call_id.clone(),
+        approved: answer.approved,
+        by: account.to_string(),
+        at_ms: answer.at_ms,
+    }) {
+        Ok(events) => events,
+        Err(opengrok_core::run::RunError::AlreadyAnswered) => {
+            tracing::info!(run = %run_id.as_str(), call_id = %pending.call_id, "mcp ask: already answered; the first answer settles it");
+            return;
         }
-        Ok(None) => tracing::warn!(
-            call_id = %card.pending.call_id,
-            "mcp ask: no pending card for this answer; finishing the run anyway"
-        ),
         Err(error) => {
-            tracing::warn!(%error, "mcp ask: the transcript could not be read; finishing the run anyway")
+            tracing::error!(%error, run = %run_id.as_str(), call_id = %pending.call_id, "mcp ask: the answer could not be decided");
+            return;
+        }
+    };
+    for event in &events {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: answer.at_ms,
+    };
+    let seq = match store
+        .append_run(&run_id, answer.seq, &events, &view, Some(&account))
+        .await
+    {
+        Ok(seq) => seq,
+        // Two presses raced to here. The one that won the append owns the rest of this — the card,
+        // the yes and the ending — so this one stops rather than writing a second yes.
+        Err(opengrok_store::StoreError::Conflict) => {
+            tracing::warn!(run = %run_id.as_str(), call_id = %pending.call_id, "mcp ask: another answer won the append; it settles the card");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, run = %run_id.as_str(), call_id = %pending.call_id, "mcp ask: the answer could not be journalled");
+            return;
+        }
+    };
+
+    // THE FLIP IS NOT A GATE. If the transcript's pill cannot be moved, the yes and the finished
+    // run still matter more: NativeChat paints its card from the approvals queue and settles it
+    // locally, so a stuck pill is a stale pixel, while a lost yes is a call somebody approved
+    // that never runs. Every way it can fail is an error line, and the settle carries on.
+    let status = if answer.approved {
+        "approved"
+    } else {
+        "denied"
+    };
+    match pending_card_entry_for(&store, &coworker, &account, &pending.call_id).await {
+        Ok(Some(entry_id)) => match store
+            .set_gateway_approval_status(&coworker, &account, &entry_id, status)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::error!(entry_id, call_id = %pending.call_id, "mcp ask: the answered card matched no entry to flip")
+            }
+            Err(error) => {
+                tracing::error!(%error, entry_id, call_id = %pending.call_id, "mcp ask: the answered card could not be flipped")
+            }
+        },
+        Ok(None) => {
+            tracing::error!(call_id = %pending.call_id, "mcp ask: no pending card for this answer to flip")
+        }
+        Err(error) => {
+            tracing::error!(%error, call_id = %pending.call_id, "mcp ask: the transcript could not be read to flip the card")
         }
     }
 
-    if card.approved
+    if answer.approved
         && let Err(error) = remember_mcp_allow_once(
-            store,
+            &store,
             &coworker,
             // The person who answered owns the yes, so only their retry can spend it. PAIRED WITH
             // the take in `dispatch`, which binds the account off the MCP session: if these two
@@ -1005,62 +1077,80 @@ pub async fn settle_mcp_answer(
             // not unsafe, but it would present as "approvals do not work on shared coworkers".
             // Check the pairing when the roster widens past the owner.
             Some(account.as_str()),
-            &card.pending.tool,
-            &card.pending.arguments,
-            &card.pending.call_id,
+            &pending.tool,
+            &pending.arguments,
+            &pending.call_id,
             // A policy yes releases the GATE on the retry; a judge yes skips the judge.
-            card.pending.reason != SuspendReason::AutoReview,
+            pending.reason != SuspendReason::AutoReview,
         )
         .await
     {
         // The card is answered either way; a lost yes only means the retry asks again.
-        tracing::error!(%error, call_id = %card.pending.call_id, "mcp ask: the yes could not be remembered for the retry");
+        tracing::error!(%error, call_id = %pending.call_id, "mcp ask: the yes could not be remembered for the retry");
     }
 
-    let mut run = card.run.clone();
-    let finished = run
-        .decide(RunCommand::Finish { at_ms: card.at_ms })
-        .map_err(|error| error.to_string())?;
+    let finished = match run.decide(RunCommand::Finish {
+        at_ms: answer.at_ms,
+    }) {
+        Ok(finished) => finished,
+        Err(error) => {
+            tracing::error!(%error, run = %run_id.as_str(), "mcp ask: the answered run could not be finished");
+            return;
+        }
+    };
     for event in &finished {
         run.apply(event);
     }
     let view = RunView {
-        id: card.run_id.clone(),
+        id: run_id.clone(),
         thread_id: run.thread_id.clone(),
         status: run.status,
         event_count: run.emitted.len() as i64,
-        updated_at_ms: card.at_ms,
+        updated_at_ms: answer.at_ms,
     };
     match store
-        .append_run(card.run_id, card.seq, &finished, &view, Some(account))
+        .append_run(&run_id, seq, &finished, &view, Some(&account))
         .await
     {
         Ok(_) => {}
-        // Somebody ended it between our read and our write. The ending that won is as good as
-        // ours — the same reading `answer_run` gives an answer that lost its race.
-        Err(opengrok_store::StoreError::Conflict) => {}
-        Err(error) => return Err(error.to_string()),
+        Err(opengrok_store::StoreError::Conflict) => {
+            // Somebody ended it between our write and theirs. Which ending won is worth knowing,
+            // so read it back and say — assuming "finished" here is how a stopped or failed run
+            // comes to be logged as one that ended cleanly.
+            match store.load_run(&run_id).await {
+                Ok((settled, _)) => {
+                    tracing::warn!(run = %run_id.as_str(), status = settled.status.as_str(), "mcp ask: the ending raced; the run reads as this")
+                }
+                Err(error) => {
+                    tracing::error!(%error, run = %run_id.as_str(), "mcp ask: the ending raced and the run could not be read back")
+                }
+            }
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, run = %run_id.as_str(), "mcp ask: the answered run could not be finished");
+            return;
+        }
     }
-    if card.approved {
+    if answer.approved {
         tracing::info!(
-            run = %card.run_id.as_str(),
+            run = %run_id.as_str(),
             coworker = %coworker.as_str(),
-            call_id = %card.pending.call_id,
-            tool = %card.pending.tool,
-            reason = card.pending.reason.as_str(),
+            call_id = %pending.call_id,
+            tool = %pending.tool,
+            reason = pending.reason.as_str(),
             "mcp ask: approved — the run is finished and the retry may spend the yes"
         );
     } else {
         tracing::info!(
-            run = %card.run_id.as_str(),
+            run = %run_id.as_str(),
             coworker = %coworker.as_str(),
-            call_id = %card.pending.call_id,
-            tool = %card.pending.tool,
-            reason = card.pending.reason.as_str(),
+            call_id = %pending.call_id,
+            tool = %pending.tool,
+            reason = pending.reason.as_str(),
             "mcp ask: denied — the run is finished and nothing is remembered"
         );
     }
-    Ok(())
 }
 
 async fn existing_mcp_ask(
@@ -1076,7 +1166,10 @@ async fn existing_mcp_ask(
             Ok(pair) => pair,
             Err(error) => return Err(error),
         };
-        if run.thread_id != thread_id {
+        // This coworker's audit thread, and a run the door itself minted — the same exactness
+        // the answer door applies, so a conversation opened on a look-alike `threadId` cannot
+        // lend its requestId to an MCP retry.
+        if run.thread_id != thread_id || !is_mcp_audit_run(&run) {
             continue;
         }
         let Some(pending) = run.pending.as_ref() else {

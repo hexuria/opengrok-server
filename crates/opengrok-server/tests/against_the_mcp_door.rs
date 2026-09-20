@@ -22,7 +22,7 @@ use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
-use opengrok_tools::{AwaitingReason, REVIEW_ASK_REASON, ToolCall, ToolResult, USER_MACHINE_SHELL};
+use opengrok_tools::{AwaitingReason, ToolCall, ToolResult, USER_MACHINE_SHELL};
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
@@ -259,6 +259,21 @@ async fn answer_card(
         "the AG-UI door answers an MCP card"
     );
     res.json().await.expect("answer json")
+}
+
+/// Wait for the settle to land. The answer is journalled in the BACKGROUND — the settle has to
+/// hold the door's per-coworker lock, which `dispatch` holds across a real tool call — so the
+/// run's own status is what says it is done, not a word in the reply.
+async fn wait_until_ended(store: &PgStore, run_id: &RunId) -> opengrok_core::run::Run {
+    for _ in 0..100 {
+        if let Ok((run, _)) = store.load_run(run_id).await
+            && run.status.is_terminal()
+        {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the answered MCP run never reached an ending");
 }
 
 /// The queue the app reads to find what is waiting on this person.
@@ -595,6 +610,12 @@ async fn an_mcp_ask_raises_a_real_card_the_ag_ui_door_can_answer() {
     assert_eq!(card["message"]["approval"]["requestId"], call.id);
     assert_eq!(card["message"]["approval"]["status"], "pending");
     assert_eq!(card["message"]["approval"]["surface"], "box_shell");
+    // THE ASK'S OWN SENTENCE, not the judge's default. The door used to overwrite it, so an
+    // egress-tunnel ask was shown to the person as an auto-review one.
+    assert_eq!(
+        card["message"]["approval"]["reason"], "why",
+        "the card says what the ask said: {card}"
+    );
     let entry_id = card["id"].as_str().expect("entry id").to_string();
 
     // The queue the app reads names WHICH question is being asked, and why in the card's own
@@ -608,9 +629,19 @@ async fn an_mcp_ask_raises_a_real_card_the_ag_ui_door_can_answer() {
         .cloned()
         .expect("the MCP card is waiting in the approvals queue");
     assert_eq!(item["reason"], json!("auto-review"), "{item}");
-    assert_eq!(item["why"], json!(REVIEW_ASK_REASON), "{item}");
     assert_eq!(item["tool"], json!("write_file"), "{item}");
     assert_eq!(item["arguments"]["path"], json!("/tmp/from-mcp"), "{item}");
+    // `why` is built from the RUN — which question, and what the call would do. It does not
+    // quote the card, so a polled queue never scans a transcript.
+    let why = item["why"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("Auto-review asked about this"),
+        "the queue names which question is being asked: {item}"
+    );
+    assert!(
+        why.contains("/tmp/from-mcp"),
+        "and what saying yes would do: {item}"
+    );
 
     let answered = answer_card(&base, &access, &awaiting[0], &call.id, true).await;
     assert_eq!(answered["approved"], json!(true), "{answered}");
@@ -620,17 +651,21 @@ async fn an_mcp_ask_raises_a_real_card_the_ag_ui_door_can_answer() {
         json!(false),
         "an MCP audit run is not resumed as a conversation turn: {answered}"
     );
-    assert_eq!(answered["finished"], json!(true), "{answered}");
+    assert_eq!(
+        answered["settling"],
+        json!(true),
+        "the ending is on its way, and the reply says so rather than claiming it landed: {answered}"
+    );
 
-    let flipped = card_for(&store, &coworker, &account, &entry_id).await;
-    assert_eq!(flipped["message"]["approval"]["status"], "approved");
-
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
+    // The settle runs in the background, so the RUN is what is waited on.
+    let run = wait_until_ended(&store, &awaiting[0]).await;
     assert_eq!(
         run.status,
         RunStatus::Finished,
         "an MCP run is finished on the card, not resumed as a conversation"
     );
+    let flipped = card_for(&store, &coworker, &account, &entry_id).await;
+    assert_eq!(flipped["message"]["approval"]["status"], "approved");
     assert!(run.answered.contains(&call.id));
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(
@@ -756,20 +791,21 @@ async fn a_policy_approval_ask_raises_the_card_and_its_yes_releases_the_gate() {
         .cloned()
         .expect("the policy card is waiting in the approvals queue");
     assert_eq!(item["reason"], json!("policy-approval"), "{item}");
-    assert_eq!(
-        item["why"],
-        json!("only the on-call may run shell here"),
-        "{item}"
+    let why = item["why"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("This coworker's policy needs a person to say yes"),
+        "the queue names the POLICY's question, not the judge's: {item}"
     );
+    assert!(why.contains("echo policy"), "and the command: {item}");
 
     let answered = answer_card(&base, &access, &awaiting[0], &call.id, true).await;
-    assert_eq!(answered["finished"], json!(true), "{answered}");
+    assert_eq!(answered["settling"], json!(true), "{answered}");
     assert_eq!(answered["continuing"], json!(false), "{answered}");
 
+    let run = wait_until_ended(&store, &awaiting[0]).await;
+    assert_eq!(run.status, RunStatus::Finished);
     let flipped = card_for(&store, &coworker, &account, &entry_id).await;
     assert_eq!(flipped["message"]["approval"]["status"], "approved");
-    let (run, _) = store.load_run(&awaiting[0]).await.expect("run");
-    assert_eq!(run.status, RunStatus::Finished);
 
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(
@@ -832,16 +868,16 @@ async fn a_no_on_an_mcp_card_finishes_the_run_and_the_next_call_asks_again() {
         json!(false),
         "a denied MCP run is not carried on to a model: {answered}"
     );
-    assert_eq!(answered["finished"], json!(true), "{answered}");
+    assert_eq!(answered["settling"], json!(true), "{answered}");
 
-    let refused = card_for(&store, &coworker, &account, &entry_id).await;
-    assert_eq!(refused["message"]["approval"]["status"], "denied");
-    let (run, _) = store.load_run(&denied_run).await.expect("run");
+    let run = wait_until_ended(&store, &denied_run).await;
     assert_eq!(
         run.status,
         RunStatus::Finished,
         "a refusal is an ordinary ending, not a failure"
     );
+    let refused = card_for(&store, &coworker, &account, &entry_id).await;
+    assert_eq!(refused["message"]["approval"]["status"], "denied");
     assert_eq!(
         opengrok_server::mcp_door::take_mcp_allow_once(
             &store,

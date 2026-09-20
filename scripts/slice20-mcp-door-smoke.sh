@@ -138,8 +138,10 @@ echo "$entry" | jq -e '.reason == "policy-approval"' >/dev/null \
   || fail "the queue does not name the ask: $entry"
 echo "$entry" | jq -e '.why | type == "string" and length > 0' >/dev/null \
   || fail "the queue does not say why: $entry"
-echo "$entry" | jq -e '.threadId | startswith("mcp-")' >/dev/null \
-  || fail "an MCP card is not on a conversation thread: $entry"
+# EXACTLY the thread the door mints for THIS coworker, not merely one that starts `mcp-`.
+# `threadId` is whatever the client sent, so a prefix would let a conversation pose as one.
+echo "$entry" | jq -e --arg t "mcp-$coworker" '.threadId == $t' >/dev/null \
+  || fail "an MCP card should be on its own mcp-<coworker> thread: $entry"
 run_id=$(echo "$entry" | jq -r '.runId')
 ok "queued as $(echo "$entry" | jq -r '.reason'), because: $(echo "$entry" | jq -r '.why' | cut -c1-60)"
 
@@ -148,9 +150,16 @@ echo "10. the person says yes, and the run FINISHES rather than resuming as a tu
 # while the client is being told to retry — the same call, twice.
 answered=$(curl -fsS -X POST "$BASE/ag-ui/runs/$run_id/answer" -H "authorization: Bearer $token" \
   -H 'content-type: application/json' -d "{\"call_id\":\"$request_id\",\"approved\":true}")
-echo "$answered" | jq -e '.finished == true and .continuing == false' >/dev/null \
-  || fail "the MCP run was not settled on its card: $answered"
-state=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token" | jq -r '.status')
+echo "$answered" | jq -e '.settling == true and .continuing == false' >/dev/null \
+  || fail "the MCP card was not taken for settling: $answered"
+# The settle runs in the background — it holds the door's per-coworker lock, which a tools/call
+# can hold for minutes — so the RUN is what says it is done, not the reply.
+state=""
+for _ in $(seq 1 40); do
+  state=$(curl -fsS "$BASE/ag-ui/runs/$run_id" -H "authorization: Bearer $token" | jq -r '.status')
+  case "$state" in finished|failed|stopped) break ;; esac
+  sleep 1
+done
 [ "$state" = "finished" ] || fail "the answered MCP run is $state, not finished"
 ok "answered, and its run is finished"
 

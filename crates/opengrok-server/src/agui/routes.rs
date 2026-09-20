@@ -2815,12 +2815,72 @@ pub async fn answer_run(
     let resumed_seq = run.emitted.len() as u32;
 
     let at_ms = now_ms();
-    let events = match run.decide(RunCommand::Answer {
+    let answer = RunCommand::Answer {
         call_id: request.call_id.clone(),
         approved: request.approved,
         by: account_id.to_string(),
         at_ms,
-    }) {
+    };
+
+    // AN MCP AUDIT RUN IS NOT A CONVERSATION, so it does not carry on: answering its card finishes
+    // it, and a yes is remembered for the MCP client's own retry instead. Resuming it would run
+    // the tool here while the client is being told to retry, and the retry would run it again.
+    //
+    // THE WHOLE SETTLE GOES TO THE BACKGROUND, Answer and all. It has to hold the door's
+    // per-coworker lock, and `dispatch` holds that lock across a real tool call — minutes, on a
+    // slow box — so doing it here would park somebody's approve on a request that cannot finish.
+    // Journalling the Answer inside that lock is also stricter than doing it here would be: it
+    // closes the window where a `tools/call` arriving between the append and the lock finds no
+    // pending ask, runs the call and raises a second card.
+    //
+    // The aggregate still decides the answer synchronously first, so a retried press still gets
+    // `alreadyAnswered` and a wrong call id still gets a 409 — `decide` is pure, so this costs
+    // nothing and settles nothing.
+    if crate::mcp_door::is_mcp_audit_run(&run)
+        && let Some(pending) = pending.clone()
+    {
+        if let Err(error) = run.decide(answer) {
+            return match error {
+                opengrok_core::run::RunError::AlreadyAnswered => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "runId": run_id.as_str(),
+                        "callId": request.call_id,
+                        "alreadyAnswered": true,
+                    })),
+                )
+                    .into_response(),
+                error => (StatusCode::CONFLICT, error.to_string()).into_response(),
+            };
+        }
+        let store = state.auth.store.clone();
+        let settling = crate::mcp_door::McpCardAnswer {
+            run_id: run_id.clone(),
+            run,
+            seq,
+            pending,
+            approved: request.approved,
+            at_ms,
+        };
+        let account = account_id.clone();
+        tokio::spawn(async move {
+            crate::mcp_door::settle_mcp_answer(store, account, settling).await;
+        });
+        return Json(serde_json::json!({
+            "runId": run_id.as_str(),
+            "callId": request.call_id,
+            "approved": request.approved,
+            "alreadyAnswered": false,
+            // Nothing follows on this run — the MCP client's retry is what happens next.
+            "continuing": false,
+            // And the ending is on its way rather than already done: a client that needs to know
+            // reads the run back until it is `finished`.
+            "settling": true,
+        }))
+        .into_response();
+    }
+
+    let events = match run.decide(answer) {
         Ok(events) => events,
         // A second answer is not an error the caller needs to fix; it is the same answer arriving
         // twice. Reporting the settled state is what makes a retry safe to send.
@@ -2849,16 +2909,15 @@ pub async fn answer_run(
         event_count: run.emitted.len() as i64,
         updated_at_ms: at_ms,
     };
-    let seq = match state
+    if let Err(error) = state
         .auth
         .store
         .append_run(&run_id, seq, &events, &view, Some(&account_id))
         .await
     {
-        Ok(seq) => seq,
         // A conflict here means somebody answered between our read and our write. The answer that
         // won is as good as ours, so this is not a failure to report as one.
-        Err(opengrok_store::StoreError::Conflict) => {
+        if matches!(error, opengrok_store::StoreError::Conflict) {
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -2869,44 +2928,7 @@ pub async fn answer_run(
             )
                 .into_response();
         }
-        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    };
-
-    // AN MCP AUDIT RUN IS NOT A CONVERSATION, so it does not carry on: answering its card finishes
-    // it, and a yes is remembered for the MCP client's own retry instead. Resuming it would run
-    // the tool here while the client is being told to retry, and the retry would run it again.
-    // `mcp_door` owns both halves of that bargain; this is the door the answer arrives at.
-    if crate::mcp_door::is_mcp_audit_thread(&run.thread_id)
-        && let Some(pending) = pending.as_ref()
-    {
-        let settled = crate::mcp_door::settle_mcp_answer(
-            &state.auth.store,
-            &account_id,
-            crate::mcp_door::AnsweredMcpCard {
-                run_id: &run_id,
-                run: &run,
-                seq,
-                pending,
-                approved: request.approved,
-                at_ms,
-            },
-        )
-        .await;
-        if let Err(error) = settled.as_ref() {
-            // The answer landed; only the ending did not. Said plainly rather than as a 503, which
-            // would invite a retry of an answer the aggregate will refuse as already given.
-            tracing::error!(%error, run = %run_id.as_str(), "the answered MCP run could not be finished");
-        }
-        return Json(serde_json::json!({
-            "runId": run_id.as_str(),
-            "callId": request.call_id,
-            "approved": request.approved,
-            "alreadyAnswered": false,
-            // Nothing follows on this run — the MCP client's retry is what happens next.
-            "continuing": false,
-            "finished": settled.is_ok(),
-        }))
-        .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
     // The answer is durable; now carry the run on. In the background, because a model call can
@@ -3351,21 +3373,10 @@ pub async fn list_awaiting(
     match state.auth.store.awaiting_approval(&account_id).await {
         Ok(runs) => {
             let mut waiting = Vec::new();
-            // One transcript read per COWORKER, not per run: the card's own sentence is what the
-            // person was shown, and one coworker can have several calls waiting at once.
-            let mut transcripts: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
             for run_id in runs {
                 if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
                     && let Some(pending) = run.pending
                 {
-                    let why = why_of_card(
-                        &state,
-                        &account_id,
-                        run.coworker_id.as_ref(),
-                        &pending,
-                        &mut transcripts,
-                    )
-                    .await;
                     waiting.push(serde_json::json!({
                         "runId": run_id.as_str(),
                         "threadId": run.thread_id,
@@ -3379,8 +3390,8 @@ pub async fn list_awaiting(
                         // land in this one queue, and a client that cannot tell them apart can
                         // only offer one word for all four. The run's own word, not a new one.
                         "reason": pending.reason.as_str(),
-                        // And why, in the sentence the card carries.
-                        "why": why,
+                        // And why, in a sentence. Built from the run alone — see `why_of`.
+                        "why": why_of(&pending),
                     }));
                 }
             }
@@ -3391,45 +3402,30 @@ pub async fn list_awaiting(
     }
 }
 
-/// What the card SAYS, for the queue: the reason it was raised with, else its summary line, else
-/// a sentence built from the tool and its arguments — the same one the card itself would have
-/// used. The card is the person's own copy of the question, so the queue quotes it rather than
-/// paraphrasing; a transcript that cannot be read falls back rather than leaving the entry mute.
-async fn why_of_card(
-    state: &AgUiState,
-    account_id: &AccountId,
-    coworker_id: Option<&CoworkerId>,
-    pending: &opengrok_core::run::PendingApproval,
-    transcripts: &mut BTreeMap<String, Vec<serde_json::Value>>,
-) -> String {
-    if let Some(coworker_id) = coworker_id {
-        if !transcripts.contains_key(coworker_id.as_str()) {
-            let entries = state
-                .auth
-                .store
-                .gateway_transcript(coworker_id, account_id)
-                .await
-                .unwrap_or_default();
-            transcripts.insert(coworker_id.as_str().to_string(), entries);
+/// Why this call is waiting, in a sentence: which question is being asked, and what the call
+/// would do if the answer is yes.
+///
+/// FROM THE RUN AND NOTHING ELSE. The card in the transcript carries the ask's own words, but
+/// reading it would mean a transcript scan per waiting coworker on a queue a client polls — and
+/// the run already holds the reason, the tool and the arguments, which is what the sentence is
+/// made of. The opening line says which of the four questions this is; `cards::summary_for`
+/// writes the rest, the same words the card itself uses for what is about to happen.
+fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
+    use opengrok_core::run::SuspendReason;
+    let what = crate::gateway::cards::summary_for(&pending.tool, &pending.arguments);
+    let asking = match pending.reason {
+        SuspendReason::PolicyApproval => crate::gateway::cards::POLICY_ASK_REASON,
+        // Deliberately not the judge's default reason text: the ask's own sentence lives on the
+        // card, and an egress-tunnel ask has a different one. Saying which judge instruction
+        // fired, from a run that does not know, would be a guess printed as a fact.
+        SuspendReason::AutoReview => "Auto-review asked about this rather than allowing it.",
+        SuspendReason::ExecConsent => {
+            "This would run on your own computer, so it needs your consent."
         }
-        if let Some(entries) = transcripts.get(coworker_id.as_str())
-            && let Some(approval) = entries
-                .iter()
-                .map(|entry| &entry["message"]["approval"])
-                .find(|approval| approval["requestId"] == pending.call_id.as_str())
-        {
-            for key in ["reason", "summary"] {
-                if let Some(said) = approval[key]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|said| !said.is_empty())
-                {
-                    return said.to_string();
-                }
-            }
-        }
-    }
-    crate::gateway::cards::summary_for(&pending.tool, &pending.arguments)
+        SuspendReason::UserForm => "The coworker is asking you to fill something in.",
+        SuspendReason::Credential => "The coworker is asking for a saved login to be brokered.",
+    };
+    format!("{asking} {what}")
 }
 
 /// `?coworker=cw_…`: whose computer the egress-tunnel question is about.
