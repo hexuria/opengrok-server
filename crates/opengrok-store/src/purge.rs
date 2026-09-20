@@ -18,6 +18,10 @@ use sqlx::Row;
 use crate::postgres::PgStore;
 use crate::{StoreError, StoreResult};
 
+/// Chosen once, arbitrary, distinct from the migration lock: two purges queue behind it, a
+/// migration does not.
+const PURGE_LOCK_KEY: i64 = 0x70_75_72_67_65; // "purge"
+
 /// What a purge did, or would do: the accounts it keeps, and rows removed per table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PurgeReport {
@@ -53,7 +57,8 @@ impl PgStore {
         let mut tx = self.pool().begin().await?;
         // One purge at a time. The id lists are read once and used as literals below, so a
         // second purge interleaving with this one would delete around a moving target.
-        sqlx::query("select pg_advisory_xact_lock(7_324_001)")
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(PURGE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
 
@@ -393,11 +398,8 @@ impl PgStore {
         );
         delete!(
             "pending_login",
-            "delete from pending_login where lower(email) = any($1)",
+            "delete from pending_login where lower(email) = any(select lower(k) from unnest($1::text[]) as k)",
             &emails
-                .iter()
-                .map(|e| e.to_ascii_lowercase())
-                .collect::<Vec<_>>()
         );
         delete!(
             "account_computer",
