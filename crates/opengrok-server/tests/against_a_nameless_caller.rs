@@ -94,6 +94,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         eprintln!("skipping: OG_DATABASE_URL is not set");
         return;
     };
+    let database_url = opengrok_store::gate_database_or_panic(database_url);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&database_url)

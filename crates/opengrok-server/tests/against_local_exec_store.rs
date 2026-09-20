@@ -10,7 +10,7 @@ use opengrok_store::PgStore;
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;

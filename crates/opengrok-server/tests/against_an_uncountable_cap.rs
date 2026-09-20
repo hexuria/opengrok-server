@@ -136,7 +136,8 @@ fn state_over(store: PgStore, email: &str) -> AgUiState {
 }
 
 async fn connect() -> Option<PgStore> {
-    let database_url = std::env::var("OG_DATABASE_URL").ok()?;
+    let database_url =
+        opengrok_store::gate_database_or_panic(std::env::var("OG_DATABASE_URL").ok()?);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
