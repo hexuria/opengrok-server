@@ -17,9 +17,7 @@ literals), and a variable that exists in code but not here is a documentation bu
 | Variable | Default | What it is |
 |---|---|---|
 | `OG_BIND` | `0.0.0.0:1337` compiled, **use `0.0.0.0:1447`** — or `127.0.0.1:1447` behind Caddy | where everything listens: the Sand gateway, AG-UI, auth, the console. 1337 clashes with grok-bot's local-docker box; 1447 is the convention everywhere (the gate, the smokes, the live dev server). With TLS in front (`setup/tls.md`) the server binds loopback and Caddy takes the LAN address on the same port |
-| `OG_GRPC_BIND` | unset (off) | opt-in tonic listener for seam-B gRPC. Unset means no gRPC socket — an unused open port is a liability |
 | `OG_PUBLIC_GATEWAY_URL` | unset | the address `EnsureSandBox` mints to clients, and the MCP door's OAuth issuer + resource (`<url>/mcp`) (e.g. `http://192.168.100.24:1447`). Unset ⇒ the mint refuses. Must be non-loopback because the *client* refuses a loopback host — the mint itself does not check that (`seamb.rs`; `slice13-seamb-smoke.sh` is the loopback assertion) |
-| `OG_GATEWAY_BEARER` | unset | the shared bearer the desktop client presents on every gateway call. The client-side counterpart is the token field beside its OpenGrok gateway URL setting |
 | `OG_COOKIE_SECURE` | unset | `1` marks the console's auth cookies `Secure` — set it behind HTTPS |
 
 ## The model door
@@ -93,7 +91,7 @@ false until that client is attached. Never publish 8791/8792.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_LOGIN_EMAIL` | `OG_GATEWAY_EMAIL`, then `host@opengrok.local` | the host account the desktop roster and sign-in bind to on a single-user deployment |
+| `OG_LOGIN_EMAIL` | `host@opengrok.local` | the host account a browser login binds to on a single-user deployment |
 | `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
 | `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
 
@@ -122,4 +120,4 @@ throwaway signup addresses.
 | `RUST_LOG` | tracing filter, e.g. `opengrok=debug,opengrok_server=debug,opengrok_harness=debug` |
 | `OG_TRACE_REQUESTS` | **on by default**: one INFO line per request (method, path, status, ms, request id, Origin presence, bearer *length*, never its value), plus `/events` stream open/close with the subscriber count. `0` turns it off. Every request carries an `X-Request-Id` — the client's if it sent one, a UUID otherwise — echoed on the response and stamped on every log line the handler writes |
 
-Retired: `SAND_GATEWAY_TOKEN` is read by nothing — the client bearer is `OG_GATEWAY_BEARER`.
+Retired, read by nothing: `SAND_GATEWAY_TOKEN`, and — since the seam A/B deletion of 20 Sep 2026 — `OG_GATEWAY_BEARER`, `OG_GATEWAY_EMAIL`, `OG_GATEWAY_IDENTITY_FALLBACK` and `OG_GRPC_BIND`.
