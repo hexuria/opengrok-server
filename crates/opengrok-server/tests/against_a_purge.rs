@@ -294,12 +294,18 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
         "a refused purge deleted rows"
     );
 
+    let keep = everyone_but(&store, &gone_email).await;
+    assert!(
+        keep.contains(&kept_email),
+        "the kept fixture is on the allowlist"
+    );
+
     // A dry run reports the work and changes nothing.
     let rehearsal = store
-        .purge_accounts_except(std::slice::from_ref(&kept_email), true)
+        .purge_accounts_except(&keep, true)
         .await
         .expect("dry run");
-    assert!(rehearsal.accounts_deleted >= 1, "{rehearsal:?}");
+    assert_eq!(rehearsal.accounts_deleted, 1, "{rehearsal:?}");
     assert_eq!(
         footprint(&store, &gone).await,
         before_gone,
@@ -307,15 +313,18 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
     );
 
     let report = store
-        .purge_accounts_except(std::slice::from_ref(&kept_email), false)
+        .purge_accounts_except(&keep, false)
         .await
         .expect("purge");
-    assert_eq!(
-        report.kept,
-        vec![(kept_email.clone(), kept.account.to_string())],
+    assert!(
+        report
+            .kept
+            .contains(&(kept_email.clone(), kept.account.to_string())),
         "{report:?}"
     );
-    assert!(report.accounts_deleted >= 1, "{report:?}");
+    assert_eq!(report.accounts_deleted, 1, "{report:?}");
+    assert_eq!(report.coworkers_deleted, 1, "{report:?}");
+    assert_eq!(report.orgs_deleted, 1, "{report:?}");
     assert!(report.rows["events"] >= 5, "{report:?}");
 
     for (table, count) in footprint(&store, &gone).await {

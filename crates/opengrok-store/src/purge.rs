@@ -57,11 +57,13 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-        let kept_rows =
-            sqlx::query("select id, email, org_id from account_view where lower(email) = any($1)")
-                .bind(&keep)
-                .fetch_all(&mut *tx)
-                .await?;
+        let kept_rows = sqlx::query(
+            "select id, email, org_id from account_view \
+             where lower(email) = any(select lower(k) from unnest($1::text[]) as k)",
+        )
+        .bind(&keep)
+        .fetch_all(&mut *tx)
+        .await?;
         let mut report = PurgeReport::default();
         let mut kept_ids: Vec<String> = Vec::new();
         let mut kept_orgs: Vec<String> = Vec::new();
@@ -175,8 +177,9 @@ impl PgStore {
         streams.extend(connections.iter().map(|id| format!("connection/{id}")));
 
         // Vault keys embed an owner id (`org-computer:<org>:<kind>`, `conn_<connector>_<acct>`),
-        // so the id as a LIKE infix is the handle — with `_` and `%` escaped, since every id has
-        // an underscore in it.
+        // so the id as a LIKE infix is the handle — with `_` and `%` backslash-escaped (LIKE's
+        // default escape; `LIKE ANY (subquery)` takes no ESCAPE clause), since every id has an
+        // underscore in it.
         let like_escape = |id: &String| {
             id.replace('\\', "\\\\")
                 .replace('_', "\\_")
@@ -212,7 +215,7 @@ impl PgStore {
         );
         delete!(
             "room_pause",
-            "delete from room_pause where run_id = any($1) or group_id = any($2)",
+            "delete from room_pause where run_id = any($1) or group_id = any($2) or member_id = any($2)",
             &runs,
             &coworkers
         );
@@ -309,8 +312,9 @@ impl PgStore {
         );
         delete!(
             "coworker_template_use",
-            "delete from coworker_template_use where coworker_id = any($1)",
-            &coworkers
+            "delete from coworker_template_use where coworker_id = any($1) or template_id = any($2)",
+            &coworkers,
+            &templates
         );
         delete!(
             "ceiling_view",
@@ -325,15 +329,14 @@ impl PgStore {
         );
         delete!(
             "connection_loan",
-            "delete from connection_loan where coworker_id = any($1)",
-            &coworkers
+            "delete from connection_loan where coworker_id = any($1) or connection_id = any($2)",
+            &coworkers,
+            &connections
         );
         delete!(
             "connection_view",
-            "delete from connection_view where owner_id = any($1) or owner_id = any($2) or owner_id = any($3)",
-            &accounts,
-            &coworkers,
-            &orgs
+            "delete from connection_view where id = any($1)",
+            &connections
         );
         delete!(
             "seamb_profile",
@@ -406,9 +409,11 @@ impl PgStore {
             "delete from account_computer_error where account_id = any($1)",
             &accounts
         );
+        // By scope only: `org_id` on a box row is the idle sweep's bookkeeping, not ownership,
+        // and a kept account's box can carry a doomed org's id.
         delete!(
             "scoped_computer",
-            "delete from scoped_computer where scope_id = any($1) or scope_id = any($2) or scope_id = any($3) or org_id = any($3)",
+            "delete from scoped_computer where scope_id = any($1) or scope_id = any($2) or scope_id = any($3)",
             &accounts,
             &coworkers,
             &orgs
@@ -450,8 +455,8 @@ impl PgStore {
         );
         delete!(
             "coworker_template",
-            "delete from coworker_template where org_id = any($1)",
-            &orgs
+            "delete from coworker_template where id = any($1)",
+            &templates
         );
         delete!(
             "gateway_key_view",
