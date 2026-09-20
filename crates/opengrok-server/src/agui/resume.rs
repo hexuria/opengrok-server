@@ -597,7 +597,7 @@ async fn resume_suspended_run(
     // rest of this run: one card per run, not one per click.
     let runner = runner.with_egress_consented(
         pending.reason == opengrok_core::run::SuspendReason::AutoReview
-            && crate::agui::routes::leaves_the_box(&pending.tool),
+            && opengrok_tools::leaves_the_box(&pending.tool),
     );
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person was answering the card must not change the coworker halfway through the

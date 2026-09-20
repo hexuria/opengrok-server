@@ -503,6 +503,13 @@ pub enum EgressTunnelMode {
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// The tools whose action leaves the box for the network — the ones the egress tunnel's consent
+/// card is about. One list, used by the ask, the frame's admission check and the server's
+/// resume paths.
+pub fn leaves_the_box(tool_name: &str) -> bool {
+    matches!(tool_name, "computer" | "open_url" | RUN_RECIPE)
+}
+
 /// The tools that run on the box (as opposed to plugin tools and the person's own machine).
 fn needs_the_box(tool_name: &str) -> bool {
     matches!(
@@ -748,7 +755,7 @@ impl Executor {
         if decision.needs_approval() && !gate_approved {
             return false;
         }
-        let screen_tool = matches!(tool_name, "computer" | "open_url" | RUN_RECIPE);
+        let screen_tool = leaves_the_box(tool_name);
         if context.screen_hold && screen_tool {
             return false;
         }
@@ -1406,7 +1413,7 @@ impl Executor {
         // client attached). Docker host-network is not that. With no standing auto-review
         // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
         // subsumes this (one card).
-        let leave_box_tool = matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE);
+        let leave_box_tool = leaves_the_box(&tool_name);
         let review_inactive = self
             .auto_review
             .as_ref()
