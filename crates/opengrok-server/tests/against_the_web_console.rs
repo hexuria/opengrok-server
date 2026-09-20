@@ -22,7 +22,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 
 macro_rules! database_or_skip {
@@ -120,13 +119,7 @@ fn app_with(store: PgStore, secret: &[u8]) -> axum::Router {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
-    opengrok_server::router(agui, gateway)
+    opengrok_server::router(agui)
 }
 
 async fn spawn(app: axum::Router) -> String {

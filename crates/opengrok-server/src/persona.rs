@@ -61,11 +61,10 @@ pub fn validate_name(name: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// The decoration the client keeps in the seam-B profile blob, as opposed to the fields the
-/// aggregate owns. One list, because three doors write it — the desktop client's
-/// `UpdateGrokBotAgent` (`seamb.rs`), the gateway's `updateAgent` (`gateway/lifecycle.rs`) and
-/// the app's `PATCH /coworkers/{id}` (`agui/routes.rs`) — and a key one door forgot is an edit
-/// the person watched succeed and lost.
+/// The decoration kept in the profile blob (the store still calls it `seamb_profile`), as
+/// opposed to the fields the aggregate owns. One list, kept even now that `PATCH /coworkers/{id}`
+/// (`agui/routes.rs`) is the only door writing it: three doors wrote it once, and a key one of
+/// them forgot was an edit the person watched succeed and lost.
 pub const PROFILE_TEXT_KEYS: [&str; 4] = ["description", "title", "avatarShape", "avatarColor"];
 
 /// Merge the string-valued decoration out of `edits` into `profile`, in place.

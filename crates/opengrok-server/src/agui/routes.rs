@@ -61,15 +61,14 @@ pub struct AgUiState {
     /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
     /// still needs it in their ceiling before its tools run.
     pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
-    /// Shared with `GatewayState.settings` so AG-UI turns see `egressTunnelEnabled`.
-    /// `None` until `GatewayState::new` / `router` attach the Arc; env flags still apply.
+    /// Host settings. `None` until `router` attaches the Arc; env flags still apply.
     pub host_settings: Option<Arc<Mutex<serde_json::Value>>>,
 }
 
 impl AgUiState {
     /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
-    /// or host setting `egressTunnelEnabled`. This is host *intent*. The gateway verb
-    /// and Review-an-action gate also need `/v1/info` `egress_tunnel.ready`.
+    /// or host setting `egressTunnelEnabled`. This is host *intent*. Review-an-action
+    /// also needs `/v1/info` `egress_tunnel.ready`.
     #[must_use]
     pub fn egress_tunnel_enabled(&self) -> bool {
         let settings = self
@@ -634,15 +633,9 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
-/// `POST /ag-ui` lives on `GatewayState` so a UserForm CUSTOM can mint the gateway card and
-/// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
-/// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
-pub fn run_router(state: crate::gateway::GatewayState) -> Router {
-    Router::new().route("/ag-ui", post(run)).with_state(state)
-}
-
 pub fn router(state: AgUiState) -> Router {
     Router::new()
+        .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
@@ -2023,15 +2016,10 @@ pub(crate) async fn principal_from_bearer(
 
 /// Start a run and stream its events.
 pub async fn run(
-    State(gateway): State<crate::gateway::GatewayState>,
+    State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
-    // `GatewayState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
-    // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
-    // AG-UI path does.
-    let state = gateway.agui.clone();
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
     //
@@ -2259,7 +2247,7 @@ pub async fn run(
         // is forwarded, so NativeChat sees the id on the AG-UI stream.
         let sink = AgUiSink {
             tx,
-            gateway,
+            state: state.clone(),
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
             form_hold: Mutex::new(crate::user_form::UserFormSseHold::default()),
@@ -2874,8 +2862,8 @@ pub async fn answer_run(
     // about a refusal somebody made on purpose. Worse, the tool call was left with no result at
     // all, so the next turn in that thread replayed a call nothing answered.
     //
-    // The gateway's own answer path has done this from the start (`gateway::conversation`); the
-    // two doors on to the same run disagreed, and this is the one that was wrong.
+    // The desktop's own answer path (seam A, since deleted) did this from the start; the two
+    // doors on to the same run disagreed, and this is the one that was wrong.
     let continuing = pending.is_some();
     if let Some(pending) = pending {
         let outcome = resume_outcome(request.approved, &pending);
@@ -3557,7 +3545,7 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 /// card stayed `call-*-1` with Continue that could not submit.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
-    gateway: crate::gateway::GatewayState,
+    state: AgUiState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
     form_hold: Mutex<crate::user_form::UserFormSseHold>,
@@ -3599,7 +3587,7 @@ impl EventSink for AgUiSink {
                 if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id)
                 {
                     crate::hitl::stamp_user_form_entry_id(
-                        &self.gateway.agui,
+                        &self.state,
                         coworker_id,
                         account_id,
                         &mut event,

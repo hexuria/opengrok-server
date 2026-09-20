@@ -28,7 +28,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -123,13 +122,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email,
-        Some("http://opengrok.lan:1447".to_string()),
-    );
-    let app = opengrok_server::router(agui, gateway);
+    let app = opengrok_server::router(agui);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

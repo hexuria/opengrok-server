@@ -20,7 +20,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -101,14 +100,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         // the one record both doors read, so the two answers cannot drift apart.
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    .allowing_identity_fallback();
-    let app = opengrok_server::router(agui, gateway);
+    let app = opengrok_server::router(agui);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -171,21 +163,6 @@ impl Harness {
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
     }
-
-    /// The desktop door's own reading of the same record, for as long as that door stands.
-    async fn seam_a(&self, method: &str) -> Value {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body("{}")
-            .send()
-            .await
-            .expect("api call");
-        assert_eq!(res.status().as_u16(), 200);
-        res.json().await.expect("json body")
-    }
 }
 
 fn database_url() -> Option<String> {
@@ -244,36 +221,6 @@ async fn the_record_reads_back_whole_and_a_patch_keeps_the_rest() {
         again["egressTunnelAvailable"],
         json!(false),
         "a coworker that is not this account's answers false, never an error"
-    );
-}
-
-#[tokio::test]
-async fn both_doors_read_the_one_record() {
-    let Some(url) = database_url() else { return };
-    let h = harness(&url, "host-settings-parity@test.local").await;
-    let access = h.person("host-settings-parity@test.local").await;
-
-    h.put(
-        &access,
-        &json!({ "egressTunnelEnabled": true, "extra": "kept" }),
-    )
-    .await;
-    let desktop = h.seam_a("getHostSettings").await;
-    assert_eq!(
-        desktop["egressTunnelEnabled"],
-        json!(true),
-        "the desktop verb sees what the AG-UI door wrote: it is the same Arc"
-    );
-    assert_eq!(desktop["extra"], json!("kept"));
-    let (_, agui) = h.get(Some(&access), "").await;
-    let mut desktop_keys: Vec<_> = desktop.as_object().unwrap().keys().cloned().collect();
-    let mut agui_keys: Vec<_> = agui.as_object().unwrap().keys().cloned().collect();
-    desktop_keys.sort();
-    agui_keys.sort();
-    agui_keys.retain(|k| k != "egressTunnelAvailable");
-    assert_eq!(
-        desktop_keys, agui_keys,
-        "same record, plus the one field the AG-UI door adds"
     );
 }
 

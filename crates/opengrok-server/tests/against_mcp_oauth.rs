@@ -24,7 +24,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -144,13 +143,7 @@ async fn spawn(store: PgStore, email: &str) -> (String, AuthState) {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some(base.clone()),
-    );
-    let app = opengrok_server::router(agui, gateway);
+    let app = opengrok_server::router(agui);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });

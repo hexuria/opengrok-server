@@ -21,7 +21,6 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_server::gateway_admin::GatewayAdmin;
 use opengrok_server::spend::GuardedDoor;
 use opengrok_store::{PgStore, Vault};
@@ -364,16 +363,7 @@ async fn harness(database_url: &str, host_email: &str) -> Harness {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway_state = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
-    let app = opengrok_server::router(agui.clone(), gateway_state);
+    let app = opengrok_server::router(agui.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -406,25 +396,6 @@ impl Harness {
             .expect("mint access")
     }
 
-    /// `POST /api/{method}` with the gateway bearer — how the desktop's coordinator calls.
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .expect("api call");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
-    }
-
     async fn spend(&self, access: &str, coworker: &str) -> (u16, Value) {
         let res = self
             .client
@@ -437,29 +408,6 @@ impl Harness {
         (status, res.json().await.unwrap_or(Value::Null))
     }
 
-    /// Wait until the coworker's gateway thread has `expected` runs and the newest has settled;
-    /// hand back that run's status and failure. Counting is what keeps a fast poll from
-    /// answering with the previous turn's run.
-    async fn settled_run(&self, coworker: &str, expected: usize) -> (String, Option<String>) {
-        let thread = format!("gateway-{coworker}");
-        for _ in 0..100 {
-            let runs = self.store.runs_for_thread(&thread, 50).await.expect("runs");
-            if runs.len() >= expected
-                && let Some(newest) = runs.iter().max_by_key(|run| run.started_at_ms)
-            {
-                let (loaded, _) = self.store.load_run(&newest.id).await.expect("load run");
-                let status = format!("{:?}", loaded.status).to_lowercase();
-                if status.contains("finished") || status.contains("failed") {
-                    return (status, loaded.failure.clone());
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        panic!("the run did not settle in 10s");
-    }
-}
-
-impl Harness {
     async fn put_limit(&self, access: &str, path: &str, body: Value) -> (u16, String) {
         let res = self
             .client
@@ -471,22 +419,6 @@ impl Harness {
             .expect("put limit");
         let status = res.status().as_u16();
         (status, res.text().await.unwrap_or_default())
-    }
-
-    async fn turn(&self, coworker: &str, n: usize) -> (String, Option<String>) {
-        let (status, sent) = self
-            .api(
-                "sendPrompt",
-                // A nonce dedupes a press per payload; two coworkers' first turns must not share one.
-                json!({ "agentId": coworker, "prompt": format!("turn {n}"), "clientNonce": format!("n{n}-{coworker}") }),
-            )
-            .await;
-        assert_eq!(status, 200, "{sent}");
-        self.settled_run(coworker, n).await
-    }
-
-    fn usage_reads(&self) -> usize {
-        self.stand_in.lock().unwrap().usage_reads
     }
 }
 
@@ -678,25 +610,6 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
     assert_eq!(status, 201, "{hired}");
     assert_eq!(hired["model"], json!("oag/other"), "{hired}");
 
-    // The desktop's createAgent passes a templateId through: the same copy happens.
-    let (status, created) = h
-        .api(
-            "createAgent",
-            json!({ "name": "Cara", "templateId": template_id, "clientNonce": format!("tpl-{tag}") }),
-        )
-        .await;
-    assert_eq!(status, 200, "{created}");
-    let cara = CoworkerId::from_stored(created["agent"]["id"].as_str().expect("id").to_string());
-    let policy = store.policy_for(&admin_id, &cara).await.expect("policy");
-    assert_eq!(
-        policy.grant.as_ref().expect("a grant").needs_approval,
-        opengrok_policy::ToolSet::only(vec!["shell".to_string()])
-    );
-    assert_eq!(
-        store.template_of(&cara).await.expect("use").as_deref(),
-        Some(template_id.as_str())
-    );
-
     // Editing the template changes no hired coworker; deleting it leaves them exactly as hired.
     let res = h
         .client
@@ -850,17 +763,6 @@ async fn a_limit_that_did_not_land_at_hire_is_said_in_the_reply() {
             .is_some(),
         "the grant still did"
     );
-
-    // The desktop's createAgent: the same note, on its own reply shape.
-    let (status, created) = h
-        .api(
-            "createAgent",
-            json!({ "name": "Cara", "templateId": template_id, "clientNonce": format!("tplnote-{tag}") }),
-        )
-        .await;
-    assert_eq!(status, 200, "{created}");
-    let note = created["templateNote"].as_str().unwrap_or("");
-    assert!(note.contains("points limit could not be set"), "{created}");
 
     sqlx::query("drop trigger if exists og_test_refuse_points_limit on points_limit")
         .execute(&pool)

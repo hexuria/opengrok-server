@@ -8,4 +8,4 @@ pub mod host_settings;
 pub mod provision;
 pub mod routes;
 
-pub use routes::{AgUiState, router, run_router, to_chat_messages};
+pub use routes::{AgUiState, router, to_chat_messages};

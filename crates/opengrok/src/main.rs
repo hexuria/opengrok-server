@@ -284,10 +284,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
-    // the half of the mission that does not wait for a request. The schedule sweep is started
-    // below, after the gateway exists: a routine's finished run is posted into the coworker's
-    // chat through the gateway's live stream.
+    // the half of the mission that does not wait for a request.
     tokio::spawn(opengrok_server::autonomy::sweep::monitors_forever(
+        state.clone(),
+    ));
+    tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
         state.clone(),
     ));
 
@@ -297,27 +298,7 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
-    // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
-    // the shipped host's own fallback — and the email names whose coworkers are the roster.
-    //
-    // OG_GATEWAY_BEARER, deliberately not OG_GATEWAY_TOKEN: that name already means the key WE
-    // present to the model gateway. One name meaning "what we show upstream" and "what clients
-    // must show us" is how a model key ends up handed to every desktop client.
-    let gateway = opengrok_server::gateway::GatewayState::new(
-        state.clone(),
-        std::env::var("OG_GATEWAY_BEARER")
-            .ok()
-            .filter(|token| !token.is_empty()),
-        std::env::var("OG_GATEWAY_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string()),
-        std::env::var("OG_PUBLIC_GATEWAY_URL")
-            .ok()
-            .filter(|url| !url.is_empty()),
-    );
-    tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
-        gateway.clone(),
-    ));
-
-    let app = opengrok_server::router(state, gateway);
+    let app = opengrok_server::router(state);
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("could not bind {bind}"))?;

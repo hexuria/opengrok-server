@@ -22,7 +22,6 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -191,9 +190,9 @@ struct Harness {
     agui: AgUiState,
     store: PgStore,
     account: AccountId,
+    email: String,
     stub: Arc<FillStub>,
     client: reqwest::Client,
-    gateway: GatewayState,
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
@@ -236,14 +235,7 @@ async fn harness_with_door(database_url: &str, email: &str, door: Arc<MockDoor>)
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    .allowing_identity_fallback();
-    let app = opengrok_server::router(agui.clone(), gateway.clone());
+    let app = opengrok_server::router(agui.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -256,9 +248,9 @@ async fn harness_with_door(database_url: &str, email: &str, door: Arc<MockDoor>)
         agui,
         store,
         account,
+        email: email.to_string(),
         stub,
         client: reqwest::Client::new(),
-        gateway,
     }
 }
 
@@ -279,21 +271,81 @@ impl Harness {
     }
 
     async fn api(&self, method: &str, body: Value) -> (u16, Value) {
+        let token = self.access_token(&self.email);
+        match method {
+            "sendPrompt" => self.send_turn(&token, &body).await,
+            "submitUserForm" => {
+                self.post_json("/ag-ui/user-form/submit", &token, body)
+                    .await
+            }
+            "dismissUserForm" => {
+                self.post_json("/ag-ui/user-form/dismiss", &token, body)
+                    .await
+            }
+            "resolveBoxHandoff" => {
+                self.post_json("/ag-ui/box-handoff/resolve", &token, body)
+                    .await
+            }
+            "submitCredentialResult" => {
+                self.post_json("/ag-ui/credential/result", &token, body)
+                    .await
+            }
+            "getAgentTranscriptTail" => {
+                let agent = body.get("id").and_then(Value::as_str).expect("id");
+                self.transcript_tail(agent).await
+            }
+            other => panic!("{other} was a seam A verb; drive the AG-UI twin instead"),
+        }
+    }
+
+    async fn send_turn(&self, token: &str, body: &Value) -> (u16, Value) {
+        let agent = body
+            .get("agentId")
+            .and_then(Value::as_str)
+            .expect("agentId");
+        let prompt = body.get("prompt").and_then(Value::as_str).unwrap_or("");
         let res = self
             .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
+            .post(format!("{}/ag-ui", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "threadId": format!("uf-{agent}"),
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": "m1", "role": "user", "content": prompt }],
+                "forwardedProps": { "coworkerId": agent },
+            }))
             .send()
             .await
-            .expect("api call");
+            .expect("ag-ui turn");
+        let status = res.status().as_u16();
+        (status, json!({ "accepted": true }))
+    }
+
+    async fn post_json(&self, path: &str, token: &str, body: Value) -> (u16, Value) {
+        let res = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&body)
+            .send()
+            .await
+            .expect("ag-ui rest");
         let status = res.status().as_u16();
         let text = res.text().await.expect("body");
         (
             status,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
+    }
+
+    async fn transcript_tail(&self, agent: &str) -> (u16, Value) {
+        let coworker = opengrok_core::id::CoworkerId::from_stored(agent);
+        let entries = self
+            .store
+            .gateway_transcript(&coworker, &self.account)
+            .await
+            .expect("tail");
+        (200, json!({ "entries": entries }))
     }
 
     async fn computer_json(&self, token: &str, agent: &str) -> (u16, Value) {
@@ -1051,13 +1103,9 @@ async fn an_unanswered_form_times_out_and_resumes() {
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let settled = opengrok_server::user_form::timeout_unresolved_form(
-        &h.gateway.agui,
-        &h.account,
-        &coworker,
-        &agent,
-    )
-    .await;
+    let settled =
+        opengrok_server::user_form::timeout_unresolved_form(&h.agui, &h.account, &coworker, &agent)
+            .await;
     assert!(settled, "timeout should settle the open form");
 
     let stored = h
@@ -1400,104 +1448,6 @@ async fn a_missing_form_entry_is_an_error_not_null() {
     assert_eq!(body["error"], "form entry missing", "{body}");
 }
 
-#[tokio::test]
-async fn egress_tunnel_follows_host_setting() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "user-form-egress-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness(&database_url, &email).await;
-
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(false), "default is off: {body}");
-
-    let (status, settings) = h.api("getHostSettings", json!({})).await;
-    assert_eq!(status, 200, "{settings}");
-    assert_eq!(settings["egressTunnelEnabled"], false, "{settings}");
-
-    let (status, settings) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
-        .await;
-    assert_eq!(status, 200, "{settings}");
-    assert_eq!(settings["egressTunnelEnabled"], true, "{settings}");
-
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body,
-        json!(false),
-        "host setting alone is not available until /v1/info ready: {body}"
-    );
-
-    let (status, settings) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
-        .await;
-    assert_eq!(status, 200, "{settings}");
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(false), "toggle off: {body}");
-}
-
-#[tokio::test]
-async fn egress_tunnel_needs_box_ready_when_info_is_present() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "user-form-egress-box-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness(&database_url, &email).await;
-    let token = h.access_token(&email);
-    let agent = h.hire(&token, "egress-box").await;
-    let (status, _) = h.api("openAgent", json!({ "id": agent })).await;
-    assert_eq!(status, 200);
-
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
-        .await;
-    assert_eq!(status, 200);
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body,
-        json!(false),
-        "a box that cannot report /v1/info is not available: {body}"
-    );
-
-    h.stub.set_egress(Some(EgressTunnel {
-        enabled: true,
-        ready: false,
-    }));
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body,
-        json!(false),
-        "host wants the tunnel but no laptop client is attached: {body}"
-    );
-
-    h.stub.set_egress(Some(EgressTunnel {
-        enabled: true,
-        ready: true,
-    }));
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(true), "ready box + host setting: {body}");
-
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
-        .await;
-    assert_eq!(status, 200);
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body,
-        json!(false),
-        "a ready box does not override a host that opted out: {body}"
-    );
-}
-
 /// NativeChat 729bdd9 reads GET `/coworkers/{id}/computer` only — not Box
 /// `/v1/info` and not the gateway verb. Live ready must be on this JSON.
 #[tokio::test]
@@ -1536,10 +1486,15 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
         "user share has no groupId: {body}"
     );
 
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
-        .await;
-    assert_eq!(status, 200);
+    let res = h
+        .client
+        .put(format!("{}/ag-ui/host-settings", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "egressTunnelEnabled": true }))
+        .send()
+        .await
+        .expect("put host settings");
+    assert_eq!(res.status().as_u16(), 200);
 
     h.stub.set_egress(Some(EgressTunnel {
         enabled: true,
@@ -2082,56 +2037,6 @@ async fn a_new_prompt_while_waiting_interrupts_the_parked_run_as_steer() {
         "steer must reach the model as a new turn: {}",
         h.tail(&agent).await
     );
-}
-
-#[tokio::test]
-async fn interrupt_agent_run_stops_a_parked_form_without_a_new_prompt() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "user-form-interrupt-verb-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness(&database_url, &email).await;
-    let token = h.access_token(&email);
-    let agent = h.hire(&token, "Irma").await;
-
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({
-                "agentId": agent,
-                "prompt": "sign in",
-                "clientNonce": "n-interrupt-verb"
-            }),
-        )
-        .await;
-    assert_eq!(status, 200);
-    let card = h.wait_for_form(&agent).await;
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-    assert!(h.pending_user_form_runs().await >= 1);
-
-    let (status, body) = h
-        .api("interruptAgentRun", json!({ "agentId": agent }))
-        .await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["isRunning"], false, "{body}");
-
-    for _ in 0..50 {
-        if h.pending_user_form_runs().await == 0 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(h.pending_user_form_runs().await, 0);
-    let coworker = opengrok_core::id::CoworkerId::from_stored(agent);
-    let form = h
-        .store
-        .find_gateway_entry(&coworker, &h.account, &entry_id)
-        .await
-        .expect("load form")
-        .expect("form row")
-        .1;
-    assert_eq!(form["formResolution"], "dismissed", "{form}");
 }
 
 #[tokio::test]
