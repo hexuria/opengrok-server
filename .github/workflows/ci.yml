@@ -52,10 +52,8 @@ jobs:
       - name: crate size ceilings
         run: bash scripts/crate-size.sh
       # The gate does not build; a stale binary is the classic way to test yesterday's code.
-      # `--features` matches what gate.sh itself builds with: the smokes run mock doors, and the
-      # mock catalogue is off by default so it cannot reach a production binary.
       - name: build the server the smokes run
-        run: cargo build -p opengrok --features opengrok-server/mock-fixtures
+        run: cargo build -p opengrok
       - name: scripts/gate.sh --smoke
         run: scripts/gate.sh --smoke
 
