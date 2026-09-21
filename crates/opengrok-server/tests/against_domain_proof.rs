@@ -28,13 +28,13 @@ use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::domain_proof::{StaticDns, TxtLookup};
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;
@@ -152,12 +152,7 @@ fn app_with(
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        "host@og.local".to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (opengrok_server::router(agui, gateway), auth)
 }
 

@@ -38,24 +38,9 @@ pub struct MockDoor {
     /// starts with `JUDGE_MARKER`). Ordinary requests are unaffected, so a mock-driven turn can
     /// reach every rung of the ladder with no provider and no spend.
     judge_verdict: Option<String>,
-    /// A group member: on a room turn (a system prompt that begins "You are …, one participant")
-    /// it says "{name} here" through the `SendMessage` tool, then stops. Outside a room it
-    /// echoes. What a test needs to see two members speak in turn, distinguishably.
-    room_speaker: bool,
     /// Answers with the system prompt it was given, so a test can assert what the model was
     /// actually told rather than what the code meant to tell it.
     echo_system: bool,
-    /// Forwards whatever the person typed to the `mock_fixture` tool, then speaks the tool's
-    /// result back as an ordinary bubble. What makes `help` and every fixture reachable from the
-    /// composer with no provider and no spend.
-    ///
-    /// The door stays dumb on purpose: it does not know which fixtures exist. The catalogue lives
-    /// on the server side of the tool, so there is one list rather than two that can drift.
-    catalogue: bool,
-    /// The one room member (by the name the system prompt gives it) that reaches for the shell
-    /// tool before it speaks — what a test needs to raise a card INSIDE a room and watch the
-    /// round continue after the answer. The others behave as `room_speaker`.
-    room_tool_asker: Option<String>,
     /// Wait this long before EACH delta, so a mock turn takes observable time.
     ///
     /// WITHOUT THIS THE MOCK DOOR CANNOT SHOW A RUNNING STATE AT ALL. Every path here ends in
@@ -139,9 +124,9 @@ fn paced_pause(
     let Some(ceiling) = ceiling else {
         return Some(pace);
     };
-    // An empty script is reachable — `serving_fixtures` splits an empty tool result into no deltas
-    // at all — and `Duration / 0` panics, which is denied workspace-wide. It also has nothing to
-    // pace, so the pacing is simply whatever it was.
+    // An empty script is reachable — a door can answer with no deltas at all — and `Duration / 0`
+    // panics, which is denied workspace-wide. It also has nothing to pace, so the pacing is simply
+    // whatever it was.
     let deltas = u32::try_from(deltas).unwrap_or(u32::MAX);
     if deltas == 0 {
         return Some(pace);
@@ -182,13 +167,13 @@ impl MockDoor {
     ///
     /// THE FLOOR IS FOR CALLS A PERSON IS WATCHING. The auto-review judge is a second model call
     /// per tool call, invisible in the transcript, and flooring it multiplies the wait by
-    /// something nobody can see: a fixture turn is ask-the-tool, judge, say-it-back, so a 2.5 s
+    /// something nobody can see: a tool turn is ask-the-tool, judge, say-it-back, so a 2.5 s
     /// floor became 7.5 s of "Working" for one reply. Excluding the judge makes the visible wait
     /// the number the operator actually set.
     ///
     /// KEYED ON THE REQUEST, NOT ON THE CONFIGURATION. The first version exempted only the
     /// canned-verdict branch, so with no `OG_AUTO_REVIEW_MOCK_VERDICT` — the dev server's actual
-    /// state — a judge request fell through to the echo/catalogue branch and paid the floor
+    /// state — a judge request fell through to the echo branch and paid the floor
     /// after all: the exemption was dead on the one server it was measured on. A judge request is
     /// recognisable by its system prompt whatever branch answers it, so that is what decides.
     fn emit(&self, request: &ModelRequest, script: Vec<ModelDelta>) -> DeltaStream {
@@ -240,32 +225,11 @@ impl MockDoor {
         }
     }
 
-    /// A door that behaves as a group member: on a room turn it delivers "{name} here" with the
-    /// room's `SendMessage` tool and then stops; anywhere else it echoes. The name comes from the
-    /// system prompt the orchestrator wrote, so two members speak distinguishably from ONE door.
     /// A door that says back its own system prompt. The composition of identity, standing role
     /// and machine discipline is only correct if it ARRIVES, and every other door hides it.
     pub fn echoing_the_system_prompt() -> Self {
         Self {
             echo_system: true,
-            ..Self::default()
-        }
-    }
-
-    pub fn room_speaker() -> Self {
-        Self {
-            room_speaker: true,
-            ..Self::default()
-        }
-    }
-
-    /// `room_speaker`, except that the member named `asker` asks to run `asking_for_a_tool`'s
-    /// shell command first and speaks — "{name} here, after the tool" — only once that call's
-    /// result is in the conversation. A refusal is a result too: the member speaks after a no.
-    pub fn room_speaker_asking_for_a_tool(asker: impl Into<String>) -> Self {
-        Self {
-            room_speaker: true,
-            room_tool_asker: Some(asker.into()),
             ..Self::default()
         }
     }
@@ -289,25 +253,6 @@ impl MockDoor {
                 id: "mock-call-1".to_string(),
             },
         ]
-    }
-
-    /// Whether the conversation already holds the result of this call (`[tool <id> result]`).
-    fn saw_result(request: &ModelRequest, call_id: &str) -> bool {
-        let marker = format!("[tool {call_id} result]");
-        request
-            .messages
-            .iter()
-            .any(|message| message.content.contains(&marker))
-    }
-
-    /// "You are Ada, one participant in a group chat …" → `Ada`.
-    fn room_member_name(request: &ModelRequest) -> Option<String> {
-        let system = request.system.as_deref()?;
-        let rest = system.strip_prefix("You are ")?;
-        let (name, tail) = rest.split_once(',')?;
-        tail.trim_start()
-            .starts_with("one participant")
-            .then(|| name.to_string())
     }
 
     /// A door that asks to run a shell command, then stops.
@@ -469,16 +414,7 @@ impl MockDoor {
         ]
     }
 
-    /// A door whose every turn hands the person's own words to the `mock_fixture` tool and then
-    /// says back what it answered. `OG_MODEL_DOOR=mock-cards` selects it.
-    pub fn serving_fixtures() -> Self {
-        Self {
-            catalogue: true,
-            ..Self::default()
-        }
-    }
-
-    /// The person's last words, which the catalogue door forwards verbatim as a fixture name.
+    /// The person's last words, trimmed.
     fn last_user_message(request: &ModelRequest) -> String {
         request
             .messages
@@ -487,17 +423,6 @@ impl MockDoor {
             .find(|message| message.role == "user")
             .map(|message| message.content.trim().to_string())
             .unwrap_or_default()
-    }
-
-    /// What the tool answered, read back out of the conversation the harness appended it to.
-    fn result_of(request: &ModelRequest, call_id: &str) -> Option<String> {
-        let marker = format!("[tool {call_id} result]");
-        request.messages.iter().rev().find_map(|message| {
-            message
-                .content
-                .split_once(&marker)
-                .map(|(_, tail)| tail.trim().to_string())
-        })
     }
 
     pub fn failing_with(message: impl Into<String>) -> Self {
@@ -571,73 +496,7 @@ impl ModelDoor for MockDoor {
             return Ok(self.emit(&request, vec![ModelDelta::Text(said)]));
         }
 
-        // The catalogue door: ask the fixture tool for whatever the person typed, then speak its
-        // answer. Two rounds, keyed off the conversation exactly as `once_then_answer` is — a
-        // counter here would be per-process on a shared `Arc` and would work only the first time.
-        if self.catalogue {
-            const CALL: &str = "mock-fixture-1";
-            let script = match Self::result_of(&request, CALL) {
-                // The tool has answered; say it back as an ordinary bubble so `help` reads as
-                // chat rather than as a tool card.
-                //
-                // WORD BY WORD, like `echo_script`. One delta carrying the whole fixture makes the
-                // pacing knob almost useless here: a single pause before the text is shorter than
-                // a roster round-trip plus a paint, so the running state never becomes visible and
-                // neither does the answer arriving. Splitting changes nothing a reader can see —
-                // the deltas are concatenated on the way to the transcript — and it buys the same
-                // observable window the echoing door has.
-                Some(answer) => answer
-                    .split_inclusive(' ')
-                    .map(|word| ModelDelta::Text(word.to_string()))
-                    .collect(),
-                None => {
-                    let asked = Self::last_user_message(&request);
-                    vec![
-                        ModelDelta::ToolCallStart {
-                            id: CALL.to_string(),
-                            name: "mock_fixture".to_string(),
-                        },
-                        ModelDelta::ToolCallArgs {
-                            id: CALL.to_string(),
-                            delta: serde_json::json!({ "fixture": asked }).to_string(),
-                        },
-                        ModelDelta::ToolCallEnd {
-                            id: CALL.to_string(),
-                        },
-                    ]
-                }
-            };
-            return Ok(self.emit(&request, script));
-        }
-        let script = if self.room_speaker
-            && let Some(name) = Self::room_member_name(&request)
-        {
-            let send_id = format!("room-{}", name.to_lowercase());
-            let asks_first = self.room_tool_asker.as_deref() == Some(name.as_str());
-            if Self::saw_result(&request, &send_id) {
-                // Its own message is delivered; the turn is over.
-                vec![ModelDelta::Text("(that is all from me)".to_string())]
-            } else if asks_first && !Self::saw_result(&request, "mock-call-1") {
-                Self::shell_script()
-            } else {
-                let line = if asks_first {
-                    format!("{name} here, after the tool")
-                } else {
-                    format!("{name} here")
-                };
-                vec![
-                    ModelDelta::ToolCallStart {
-                        id: send_id.clone(),
-                        name: "SendMessage".to_string(),
-                    },
-                    ModelDelta::ToolCallArgs {
-                        id: send_id.clone(),
-                        delta: serde_json::json!({ "content": line }).to_string(),
-                    },
-                    ModelDelta::ToolCallEnd { id: send_id },
-                ]
-            }
-        } else if self.script.is_empty()
+        let script = if self.script.is_empty()
             || (self.echo_steer
                 && !Self::last_user_message(&request)
                     .to_ascii_lowercase()
@@ -788,8 +647,8 @@ mod tests {
         assert_eq!(paced_pause(None, Some(ms(400)), 4), None);
         assert_eq!(paced_pause(None, None, 4), None);
 
-        // An empty script is REACHABLE — `serving_fixtures` splits an empty tool result into no
-        // deltas — and `Duration / 0` panics, which is denied workspace-wide.
+        // An empty script is REACHABLE — a door can answer with no deltas — and `Duration / 0`
+        // panics, which is denied workspace-wide.
         assert_eq!(paced_pause(Some(ms(40)), Some(ms(400)), 0), Some(ms(40)));
 
         // A ceiling BELOW the pacing hurries everything, including a one-liner. Honest arithmetic
@@ -914,7 +773,7 @@ mod tests {
     ///
     /// The first version keyed the exemption on the `judge_verdict` branch — so with no
     /// `OG_AUTO_REVIEW_MOCK_VERDICT` (the dev server's actual state) a judge request fell through
-    /// to the echo/catalogue branch and paid the floor after all. The exemption was dead on the
+    /// to the echo branch and paid the floor after all. The exemption was dead on the
     /// one server it was measured on, and the shorter "Working" window seen there came from the
     /// lowered default alone. The exemption has to read the REQUEST, not the configuration.
     #[tokio::test]

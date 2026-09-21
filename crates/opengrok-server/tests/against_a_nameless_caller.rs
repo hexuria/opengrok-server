@@ -28,7 +28,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
@@ -94,6 +94,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         eprintln!("skipping: OG_DATABASE_URL is not set");
         return;
     };
+    let database_url = opengrok_store::gate_database_or_panic(database_url);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&database_url)
@@ -123,12 +124,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email,
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

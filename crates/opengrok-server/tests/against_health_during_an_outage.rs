@@ -20,7 +20,7 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 
 fn state_over(store: PgStore, email: &str) -> AgUiState {
@@ -48,12 +48,7 @@ fn state_over(store: PgStore, email: &str) -> AgUiState {
 /// Authorization header, no Origin.
 async fn health_through_the_router(store: PgStore, email: &str) -> (u16, serde_json::Value) {
     let agui = state_over(store, email);
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("health-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui, gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -123,6 +118,7 @@ async fn a_live_store_still_answers_ok() {
         eprintln!("skipping: OG_DATABASE_URL is not set");
         return;
     };
+    let database_url = opengrok_store::gate_database_or_panic(database_url);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&database_url)

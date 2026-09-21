@@ -27,22 +27,23 @@ pub mod identity;
 pub mod migrations;
 pub mod points;
 pub mod postgres;
+pub mod purge;
 pub mod replica;
-pub mod room;
 pub mod spend;
 pub mod templates;
 pub mod vault;
 
-pub use autonomy::{DueSchedule, LogEvent};
+pub use autonomy::{DueSchedule, HookRow, LogEvent};
 pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
-    RefreshTokenRow, RowPreview, UnreadState,
+    RefreshTokenRow,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
     ArtifactRow, CredentialHint, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow,
-    RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, ThreadRun,
+    RecipeRunRow, RecipeShareRow, RecipeVersionRow, ThreadRun,
 };
+pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;
@@ -158,6 +159,25 @@ impl EventStore for MemoryEventStore {
 }
 
 /// One stream per coworker.
+/// Whether a database URL names a database the integration tests may use: one whose name ends
+/// in `_gate`. The dev database once collected 2,521 fixture accounts because a shell had the
+/// live URL exported when the suite ran; a test that refuses anything else cannot do that again.
+pub fn is_test_database_url(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or("");
+    !name.is_empty() && name.ends_with("_gate")
+}
+
+/// The URL back, or a panic that says why the tests will not run against it. For the top of
+/// every Postgres integration test: the one place a live database could sneak in.
+pub fn gate_database_or_panic(url: String) -> String {
+    assert!(
+        is_test_database_url(&url),
+        "refusing to run tests against {url}: OG_DATABASE_URL must name a database whose name ends in _gate (the dev database is not a test fixture)",
+    );
+    url
+}
+
 pub fn coworker_stream(id: &opengrok_core::id::CoworkerId) -> String {
     format!("coworker/{id}")
 }
@@ -219,6 +239,32 @@ pub struct AccountProjection {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    #[test]
+    fn only_a_gate_database_is_a_test_database() {
+        use super::is_test_database_url;
+        assert!(is_test_database_url(
+            "postgres://oag:oag@127.0.0.1:5452/opengrok_gate"
+        ));
+        assert!(is_test_database_url(
+            "postgres://oag:oag@127.0.0.1:5452/opengrok_gate?sslmode=disable"
+        ));
+        assert!(!is_test_database_url(
+            "postgres://oag:oag@127.0.0.1:5455/opengrok_web_verify"
+        ));
+        assert!(!is_test_database_url(
+            "postgres://oag:oag@127.0.0.1:5455/opengrok_gate_backup"
+        ));
+        assert!(!is_test_database_url("postgres://oag:oag@127.0.0.1:5455/"));
+    }
+
+    #[test]
+    #[should_panic(expected = "ends in _gate")]
+    fn a_live_database_url_panics_before_any_test_runs() {
+        super::gate_database_or_panic(
+            "postgres://oag:oag@127.0.0.1:5455/opengrok_web_verify".to_string(),
+        );
+    }
+
     use super::*;
     use opengrok_core::account::{AccountCommand, Plan};
     use opengrok_core::id::SessionId;

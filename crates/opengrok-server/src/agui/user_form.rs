@@ -1,8 +1,10 @@
 //! `submitUserForm` / `dismissUserForm` / box-handoff resolve — gateway verbs and AG-UI REST twins.
 //!
-//! WHY THIS IS NOT `submitSecret`. That verb stamps `secretProvided` and DROPS the value
-//! (connector vault). This path types into the live page. Mixing them would either vault a
-//! Google password or fill a connector secret into Chromium.
+//! WHY THIS IS NOT A SECRET DROP. The desktop's `submitSecret` (deleted with seam A) stamped
+//! `secretProvided` and DROPPED the value into the connector vault. This path types into the live
+//! page. Mixing the two would either vault a Google password or fill a connector secret into
+//! Chromium — the reason they were never one path, and the reason this one did not follow that
+//! verb out.
 //!
 //! WHY ESCALATE IS NOT A RESUME. Official `dismissUserForm` mode `escalated` is Grok Bot
 //! "Open the screen": emit a **separate** `sand://box` attachment with `boxRequestId` and keep
@@ -19,7 +21,7 @@
 //! an escalate retry.
 //!
 //! NativeChat talks AG-UI with an account bearer, not the gateway host bearer, so the REST
-//! twins live on a router that has `GatewayState` (live emit + resume) but authenticates
+//! twins live on a router that has `HostState` (live emit + resume) but authenticates
 //! like AG-UI (`account_from_bearer`), never through `refuse()`.
 
 use std::collections::{BTreeMap, HashSet};
@@ -41,14 +43,15 @@ use opengrok_tools::user_form::{
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
 
-use super::{GatewayState, conversation, live};
+use super::resume;
+use crate::host_state::HostState;
 
 /// How long an unanswered form or live handoff may block the turn. Tests call the settlers
 /// directly rather than waiting this out. Facebook hang: password fill reported submitted and
 /// the OTP wait never ended.
 pub const FORM_HOLD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-pub fn agui_router(state: GatewayState) -> Router {
+pub fn agui_router(state: HostState) -> Router {
     Router::new()
         .route("/ag-ui/user-form/submit", post(agui_submit))
         .route("/ag-ui/user-form/dismiss", post(agui_dismiss))
@@ -57,7 +60,7 @@ pub fn agui_router(state: GatewayState) -> Router {
 }
 
 async fn agui_submit(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -73,7 +76,7 @@ async fn agui_submit(
 }
 
 async fn agui_dismiss(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -89,7 +92,7 @@ async fn agui_dismiss(
 }
 
 async fn agui_resolve_handoff(
-    State(state): State<GatewayState>,
+    State(state): State<HostState>,
     headers: HeaderMap,
     axum::Json(args): axum::Json<Value>,
 ) -> Response {
@@ -104,53 +107,11 @@ async fn agui_resolve_handoff(
         .into_response()
 }
 
-pub async fn submit_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    submit_user_form(state, args, &account).await
-}
-
-pub async fn dismiss_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    dismiss_user_form(state, args, &account).await
-}
-
-pub async fn resolve_for_caller(state: &GatewayState, args: &Value, caller: &str) -> (u16, Value) {
-    let Some(account) = account_of(state, caller).await else {
-        return (
-            401,
-            json!({ "error": "the gateway account does not exist yet" }),
-        );
-    };
-    resolve_box_handoff(state, args, &account).await
-}
-
-async fn account_of(state: &GatewayState, caller: &str) -> Option<AccountId> {
-    state
-        .agui
-        .auth
-        .store
-        .account_by_email(caller)
-        .await
-        .ok()
-        .flatten()
-        .map(|account| account.id)
-}
-
 /// `submitUserForm {entryId, values, agentId, platform?}`. Types into the box, settles
 /// `formResolution` plus `formFieldOutcomes`, resumes with a secret-free tool result that says
 /// the values were filled into the page — not that login succeeded.
 pub async fn submit_user_form(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -188,7 +149,6 @@ pub async fn submit_user_form(
         tracing::error!(%error, "could not settle a user-form entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
     if resolution == FormResolution::Submitted {
         super::credential::offer_save_after_submit(
@@ -218,7 +178,7 @@ pub async fn submit_user_form(
 /// `dismissUserForm {entryId, mode: dismissed|escalated, agentId, platform?}`. No fill.
 /// `dismissed` resumes. `escalated` starts a box handoff and does **not** resume.
 pub async fn dismiss_user_form(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -265,7 +225,6 @@ pub async fn dismiss_user_form(
         tracing::error!(%error, "could not settle a user-form entry");
         return (500, json!({ "error": "transcript unavailable" }));
     }
-    live::emit_transcript(state, &agent_id, account_id, "updated", settled.clone());
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     if resolution == FormResolution::Escalated {
@@ -302,7 +261,7 @@ pub async fn dismiss_user_form(
 /// (NativeChat KeepAlive falls back to the form when `handoffEntryId` is missing).
 /// Does **not** stop the box (`handBackForeverBox` is a lifecycle verb).
 pub async fn resolve_box_handoff(
-    state: &GatewayState,
+    state: &HostState,
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
@@ -339,7 +298,7 @@ pub async fn resolve_box_handoff(
     }
 
     let settled_siblings =
-        settle_live_handoffs(state, account_id, &coworker_id, &agent_id, word, timed_out).await;
+        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
     // Name the call this resume answers. Passing `None` lets it land on whichever
     // call happens to be parked, which for stacked forms is the sibling's -- the
     // twin then gets this form's tool result.
@@ -374,7 +333,7 @@ pub async fn resolve_box_handoff(
 /// Spawned when a user-form card is minted. No-ops if the form already settled (including
 /// escalate — that wait is the handoff timer).
 pub fn spawn_form_hold_timeout(
-    state: GatewayState,
+    state: HostState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
@@ -386,7 +345,7 @@ pub fn spawn_form_hold_timeout(
 }
 
 pub fn spawn_handoff_hold_timeout(
-    state: GatewayState,
+    state: HostState,
     account_id: AccountId,
     coworker_id: CoworkerId,
     agent_id: String,
@@ -399,7 +358,7 @@ pub fn spawn_handoff_hold_timeout(
 
 /// Settle every still-unresolved user-form as `dismissed` + `timedOut` and resume. Idempotent.
 pub async fn timeout_unresolved_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -453,7 +412,6 @@ pub async fn timeout_unresolved_form(
             tracing::error!(%error, "could not time out a user-form");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
         journal_settled_form(state, account_id, coworker_id, &settled).await;
         form_for_result = Some(form);
         settled_any = true;
@@ -477,7 +435,7 @@ pub async fn timeout_unresolved_form(
 
 /// Stamp `boxResolution: timed_out` on a live handoff and resume. Idempotent.
 pub async fn timeout_live_handoff(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -507,13 +465,13 @@ pub async fn timeout_live_handoff(
 }
 
 async fn start_box_handoff(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
     form: &FormRequest,
 ) -> Option<Value> {
-    let card = super::cards::computer_handoff_card(
+    let card = crate::cards::computer_handoff_card(
         &format!("e_{}", uuid::Uuid::now_v7()),
         &format!("req_{}", uuid::Uuid::now_v7().simple()),
         &handoff_instruction(form),
@@ -529,7 +487,6 @@ async fn start_box_handoff(
         tracing::error!(%error, "could not append the box handoff entry");
         return None;
     }
-    live::emit_transcript(state, agent_id, account_id, "appended", card.clone());
     spawn_handoff_hold_timeout(
         state.clone(),
         account_id.clone(),
@@ -543,12 +500,11 @@ async fn start_box_handoff(
 /// handoff chrome without resuming — the new text is steer, not a card answer.
 /// Escalate itself never calls this.
 pub(crate) async fn dismiss_unresolved_on_interrupt(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
 ) {
-    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
     let Ok(entries) = state
         .agui
         .auth
@@ -595,7 +551,6 @@ pub(crate) async fn dismiss_unresolved_on_interrupt(
             tracing::error!(%error, "could not dismiss a form on interrupt");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", settled.clone());
         journal_settled_form(state, account_id, coworker_id, &settled).await;
     }
 }
@@ -623,7 +578,7 @@ fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
     ))
 }
 
-async fn may_use(state: &GatewayState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
+async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
     state
         .agui
         .auth
@@ -636,7 +591,7 @@ async fn may_use(state: &GatewayState, account_id: &AccountId, coworker: &Cowork
 /// Null stays the disclosure answer for a coworker the caller may not use. A stamped
 /// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
 async fn load_owned_entry(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     entry_id: &str,
@@ -718,10 +673,9 @@ fn is_escalated_form(entry: &Value) -> bool {
 /// Stamp `boxResolution` on every still-live sand://box sibling. One Skip must not
 /// leave another unanswered handoff holding "Waiting for you".
 async fn settle_live_handoffs(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     resolution: &str,
     timed_out: bool,
 ) -> Vec<Value> {
@@ -765,7 +719,6 @@ async fn settle_live_handoffs(
             tracing::error!(%error, "could not settle a box handoff");
             continue;
         }
-        live::emit_transcript(state, agent_id, account_id, "updated", card.clone());
         settled.push(card);
     }
     settled
@@ -775,13 +728,13 @@ async fn settle_live_handoffs(
 /// still unanswered. Settle siblings as declined and resume. Escalate itself never
 /// comes here (`mode: escalated` on a settled form still hits heal_or_already).
 async fn abandon_escalated_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
     entry: Value,
 ) -> (u16, Value) {
-    settle_live_handoffs(state, account_id, coworker_id, agent_id, "declined", false).await;
+    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
     // Name the call this Skip answers; with `None` a stacked sibling's parked
     // call would take the declined result instead.
     resume_user_form(
@@ -797,7 +750,7 @@ async fn abandon_escalated_form(
 }
 
 async fn fill_on_box(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     form: &FormRequest,
@@ -828,11 +781,16 @@ async fn fill_on_box(
     let Some((computer, box_id)) = runner.fill_target() else {
         return failed();
     };
+    // The person may press Submit long after the box went to sleep; this path types straight
+    // into the box, so it wakes it the way a tool call would — same memo, same in-use stamp.
+    if runner.wake_fill_target().await.is_err() {
+        return failed();
+    }
     fill_into_focus(computer.as_ref(), &box_id, form, values).await
 }
 
 async fn heal_or_already(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -882,7 +840,7 @@ async fn heal_or_already(
 /// pending run was found and answered (a retry can pick up a card that settled before the
 /// run did).
 async fn resume_user_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -902,7 +860,7 @@ async fn resume_user_form(
 }
 
 pub(crate) async fn resume_settled(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     agent_id: &str,
@@ -956,12 +914,12 @@ pub(crate) async fn resume_settled(
         tracing::error!(%error, "could not append the answer");
         return false;
     }
-    let in_room = conversation::in_a_room(&run, coworker_id);
+    let in_room = resume::in_a_room(&run, coworker_id);
     let state = state.clone();
     let account_id = account_id.clone();
     let coworker_id = coworker_id.clone();
     let agent_id = agent_id.to_string();
-    tokio::spawn(conversation::resume_where_it_lives(
+    tokio::spawn(resume::resume_where_it_lives(
         in_room,
         state,
         account_id,
@@ -976,7 +934,7 @@ pub(crate) async fn resume_settled(
 }
 
 pub(crate) async fn pending_suspended(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,
@@ -997,7 +955,7 @@ pub(crate) async fn pending_suspended(
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
         };
-        if !conversation::run_belongs_to(&run, coworker_id) {
+        if !resume::run_belongs_to(&run, coworker_id) {
             continue;
         }
         let Some(pending) = run.pending.clone() else {
@@ -1024,7 +982,7 @@ fn now_ms() -> i64 {
 /// this frame, `GET /ag-ui/threads/{id}` only has the mint-time CUSTOM and a
 /// cold client cannot rebuild ✓ Submitted.
 async fn journal_settled_form(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     settled: &Value,
@@ -1042,7 +1000,7 @@ async fn journal_settled_form(
 /// Append a CUSTOM onto a still-pending run (NativeChat replays this). Scrubs
 /// accidental password keys before the payload is stored.
 pub(crate) async fn journal_agui_custom(
-    state: &GatewayState,
+    state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,

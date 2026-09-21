@@ -66,12 +66,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|error| anyhow::anyhow!("migrations failed: {error}"))?;
 
-    // Who a browser login signs in as — the single user of a self-hosted OpenGrok. Defaults to
-    // the gateway's own account so the desktop's roster and its sign-in are the same person.
-    let login_email = std::env::var("OG_LOGIN_EMAIL")
-        .ok()
-        .or_else(|| std::env::var("OG_GATEWAY_EMAIL").ok())
-        .unwrap_or_else(|| "host@opengrok.local".to_string());
+    // Who a browser login signs in as — the single user of a self-hosted OpenGrok.
+    let login_email =
+        std::env::var("OG_LOGIN_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string());
     let public_url = std::env::var("OG_PUBLIC_GATEWAY_URL")
         .ok()
         .filter(|url| !url.is_empty())
@@ -151,37 +148,19 @@ async fn main() -> anyhow::Result<()> {
                     .max_turn_ms(ceiling),
             ))
         }
-        // Every renderable transcript shape on demand, so client rendering can be worked on
-        // without a provider. `gateway::mock_fixtures` owns the catalogue; the door only forwards.
-        //
-        // REFUSES TO BOOT WITHOUT THE CATALOGUE COMPILED IN, rather than falling through to the
-        // real gateway door. The door and the catalogue are two halves of one thing: this door
-        // answers every turn by calling `mock_fixture`, so without the tool it would ask for a
-        // tool nobody offers and fill the transcript with tool-not-found. Silently serving a REAL
-        // door instead would be worse still — an operator who asked for a mock would be billed
-        // for models. An operator who names a door this binary does not have has made a mistake
-        // worth stopping for (CLAUDE.md #8: fail closed and say why).
-        Ok("mock-cards") => {
-            #[cfg(not(feature = "mock-fixtures"))]
-            anyhow::bail!(
-                "OG_MODEL_DOOR=mock-cards, but this binary was built without the `mock-fixtures` \
-                 feature, so there is no catalogue for that door to serve. Build with \
-                 `--features opengrok-server/mock-fixtures` (scripts/serve.sh does), or choose \
-                 another door."
-            );
-            #[cfg(feature = "mock-fixtures")]
-            {
-                tracing::warn!(
-                    "OG_MODEL_DOOR=mock-cards — no model; every turn serves a transcript fixture (type `help`)"
-                );
-                Arc::new(with_mock_verdict(
-                    MockDoor::serving_fixtures()
-                        .paced_by_ms(paced)
-                        .min_turn_ms(floor)
-                        .max_turn_ms(ceiling),
-                ))
-            }
-        }
+        // REFUSES TO BOOT, and does not fall through. The catalogue this door served — every
+        // renderable transcript shape on demand, for working on the desktop client's renderers
+        // with no provider — was deleted with that client's door, so there is nothing left for
+        // it to serve. Silently starting a REAL door instead would be the worse answer: an
+        // operator who asked for a mock would be billed for models. An operator who names a door
+        // this binary does not have has made a mistake worth stopping for (CLAUDE.md #8: fail
+        // closed and say why).
+        Ok("mock-cards") => anyhow::bail!(
+            "OG_MODEL_DOOR=mock-cards no longer exists. It served the mock transcript catalogue, \
+             which was deleted on 20 Sep 2026 with the desktop client's door it was built to \
+             render into. Use OG_MODEL_DOOR=mock (a scripted stream) or mock-tools (one shell \
+             call per turn), or leave it unset to exit through the gateway."
+        ),
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
         Ok("mock-tools") => {
@@ -285,8 +264,8 @@ async fn main() -> anyhow::Result<()> {
 
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
     // the half of the mission that does not wait for a request. The schedule sweep is started
-    // below, after the gateway exists: a routine's finished run is posted into the coworker's
-    // chat through the gateway's live stream.
+    // below, after the host state exists: a routine's finished run is posted into the coworker's
+    // chat through the host state's live stream.
     tokio::spawn(opengrok_server::autonomy::sweep::monitors_forever(
         state.clone(),
     ));
@@ -297,18 +276,10 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
     ));
 
-    // Seam A: the desktop client's gateway. The bearer is optional — absent means loopback-only,
-    // the shipped host's own fallback — and the email names whose coworkers are the roster.
-    //
-    // OG_GATEWAY_BEARER, deliberately not OG_GATEWAY_TOKEN: that name already means the key WE
-    // present to the model gateway. One name meaning "what we show upstream" and "what clients
-    // must show us" is how a model key ends up handed to every desktop client.
-    let gateway = opengrok_server::gateway::GatewayState::new(
+    // What the surviving doors share beyond `AgUiState`: the host settings record, this
+    // process's start time (`/health`), and the address a client is handed for this host.
+    let gateway = opengrok_server::host_state::HostState::new(
         state.clone(),
-        std::env::var("OG_GATEWAY_BEARER")
-            .ok()
-            .filter(|token| !token.is_empty()),
-        std::env::var("OG_GATEWAY_EMAIL").unwrap_or_else(|_| "host@opengrok.local".to_string()),
         std::env::var("OG_PUBLIC_GATEWAY_URL")
             .ok()
             .filter(|url| !url.is_empty()),
@@ -316,15 +287,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
         gateway.clone(),
     ));
-
-    // The tonic listener — internal gRPC on the transcribed seam-B contract. Opt-in: absent
-    // means no listener, because nothing internal dials it yet and an unused open port is a
-    // liability, not a feature.
-    if let Ok(bind) = std::env::var("OG_GRPC_BIND")
-        && let Ok(addr) = bind.parse()
-    {
-        tokio::spawn(opengrok_server::grpc::serve(gateway.clone(), addr));
-    }
 
     let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)

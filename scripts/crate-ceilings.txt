@@ -1,0 +1,4 @@
+# <crate> <ceiling>, one per line, sorted by crate name.
+# A crate not listed uses the default of 8000.
+opengrok-server 30052
+opengrok-tools 10363

@@ -110,9 +110,9 @@ The milestone that proves the port; everything after it is breadth, not risk.
 ## Slice 9 — Seam B: identity and the mint (P0 + P1)
 
 Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two services,
-18 methods, transcribed from `source/mock/`** with provenance comments (LEGAL.md stands —
-no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the Axum edge; a bare
-tonic gRPC server cannot answer the client.
+18 methods, transcribed from `source/mock/`** with provenance comments (the transcription
+rule stands — no vendored stubs). Connect-style unary (POST + JSON over HTTP/1.1) at the
+Axum edge; a bare tonic gRPC server cannot answer the client.
 
 - [x] **9.1** Auth at the mock's own surface (`source/mock/auth-http.ts`): `/auth/poll` minting
   the `{accessToken, refreshToken}` pair, on top of slice 1's `/auth/cursor_dev_session_token`
@@ -299,8 +299,9 @@ the proof, not construction.
   output IS the container id. Evidence: `docs/verification/door1/README.md`. (`2502deb`)
 - [x] **16.cards** An MCP Ask synthesizes a durable run and a real `auto-review-approval`
   card (`requestId` = the tool call id); the MCP error names it and does not wait. The person
-  answers in OpenGrok (`resolveAutoReviewApproval`), which Finishes the synthesized run;
-  the MCP client retries under the remembered call id. PolicyApproval got its card in 16.policy;
+  answers in OpenGrok (`POST /ag-ui/runs/{id}/answer`), which flips the card, remembers the yes
+  and Finishes the synthesized run rather than resuming it; the MCP client retries under the
+  remembered call id. PolicyApproval got its card in 16.policy;
   reverse-exec stays excluded. *(this commit)*
 - [x] **16.policy** A policy grant's "needs a human yes" has a card. It was a stuck run: `card_for`
   returned nothing for `PolicyApproval`, the resolve verb matched only auto-review, so a
@@ -309,11 +310,10 @@ the proof, not construction.
   reason (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule`
   — so the client's "Always" is a plain approve that writes nothing
   (`transcript-card/auto-review-actions.ts:149-150`); a policy is widened in policy, never from a
-  card. `resolveAutoReviewApproval` settles both reasons and the resume routes a policy yes to
-  the gate; `resolveLocalToolPermission` settles exec-consent only. The MCP door raises the same
-  card for a policy ask and remembers its yes as a GATE yes for the retry.
-  `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → desktop verb → finished
-  run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
+  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes
+  to the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE
+  yes for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the
+  AG-UI answer → finished run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
   computer: hire → grant → turn suspends → card in the transcript → approved runs the command
   on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
   runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
@@ -567,6 +567,12 @@ every record that sharing would otherwise break carry whose it is.
   learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
   are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
+## Phase 0
+
+- [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
+- [x] **Host settings on the AG-UI door.** `GET/PUT /ag-ui/host-settings` (+ `egressTunnelAvailable` for `?coworker=`) under the account token — the three seam-A verbs NativeChat still called (`getHostSettings`, `setHostSettings`, `isEgressTunnelAvailable`), re-homed so seam A can close. Step 1 of the seam deletion (P0-E); step 2 is the NativeChat switch, step 3 the deletion itself. 20 Sep 2026.
+- [x] **P0-E — seam A and seam B deleted.** The two doors built for the discontinued Grok Bot desktop client are gone: `POST /api/{method}`, `GET /events`, `/avatars/{id}`, the live event bus, the group-chat orchestrator, the mock-fixtures catalogue (seam A); `seamb.rs`, `seamb_send.rs`, the tonic mirror and the `opengrok-proto` crate (seam B). ~20,500 lines, and with them prost/tonic and protoc in CI. `/health` moved to `crates/opengrok-server/src/health.rs`, its reply unchanged to the byte. What survives is AG-UI, the REST routes beside it, `/mcp`, the webhook door and the autonomy loops. Rooms went with seam A: `conversation::resume_where_it_lives` leaves a member's run parked with a warning, because no surviving door can create a room. `GatewayState` keeps its name (renaming it is a follow-up) and is down to the settings record, the start time and the advertised address. 20 Sep 2026.
+
 ## Later — unordered, deliberately
 
 - [x] **18.points** Limits in POINTS (`plan-spend-policy.md`, rewritten): one point is one
@@ -624,7 +630,7 @@ every record that sharing would otherwise break carry whose it is.
 - [x] GitHub Actions CI — resolved 1 Sep 2026 by the repo going public: the workflow now runs
   `scripts/gate.sh --smoke` itself, green. *(this commit)*
 - [ ] **Rights review — now OVERDUE rather than blocking**: the operator published the repo on
-  1 Sep 2026 with the review still outstanding (`LEGAL.md` status note).
+  1 Sep 2026 with the review still outstanding.
 - [ ] gpt-5.6-luna — upstream credits (`personal-team-blocked:spending-limit`); 5.5/5.4-mini
   verified working through the same gateway. **And it does not tool-call through the gateway**
   (found 2 Sep 2026 capturing the policy card: five runs, zero `TOOL_*` events, shell requests

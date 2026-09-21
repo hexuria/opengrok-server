@@ -9,7 +9,6 @@ members = [
   "crates/opengrok",   # the binary: wires the server, embeds the gateway
   "crates/opengrok-core",    # domain types, ids, errors. No I/O.
   "crates/opengrok-wire",    # the client contract: gateway commands, transcript entries, activity
-  "crates/opengrok-proto",   # seam B transcribed: Connect-over-HTTP/1.1 messages (prost), never vendored stubs
   "crates/opengrok-harness", # the agent loop: turns, tools, streaming
   "crates/opengrok-box",     # the coworker's computer
   "crates/opengrok-plugins",# Agent Plugins: the bundle of skills + MCP servers a coworker is given
@@ -27,7 +26,7 @@ license = "MIT"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors", "fs"] }
 # 0.13 to match rmcp's, so the binary carries ONE http client and one TLS stack rather than two.
@@ -52,16 +51,6 @@ futures = "0.3"
 async-trait = "0.1"
 
 # The agent stack, pinned here so the versions are a recorded decision rather than drift.
-# rig-core: PINNED BUT UNCLAIMED — no member crate declares it, so nothing here compiles it.
-#   It was a second `ModelDoor` (`OG_MODEL_DOOR=rig`), retired because rig did not put the model
-#   on the wire: the gateway saw a modelless request, classified it by policy, and answered on
-#   whatever rung the classifier picked, so every coworker's pin was silently ignored. That cost a
-#   night on 8 Sep 2026. `GatewayDoor` is now the only way out, and it is the one whose failure
-#   modes we have read line by line.
-#   The pin stays because the half of rig we never used is the half worth having — embeddings,
-#   vector_store, rerank, loaders. When searchable memory lands, `rig-core.workspace = true` in
-#   whichever crate wants it is the whole re-adoption, and it belongs nowhere near the harness.
-rig-core = "0.42"
 # rmcp: the official MCP SDK. Client-side first: mem0/OpenMemory and cua integrate as MCP servers
 #   we connect to, not as code we write.
 rmcp = { version = "3", default-features = false, features = [
@@ -74,14 +63,6 @@ rmcp = { version = "3", default-features = false, features = [
   "server",
   "transport-streamable-http-server",
 ] }
-# prost for transcribed seam-B message types. tonic deliberately absent: the desktop client speaks
-#   ConnectRPC over HTTP/1.1 (see crates/opengrok-proto), which a tonic server cannot answer.
-prost = "0.14"
-# tonic enters (operator decision, 30 Aug 2026): internal gRPC on our OWN transcribed protos.
-# The client edge stays Connect-on-Axum — a bare tonic server cannot answer HTTP/1.1 Connect.
-tonic = "0.14"
-tonic-prost = "0.14"
-tonic-prost-build = "0.14"
 # Cron parsing for the scheduler. Parsing only — the ticking is ours, in the same sweep pattern
 #   as recovery, so firing stays durable and policy-checked rather than delegated to a framework.
 cron = "0.17"
@@ -112,6 +93,10 @@ chacha20poly1305 = "0.11"
 # it. Nothing can be done from this side — its `http_client()` seam takes a 0.11 `Client`, so our
 # own cannot be lent to it — and the alternative the issue rules out is writing the client
 # ourselves. Worth revisiting if the SDK ever moves forward a major version.
+#
+# Optional behind opengrok-server's `jev` feature (`jev = ["dep:typesafe-sdk"]`). A
+# `--no-default-features` binary therefore carries one reqwest and one hyper. The feature is on
+# by default so a deployment with a Jev key is unchanged.
 typesafe-sdk = "0.1"
 
 [workspace.lints.rust]

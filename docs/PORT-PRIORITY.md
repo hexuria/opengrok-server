@@ -187,7 +187,7 @@ tonic internal) and slice 8.1–8.2 is exactly this work. Nothing here changes t
 confirms it and narrows the message set to transcribe from "hundreds" to **18 methods across two
 services**.
 
-`LEGAL.md` stands: transcribe with provenance, never vendor the generated stubs.
+The transcription rule stands: transcribe with provenance, never vendor the generated stubs.
 
 ---
 

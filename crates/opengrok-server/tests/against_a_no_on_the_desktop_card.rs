@@ -1,4 +1,4 @@
-//! A no on the desktop's approval card reaches the model, and the run ends.
+//! A no on the approval card reaches the model, and the run ends.
 //!
 //! THE BUG THIS EXISTS FOR, seen on 18 Sep 2026 in NativeChat: a person denied a `shell` card and
 //! the composer went on offering to stop a turn that nothing was doing. The working line had gone
@@ -14,10 +14,11 @@
 //! reached this one and ended it with "we do not know whether it ran" — a sentence about a crash,
 //! written over a refusal somebody made on purpose.
 //!
-//! The gateway's door has resumed refusals from the start (see `against_policy_card`, which is
-//! this test's twin on that side). Two doors on to the same run disagreed; this is the one that
-//! was wrong. So this asserts what only a resumed refusal can be: the run REACHES AN ENDING, the
-//! tool never ran, and the refusal the model was handed names the tool it may not use.
+//! The desktop's door resumed refusals from the start; the two doors on to the same run
+//! disagreed, and this one was wrong. That door has since been deleted, so this file is now the
+//! only place the rule is written down. It asserts what only a resumed refusal can be: the run
+//! REACHES AN ENDING, the tool never ran, and the refusal the model was handed names the tool it
+//! may not use.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -35,14 +36,14 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;
@@ -213,15 +214,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -256,49 +249,56 @@ impl Harness {
             .expect("mint access")
     }
 
-    /// `POST /api/{method}` with the gateway bearer — how the desktop's coordinator calls.
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .expect("api call");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    /// One turn on the AG-UI door, the way NativeChat drives one. The reply is the whole SSE
+    /// stream; a turn that pauses for a card ends it with `run-awaiting-approval`.
+    async fn turn(&self, token: &str, agent: &str, prompt: &str) -> String {
+        self.turn_on(
+            token,
+            agent,
+            &format!("thr-{}", uuid::Uuid::now_v7()),
+            prompt,
         )
+        .await
     }
 
-    /// Poll the coworker's transcript for a pending approval card with this request id or, when
-    /// none is named, the first pending one.
-    async fn wait_for_card(&self, agent: &str) -> Value {
+    /// The same, on a thread the caller names — the client picks `threadId` and the server takes
+    /// it verbatim, which is the whole reason the MCP test below exists.
+    async fn turn_on(&self, token: &str, agent: &str, thread: &str, prompt: &str) -> String {
+        let res = self
+            .client
+            .post(format!("{}/ag-ui", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "threadId": thread,
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": "m1", "role": "user", "content": prompt }],
+                "forwardedProps": { "coworkerId": agent },
+            }))
+            .send()
+            .await
+            .expect("ag-ui turn");
+        assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+        res.text().await.expect("sse")
+    }
+
+    /// The run this person is waiting on, and the call id its card is for.
+    async fn wait_for_pending(&self) -> (opengrok_core::id::RunId, String) {
         for _ in 0..100 {
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 100 }),
-                )
-                .await;
-            if let Some(card) = tail["entries"].as_array().and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|entry| {
-                        entry["message"]["type"] == "auto-review-approval"
-                            && entry["message"]["approval"]["status"] == "pending"
-                    })
-                    .cloned()
-            }) {
-                return card;
+            for id in self
+                .store
+                .awaiting_approval(&self.account)
+                .await
+                .expect("awaiting")
+            {
+                if let Ok((run, _)) = self.store.load_run(&id).await
+                    && let Some(pending) = run.pending.as_ref()
+                {
+                    return (id, pending.call_id.clone());
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        panic!("no pending approval card appeared in 10s");
+        panic!("no run suspended for an approval in 10s");
     }
 }
 
@@ -343,39 +343,11 @@ async fn a_no_on_the_desktop_card_is_told_to_the_model_and_ends_the_run() {
     );
 
     // A turn the mock door answers by reaching for shell, which the policy says to ask about.
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "run a command", "clientNonce": "n-desktop-no" }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
-    let card = h.wait_for_card(&agent).await;
-    let call_id = card["message"]["approval"]["requestId"]
-        .as_str()
-        .expect("request id")
-        .to_string();
+    h.turn(&token, &agent, "run a command").await;
+    let (run_id, call_id) = h.wait_for_pending().await;
     assert!(h.stub.ran().is_empty(), "nothing ran before the answer");
 
-    // The run the card belongs to, found the way the desktop finds it: off the queue of runs
-    // waiting on this person.
-    let mut run_id = None;
-    for id in h
-        .store
-        .awaiting_approval(&h.account)
-        .await
-        .expect("awaiting")
-    {
-        if let Ok((run, _)) = h.store.load_run(&id).await
-            && run.pending.as_ref().is_some_and(|p| p.call_id == call_id)
-        {
-            run_id = Some(id);
-            break;
-        }
-    }
-    let run_id = run_id.expect("the suspended run");
-
-    // THE DESKTOP'S DOOR, and a no.
+    // THE ANSWER, and it is a no.
     let answered: Value = h
         .client
         .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
@@ -439,5 +411,184 @@ async fn a_no_on_the_desktop_card_is_told_to_the_model_and_ends_the_run() {
     assert!(
         emitted.contains("shell"),
         "the refusal names the tool: {emitted}"
+    );
+}
+
+/// AN ORDINARY RUN IS STILL CARRIED ON, and this test exists to keep it that way.
+///
+/// The same route now has a second reading: a run on an `mcp-{coworker}` thread is one MCP call's
+/// audit row, and answering its card FINISHES it rather than resuming it — resuming would run the
+/// tool here while the MCP client is being told to retry. A conversation must never fall down that
+/// branch. If it did, the person would be left with a turn that stopped mid-sentence, a tool call
+/// with no result for the next turn to replay, and a `continuing: false` telling their client to
+/// stop watching a run that had simply been abandoned.
+#[tokio::test]
+async fn an_ordinary_run_answered_on_the_same_route_is_carried_on() {
+    let database_url = database_or_skip!();
+    let email = format!("ordinary-yes-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn(&token, &agent, "run a command").await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let (suspended, _) = h.store.load_run(&run_id).await.expect("run");
+    assert!(
+        !suspended.thread_id.starts_with("mcp-"),
+        "a conversation turn is not an MCP audit row: {}",
+        suspended.thread_id
+    );
+
+    let answered: Value = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer")
+        .json()
+        .await
+        .expect("answer json");
+    assert_eq!(
+        answered["continuing"], true,
+        "the turn goes on after the yes: {answered}"
+    );
+    assert!(
+        answered.get("finished").is_none(),
+        "`finished` is the MCP branch's word; a conversation is not settled here: {answered}"
+    );
+
+    // And it really is carried on: the approved command runs, and the run reaches an ending with
+    // nobody asking it to.
+    let mut ended = None;
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            ended = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let run = ended.expect("the approved run never ended, so nothing picked it back up");
+    assert_eq!(run.status, RunStatus::Finished);
+    assert!(
+        !h.stub.ran().is_empty(),
+        "the approved command never ran, so the run was finished rather than resumed"
+    );
+}
+
+/// A THREAD CALLED `mcp-…` IS NOT AN MCP RUN, and anybody can name one.
+///
+/// `POST /ag-ui` takes `threadId` from the client verbatim. While the answer route tested the
+/// thread by PREFIX, a person could open an ordinary turn on `mcp-anything`, answer their own
+/// approval card, and have the server mint an MCP allow-once from it — a yes the door would
+/// spend on the next `tools/call`, for a call nobody at the door ever made. The test is exact
+/// now: the run's thread must be the one the door would have minted for THIS run's coworker.
+#[tokio::test]
+async fn a_conversation_on_a_look_alike_thread_is_not_an_mcp_run() {
+    let database_url = database_or_skip!();
+    let email = format!("look-alike-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn_on(&token, &agent, "mcp-not-mine", "run a command")
+        .await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let (suspended, _) = h.store.load_run(&run_id).await.expect("run");
+    assert_eq!(
+        suspended.thread_id, "mcp-not-mine",
+        "the client's thread name was taken verbatim, which is the point"
+    );
+    let pending = suspended.pending.clone().expect("a pending call");
+
+    let answered: Value = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer")
+        .json()
+        .await
+        .expect("answer json");
+    assert_eq!(
+        answered["continuing"], true,
+        "a conversation on a look-alike thread is still a conversation: {answered}"
+    );
+    assert!(
+        answered.get("settling").is_none(),
+        "it must not be settled as an MCP card: {answered}"
+    );
+
+    // AND NOTHING WAS MINTED. A yes remembered here would be spendable by the coworker's own bot
+    // key on a call the MCP door never asked about.
+    assert_eq!(
+        opengrok_server::mcp_door::take_mcp_allow_once(
+            &h.store,
+            &opengrok_core::id::CoworkerId::from_stored(agent.clone()),
+            Some(h.account.as_str()),
+            &pending.tool,
+            &pending.arguments,
+        )
+        .await,
+        None,
+        "an ordinary run must not mint an MCP allow-once"
+    );
+
+    let mut ended = None;
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            ended = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        ended
+            .expect("the run never ended, so nothing resumed it")
+            .status,
+        RunStatus::Finished
     );
 }

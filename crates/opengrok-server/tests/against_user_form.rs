@@ -3,9 +3,9 @@
 //! A coworker is hired with a computer that records `act` and `screenshot`. The mock door
 //! asks for `request_user_form`. Submit types email then Tab then password, never screenshots,
 //! settles `formResolution`, and the secret is absent from the entry, the transcript, and
-//! history. `submitSecret` still drops its value and does not type. The AG-UI REST twin
-//! authenticates with an account bearer. A turn that starts on `POST /ag-ui` (no `sendPrompt`)
-//! stamps `entryId` on CUSTOM `run-awaiting-approval` so NativeChat can submit from the SSE.
+//! history. The AG-UI REST twin authenticates with an account bearer, and a turn on
+//! `POST /ag-ui` stamps `entryId` on CUSTOM `run-awaiting-approval` so NativeChat can submit
+//! straight from the SSE frame.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
@@ -22,14 +22,14 @@ use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;
@@ -127,6 +127,9 @@ impl Computer for FillStub {
     async fn state(&self, _box_id: &str) -> BoxResult<String> {
         Ok("running".to_string())
     }
+    async fn offers_a_screen(&self, _box_id: &str) -> bool {
+        true
+    }
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
     }
@@ -193,7 +196,7 @@ struct Harness {
     account: AccountId,
     stub: Arc<FillStub>,
     client: reqwest::Client,
-    gateway: GatewayState,
+    gateway: HostState,
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
@@ -236,13 +239,7 @@ async fn harness_with_door(database_url: &str, email: &str, door: Arc<MockDoor>)
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    .allowing_identity_fallback();
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -278,22 +275,69 @@ impl Harness {
             .expect("mint access")
     }
 
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
+    /// One AG-UI POST with an account bearer — how NativeChat answers a card.
+    async fn agui(&self, token: &str, path: &str, body: Value) -> (u16, Value) {
         let res = self
             .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
+            .post(format!("{}{path}", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&body)
             .send()
             .await
-            .expect("api call");
+            .expect("ag-ui call");
         let status = res.status().as_u16();
         let text = res.text().await.expect("body");
         (
             status,
             serde_json::from_str(&text).unwrap_or(Value::String(text)),
         )
+    }
+
+    /// One turn on the AG-UI door. The reply is the whole SSE stream; a turn that pauses for a
+    /// form ends it with `run-awaiting-approval`.
+    async fn turn(&self, token: &str, agent: &str, prompt: &str) -> String {
+        let res = self
+            .client
+            .post(format!("{}/ag-ui", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "threadId": format!("gateway-{agent}"),
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": format!("m-{}", uuid::Uuid::now_v7().simple()), "role": "user", "content": prompt }],
+                "forwardedProps": { "coworkerId": agent },
+            }))
+            .send()
+            .await
+            .expect("ag-ui turn");
+        assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
+        res.text().await.expect("sse")
+    }
+
+    /// `GET /ag-ui/host-settings[?coworker=…]` — the record, plus this coworker's tunnel.
+    async fn host_settings(&self, token: &str, query: &str) -> Value {
+        let res = self
+            .client
+            .get(format!("{}/ag-ui/host-settings{query}", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("get host settings");
+        assert_eq!(res.status().as_u16(), 200);
+        res.json().await.expect("host settings json")
+    }
+
+    /// `PUT /ag-ui/host-settings` — a partial record, merged.
+    async fn patch_host_settings(&self, token: &str, patch: Value) -> Value {
+        let res = self
+            .client
+            .put(format!("{}/ag-ui/host-settings", self.base))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&patch)
+            .send()
+            .await
+            .expect("put host settings");
+        assert_eq!(res.status().as_u16(), 200);
+        res.json().await.expect("host settings json")
     }
 
     async fn computer_json(&self, token: &str, agent: &str) -> (u16, Value) {
@@ -329,12 +373,7 @@ impl Harness {
 
     async fn wait_for_form(&self, agent: &str) -> Value {
         for _ in 0..100 {
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 100 }),
-                )
-                .await;
+            let tail = self.tail(agent).await;
             if let Some(card) = tail["entries"].as_array().and_then(|entries| {
                 entries
                     .iter()
@@ -356,12 +395,7 @@ impl Harness {
 
     async fn wait_for_forms(&self, agent: &str, n: usize) -> Vec<Value> {
         for _ in 0..100 {
-            let (_, tail) = self
-                .api(
-                    "getAgentTranscriptTail",
-                    json!({ "id": agent, "limit": 100 }),
-                )
-                .await;
+            let tail = self.tail(agent).await;
             let cards: Vec<Value> = tail["entries"]
                 .as_array()
                 .into_iter()
@@ -418,14 +452,18 @@ impl Harness {
             .len()
     }
 
+    /// The coworker's transcript, in the shape the assertions here already read. Straight off the
+    /// store: the verb that used to serve it was the desktop's.
     async fn tail(&self, agent: &str) -> Value {
-        let (_, tail) = self
-            .api(
-                "getAgentTranscriptTail",
-                json!({ "id": agent, "limit": 100 }),
+        let entries = self
+            .store
+            .gateway_transcript(
+                &opengrok_core::id::CoworkerId::from_stored(agent.to_string()),
+                &self.account,
             )
-            .await;
-        tail
+            .await
+            .expect("transcript");
+        json!({ "entries": entries })
     }
 
     async fn wait_user_form_idle(&self) {
@@ -451,13 +489,7 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ada").await;
 
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-form" }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     assert_eq!(card["kind"], "send-message");
     assert_eq!(card["message"]["type"], "user-form");
@@ -474,8 +506,9 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
     let entry_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "submitUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
             json!({
                 "entryId": entry_id,
                 "agentId": agent,
@@ -535,44 +568,6 @@ async fn submit_types_into_the_box_settles_the_card_and_strips_secrets() {
         dump.contains("submitted") || dump.contains(EMAIL),
         "settled card still visible: {dump}"
     );
-
-    // `submitSecret` still drops the value and does not type into the box.
-    let before_acts = h.stub.acts().len();
-    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
-    let secret_entry = json!({
-        "kind": "send-message",
-        "id": format!("e_secret_{}", uuid::Uuid::now_v7().simple()),
-        "timestampMs": now_ms(),
-        "message": {
-            "type": "secret-request",
-            "secretRequest": { "label": "GITHUB_TOKEN", "description": "vault" }
-        }
-    });
-    let secret_id = secret_entry["id"].as_str().unwrap().to_string();
-    h.store
-        .append_gateway_entry(&coworker, &h.account, &secret_entry, now_ms())
-        .await
-        .expect("append secret-request");
-    let (status, saved) = h
-        .api(
-            "submitSecret",
-            json!({
-                "entryId": secret_id,
-                "agentId": agent,
-                "value": SECRET
-            }),
-        )
-        .await;
-    assert_eq!(status, 200, "{saved}");
-    assert_eq!(saved["secretProvided"], true, "{saved}");
-    let saved_dump = saved.to_string();
-    assert!(!saved_dump.contains(SECRET), "{saved_dump}");
-    assert_eq!(
-        h.stub.acts().len(),
-        before_acts,
-        "submitSecret must not Type"
-    );
-    assert_eq!(h.stub.shots(), 0);
 }
 
 #[tokio::test]
@@ -583,13 +578,7 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Bea").await;
 
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-agui" }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
 
@@ -643,8 +632,9 @@ async fn agui_rest_submit_round_trips_with_an_account_bearer() {
     assert_eq!(h.stub.shots(), 0);
 
     let (status, dismissed) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": entry_id,
                 "agentId": agent,
@@ -667,20 +657,15 @@ async fn dismiss_settles_without_typing() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Cam").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-dismiss" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
     assert!(h.pending_user_form_runs().await >= 1);
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": entry_id,
                 "agentId": agent,
@@ -730,8 +715,9 @@ async fn dismiss_settles_without_typing() {
 
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     let (status, resolved) = h
-        .api(
-            "resolveBoxHandoff",
+        .agui(
+            &token,
+            "/ag-ui/box-handoff/resolve",
             json!({
                 "entryId": handoff_id,
                 "agentId": agent,
@@ -984,19 +970,14 @@ async fn dismissed_resumes_without_a_handoff() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Eve").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-dismissed" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": entry_id,
                 "agentId": agent,
@@ -1039,19 +1020,13 @@ async fn an_unanswered_form_times_out_and_resumes() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Fay").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-timeout" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let settled = opengrok_server::gateway::user_form::timeout_unresolved_form(
+    let settled = opengrok_server::agui::user_form::timeout_unresolved_form(
         &h.gateway, &h.account, &coworker, &agent,
     )
     .await;
@@ -1086,19 +1061,14 @@ async fn agui_handoff_resolve_declines_without_stopping_the_box() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Gia").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-decline" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": entry_id,
                 "agentId": agent,
@@ -1150,19 +1120,14 @@ async fn skip_via_form_entry_id_settles_the_live_handoff_and_resumes() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ivy").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-skip-form" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let form_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1183,8 +1148,9 @@ async fn skip_via_form_entry_id_settles_the_live_handoff_and_resumes() {
 
     // NativeChat KeepAlive: Skip posts the form gateway id when handoffEntryId is missing.
     let (status, resolved) = h
-        .api(
-            "resolveBoxHandoff",
+        .agui(
+            &token,
+            "/ag-ui/box-handoff/resolve",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1236,19 +1202,14 @@ async fn dismiss_dismissed_after_escalate_abandons_the_live_handoff() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Jen").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-abandon" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let form_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1265,8 +1226,9 @@ async fn dismiss_dismissed_after_escalate_abandons_the_live_handoff() {
     assert!(h.pending_user_form_runs().await >= 1);
 
     let (status, dismissed) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1299,19 +1261,14 @@ async fn a_second_escalate_does_not_resume_while_the_handoff_is_live() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Kim").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({ "agentId": agent, "prompt": "sign in", "clientNonce": "n-reesc" }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let form_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, first) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1327,8 +1284,9 @@ async fn a_second_escalate_does_not_resume_while_the_handoff_is_live() {
     let _ = h.wait_for_handoff(&agent).await;
 
     let (status, again) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,
@@ -1357,8 +1315,9 @@ async fn a_second_escalate_does_not_resume_while_the_handoff_is_live() {
     );
 
     let (status, resolved) = h
-        .api(
-            "resolveBoxHandoff",
+        .agui(
+            &token,
+            "/ag-ui/box-handoff/resolve",
             json!({
                 "entryId": handoff_id,
                 "agentId": agent,
@@ -1398,46 +1357,6 @@ async fn a_missing_form_entry_is_an_error_not_null() {
 }
 
 #[tokio::test]
-async fn egress_tunnel_follows_host_setting() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "user-form-egress-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness(&database_url, &email).await;
-
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(false), "default is off: {body}");
-
-    let (status, settings) = h.api("getHostSettings", json!({})).await;
-    assert_eq!(status, 200, "{settings}");
-    assert_eq!(settings["egressTunnelEnabled"], false, "{settings}");
-
-    let (status, settings) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
-        .await;
-    assert_eq!(status, 200, "{settings}");
-    assert_eq!(settings["egressTunnelEnabled"], true, "{settings}");
-
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        body,
-        json!(false),
-        "host setting alone is not available until /v1/info ready: {body}"
-    );
-
-    let (status, settings) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
-        .await;
-    assert_eq!(status, 200, "{settings}");
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(false), "toggle off: {body}");
-}
-
-#[tokio::test]
 async fn egress_tunnel_needs_box_ready_when_info_is_present() {
     let database_url = database_or_skip!();
     let email = format!(
@@ -1447,51 +1366,44 @@ async fn egress_tunnel_needs_box_ready_when_info_is_present() {
     let h = harness(&database_url, &email).await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "egress-box").await;
-    let (status, _) = h.api("openAgent", json!({ "id": agent })).await;
-    assert_eq!(status, 200);
+    let named = format!("?coworker={agent}");
 
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
+    let record = h
+        .patch_host_settings(&token, json!({ "egressTunnelEnabled": true }))
         .await;
-    assert_eq!(status, 200);
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(record["egressTunnelEnabled"], true, "{record}");
+    let record = h.host_settings(&token, &named).await;
     assert_eq!(
-        body,
-        json!(false),
-        "a box that cannot report /v1/info is not available: {body}"
+        record["egressTunnelAvailable"], false,
+        "a box that cannot report /v1/info is not available: {record}"
     );
 
     h.stub.set_egress(Some(EgressTunnel {
         enabled: true,
         ready: false,
     }));
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
+    let record = h.host_settings(&token, &named).await;
     assert_eq!(
-        body,
-        json!(false),
-        "host wants the tunnel but no laptop client is attached: {body}"
+        record["egressTunnelAvailable"], false,
+        "host wants the tunnel but no laptop client is attached: {record}"
     );
 
     h.stub.set_egress(Some(EgressTunnel {
         enabled: true,
         ready: true,
     }));
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body, json!(true), "ready box + host setting: {body}");
-
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": false }))
-        .await;
-    assert_eq!(status, 200);
-    let (status, body) = h.api("isEgressTunnelAvailable", json!({})).await;
-    assert_eq!(status, 200, "{body}");
+    let record = h.host_settings(&token, &named).await;
     assert_eq!(
-        body,
-        json!(false),
-        "a ready box does not override a host that opted out: {body}"
+        record["egressTunnelAvailable"], true,
+        "ready box + host setting: {record}"
+    );
+
+    h.patch_host_settings(&token, json!({ "egressTunnelEnabled": false }))
+        .await;
+    let record = h.host_settings(&token, &named).await;
+    assert_eq!(
+        record["egressTunnelAvailable"], false,
+        "a ready box does not override a host that opted out: {record}"
     );
 }
 
@@ -1533,10 +1445,8 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
         "user share has no groupId: {body}"
     );
 
-    let (status, _) = h
-        .api("setHostSettings", json!({ "egressTunnelEnabled": true }))
+    h.patch_host_settings(&token, json!({ "egressTunnelEnabled": true }))
         .await;
-    assert_eq!(status, 200);
 
     h.stub.set_egress(Some(EgressTunnel {
         enabled: true,
@@ -1682,6 +1592,15 @@ fn sse_events(sse: &str) -> Vec<Value> {
                 .find_map(|line| line.strip_prefix("data: "))
                 .and_then(|payload| serde_json::from_str(payload).ok())
         })
+        .collect()
+}
+
+/// The model's answer, glued back together: the stream is one delta per word.
+fn answer_text(sse: &str) -> String {
+    sse_events(sse)
+        .iter()
+        .filter(|event| event["type"] == "TEXT_MESSAGE_CONTENT")
+        .filter_map(|event| event["delta"].as_str().map(str::to_string))
         .collect()
 }
 
@@ -1997,32 +1916,18 @@ async fn a_new_prompt_while_waiting_interrupts_the_parked_run_as_steer() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Steer").await;
 
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({
-                "agentId": agent,
-                "prompt": "sign in",
-                "clientNonce": "n-park"
-            }),
-        )
-        .await;
-    assert_eq!(status, 200, "{sent}");
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let entry_id = card["id"].as_str().expect("entry id").to_string();
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let (status, sent) = h
-        .api(
-            "sendPrompt",
-            json!({
-                "agentId": agent,
-                "prompt": "forget the form and list the open tabs instead",
-                "clientNonce": "n-steer"
-            }),
+    let steered = h
+        .turn(
+            &token,
+            &agent,
+            "forget the form and list the open tabs instead",
         )
         .await;
-    assert_eq!(status, 200, "{sent}");
 
     for _ in 0..50 {
         if h.pending_user_form_runs().await == 0 {
@@ -2053,82 +1958,15 @@ async fn a_new_prompt_while_waiting_interrupts_the_parked_run_as_steer() {
         "steer must not Type into the form"
     );
 
-    let tail = h.tail(&agent).await;
-    let entries = tail["entries"].as_array().cloned().unwrap_or_default();
+    // The steer reached the MODEL, not just the run log: the mock answers by quoting what it
+    // was told, so its answer naming the new text is the proof the parked card did not swallow it.
+    let answer = answer_text(&steered);
     assert!(
-        entries.iter().any(|entry| {
-            entry["role"] == "user"
-                && entry["content"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("list the open tabs"))
-        }),
-        "new user text is in the transcript: {tail}"
+        answer.contains("list the open tabs")
+            && answer.contains("You said:")
+            && answer.contains("mock door"),
+        "steer must reach the model as a new turn: {answer}"
     );
-    for _ in 0..50 {
-        let tail = h.tail(&agent).await;
-        let dump = tail.to_string();
-        if dump.contains("list the open tabs")
-            && dump.contains("You said:")
-            && dump.contains("mock door")
-        {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!(
-        "steer must reach the model as a new turn: {}",
-        h.tail(&agent).await
-    );
-}
-
-#[tokio::test]
-async fn interrupt_agent_run_stops_a_parked_form_without_a_new_prompt() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "user-form-interrupt-verb-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness(&database_url, &email).await;
-    let token = h.access_token(&email);
-    let agent = h.hire(&token, "Irma").await;
-
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({
-                "agentId": agent,
-                "prompt": "sign in",
-                "clientNonce": "n-interrupt-verb"
-            }),
-        )
-        .await;
-    assert_eq!(status, 200);
-    let card = h.wait_for_form(&agent).await;
-    let entry_id = card["id"].as_str().expect("entry id").to_string();
-    assert!(h.pending_user_form_runs().await >= 1);
-
-    let (status, body) = h
-        .api("interruptAgentRun", json!({ "agentId": agent }))
-        .await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["isRunning"], false, "{body}");
-
-    for _ in 0..50 {
-        if h.pending_user_form_runs().await == 0 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(h.pending_user_form_runs().await, 0);
-    let coworker = opengrok_core::id::CoworkerId::from_stored(agent);
-    let form = h
-        .store
-        .find_gateway_entry(&coworker, &h.account, &entry_id)
-        .await
-        .expect("load form")
-        .expect("form row")
-        .1;
-    assert_eq!(form["formResolution"], "dismissed", "{form}");
 }
 
 #[tokio::test]
@@ -2142,23 +1980,14 @@ async fn escalate_still_holds_until_hand_back_and_is_not_an_interrupt() {
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Hold").await;
 
-    let (status, _) = h
-        .api(
-            "sendPrompt",
-            json!({
-                "agentId": agent,
-                "prompt": "sign in",
-                "clientNonce": "n-escalate-hold"
-            }),
-        )
-        .await;
-    assert_eq!(status, 200);
+    h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let form_id = card["id"].as_str().expect("entry id").to_string();
 
     let (status, body) = h
-        .api(
-            "dismissUserForm",
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
             json!({
                 "entryId": form_id,
                 "agentId": agent,

@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-# Forwards to opengrok-server; the binary's `mock-cards` door needs the catalogue that feature
-# compiles in, and refuses to boot without it rather than falling back to a real (billed) door.
-mock-fixtures = ["opengrok-server/mock-fixtures"]
+default = ["jev"]
+# Forwards Jev. Off, this binary has no typesafe-sdk and one HTTP stack.
+jev = ["opengrok-server/jev"]
 
 [lints]
 workspace = true
@@ -18,7 +18,7 @@ name = "opengrok"
 path = "src/main.rs"
 
 [dependencies]
-opengrok-server = { path = "../opengrok-server" }
+opengrok-server = { path = "../opengrok-server", default-features = false }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-box = { path = "../opengrok-box" }
 opengrok-plugins = { path = "../opengrok-plugins" }

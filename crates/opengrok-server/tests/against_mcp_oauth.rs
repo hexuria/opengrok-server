@@ -24,14 +24,14 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_store::PgStore;
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;
@@ -144,12 +144,7 @@ async fn spawn(store: PgStore, email: &str) -> (String, AuthState) {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some(base.clone()),
-    );
+    let gateway = HostState::new(agui.clone(), Some(base.clone()));
     let app = opengrok_server::router(agui, gateway);
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");

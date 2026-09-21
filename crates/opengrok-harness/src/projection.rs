@@ -315,6 +315,25 @@ impl Projection {
         events
     }
 
+    /// One frame before the first box-bound tool of a turn starts a sleeping box, so a client
+    /// can say "waking the computer" for the wait instead of "working". Closes an open message
+    /// first, like every other frame that is not text.
+    pub fn box_waking(&mut self, coworker_id: &str) -> Vec<Event> {
+        let mut events = self.start();
+        if self.finished {
+            return Vec::new();
+        }
+        events.extend(self.close_open());
+        events.push(
+            self.event(EventType::Custom)
+                .with("name", "box-waking")
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone())
+                .with("coworkerId", coworker_id.to_string()),
+        );
+        events
+    }
+
     /// End the run because a person stopped it.
     ///
     /// TWO FRAMES, AND BOTH ARE NEEDED. AG-UI has no `RUN_STOPPED`, and the two endings it does

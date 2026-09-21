@@ -11,6 +11,7 @@
 //! The route half needs Postgres and skips loudly without OG_DATABASE_URL; the client half does
 //! not touch it, so the SDK wrapper is exercised on a machine with no database.
 
+#![cfg(feature = "jev")]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
@@ -29,7 +30,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
+use opengrok_server::host_state::HostState;
 use opengrok_server::jev::{
     Answer, ChoiceAnswer, JevConfig, JevDoor, JevError, JsonContent, MockJev, NoulAnswer, Question,
     ScoreAnswer, TypeSafeJev,
@@ -50,7 +51,8 @@ fn close_enough(left: f64, right: f64) -> bool {
 // ---------------------------------------------------------------------------------------------
 
 async fn connect() -> Option<PgStore> {
-    let database_url = std::env::var("OG_DATABASE_URL").ok()?;
+    let database_url =
+        opengrok_store::gate_database_or_panic(std::env::var("OG_DATABASE_URL").ok()?);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(&database_url)
@@ -122,12 +124,7 @@ fn app_with(store: PgStore, email: &str, jev: Option<Arc<dyn JevDoor>>) -> (Rout
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    );
+    let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     (opengrok_server::router(agui.clone(), gateway), agui)
 }
 

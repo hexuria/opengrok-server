@@ -1,5 +1,11 @@
 # The grok-bot client contract — what OpenGrok must serve
 
+> **The door this describes was removed on 20 Sep 2026.** Seam A (`POST /api/{method}`,
+> `GET /events`, `/avatars/{id}`) and seam B (ConnectRPC) were built for the Grok Bot desktop
+> client, which is discontinued; a door with no caller is a door that only has to keep compiling.
+> This file stays as the transcription record — what the client asked for, and the evidence for
+> each claim — not as a description of what the server serves today.
+
 **Audience:** an engineer/agent who has never opened either repository and must implement
 the OpenGrok backend so the shipped Grok Bot desktop app boots against it.
 

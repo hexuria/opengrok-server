@@ -10,6 +10,7 @@
 //! placeholder body; slice 3 replaces the middle with the harness, and the framing does not change.
 
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::{HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -30,7 +31,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-/// How long a turn waits for a sleeping box to come up before running its first command anyway.
+/// How long the first box-bound tool call of a turn waits for a sleeping box to come up before
+/// answering that the computer is down. The wait moved from before the model was asked (every
+/// turn paid it) to the tool that needs the box (only those turns pay it).
 /// A box.ascii.dev resume restores a snapshot onto a fresh machine: archived → provisioned →
 /// running took 10–15s live (bx_ncfmdpem, 2 Sep 2026); 90s leaves room for a slow restore.
 pub(crate) const TURN_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
@@ -60,8 +63,8 @@ pub struct AgUiState {
     /// Plugins installed on this server, by name. Installing one makes it *available*; a coworker
     /// still needs it in their ceiling before its tools run.
     pub plugins: Arc<BTreeMap<String, opengrok_plugins::Plugin>>,
-    /// Shared with `GatewayState.settings` so AG-UI turns see `egressTunnelEnabled`.
-    /// `None` until `GatewayState::new` / `router` attach the Arc; env flags still apply.
+    /// Shared with `HostState.settings` so AG-UI turns see `egressTunnelEnabled`.
+    /// `None` until `HostState::new` / `router` attach the Arc; env flags still apply.
     pub host_settings: Option<Arc<Mutex<serde_json::Value>>>,
 }
 
@@ -75,8 +78,8 @@ impl AgUiState {
             .host_settings
             .as_ref()
             .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
-            .unwrap_or_else(crate::gateway::default_settings);
-        crate::gateway::egress_tunnel_available(&settings)
+            .unwrap_or_else(crate::host_state::default_settings);
+        crate::host_state::egress_tunnel_available(&settings)
     }
 
     /// Host intent AND this box's `egress_tunnel.ready`. Failed info → false.
@@ -203,9 +206,10 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
 /// a grant revoked a second ago must stop this turn (CLAUDE.md #6).
 /// The same binding, addressed by coworker rather than by request — because the scheduler and the
 /// monitor fire runs with no `RunAgentInput` anywhere in sight.
-/// `wake_patience` bounds how long a sleeping box is waited on before the first command is tried
-/// anyway: a turn can afford `TURN_WAKE_PATIENCE`; the MCP door, whose caller (Claude Code) has
-/// its own request timeout, passes a shorter one and lets the tool result say "still starting".
+/// `wake_patience` bounds how long the first box-bound tool call waits for a sleeping box before
+/// answering that the computer is down or still starting: a turn can afford `TURN_WAKE_PATIENCE`;
+/// the MCP door, whose caller (Claude Code) has its own request timeout, passes a shorter one and
+/// lets the tool result say "still starting".
 pub(crate) async fn tools_for_coworker(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
@@ -238,52 +242,68 @@ pub(crate) async fn tools_for_coworker(
         .ok()
         .flatten()?;
     let mut computer = super::provision::provider_for(state, org_id.as_deref(), &kind).await?;
-    // A sleeping box is woken before this turn runs (disk was kept, so it comes back where it was),
-    // and its last-used stamp is refreshed so the sweep leaves it running while it is in use. Ask
-    // the provider rather than trusting our `stopped` flag: box.ascii.dev archives a box on its own
-    // TTL, and that box is `archived` with our flag still clear. `wake` also WAITS — a resumed ascii
-    // box is `provisioning` for a while and refuses commands (409 `box_starting`) until `ready`.
-    // Best-effort — a wake failure still lets the turn try.
-    let live = computer.state(&box_id).await.ok();
-    if stopped || live.as_deref() != Some("running") {
-        match computer.wake(&box_id, wake_patience).await {
-            Ok(reached) if reached != "running" => {
-                tracing::warn!(box_id, state = %reached, "the box did not come up in time; the turn may fail");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(%error, box_id, "could not wake the box; the turn may fail");
-                let forbidden = matches!(
-                    &error,
-                    opengrok_box::BoxError::Refused {
-                        status: 401 | 403,
-                        ..
-                    }
-                ) || error.to_string().contains("forbidden");
-                if forbidden {
-                    match super::provision::take_over_with_local_docker(
-                        state,
-                        scope,
-                        &scope_id,
-                        org_id.as_deref(),
-                    )
-                    .await
-                    {
-                        Some((local, new_id)) => {
-                            computer = local;
-                            box_id = new_id;
-                        }
-                        None => return None,
-                    }
+    // The box is NOT woken here. A turn used to wait up to `wake_patience` for a sleeping box
+    // before the model was even asked, and a plain "hi" paid for it (90 s with a dead box, 21 Sep
+    // 2026). The executor wakes the box the first time a tool needs it, and the stream says so.
+    // What stays is one cheap look at the box: a provider that refuses to say (401/403 — an ascii
+    // key revoked, a computer this deployment may no longer reach) is taken over by local Docker
+    // now, as it was when the wake found the same refusal.
+    let _ = stopped;
+    let mut running = false;
+    match computer.state(&box_id).await {
+        Ok(state) => running = state == "running",
+        Err(error) => {
+            let forbidden = matches!(
+                &error,
+                opengrok_box::BoxError::Refused {
+                    status: 401 | 403,
+                    ..
                 }
+            ) || error.to_string().contains("forbidden");
+            if forbidden {
+                tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
+                match super::provision::take_over_with_local_docker(
+                    state,
+                    scope,
+                    &scope_id,
+                    org_id.as_deref(),
+                )
+                .await
+                {
+                    Some((local, new_id)) => {
+                        computer = local;
+                        box_id = new_id;
+                        running = true;
+                    }
+                    None => return None,
+                }
+            } else {
+                tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so");
             }
         }
     }
-    let _ = state
-        .auth
-        .store
-        .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
-        .await;
+    // The in-use stamp keeps the idle sweep off a box while it is used. A box that is asleep is
+    // not in use by a turn that never touches it, so it is stamped only when running now — and by
+    // the executor, through `on_woken`, the moment a tool (or a form fill) brings it up; a box
+    // the executor merely finds running is not stamped twice.
+    if running {
+        let _ = state
+            .auth
+            .store
+            .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+            .await;
+    }
+    let stamp_store = state.auth.store.clone();
+    let stamp_scope_id = scope_id.clone();
+    let on_woken: opengrok_tools::OnWoken = std::sync::Arc::new(move |_| {
+        let store = stamp_store.clone();
+        let scope_id = stamp_scope_id.clone();
+        tokio::spawn(async move {
+            let _ = store
+                .mark_scoped_used(scope, &scope_id, chrono::Utc::now().timestamp_millis())
+                .await;
+        });
+    });
 
     let policy = state
         .auth
@@ -306,8 +326,23 @@ pub(crate) async fn tools_for_coworker(
     );
     // A box with a display gets the screen tools (`open_url`, `computer`); a headless one is
     // never told about them, so it cannot be sent down a dead end.
-    let screen = computer.screen_url(&box_id).await.ok().flatten().is_some();
-    let egress_tunnel = state.egress_tunnel_for(computer.as_ref(), &box_id).await;
+    // Whether the coworker has a screen is how its box is made, not whether the box happens to be
+    // awake: the prompt and the tool list then say the same thing on every turn.
+    let screen = computer.offers_a_screen(&box_id).await;
+    // The tunnel probe asks the box's guest, which only answers when the box is up. For a box
+    // that is asleep now, the executor asks the guest right after the first leave-box tool wakes
+    // it, and raises the consent card only if the tunnel is really there.
+    let egress_tunnel = if running {
+        if state.egress_tunnel_for(computer.as_ref(), &box_id).await {
+            opengrok_tools::EgressTunnelMode::On
+        } else {
+            opengrok_tools::EgressTunnelMode::Off
+        }
+    } else if state.egress_tunnel_enabled() {
+        opengrok_tools::EgressTunnelMode::AskTheBoxAfterWake
+    } else {
+        opengrok_tools::EgressTunnelMode::Off
+    };
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -332,12 +367,14 @@ pub(crate) async fn tools_for_coworker(
         Vec::new()
     };
     let mut executor = opengrok_tools::Executor::with_policy(computer, policy)
+        .with_wake_patience(wake_patience)
+        .with_on_woken(on_woken)
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel(egress_tunnel);
+        .with_egress_tunnel_mode(egress_tunnel);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -397,7 +434,7 @@ async fn pending_form_or_credential_hold(
         let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
             continue;
         };
-        if !crate::gateway::conversation::run_belongs_to(&run, coworker_id) {
+        if !crate::agui::resume::run_belongs_to(&run, coworker_id) {
             continue;
         }
         if matches!(
@@ -633,10 +670,10 @@ async fn connect_plugins(
     (sessions, tools)
 }
 
-/// `POST /ag-ui` lives on `GatewayState` so a UserForm CUSTOM can mint the gateway card and
+/// `POST /ag-ui` lives on `HostState` so a UserForm CUSTOM can mint the gateway card and
 /// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
 /// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
-pub fn run_router(state: crate::gateway::GatewayState) -> Router {
+pub fn run_router(state: crate::host_state::HostState) -> Router {
     Router::new().route("/ag-ui", post(run)).with_state(state)
 }
 
@@ -647,6 +684,10 @@ pub fn router(state: AgUiState) -> Router {
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
+        .route(
+            "/ag-ui/host-settings",
+            get(host_settings).put(patch_host_settings),
+        )
         .route("/coworkers", post(hire).get(list_coworkers))
         .route("/models", get(list_models))
         // The org's coworker templates, for the hire picker. Written by the admin
@@ -2018,12 +2059,12 @@ pub(crate) async fn principal_from_bearer(
 
 /// Start a run and stream its events.
 pub async fn run(
-    State(gateway): State<crate::gateway::GatewayState>,
+    State(gateway): State<crate::host_state::HostState>,
     headers: axum::http::HeaderMap,
     Json(input): Json<RunAgentInput>,
 ) -> Response {
-    // `AgUiState` has no path to the live bus (`GatewayState` owns it). This handler lives on
-    // `GatewayState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
+    // `AgUiState` has no path to the live bus (`HostState` owns it). This handler lives on
+    // `HostState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
     // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
     // AG-UI path does.
     let state = gateway.agui.clone();
@@ -2104,7 +2145,7 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
-        crate::gateway::conversation::interrupt_parked_hitl(
+        crate::agui::resume::interrupt_parked_hitl(
             &gateway,
             account_id,
             &coworker_id,
@@ -2262,7 +2303,7 @@ pub async fn run(
             gateway,
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
-            form_hold: Mutex::new(crate::gateway::user_form::UserFormSseHold::default()),
+            form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_streaming(
             door.as_ref(),
@@ -2416,7 +2457,7 @@ async fn append_events(
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
         if event.event_type == opengrok_wire::agui::EventType::Custom
-            && crate::gateway::conversation::is_suspend_custom(
+            && crate::agui::resume::is_suspend_custom(
                 event.extra.get("name").and_then(|name| name.as_str()),
             )
         {
@@ -2587,7 +2628,7 @@ async fn events_for_client(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    crate::gateway::user_form::hydrate_agui_events(
+    crate::agui::user_form::hydrate_agui_events(
         run.emitted.clone(),
         &forms,
         started_at_ms,
@@ -2738,7 +2779,7 @@ pub async fn replay_thread(
                 }
                 None => Vec::new(),
             };
-            Some(crate::gateway::user_form::hydrate_agui_events(
+            Some(crate::agui::user_form::hydrate_agui_events(
                 run.emitted,
                 &forms,
                 summary.started_at_ms,
@@ -2810,12 +2851,72 @@ pub async fn answer_run(
     let resumed_seq = run.emitted.len() as u32;
 
     let at_ms = now_ms();
-    let events = match run.decide(RunCommand::Answer {
+    let answer = RunCommand::Answer {
         call_id: request.call_id.clone(),
         approved: request.approved,
         by: account_id.to_string(),
         at_ms,
-    }) {
+    };
+
+    // AN MCP AUDIT RUN IS NOT A CONVERSATION, so it does not carry on: answering its card finishes
+    // it, and a yes is remembered for the MCP client's own retry instead. Resuming it would run
+    // the tool here while the client is being told to retry, and the retry would run it again.
+    //
+    // THE WHOLE SETTLE GOES TO THE BACKGROUND, Answer and all. It has to hold the door's
+    // per-coworker lock, and `dispatch` holds that lock across a real tool call — minutes, on a
+    // slow box — so doing it here would park somebody's approve on a request that cannot finish.
+    // Journalling the Answer inside that lock is also stricter than doing it here would be: it
+    // closes the window where a `tools/call` arriving between the append and the lock finds no
+    // pending ask, runs the call and raises a second card.
+    //
+    // The aggregate still decides the answer synchronously first, so a retried press still gets
+    // `alreadyAnswered` and a wrong call id still gets a 409 — `decide` is pure, so this costs
+    // nothing and settles nothing.
+    if crate::mcp_door::is_mcp_audit_run(&run)
+        && let Some(pending) = pending.clone()
+    {
+        if let Err(error) = run.decide(answer) {
+            return match error {
+                opengrok_core::run::RunError::AlreadyAnswered => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "runId": run_id.as_str(),
+                        "callId": request.call_id,
+                        "alreadyAnswered": true,
+                    })),
+                )
+                    .into_response(),
+                error => (StatusCode::CONFLICT, error.to_string()).into_response(),
+            };
+        }
+        let store = state.auth.store.clone();
+        let settling = crate::mcp_door::McpCardAnswer {
+            run_id: run_id.clone(),
+            run,
+            seq,
+            pending,
+            approved: request.approved,
+            at_ms,
+        };
+        let account = account_id.clone();
+        tokio::spawn(async move {
+            crate::mcp_door::settle_mcp_answer(store, account, settling).await;
+        });
+        return Json(serde_json::json!({
+            "runId": run_id.as_str(),
+            "callId": request.call_id,
+            "approved": request.approved,
+            "alreadyAnswered": false,
+            // Nothing follows on this run — the MCP client's retry is what happens next.
+            "continuing": false,
+            // And the ending is on its way rather than already done: a client that needs to know
+            // reads the run back until it is `finished`.
+            "settling": true,
+        }))
+        .into_response();
+    }
+
+    let events = match run.decide(answer) {
         Ok(events) => events,
         // A second answer is not an error the caller needs to fix; it is the same answer arriving
         // twice. Reporting the settled state is what makes a retry safe to send.
@@ -2879,7 +2980,7 @@ pub async fn answer_run(
     // about a refusal somebody made on purpose. Worse, the tool call was left with no result at
     // all, so the next turn in that thread replayed a call nothing answered.
     //
-    // The gateway's own answer path has done this from the start (`gateway::conversation`); the
+    // The suspended-run resume path has done this from the start (`agui::resume`); the
     // two doors on to the same run disagreed, and this is the one that was wrong.
     let continuing = pending.is_some();
     if let Some(pending) = pending {
@@ -3235,6 +3336,12 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
+    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click.
+    let runner = runner.with_egress_consented(
+        answered.reason == opengrok_core::run::SuspendReason::AutoReview
+            && opengrok_tools::leaves_the_box(&answered.tool),
+    );
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled
@@ -3320,6 +3427,13 @@ pub async fn list_awaiting(
                         // What is actually being approved. A person asked to approve "shell"
                         // without seeing the command is being asked to approve nothing.
                         "arguments": pending.arguments,
+                        // WHICH QUESTION IS BEING ASKED. The judge's ask, a policy grant's, the
+                        // machine owner's consent and a form are four different things that all
+                        // land in this one queue, and a client that cannot tell them apart can
+                        // only offer one word for all four. The run's own word, not a new one.
+                        "reason": pending.reason.as_str(),
+                        // And why, in a sentence. Built from the run alone — see `why_of`.
+                        "why": why_of(&pending),
                     }));
                 }
             }
@@ -3328,6 +3442,145 @@ pub async fn list_awaiting(
         }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
+}
+
+/// Why this call is waiting, in a sentence: which question is being asked, and what the call
+/// would do if the answer is yes.
+///
+/// FROM THE RUN AND NOTHING ELSE. The card in the transcript carries the ask's own words, but
+/// reading it would mean a transcript scan per waiting coworker on a queue a client polls — and
+/// the run already holds the reason, the tool and the arguments, which is what the sentence is
+/// made of. The opening line says which of the four questions this is; `cards::summary_for`
+/// writes the rest, the same words the card itself uses for what is about to happen.
+fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
+    use opengrok_core::run::SuspendReason;
+    let what = crate::cards::summary_for(&pending.tool, &pending.arguments);
+    let asking = match pending.reason {
+        SuspendReason::PolicyApproval => crate::cards::POLICY_ASK_REASON,
+        // Deliberately not the judge's default reason text: the ask's own sentence lives on the
+        // card, and an egress-tunnel ask has a different one. Saying which judge instruction
+        // fired, from a run that does not know, would be a guess printed as a fact.
+        SuspendReason::AutoReview => "Auto-review asked about this rather than allowing it.",
+        SuspendReason::ExecConsent => {
+            "This would run on your own computer, so it needs your consent."
+        }
+        SuspendReason::UserForm => "The coworker is asking you to fill something in.",
+        SuspendReason::Credential => "The coworker is asking for a saved login to be brokered.",
+    };
+    format!("{asking} {what}")
+}
+
+/// `?coworker=cw_…`: whose computer the egress-tunnel question is about.
+#[derive(Deserialize)]
+pub struct HostSettingsQuery {
+    coworker: Option<String>,
+}
+
+/// The host's settings record, plus whether the egress tunnel is live for the coworker asked
+/// about. What the desktop verbs `getHostSettings` and `isEgressTunnelAvailable` answered, on
+/// the door NativeChat already uses and under its own account token — so the seam-A door can
+/// close without the settings page losing its host.
+///
+/// `egressTunnelAvailable` is host intent AND that coworker's box advertising the tunnel. No
+/// coworker named, not this account's, no computer, or no box report → false: a client must not
+/// paint the toggle live until a laptop client is attached.
+pub async fn host_settings(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HostSettingsQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
+}
+
+/// A partial record: the keys given replace the host's and the rest stay, the merge
+/// `setHostSettings` did. Answers the whole record, so the client reads back what it set.
+pub async fn patch_host_settings(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HostSettingsQuery>,
+    Json(patch): Json<serde_json::Value>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let Some(patch) = patch.as_object() else {
+        return (StatusCode::BAD_REQUEST, "a settings patch is a JSON object").into_response();
+    };
+    let Some(lock) = state.host_settings.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host keeps no settings",
+        )
+            .into_response();
+    };
+    if let Ok(mut settings) = lock.lock() {
+        if !settings.is_object() {
+            *settings = crate::host_state::default_settings();
+        }
+        if let Some(record) = settings.as_object_mut() {
+            for (key, value) in patch {
+                record.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
+}
+
+async fn host_settings_reply(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker: Option<&str>,
+) -> Response {
+    let mut record = state
+        .host_settings
+        .as_ref()
+        .and_then(|lock| lock.lock().ok().map(|value| value.clone()))
+        .unwrap_or_else(crate::host_state::default_settings);
+    let available = egress_tunnel_available_for(state, account_id, coworker).await;
+    if let Some(record) = record.as_object_mut() {
+        record.insert(
+            "egressTunnelAvailable".to_string(),
+            serde_json::Value::Bool(available),
+        );
+    }
+    Json(record).into_response()
+}
+
+/// Host intent, then the coworker: it must be named, be this account's, have a computer, and
+/// that box must say the tunnel is ready. Each miss is a plain false, never an error — the
+/// settings page still has its record to show.
+async fn egress_tunnel_available_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker: Option<&str>,
+) -> bool {
+    if !state.egress_tunnel_enabled() {
+        return false;
+    }
+    let (Some(coworker), Some(computer)) = (coworker, state.computer.as_ref()) else {
+        return false;
+    };
+    let coworker_id = CoworkerId::from_stored(coworker.to_string());
+    let owns = state
+        .auth
+        .store
+        .coworkers_for(account_id)
+        .await
+        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
+        .unwrap_or(false);
+    if !owns {
+        return false;
+    }
+    let Ok((loaded, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return false;
+    };
+    let Some(box_id) = loaded.computer().map(|id| id.as_str().to_string()) else {
+        return false;
+    };
+    state.egress_tunnel_for(computer.as_ref(), &box_id).await
 }
 
 /// The message a reply points at, as the one bracketed line `reply_context` writes for the
@@ -3367,7 +3620,7 @@ fn reply_quote(
     } else {
         "your earlier message"
     };
-    crate::gateway::conversation::reply_quote_line(who, text)
+    crate::agui::resume::reply_quote_line(who, text)
 }
 
 /// A user message with the quote it answers ahead of it.
@@ -3382,7 +3635,7 @@ fn with_reply_context(
 ) -> String {
     if content
         .trim_start()
-        .starts_with(crate::gateway::conversation::REPLY_QUOTE_OPENING)
+        .starts_with(crate::agui::resume::REPLY_QUOTE_OPENING)
     {
         return content.to_string();
     }
@@ -3449,10 +3702,10 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 /// card stayed `call-*-1` with Continue that could not submit.
 struct AgUiSink {
     tx: tokio::sync::mpsc::UnboundedSender<Event>,
-    gateway: crate::gateway::GatewayState,
+    gateway: crate::host_state::HostState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
-    form_hold: Mutex<crate::gateway::user_form::UserFormSseHold>,
+    form_hold: Mutex<crate::agui::user_form::UserFormSseHold>,
 }
 
 impl AgUiSink {
@@ -3487,10 +3740,10 @@ impl EventSink for AgUiSink {
     async fn emit(&self, events: &[Event]) {
         for event in events {
             let mut event = event.clone();
-            if crate::gateway::user_form::is_live_user_form_custom(&event) {
+            if crate::agui::user_form::is_live_user_form_custom(&event) {
                 if let (Some(coworker_id), Some(account_id)) = (&self.coworker_id, &self.account_id)
                 {
-                    crate::gateway::conversation::stamp_user_form_entry_id(
+                    crate::agui::resume::stamp_user_form_entry_id(
                         &self.gateway,
                         coworker_id,
                         account_id,

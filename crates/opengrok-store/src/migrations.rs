@@ -14,7 +14,9 @@ use crate::StoreResult;
 const MIGRATION_LOCK_KEY: i64 = 0x0_6E_67_72_6F_6B; // "ngrok" in hex, the tail of opengrok
 
 const SCHEMA: &str = r#"
--- The log. Append-only: no UPDATE or DELETE is ever issued against this table.
+-- The log. Append-only in normal operation: no UPDATE is ever issued, and the only DELETE is
+-- the operator purge (`purge_accounts_except`), which removes whole streams of aggregates that
+-- no longer exist.
 create table if not exists events (
     id          bigserial primary key,
     stream_id   text        not null,
@@ -275,6 +277,14 @@ alter table schedule_view add column if not exists kind text not null default 'c
 alter table schedule_view add column if not exists hook_id text;
 create unique index if not exists schedule_hook_idx
     on schedule_view (hook_id) where hook_id is not null;
+-- The bearer's hash and the bearer itself, projected so the two hot paths read ONE ROW instead of
+-- replaying a stream: an inbound POST checking a key, and an owner's listing showing them theirs.
+-- NEITHER IS NEW EXPOSURE — both are already in `events` in plaintext (`ScheduleEvent::Created`,
+-- `SecretRotated`), and this table is behind the same account check the listing is. Rows projected
+-- before these columns existed carry '', which their readers take as "ask the aggregate" and not
+-- as "this routine has no key".
+alter table schedule_view add column if not exists secret_hash text not null default '';
+alter table schedule_view add column if not exists webhook_key text not null default '';
 
 create table if not exists monitor_view (
     id            text        primary key,

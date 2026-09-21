@@ -295,6 +295,25 @@ impl DockerComputer {
 
 #[async_trait]
 impl Computer for DockerComputer {
+    /// The desktop ports are published when the container is created and cannot change after,
+    /// so the container's own port bindings say whether it has a screen — awake or not, and
+    /// whatever the image env says today. A box Docker cannot describe falls back to that env.
+    async fn offers_a_screen(&self, box_id: &str) -> bool {
+        match self
+            .docker(&[
+                "inspect",
+                "--format",
+                "{{json .HostConfig.PortBindings}}",
+                box_id,
+            ])
+            .await
+        {
+            Ok(bindings) => bindings.contains("\"6080/tcp\""),
+            Err(BoxError::NoSuchBox) => false,
+            Err(_) => self.wants_desktop(),
+        }
+    }
+
     async fn create(&self, ttl_seconds: Option<u64>) -> BoxResult<String> {
         let args = self.create_args(ttl_seconds)?;
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();

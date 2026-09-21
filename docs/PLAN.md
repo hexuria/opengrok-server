@@ -72,10 +72,10 @@ Reference: [`research/client-grok-bot.md`](research/client-grok-bot.md) — the 
 inventory with per-command shapes, transcript kinds, the 12 card types, activity events, the 21 SSE
 channels, the 30-field roster row, the box seam, a 23-step first-boot checklist and 12 traps.
 
-**The rights line is not optional and is written down separately:** [`LEGAL.md`](LEGAL.md). Short
-version — we implement a *client-facing contract for interoperability*, we never vendor the
-generated protobuf stubs, and the repo stays private until a rights review clears it. Nothing in
-this plan depends on publishing.
+**The rights line is not optional — it is `CLAUDE.md` rule 3.** Short version — we implement a
+*client-facing contract for interoperability*, we never vendor the generated protobuf stubs, and
+the repo stays private until a rights review clears it. Nothing in this plan depends on
+publishing.
 
 ---
 

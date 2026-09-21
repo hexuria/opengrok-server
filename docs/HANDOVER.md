@@ -46,11 +46,11 @@ by drift.
 |---|---|
 | Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
 | Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2 |
-| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, `LEGAL.md` |
+| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, #3 |
 | Every model call exits through open-ai-gateway; a pin is a route, not a key | `CLAUDE.md` #4 |
 | Port from the client's own mock (2 services, 18 methods), never the proto inventory | `PORT-PRIORITY.md` §3 |
 | One consent model: the server decides, cards never expire, judge failure = ask | `AUTO-REVIEW.md` §0 |
-| Repo went public 1 Sep 2026 with the rights review still outstanding — transcription rule is harder, not softer | `LEGAL.md` |
+| Repo went public 1 Sep 2026 with the rights review still outstanding — transcription rule is harder, not softer | this page |
 | Redis only after a measured hot query; artifacts land with the harness's first real files | `ROADMAP.md` Later |
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
@@ -61,7 +61,7 @@ by drift.
 | Sharing lets somebody TALK to a coworker; it is never a write grant. The gate asks two questions — `may_use` (owner or org-shared) and `owns` (owner only) — and the two lists fail in opposite directions on purpose, so only the ownership one has a drift test | `gateway/routes.rs`, `tests/against_constant_verbs.rs` |
 | A refusal is the verb's OWN not-found answer, per verb — never 403, and never a uniform 404. A 404 where the verb answers `null` for an unknown id is the same disclosure one step removed | `gateway/routes.rs::never_heard_of_it` |
 | A live frame carries WHO IT IS FOR, stamped or not. Per-person rosters needed per-person SEQUENCES, and that cost a map key (`counter_key`), not a replica-contract change: the `replicaKey` on the wire is unchanged and each account sees a contiguous run under it. A transcript frame takes the ENTRY's account, never the coworker's viewers — a shared coworker has one transcript per person | `gateway/live.rs`, #63 |
-| A seam-A request with no identity is REFUSED (`account_identity_required`, 401), never served as `OG_GATEWAY_EMAIL`. The old fallback authenticated a headerless connection as the admin on 5 Sep 2026; both ends cited the other's fallback. `OG_GATEWAY_IDENTITY_FALLBACK=1` is the only way back, and an unverifiable header is never a fallback candidate | `gateway/mod.rs::Caller` |
+| ~~A seam-A request with no identity is REFUSED (`account_identity_required`, 401), never served as `OG_GATEWAY_EMAIL`~~ — **removed 20 Sep 2026 with seam A.** The rule and its `Caller` type are gone with the door they guarded; `OG_GATEWAY_EMAIL` and `OG_GATEWAY_IDENTITY_FALLBACK` are read by nothing. Kept here because the bug it closed is worth remembering: on 5 Sep 2026 both ends failed open, each citing the other's fallback, and a headerless connection read and wrote as the admin. Every surviving door takes a signed per-account token and has no fallback to fail open into | *(deleted)* |
 | Points: a member's pool is the PAYER's — the person talking, not the hirer. Three caches key on three different things on purpose (pair, pair, payer-alone) and harmonising them reintroduces the bug | `opengrok-server/src/spend.rs` |
 | Every model call the server makes is metered, including the auto-review judge — which needs a scope AND a key AND an actor; any two of the three is a silent half-fix | `opengrok-harness/src/review.rs` |
 
@@ -93,7 +93,7 @@ next person can act, and deliberately not started:
 
 - **#61 — chat renders in one burst.** The app's answer arrives all at once. The bubble is
   already marked `"streaming": true` and the two calls that would grow it already exist and run
-  ONCE (`gateway/conversation.rs`). The journal guarantee is per-ROUND and about the server's own
+  ONCE (`agui/resume.rs`). The journal guarantee is per-ROUND and about the server's own
   ordering, so streaming does not weaken it — and the comment defending the buffering describes a
   property the code does not have. **A restart mid-answer leaves an empty bubble marked
   "typing" forever**; nothing anywhere flips that flag off. That last part is broken today,
@@ -150,7 +150,7 @@ The desktop app you verify against is **`/Applications/Open Grok.app`** (`bot.op
 
 ## Blocked on the operator, not on code
 
-The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding — `LEGAL.md`), and gpt-5.6-luna is on an upstream spending limit (5.5 / 5.4-mini work through the same gateway). GitHub Actions CI runs `scripts/gate.sh --smoke` itself since the repo went public. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
+The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding), and gpt-5.6-luna is on an upstream spending limit (5.5 / 5.4-mini work through the same gateway). GitHub Actions CI runs `scripts/gate.sh --smoke` itself since the repo went public. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
 
 ## The map
 
@@ -162,7 +162,6 @@ The rights review is **overdue** (repo public 1 Sep 2026 with it still outstandi
 | [`ROADMAP.md`](ROADMAP.md) | what is done (with commits) and what is left |
 | [`setup/`](setup/README.md) | standing the server up, end to end |
 | [`AUTO-REVIEW.md`](AUTO-REVIEW.md) | the consent model and the judge |
-| [`LEGAL.md`](LEGAL.md) | the line, before touching the client contract |
 | [`research/`](research/README.md) | the client, the gateway, the sandbox, connectors, the prior product |
 | [`box/`](box/README.md) | local copy of box.ascii.dev Public API v1 (vendor pages; live site wins) |
 | [`verification/`](verification/) | the evidence behind the ticked boxes |

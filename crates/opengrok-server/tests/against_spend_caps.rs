@@ -25,8 +25,8 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
-use opengrok_server::gateway::GatewayState;
 use opengrok_server::gateway_admin::GatewayAdmin;
+use opengrok_server::host_state::HostState;
 use opengrok_server::spend::GuardedDoor;
 use opengrok_store::{PgStore, Vault};
 use serde_json::{Value, json};
@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 macro_rules! database_or_skip {
     () => {
         match std::env::var("OG_DATABASE_URL") {
-            Ok(url) => url,
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
             Err(_) => {
                 eprintln!("skipping: OG_DATABASE_URL is not set");
                 return;
@@ -618,15 +618,7 @@ async fn harness(database_url: &str, host_email: &str) -> Harness {
         plugins: Arc::new(BTreeMap::new()),
         host_settings: None,
     };
-    let gateway_state = GatewayState::new(
-        agui.clone(),
-        Some("test-bearer".to_string()),
-        host_email.to_string(),
-        Some("http://opengrok.lan:1447".to_string()),
-    )
-    // Not an identity test: it speaks as the deployment account, which since 5 Sep 2026
-    // must be asked for rather than assumed.
-    .allowing_identity_fallback();
+    let gateway_state = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
     let app = opengrok_server::router(agui.clone(), gateway_state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -658,25 +650,6 @@ impl Harness {
                 3600,
             )
             .expect("mint access")
-    }
-
-    /// `POST /api/{method}` with the gateway bearer — how the desktop's coordinator calls.
-    async fn api(&self, method: &str, body: Value) -> (u16, Value) {
-        let res = self
-            .client
-            .post(format!("{}/api/{method}", self.base))
-            .header("authorization", "Bearer test-bearer")
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .expect("api call");
-        let status = res.status().as_u16();
-        let text = res.text().await.expect("body");
-        (
-            status,
-            serde_json::from_str(&text).unwrap_or(Value::String(text)),
-        )
     }
 
     async fn spend(&self, access: &str, coworker: &str) -> (u16, Value) {
@@ -714,16 +687,38 @@ impl Harness {
 }
 
 impl Harness {
+    /// One turn on the AG-UI door, as the coworker's own owner. The thread name is the one
+    /// `settled_run` counts runs on, so the two stay in step.
     async fn turn(&self, coworker: &str, n: usize) -> (String, Option<String>) {
-        let (status, sent) = self
-            .api(
-                "sendPrompt",
-                // A nonce dedupes a press per payload; two coworkers' first turns must not share one.
-                json!({ "agentId": coworker, "prompt": format!("turn {n}"), "clientNonce": format!("n{n}-{coworker}") }),
-            )
-            .await;
-        assert_eq!(status, 200, "{sent}");
+        let access = self.owner_token(coworker).await;
+        let res = self
+            .client
+            .post(format!("{}/ag-ui", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .json(&json!({
+                "threadId": format!("gateway-{coworker}"),
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": format!("m{n}"), "role": "user", "content": format!("turn {n}") }],
+                "forwardedProps": { "coworkerId": coworker },
+            }))
+            .send()
+            .await
+            .expect("ag-ui turn");
+        assert_eq!(res.status().as_u16(), 200);
+        let _ = res.text().await;
         self.settled_run(coworker, n).await
+    }
+
+    /// An access token for whoever hired this coworker.
+    async fn owner_token(&self, coworker: &str) -> String {
+        let owner = self
+            .store
+            .coworker_owner(&CoworkerId::from_stored(coworker.to_string()))
+            .await
+            .expect("owner lookup")
+            .expect("the coworker has an owner");
+        let (account, _) = self.store.load_account(&owner).await.expect("account");
+        self.access_token(&owner, &account.email)
     }
 
     fn usage_reads(&self) -> usize {
@@ -1216,8 +1211,14 @@ async fn a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_pla
         .and_then(|m| m.iter().find(|m| m["id"] == account_id.as_str()))
         .and_then(|m| m["usedPoints"].as_i64())
         .expect("used");
-    let (status, deleted) = h.api("deleteAgents", json!({ "ids": [coworker] })).await;
-    assert_eq!(status, 200, "{deleted}");
+    let res = h
+        .client
+        .delete(format!("{}/coworkers/{coworker}", h.base))
+        .header("Authorization", format!("Bearer {access}"))
+        .send()
+        .await
+        .expect("retire");
+    assert!(res.status().is_success(), "retire: {}", res.status());
     assert!(
         h.stand_in.lock().unwrap().keys[0].revoked,
         "revoked on the gateway at retirement"
