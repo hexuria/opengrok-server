@@ -132,7 +132,8 @@ pub async fn submit_user_form(
     let form = form_request_from(&entry);
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
-    if is_saved_login(args) && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
+    let saved_login = is_saved_login(args);
+    if saved_login && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
         // The card stays open: the person may still type by hand, or dismiss.
         return (
             403,
@@ -142,7 +143,13 @@ pub async fn submit_user_form(
 
     let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
     let resolution = overall_resolution(&outcomes);
-    let shared = shared_values(&form, &values);
+    // A saved login is secret whatever the model called its fields: nothing of it is shared
+    // back to the model or the journal.
+    let shared = if saved_login {
+        BTreeMap::new()
+    } else {
+        shared_values(&form, &values)
+    };
     let content = tool_result_content(&form, resolution, &shared, false);
 
     let settled = settle_entry(entry, resolution, &shared, false, &outcomes, false);
@@ -157,7 +164,8 @@ pub async fn submit_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
-    if resolution == FormResolution::Submitted {
+    // A login that came from the vault is not offered to the vault again.
+    if resolution == FormResolution::Submitted && !saved_login {
         super::credential::offer_save_after_submit(
             state,
             account_id,
@@ -581,9 +589,11 @@ fn is_saved_login(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// A saved login is the person's own; it lands only on a box that is one bot's own. A box
-/// shared by the account, a group or an org never receives it, whatever the bot asked for.
-/// Decided here, at fill time, from the box's scope — not from what the app believes.
+/// A saved login is the person's own; it lands only on a box that is one bot's own, and only
+/// when that bot is theirs and shown to nobody else. A box shared by the account, a group or
+/// an org never receives it, and neither does an org-visible bot's (every member drives it,
+/// so a session left there would be theirs too). Decided here, at fill time, from the box's
+/// scope and the bot's record — not from what the app believes.
 async fn fills_a_dedicated_box(
     state: &HostState,
     account_id: &AccountId,
@@ -591,7 +601,16 @@ async fn fills_a_dedicated_box(
 ) -> bool {
     let (_, _, _, _, mode) =
         super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
-    mode == opengrok_core::coworker::BoxMode::Dedicated
+    if mode != opengrok_core::coworker::BoxMode::Dedicated {
+        return false;
+    }
+    state
+        .agui
+        .auth
+        .store
+        .coworker_is_private_and_owned_by(account_id, coworker_id)
+        .await
+        .unwrap_or(false)
 }
 
 fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {

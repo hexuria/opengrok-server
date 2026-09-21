@@ -384,4 +384,27 @@ async fn a_form_raised_after_an_answer_has_its_card_and_entry_id() {
         fields[1]["at"]["y"], 410,
         "positions ride on the card: {card}"
     );
+
+    // What NativeChat reads is the run replay: the form's CUSTOM there carries the same id.
+    let replay: Value = h
+        .client
+        .get(format!("{}/ag-ui/runs/{}", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay run")
+        .json()
+        .await
+        .expect("replay json");
+    let form_custom = replay["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|event| event["name"] == "run-awaiting-approval" && event["callId"] == "form-1")
+        .unwrap_or_else(|| panic!("the form's CUSTOM is on the replay: {replay}"));
+    assert_eq!(
+        form_custom["entryId"].as_str(),
+        Some(entry_id),
+        "the replay carries the card's id: {form_custom}"
+    );
 }

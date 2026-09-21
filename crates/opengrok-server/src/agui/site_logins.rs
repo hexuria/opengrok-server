@@ -88,22 +88,38 @@ async fn save(
     let Some(vault) = state.agui.vault.as_deref() else {
         return no_vault();
     };
-    let field = |key: &str| {
+    // The site and the name are trimmed; a password is taken as typed, spaces and all.
+    let raw = |key: &str, trim: bool| {
         args.get(key)
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty() && text.chars().count() <= MAX_FIELD_CHARS)
+            .map(|text| if trim { text.trim() } else { text })
+            .filter(|text| !text.is_empty())
             .map(str::to_string)
     };
-    let (Some(origin), Some(username), Some(password)) =
-        (field("origin"), field("username"), field("password"))
-    else {
+    let (Some(origin), Some(username), Some(password)) = (
+        raw("origin", true),
+        raw("username", true),
+        raw("password", false),
+    ) else {
         return reply(
             400,
             json!({ "error": "origin, username and password are required" }),
         );
     };
-    let origin = origin.to_ascii_lowercase();
+    if [&origin, &username, &password]
+        .iter()
+        .any(|text| text.chars().count() > MAX_FIELD_CHARS)
+    {
+        return reply(
+            400,
+            json!({ "error": format!("a field is longer than {MAX_FIELD_CHARS} characters") }),
+        );
+    }
+    // The bare host, lowercase: `https://X.com/login` and `x.com` are one site.
+    let origin = opengrok_tools::credential::normalize_origin(&origin).to_ascii_lowercase();
+    if origin.is_empty() {
+        return reply(400, json!({ "error": "origin is not a site" }));
+    }
     match state
         .agui
         .auth
@@ -154,12 +170,17 @@ async fn remove(
 }
 
 /// The one place a saved password leaves the server: to the owner's own app, which asked
-/// after Touch ID. Logged without the value.
+/// after Touch ID. The app sends its bearer in the header; the console's cookie does not
+/// open this door, so a script running in the console cannot either. Logged without the
+/// value.
 async fn reveal(
     State(state): State<HostState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    if headers.get(axum::http::header::AUTHORIZATION).is_none() {
+        return sign_in_first();
+    }
     let Some(account_id) = signed_in(&state, &headers) else {
         return sign_in_first();
     };

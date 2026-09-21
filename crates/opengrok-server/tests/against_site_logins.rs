@@ -186,15 +186,15 @@ async fn a_saved_login_is_listed_without_its_password_and_revealed_only_to_its_o
             &ada,
             "POST",
             "/site-logins",
-            Some(json!({ "origin": "The-Internet.herokuapp.com", "username": "tomsmith", "password": PASSWORD })),
+            Some(json!({ "origin": "https://The-Internet.herokuapp.com/login", "username": " tomsmith ", "password": PASSWORD })),
         )
         .await;
     assert_eq!(status, 200, "{text}");
     assert_eq!(
         row["origin"], "the-internet.herokuapp.com",
-        "stored lowercase: {row}"
+        "the bare host, lowercase: {row}"
     );
-    assert_eq!(row["username"], "tomsmith");
+    assert_eq!(row["username"], "tomsmith", "the name is trimmed: {row}");
     assert!(
         !text.contains(PASSWORD),
         "the save reply carries no password: {text}"
@@ -270,6 +270,52 @@ async fn a_bad_save_is_refused_and_a_server_without_a_vault_says_so() {
     assert_eq!(status, 400, "{body}");
     let (status, _, _) = h.call("nope", "GET", "/site-logins", None).await;
     assert_eq!(status, 401);
+
+    // A password is taken as typed: the spaces around it are part of it.
+    let (status, row, _) = h
+        .call(&ada, "POST", "/site-logins", Some(json!({ "origin": "spaces.example", "username": "a", "password": " pw with spaces " })))
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let id = row["id"].as_str().expect("id").to_string();
+    let (_, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(opened["password"], " pw with spaces ");
+    // Two saves of the same login at once end with one row and one secret.
+    let (a, b) = tokio::join!(
+        h.call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "race.example", "username": "r", "password": "one" }))
+        ),
+        h.call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "race.example", "username": "r", "password": "two" }))
+        ),
+    );
+    assert_eq!(a.1["id"], b.1["id"], "one row: {} {}", a.2, b.2);
+    let secrets: i64 = sqlx::query_scalar("select count(*) from secret_store where id like $1")
+        .bind(format!("%{}%", a.1["id"].as_str().expect("id")))
+        .fetch_one(h.store.pool())
+        .await
+        .expect("count");
+    assert_eq!(secrets, 1, "one secret for the raced row");
+    // The console's cookie does not open the reveal door; the header does.
+    let response = h
+        .client
+        .post(format!("{}/site-logins/{id}/reveal", h.base))
+        .header("cookie", format!("og_access={ada}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "cookie-only reveal is refused"
+    );
 
     let bare = harness(&database_url, false).await;
     let ada = bare

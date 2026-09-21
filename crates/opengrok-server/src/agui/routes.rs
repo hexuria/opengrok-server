@@ -3392,7 +3392,8 @@ async fn continue_run(
     // pause needs its card in the transcript exactly as a fresh turn's does: without the
     // card there is no `entryId`, and NativeChat cannot submit what the person typed.
     let agent_id = coworker_id.as_str().to_string();
-    super::resume::emit_suspensions(&host, &coworker_id, &account_id, &agent_id, &events).await;
+    super::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &agent_id, &events)
+        .await;
 }
 
 /// Runs waiting on this person.

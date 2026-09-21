@@ -346,6 +346,28 @@ pub(crate) async fn emit_suspension(
 
 /// Mint a card for every HITL CUSTOM in the batch. `true` when at least one pause
 /// should hold the turn (a card went out).
+/// The answer path mints only form cards: an approval raised by a continued run is answered
+/// over `/ag-ui/runs/{id}/answer` and needs no gateway card, and a card nobody settles would
+/// sit pending in the transcript for good.
+pub(crate) async fn emit_user_form_suspensions(
+    state: &HostState,
+    coworker_id: &CoworkerId,
+    account: &opengrok_core::id::AccountId,
+    agent_id: &str,
+    events: &[opengrok_wire::agui::Event],
+) -> bool {
+    let mut held = false;
+    for suspension in find_suspensions(events)
+        .into_iter()
+        .filter(|s| s.reason == opengrok_core::run::SuspendReason::UserForm)
+    {
+        if emit_suspension(state, coworker_id, account, agent_id, &suspension).await {
+            held = true;
+        }
+    }
+    held
+}
+
 pub(crate) async fn emit_suspensions(
     state: &HostState,
     coworker_id: &CoworkerId,

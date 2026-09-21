@@ -904,6 +904,15 @@ update grant_view
 update ceiling_view
    set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
  where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` left with the broker (Sep 2026): the saved login is offered on the
+-- ordinary form card. The widening just above still matches today's default grant, so it
+-- would put the dead name on every fresh bot at every boot; this takes it out again.
+update grant_view
+   set profile = jsonb_set(profile, '{only}', (profile->'only') - 'credential.request')
+ where profile->'only' ? 'credential.request';
+update ceiling_view
+   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request')
+ where tools->'only' ? 'credential.request';
 
 -- A person's saved site logins, so the same rows follow them to every Mac. The password
 -- is sealed in secret_store under `site-login:<account>:<id>` (the account id in the key is

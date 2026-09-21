@@ -178,6 +178,16 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         .await
         .expect("append gateway entry");
 
+    // A saved site login: the row, and the password sealed under a key that carries the
+    // account id.
+    let vault =
+        opengrok_store::Vault::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+            .expect("vault");
+    store
+        .upsert_site_login(&vault, &account, "example.com", "ada", "pw", at_ms)
+        .await
+        .expect("site login");
+
     Seeded {
         account,
         org,
@@ -232,6 +242,16 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
             "gateway_entry",
             "select count(*) from gateway_entry where coworker_id = $1",
             &coworker,
+        ),
+        (
+            "site_login",
+            "select count(*) from site_login where account_id = $1",
+            &account,
+        ),
+        (
+            "secret_store (site logins)",
+            "select count(*) from secret_store where id like 'site-login:' || $1 || ':%'",
+            &account,
         ),
     ] {
         let count: i64 = sqlx::query_scalar(sql)

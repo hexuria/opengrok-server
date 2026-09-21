@@ -1957,4 +1957,63 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
         !h.stub.acts.lock().expect("acts").is_empty(),
         "the dedicated box was typed into"
     );
+    // A login that came from the vault is not offered to the vault again, and nothing of it
+    // is shared back to the model.
+    assert!(
+        body.get("sharedValues")
+            .and_then(Value::as_object)
+            .is_none_or(|shared| shared.is_empty()),
+        "a saved login shares nothing: {body}"
+    );
+    let replay = h
+        .client
+        .get(format!("{}/ag-ui/threads/gateway-{own}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay thread");
+    let replayed: Value = replay.json().await.expect("replay json");
+    let offered = replayed["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run["events"].as_array())
+        .flatten()
+        .any(|event| event["name"] == "credential.offer_save");
+    assert!(!offered, "no save offer after a vault fill: {replayed}");
+
+    // A bot the person shares with their org is driven by everyone in it: its box never gets
+    // a saved login, even though the box is the bot's own.
+    let shown = h.hire(&token, "Dee").await;
+    let patched = h
+        .client
+        .patch(format!("{}/coworkers/{shown}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "visibility": "org" }))
+        .send()
+        .await
+        .expect("patch visibility");
+    assert!(patched.status().is_success(), "{}", patched.status());
+    h.turn(&token, &shown, "sign in").await;
+    let card = h.wait_for_form(&shown).await;
+    let acts_before = h.stub.acts.lock().expect("acts").len();
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"].as_str().expect("entry id"),
+                "agentId": shown,
+                "savedLogin": true,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert_eq!(
+        h.stub.acts.lock().expect("acts").len(),
+        acts_before,
+        "nothing typed into an org-visible bot's box"
+    );
 }

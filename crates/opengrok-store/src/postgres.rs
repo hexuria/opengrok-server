@@ -1274,6 +1274,25 @@ impl PgStore {
         Ok(())
     }
 
+    /// A saved login may land only on a bot that is this person's own and shown to nobody
+    /// else: an org-visible bot is driven by every member of the org, so a session left in its
+    /// box would be theirs too.
+    pub async fn coworker_is_private_and_owned_by(
+        &self,
+        account_id: &AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<bool> {
+        let row = sqlx::query(
+            "select 1 as ok from coworker_view
+             where id = $2 and account_id = $1 and visibility = 'private'",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
     /// The secret_store key of a saved site login. The account id sits in the key so the
     /// purge's substring sweep finds it.
     pub fn site_login_secret_id(account_id: &AccountId, id: &str) -> String {
@@ -1303,19 +1322,29 @@ impl PgStore {
         password: &str,
         at_ms: i64,
     ) -> StoreResult<SiteLoginRow> {
-        let existing: Option<String> = sqlx::query_scalar(
-            "select id from site_login where account_id = $1 and origin = $2 and username = $3",
+        // The row first, in the transaction: on a conflict the existing id comes back, so two
+        // saves racing for the same login end with one row and one secret under its id.
+        let candidate = format!("sl_{}", uuid::Uuid::now_v7());
+        let label = format!("{username} on {origin}");
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "insert into site_login (id, account_id, origin, username, label, created_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $6)
+             on conflict (account_id, origin, username) do update set
+               label = excluded.label, updated_at_ms = excluded.updated_at_ms
+             returning id, origin, username, label, created_at_ms, updated_at_ms",
         )
+        .bind(&candidate)
         .bind(account_id.as_str())
         .bind(origin)
         .bind(username)
-        .fetch_optional(&self.pool)
+        .bind(&label)
+        .bind(at_ms)
+        .fetch_one(&mut *tx)
         .await?;
-        let id = existing.unwrap_or_else(|| format!("sl_{}", uuid::Uuid::now_v7()));
-        let secret_id = Self::site_login_secret_id(account_id, &id);
+        let row = site_login_row(row)?;
+        let secret_id = Self::site_login_secret_id(account_id, &row.id);
         let sealed = vault.seal(&secret_id, password)?;
-        let label = format!("{username} on {origin}");
-        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
              values ($1, $2, $3, $4)
@@ -1330,23 +1359,8 @@ impl PgStore {
         .bind(at_ms)
         .execute(&mut *tx)
         .await?;
-        let row = sqlx::query(
-            "insert into site_login (id, account_id, origin, username, label, created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $6)
-             on conflict (account_id, origin, username) do update set
-               label = excluded.label, updated_at_ms = excluded.updated_at_ms
-             returning id, origin, username, label, created_at_ms, updated_at_ms",
-        )
-        .bind(&id)
-        .bind(account_id.as_str())
-        .bind(origin)
-        .bind(username)
-        .bind(&label)
-        .bind(at_ms)
-        .fetch_one(&mut *tx)
-        .await?;
         tx.commit().await?;
-        site_login_row(row)
+        Ok(row)
     }
 
     /// Delete one of the person's own site logins, password included. False when there was

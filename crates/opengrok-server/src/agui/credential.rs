@@ -1,9 +1,10 @@
 //! Save-for-next-time after a site login: the `credential.offer_save` CUSTOM.
 //!
-//! WHY THIS IS NOT THE VAULT. Connector credentials stay in `opengrok-store::Vault`. A site
-//! password must never be stored, journaled, or shown to the model. The saved login lives in
-//! NativeChat, which offers it on the `request_user_form` card and types it into the page
-//! out of the model's view; the server only ever learns origin and username.
+//! The frame carries origin, username and the form's entry id, never a password. A saved
+//! login lives in the person's vault (`site_login`, sealed in `secret_store`, opened only for
+//! their own app) and in their Mac's keychain; NativeChat offers it on the `request_user_form`
+//! card and the fill types it into the page out of the model's view. Nothing about it is
+//! journaled or shown to the model.
 
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_tools::credential::{origin_from_form, username_from_shared};

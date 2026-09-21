@@ -1,8 +1,9 @@
 //! Save-for-next-time after a site login (`credential.offer_save`), and the scrub that keeps a
 //! password off every event, tool result, and journal row.
 //!
-//! WHY THIS IS NOT THE VAULT. `opengrok-store::Vault` seals connector / API secrets. A Google
-//! password must never enter it, Postgres, the journal, or a tool result.
+//! WHERE A PASSWORD MAY LIVE. The person's own vault (`site_login`, sealed with the same
+//! key as connector secrets, opened only for their own app) and their Mac's keychain. Never
+//! the journal, an event, or a tool result.
 //!
 //! WHY THE MODEL NEVER SEES A PASSWORD. `offer_save` is `{ origin, username, formEntryId }`.
 //! The saved login itself is offered by NativeChat on the `request_user_form` card and typed
