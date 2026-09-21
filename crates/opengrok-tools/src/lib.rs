@@ -650,15 +650,9 @@ pub struct Executor {
 /// The built-ins that need a display.
 const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
 /// The built-ins that exist to work a web page in the box's browser: the screen tools, and the
-/// two that hand a page's login to the person. Withheld together when the computer's use of the
+/// one that hands a page's login to the person. Withheld together when the computer's use of the
 /// person's network is switched off, so none of them is an advertised dead end.
-const BROWSER_TOOLS: &[&str] = &[
-    "open_url",
-    "computer",
-    RUN_RECIPE,
-    REQUEST_USER_FORM,
-    REQUEST_CREDENTIAL,
-];
+const BROWSER_TOOLS: &[&str] = &["open_url", "computer", RUN_RECIPE, REQUEST_USER_FORM];
 /// The recipe tool's name; offered next to the screen tools, gated the same way.
 pub const RUN_RECIPE: &str = "run_recipe";
 
@@ -3675,7 +3669,7 @@ mod tests {
             .with_screen(true)
             .with_egress_tunnel(true)
             .with_egress_policy(EgressPolicy::Never);
-        for tool in [REQUEST_USER_FORM, REQUEST_CREDENTIAL] {
+        for tool in [REQUEST_USER_FORM] {
             let result = executor
                 .execute(
                     &context_with_box("box_mine"),
