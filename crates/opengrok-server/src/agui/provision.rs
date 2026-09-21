@@ -702,7 +702,7 @@ fn stamp_egress_fields(screen: &mut Value, host_wants: bool, cap: Option<EgressT
 /// policy stays `per-bot|per-account|per-org`. This is the client-facing
 /// placement name (`dedicated` = bot sidebar, `user` = Settings→Computer,
 /// `group` = group sidebar, `org` = admin console).
-fn share_scope_of(scope: &str) -> &'static str {
+pub fn share_scope_of(scope: &str) -> &'static str {
     match scope {
         "bot" => "dedicated",
         "account" => "user",
@@ -713,11 +713,133 @@ fn share_scope_of(scope: &str) -> &'static str {
     }
 }
 
+/// The standing answer for a computer scope; no row is `ask`. `Err` when the store could not
+/// answer — the caller decides what that means where it stands: the run path fails closed,
+/// the pane says nothing, the GET says 503.
+pub async fn egress_policy_read(
+    state: &AgUiState,
+    scope: &str,
+    scope_id: &str,
+) -> Result<opengrok_tools::EgressPolicy, ()> {
+    match state.auth.store.egress_policy_mode(scope, scope_id).await {
+        Ok(mode) => Ok(mode
+            .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
+            .unwrap_or_default()),
+        Err(error) => {
+            tracing::warn!(%error, scope, scope_id, "could not read the egress policy");
+            Err(())
+        }
+    }
+}
+
+/// The policy for a turn, and whether it is a stand-in. A store that cannot answer fails
+/// CLOSED: `never` for this turn. `ask` would still put the tunnel card in front of a person
+/// for the screen tools, but the two login hand-offs have no card of their own — under `ask`
+/// a stored `never` would let a person type a site password into a box whose traffic then
+/// leaves through their network. One turn of a withheld browser during a store error is the
+/// cheaper wrong, and the `unconfirmed` flag keeps the prompt from calling it the person's
+/// choice.
+pub async fn egress_policy_for_turn(
+    state: &AgUiState,
+    scope: &str,
+    scope_id: &str,
+) -> (opengrok_tools::EgressPolicy, bool) {
+    match egress_policy_read(state, scope, scope_id).await {
+        Ok(policy) => (policy, false),
+        Err(()) => (opengrok_tools::EgressPolicy::Never, true),
+    }
+}
+
+/// The Computer pane carries the choice next to `shareScope`, so the client can paint the
+/// control without a second request. Nothing is stamped when the store cannot answer: the
+/// client hides the control rather than showing a word nobody chose.
+async fn stamp_egress_policy(state: &AgUiState, screen: &mut Value, scope: &str, scope_id: &str) {
+    if let Ok(policy) = egress_policy_read(state, scope, scope_id).await {
+        screen["egressPolicy"] = json!(policy.as_stored());
+    }
+}
+
 fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
     screen["shareScope"] = json!(share_scope_of(scope));
     if scope == "group" {
         screen["groupId"] = json!(scope_id);
     }
+}
+
+/// A coworker's live box, found the one way every door must find it: the account's sharing
+/// mode, then the scope that mode puts this coworker in, then that scope's recorded box and the
+/// provider of its kind. The id frozen on the coworker's own row is NOT consulted: after an
+/// update, a heal or a takeover it names a container that no longer exists (four of the dev
+/// account's coworkers carried `6c21ce5cd833` while the account's box was `box-box-1`, 21 Sep
+/// 2026), and host-settings, which read it, said the tunnel was off for a box whose guest said
+/// it was on.
+pub struct ScopedBox {
+    pub scope: &'static str,
+    pub scope_id: String,
+    pub box_id: String,
+    pub kind: String,
+    pub stopped: bool,
+    pub org_id: Option<String>,
+    pub computer: Arc<dyn Computer>,
+}
+
+/// `None` when the coworker has no box in its scope or its kind has no provider here. The
+/// Computer pane (`coworker_screen`) walks the same steps itself because it has to say WHY
+/// each one failed; the callers here (host-settings, the egress policy) only need the box.
+pub async fn scoped_box_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<ScopedBox> {
+    let row = scoped_box_row_for(state, account_id, coworker_id).await?;
+    let computer = lookup_provider(state, row.org_id.as_deref(), &row.kind)
+        .await
+        .computer?;
+    Some(ScopedBox {
+        scope: row.scope,
+        scope_id: row.scope_id,
+        box_id: row.box_id,
+        kind: row.kind,
+        stopped: row.stopped,
+        org_id: row.org_id,
+        computer,
+    })
+}
+
+/// The recorded box of a coworker's scope, without its provider. What a setting keyed by the
+/// scope needs: a preference about a box is still writable when the box's provider cannot be
+/// built right now (an org key sealed under a rotated KEK), and the Computer pane paints the
+/// control in exactly that state.
+pub struct ScopedBoxRow {
+    pub scope: &'static str,
+    pub scope_id: String,
+    pub box_id: String,
+    pub kind: String,
+    pub stopped: bool,
+    pub org_id: Option<String>,
+}
+
+pub async fn scoped_box_row_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<ScopedBoxRow> {
+    let (_, org_id, scope, scope_id, _) = scope_of(state, account_id, coworker_id.as_str()).await;
+    let (box_id, kind, stopped) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+        .ok()
+        .flatten()?;
+    Some(ScopedBoxRow {
+        scope,
+        scope_id,
+        box_id,
+        kind,
+        stopped,
+        org_id,
+    })
 }
 
 /// Live screen NativeChat paints. Same facts as gateway `getForeverBoxStatus`, on the AG-UI
@@ -795,6 +917,7 @@ pub async fn coworker_screen(
         });
         stamp_egress_fields(&mut body, host_wants, None);
         stamp_share_scope(&mut body, scope, &scope_id);
+        stamp_egress_policy(state, &mut body, scope, &scope_id).await;
         return body;
     };
     let live_state = provider
@@ -827,6 +950,7 @@ pub async fn coworker_screen(
     });
     stamp_egress_fields(&mut screen, host_wants, cap);
     stamp_share_scope(&mut screen, scope, &scope_id);
+    stamp_egress_policy(state, &mut screen, scope, &scope_id).await;
     screen
 }
 

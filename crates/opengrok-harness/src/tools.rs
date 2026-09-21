@@ -85,6 +85,34 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// The computer may not use the person's network while the tunnel is on: the browser tools
+    /// are withheld and the prompt says why. See `Executor::network_off`.
+    pub fn network_off(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.network_off())
+    }
+
+    /// The withholding is a fail-closed stand-in, not the person's choice. See
+    /// `Executor::network_unconfirmed`.
+    pub fn network_unconfirmed(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.network_unconfirmed())
+    }
+
+    /// The same, asked once the box is awake, for a path that wakes the box itself (the
+    /// user-form fill). See `Executor::network_off_now`.
+    pub async fn network_off_now(&self) -> bool {
+        match self.executor.as_ref() {
+            Some((executor, context)) => match context.box_id.as_ref() {
+                Some(box_id) => executor.network_off_now(box_id.as_str()).await,
+                None => executor.network_off(),
+            },
+            None => false,
+        }
+    }
+
     /// The person said yes, in this run, to a leave-box action: the tunnel is not asked about
     /// again. See `Executor::with_egress_consented`.
     #[must_use]

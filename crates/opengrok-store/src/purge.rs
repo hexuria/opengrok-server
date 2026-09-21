@@ -428,6 +428,13 @@ impl PgStore {
             &orgs
         );
         delete!(
+            "egress_policy",
+            "delete from egress_policy where scope_id = any($1) or scope_id = any($2) or scope_id = any($3)",
+            &accounts,
+            &coworkers,
+            &orgs
+        );
+        delete!(
             "box_update",
             "delete from box_update where scope_id = any($1) or scope_id = any($2) or scope_id = any($3)",
             &accounts,

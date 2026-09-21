@@ -829,12 +829,22 @@ async fn fill_on_box(
     else {
         return failed();
     };
+    // The fill types into the box's browser outside the executor, so the executor's withholding
+    // of the browser tools does not reach it: the same rule is applied here.
+    if runner.network_off() {
+        return failed();
+    }
     let Some((computer, box_id)) = runner.fill_target() else {
         return failed();
     };
     // The person may press Submit long after the box went to sleep; this path types straight
     // into the box, so it wakes it the way a tool call would — same memo, same in-use stamp.
     if runner.wake_fill_target().await.is_err() {
+        return failed();
+    }
+    // And, awake, the guest can say whether a tunnel is attached: a standing `never` that
+    // could not be decided while the box slept is decided here, before a password is typed.
+    if runner.network_off_now().await {
         return failed();
     }
     fill_into_focus(computer.as_ref(), &box_id, form, values).await

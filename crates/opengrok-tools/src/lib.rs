@@ -500,6 +500,48 @@ pub enum EgressTunnelMode {
     AskTheBoxAfterWake,
 }
 
+/// The person's standing answer, per computer, to the tunnel's Review-an-action card. Stored as
+/// the reverse-exec channel's words (`bypass` | `ask` | `never`) so one vocabulary serves both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EgressPolicy {
+    /// Never raise the tunnel card for this computer: every leave-box action may use the
+    /// person's network.
+    Always,
+    /// One card per run, as before. What an unset policy means.
+    #[default]
+    Ask,
+    /// This computer may not use the person's network: while the tunnel is on for it, the
+    /// leave-box tools are not offered at all, and one that arrives anyway is refused.
+    Never,
+}
+
+impl EgressPolicy {
+    /// The stored word; anything unknown reads as `Ask`, which is what no row means too.
+    pub fn from_stored(mode: &str) -> Self {
+        match mode {
+            "bypass" => Self::Always,
+            "never" => Self::Never,
+            _ => Self::Ask,
+        }
+    }
+
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::Always => "bypass",
+            Self::Ask => "ask",
+            Self::Never => "never",
+        }
+    }
+
+    pub fn is_valid(mode: &str) -> bool {
+        matches!(mode, "bypass" | "ask" | "never")
+    }
+}
+
+/// What a leave-box tool answers when the computer's network use is switched off.
+pub const NETWORK_OFF: &str =
+    "this computer's use of the person's network is switched off, so it cannot reach the web";
+
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
@@ -597,10 +639,26 @@ pub struct Executor {
     /// The person already said yes, in this run, to a leave-box action — the tunnel's card, or a
     /// judge's card on the same kind of action — so the tunnel is not asked about again.
     egress_consented: bool,
+    /// The person's standing answer for this computer. `Always` is consent given in advance;
+    /// `Never`, with the tunnel on, takes the leave-box tools off the offer (see `has_screen`).
+    egress_policy: EgressPolicy,
+    /// The policy could not be read this turn and `Never` is the fail-closed stand-in, not the
+    /// person's word: the prompt must not say they chose it.
+    egress_policy_unconfirmed: bool,
 }
 
 /// The built-ins that need a display.
 const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
+/// The built-ins that exist to work a web page in the box's browser: the screen tools, and the
+/// two that hand a page's login to the person. Withheld together when the computer's use of the
+/// person's network is switched off, so none of them is an advertised dead end.
+const BROWSER_TOOLS: &[&str] = &[
+    "open_url",
+    "computer",
+    RUN_RECIPE,
+    REQUEST_USER_FORM,
+    REQUEST_CREDENTIAL,
+];
 /// The recipe tool's name; offered next to the screen tools, gated the same way.
 pub const RUN_RECIPE: &str = "run_recipe";
 
@@ -664,6 +722,8 @@ impl Executor {
             egress_tunnel: EgressTunnelMode::Off,
             egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             egress_consented: false,
+            egress_policy: EgressPolicy::default(),
+            egress_policy_unconfirmed: false,
         }
     }
 
@@ -690,6 +750,8 @@ impl Executor {
             egress_tunnel: EgressTunnelMode::Off,
             egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             egress_consented: false,
+            egress_policy: EgressPolicy::default(),
+            egress_policy_unconfirmed: false,
         }
     }
 
@@ -701,8 +763,51 @@ impl Executor {
     }
 
     /// Whether the screen tools are on offer — the prompt must say the same thing the offering does.
+    /// A box whose network use is switched off has its screen tools withheld too: every one of
+    /// them leaves the box for the web, and a tool the model is told about but that always
+    /// refuses is a dead end it keeps trying.
     pub fn has_screen(&self) -> bool {
-        self.screen
+        self.screen && !self.network_off()
+    }
+
+    /// The computer may not use the person's network, and the box's guest says a tunnel is
+    /// attached that would carry it: the browser tools are withheld and the prompt says why.
+    /// Host intent alone (`AskTheBoxAfterWake`, the box asleep) is not enough — `ask` raises
+    /// no card then either; a `never` that withheld more than `ask` asks about would say the
+    /// person switched off something that was not carrying anything. The after-wake check
+    /// refuses in words instead, once the guest has been asked.
+    pub fn network_off(&self) -> bool {
+        self.egress_policy == EgressPolicy::Never && self.egress_tunnel == EgressTunnelMode::On
+    }
+
+    /// `network_off`, asked once the box is awake: under a standing `never` with the tunnel
+    /// mode undecided at turn start (`AskTheBoxAfterWake`), the woken guest's word settles it.
+    /// For the paths that wake a box and act on it outside `execute` (the user-form fill).
+    pub async fn network_off_now(&self, box_id: &str) -> bool {
+        self.network_off()
+            || (self.egress_policy == EgressPolicy::Never
+                && self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
+                && self.tunnel_is_there(box_id).await)
+    }
+
+    /// The person's standing answer for this computer to the tunnel's card.
+    #[must_use]
+    pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
+        self.egress_policy = policy;
+        self
+    }
+
+    /// The policy is a fail-closed stand-in this turn, not something the person chose.
+    #[must_use]
+    pub fn with_egress_policy_unconfirmed(mut self, unconfirmed: bool) -> Self {
+        self.egress_policy_unconfirmed = unconfirmed;
+        self
+    }
+
+    /// The browser is withheld this turn because the policy could not be read, not because
+    /// the person said no — the prompt says so in those words.
+    pub fn network_unconfirmed(&self) -> bool {
+        self.egress_policy_unconfirmed && self.network_off()
     }
 
     /// How long the first box-bound tool call of a turn waits for a sleeping box.
@@ -759,6 +864,9 @@ impl Executor {
         if context.screen_hold && screen_tool {
             return false;
         }
+        if self.network_off() && screen_tool {
+            return false;
+        }
         let review_inactive = self
             .auto_review
             .as_ref()
@@ -769,11 +877,17 @@ impl Executor {
             && screen_tool
             && review_inactive
             && !review_approved
-            && !self.egress_consented
+            && !self.egress_consented()
         {
             return false;
         }
         true
+    }
+
+    /// Consent to leave through the tunnel for this run: given on a card in this run, or given
+    /// in advance for this computer (`EgressPolicy::Always`).
+    fn egress_consented(&self) -> bool {
+        self.egress_consented || self.egress_policy == EgressPolicy::Always
     }
 
     fn box_outcome(&self, box_id: &str) -> Option<Result<(), String>> {
@@ -915,7 +1029,7 @@ impl Executor {
     }
 
     pub fn has_recipes(&self) -> bool {
-        self.screen && !self.recipes.is_empty()
+        self.has_screen() && !self.recipes.is_empty()
     }
 
     /// Offer `machine: "group"` on the box tools, naming the room.
@@ -1018,6 +1132,7 @@ impl Executor {
             .iter()
             .copied()
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
+            .filter(move |name| !self.network_off() || !BROWSER_TOOLS.contains(name))
             // Offered by `tool_names` / `tool_schemas` on its own terms: a screen AND a grant.
             .filter(|name| *name != RUN_RECIPE)
     }
@@ -1352,6 +1467,14 @@ impl Executor {
             }
         };
 
+        // The browser tools are withheld when the network is off, so one arriving here is a
+        // model that was offered them on an earlier turn. Refused in words BEFORE the two
+        // hand-off cards below: a login card raised for a box that cannot browse would have
+        // the person type a password that is then thrown away.
+        if self.network_off() && BROWSER_TOOLS.contains(&tool_name.as_str()) {
+            return ToolResult::refused(&call.id, NETWORK_OFF);
+        }
+
         // HITL wait, not approve-then-run — and BEFORE the judge. A form is not a tool that
         // then executes, so auto-review must not steal the card; a `computer` type while a
         // form is open must not send the secret to another model. Policy Deny still refuses.
@@ -1389,7 +1512,7 @@ impl Executor {
         // Consent to leave through the tunnel is given once per run, not once per click: "visit
         // facebook" used to cost a card for the page, another for the screenshot, another for the
         // click (21 Sep 2026). The resume paths set it from the answered card's own tool.
-        let egress_consented = self.egress_consented;
+        let egress_consented = self.egress_consented();
         if self.egress_tunnel == EgressTunnelMode::On
             && leave_box_tool
             && !review_approved
@@ -1483,7 +1606,16 @@ impl Executor {
             return ToolResult::refused(&call.id, down);
         }
         // The box was asleep when the turn started, so the guest could not say whether the
-        // tunnel is really there. It is awake now: ask it, once, and raise the card only if it is.
+        // tunnel is really there. It is awake now: ask it, once, and raise the card only if it
+        // is — or, under a standing `never`, refuse in words: the tools were offered because
+        // nobody could know, and the person's answer to a tunnel that IS there is no.
+        if self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
+            && BROWSER_TOOLS.contains(&tool_name.as_str())
+            && self.egress_policy == EgressPolicy::Never
+            && self.tunnel_is_there(box_id.as_str()).await
+        {
+            return ToolResult::refused(&call.id, NETWORK_OFF);
+        }
         if self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
             && leave_box_tool
             && !review_approved
@@ -1636,7 +1768,7 @@ impl Executor {
     }
 
     async fn open_url(&self, box_id: &BoxId, call_id: &str, args: OpenUrlArgs) -> ToolResult {
-        if !self.screen {
+        if !self.has_screen() {
             return ToolResult::refused(call_id, "this computer has no screen");
         }
         match self.computer.open_url(box_id.as_str(), &args.url).await {
@@ -1654,7 +1786,7 @@ impl Executor {
     /// Act, then look: every action answers with a fresh screenshot, so the model sees what it
     /// did without a second call. A plain `screenshot` just looks.
     async fn computer_use(&self, box_id: &BoxId, call_id: &str, args: ComputerArgs) -> ToolResult {
-        if !self.screen {
+        if !self.has_screen() {
             return ToolResult::refused(call_id, "this computer has no screen");
         }
         let action = match args.into_action() {
@@ -2012,6 +2144,8 @@ mod tests {
     struct SpyComputer {
         ran_on: Mutex<Vec<(String, String)>>,
         fail_with: Option<BoxError>,
+        /// The guest advertises an attached tunnel (`/v1/info`), for the after-wake tests.
+        tunnel_ready: bool,
     }
 
     impl SpyComputer {
@@ -2025,6 +2159,12 @@ mod tests {
 
     #[async_trait]
     impl Computer for SpyComputer {
+        async fn egress_tunnel(&self, _box_id: &str) -> Option<opengrok_box::EgressTunnel> {
+            self.tunnel_ready.then_some(opengrok_box::EgressTunnel {
+                enabled: true,
+                ready: true,
+            })
+        }
         async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
             Ok("box_new".to_string())
         }
@@ -2623,6 +2763,7 @@ mod tests {
         let spy = Arc::new(SpyComputer {
             ran_on: Mutex::new(Vec::new()),
             fail_with: Some(BoxError::NoSuchBox),
+            tunnel_ready: false,
         });
         let executor = allowing(spy);
         let result = executor
@@ -3381,6 +3522,185 @@ mod tests {
         let result = executor.execute(&context, &later).await;
         assert!(!result.awaiting_approval, "asked again: {result:?}");
         assert_eq!(result.awaiting_reason, None);
+    }
+
+    /// The person answered in advance for this computer: no card, the call runs.
+    #[tokio::test]
+    async fn a_standing_always_skips_the_tunnel_card() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_egress_policy(EgressPolicy::Always);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+        assert!(!result.content.contains("switched off"), "{result:?}");
+    }
+
+    /// `Never` with the tunnel on: the screen tools are not on offer, the prompt is told, and a
+    /// call that arrives anyway is refused in words without touching the box.
+    #[tokio::test]
+    async fn a_standing_never_withholds_the_leave_box_tools() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_egress_policy(EgressPolicy::Never);
+        assert!(executor.network_off());
+        assert!(!executor.has_screen());
+        let offered = executor.tool_names();
+        for gone in BROWSER_TOOLS {
+            assert!(!offered.iter().any(|name| name == gone), "{offered:?}");
+        }
+        assert!(offered.iter().any(|name| name == "shell"), "{offered:?}");
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("open_url", json!({ "url": "https://example.com" })),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert!(result.content.contains("switched off"), "{result:?}");
+        assert_eq!(spy.last_box(), None, "must not wake or touch the box");
+        // The box's own shell is not the person's network: it still runs.
+        let shell = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(shell.ok, "{shell:?}");
+    }
+
+    /// With the tunnel off the policy is moot: `Never` keeps the screen, because nothing would
+    /// carry the box's traffic through the person's network.
+    #[tokio::test]
+    async fn a_standing_never_means_nothing_without_a_tunnel() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_policy(EgressPolicy::Never);
+        assert!(!executor.network_off());
+        assert!(executor.has_screen());
+        let offered = executor.tool_names();
+        assert!(offered.iter().any(|name| name == "computer"), "{offered:?}");
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(!result.content.contains("switched off"), "{result:?}");
+    }
+
+    /// Host intent with the box asleep is not a tunnel: `never` offers the tools as `ask`
+    /// would, and only refuses once the woken guest says a tunnel is really attached.
+    #[tokio::test]
+    async fn a_standing_never_waits_for_the_guest_when_the_box_was_asleep() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake)
+            .with_egress_policy(EgressPolicy::Never);
+        assert!(!executor.network_off());
+        assert!(executor.has_screen());
+        let offered = executor.tool_names();
+        assert!(offered.iter().any(|name| name == "computer"), "{offered:?}");
+        // The spy's guest advertises no tunnel, so the call goes through.
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert!(!result.content.contains("switched off"), "{result:?}");
+    }
+
+    /// The box was asleep at turn start and the guest, asked after the wake, says a tunnel IS
+    /// attached: under `never` the browser call is refused in words, where `ask` would raise
+    /// the card. `run_recipe` is a browser sequence and is caught the same way.
+    #[tokio::test]
+    async fn a_standing_never_refuses_once_the_woken_guest_says_the_tunnel_is_there() {
+        let spy = Arc::new(SpyComputer {
+            tunnel_ready: true,
+            ..SpyComputer::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake)
+            .with_egress_policy(EgressPolicy::Never);
+        assert!(!executor.network_off(), "not known before the wake");
+        assert!(executor.network_off_now("box_mine").await);
+        for (tool, args) in [
+            ("computer", json!({ "action": "screenshot" })),
+            ("open_url", json!({ "url": "https://example.com" })),
+            (RUN_RECIPE, json!({ "recipe": "r1" })),
+        ] {
+            let result = executor
+                .execute(&context_with_box("box_mine"), &call(tool, args))
+                .await;
+            assert!(
+                !result.awaiting_approval,
+                "{tool}: no card under never: {result:?}"
+            );
+            assert!(
+                result.content.contains("switched off"),
+                "{tool}: {result:?}"
+            );
+        }
+        // The same state under `ask` is the card, as before.
+        let asking = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake);
+        let result = asking
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+    }
+
+    /// The two hand-off cards are browser tools too: under `never` they are refused before a
+    /// person could be asked to type a password for a box that cannot browse.
+    #[tokio::test]
+    async fn a_standing_never_refuses_the_login_hand_offs_before_they_ask() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true)
+            .with_egress_policy(EgressPolicy::Never);
+        for tool in [REQUEST_USER_FORM, REQUEST_CREDENTIAL] {
+            let result = executor
+                .execute(
+                    &context_with_box("box_mine"),
+                    &call(
+                        tool,
+                        json!({ "origin": "https://example.com", "fields": [] }),
+                    ),
+                )
+                .await;
+            assert!(!result.awaiting_approval, "{tool}: {result:?}");
+            assert!(
+                result.content.contains("switched off"),
+                "{tool}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_policy_words_round_trip_and_unknown_reads_as_ask() {
+        for policy in [EgressPolicy::Always, EgressPolicy::Ask, EgressPolicy::Never] {
+            assert_eq!(EgressPolicy::from_stored(policy.as_stored()), policy);
+            assert!(EgressPolicy::is_valid(policy.as_stored()));
+        }
+        assert_eq!(EgressPolicy::from_stored("sometimes"), EgressPolicy::Ask);
+        assert!(!EgressPolicy::is_valid("sometimes"));
     }
 
     #[tokio::test]
