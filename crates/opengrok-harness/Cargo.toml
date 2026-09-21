@@ -9,6 +9,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Reversible scrubbing of what leaves for the provider. A hand-rolled version
+# would have to re-solve check-digit-preserving substitution and stand-ins that
+# arrive split across stream fragments; both are already tested there.
+cred-swap-core = { git = "https://github.com/hexuria/cred-swap", branch = "main" }
 opengrok-core = { path = "../opengrok-core" }
 opengrok-wire = { path = "../opengrok-wire" }
 opengrok-tools = { path = "../opengrok-tools" }

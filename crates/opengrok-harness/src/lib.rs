@@ -9,6 +9,7 @@
 //! exhaustively) or in a door (isolated, swappable), which is what makes a run reproducible
 //! without a provider.
 
+pub mod cloaked_door;
 pub mod gateway;
 pub mod journal;
 pub mod mock;

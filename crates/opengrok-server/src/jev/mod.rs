@@ -35,6 +35,7 @@
 
 pub mod client;
 pub mod mock;
+pub mod reviewer;
 pub mod routes;
 
 use std::sync::Arc;
