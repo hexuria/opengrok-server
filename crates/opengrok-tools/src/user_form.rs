@@ -410,7 +410,7 @@ pub fn tool_result_content(
     };
     let secret_note = "Secret field values were typed into the page and never shown to you.";
     let observe = if types_only_first_field(form) {
-        "Only the FIRST field was typed: this card had several fields but no `samePage` and no positions, so the rest could not be placed. Screenshot and confirm what the page shows now; do not claim login succeeded. If the remaining fields are on the same page, raise ONE new card for them with `samePage: true` and each field's `at`; if a password page is next, prefer `credential.request` when a saved login is likely, otherwise call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
+        "Only the FIRST field was typed: this card had several fields but no `samePage`, and not every field had a position, so the rest could not be placed. Screenshot and confirm what the page shows now; do not claim login succeeded. If the remaining fields are on the same page, raise ONE new card for them with `samePage: true` and each field's `at`; if a password page is next, prefer `credential.request` when a saved login is likely, otherwise call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
     } else if fully_positioned(form) {
         "Each field was clicked at the position you gave, then typed. Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If the page had moved since your screenshot and a value landed in the wrong field, raise the card again with fresh positions. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form."
     } else {
@@ -531,9 +531,14 @@ pub fn should_press_return(form: &FormRequest, typed_count: usize) -> bool {
         return true;
     }
     // A positioned login typed in full is the page's own Log in: every field was clicked and
-    // typed, and a password is among them. Without the Return the page sits filled and
-    // unsubmitted, which the old stepped flow's password-only card never did.
+    // typed, a password is among them, and the model called it a one-page card (`samePage`
+    // or `submit`). Without the Return the page sits filled and unsubmitted, which the old
+    // stepped flow's password-only card never did. The one-page mark is required so that a
+    // card whose positions went stale while the person typed cannot submit a password as a
+    // username on its own: an unmarked positioned card is filled, and the model presses the
+    // page's button after it has looked.
     if fully_positioned(form)
+        && (form.same_page || form.submit)
         && typed_count == form.fields.len()
         && form.fields.iter().any(|field| field.is_secret())
     {
@@ -1009,10 +1014,11 @@ mod tests {
     }
 
     /// The likeliest model output: one card, both fields positioned, `samePage` forgotten,
-    /// `submit` forgotten. Positions make it a whole fill and a Log in, not a silent
-    /// half-fill reported as submitted.
+    /// `submit` forgotten. Positions make it a whole fill, not a silent half-fill reported as
+    /// submitted — but not a Return: only a card the model marked as one page submits itself,
+    /// so a position gone stale while the person typed cannot post a password as a username.
     #[tokio::test]
-    async fn a_positioned_form_types_every_field_and_returns_without_same_page() {
+    async fn a_positioned_form_types_every_field_without_same_page_but_does_not_return() {
         let spy = FillSpy::default();
         let form = FormRequest {
             title: "Log in".into(),
@@ -1040,15 +1046,19 @@ mod tests {
         let acts = spy.acts.lock().unwrap().clone();
         assert_eq!(
             acts.len(),
-            7,
-            "click, select, type ×2, then Return: {acts:?}"
+            6,
+            "click, select, type ×2, and no Return: {acts:?}"
         );
-        assert_eq!(
-            acts.last(),
-            Some(&CuaAction::Key {
+        assert!(
+            !acts.contains(&CuaAction::Key {
                 key: "Return".into()
-            })
+            }),
+            "{acts:?}"
         );
+        // Marked as one page, the same card logs in.
+        let mut marked = form.clone();
+        marked.same_page = true;
+        assert!(should_press_return(&marked, 2));
         // The model is told what happened, and not the stepped advice.
         let said = tool_result_content(&form, FormResolution::Submitted, &BTreeMap::new(), false);
         assert!(said.contains("clicked at the position"), "{said}");
