@@ -504,6 +504,50 @@ impl PgStore {
     /// ahead of turns taken after it started, and the conversation would rearrange itself as it
     /// streamed. Run ids are UUIDv7 and therefore already in start order, which makes them the
     /// tie-break when two runs began in the same millisecond.
+    /// Hide a run from every client of the account that owns it.
+    ///
+    /// Nothing is destroyed: the run, its frames and the coworker's memory of the turn are
+    /// untouched. What changes is that no thread offers it again. Answers whether it was this
+    /// account's run to hide, so a run belonging to somebody else reads as no such run.
+    pub async fn hide_run(
+        &self,
+        run_id: &str,
+        account: &AccountId,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let hidden = sqlx::query(
+            "update run_view set hidden_at_ms = coalesce(hidden_at_ms, $3)
+             where id = $1 and account_id = $2",
+        )
+        .bind(run_id)
+        .bind(account.as_str())
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(hidden.rows_affected() > 0)
+    }
+
+    /// The runs of a thread this account has hidden, so a client can put the same turns out of
+    /// sight in its own cache rather than painting what another machine deleted.
+    pub async fn hidden_runs_in_thread(
+        &self,
+        thread_id: &str,
+        account: &AccountId,
+        limit: i64,
+    ) -> StoreResult<Vec<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "select id from run_view
+             where thread_id = $1 and account_id = $2 and hidden_at_ms is not null
+             order by hidden_at_ms desc limit $3",
+        )
+        .bind(thread_id)
+        .bind(account.as_str())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn runs_for_thread_owned_by(
         &self,
         thread_id: &str,
@@ -512,7 +556,7 @@ impl PgStore {
     ) -> StoreResult<Vec<ThreadRun>> {
         let rows = sqlx::query(
             "select id, status, started_at_ms, updated_at_ms from run_view
-             where thread_id = $1 and account_id = $2
+             where thread_id = $1 and account_id = $2 and hidden_at_ms is null
              order by coalesce(started_at_ms, updated_at_ms) desc, id desc limit $3",
         )
         .bind(thread_id)

@@ -299,6 +299,29 @@ impl Harness {
         (status, res.text().await.expect("body"))
     }
 
+    async fn run(&self, access: &str, run_id: &str) -> (u16, String) {
+        let res = self
+            .client
+            .get(format!("{}/ag-ui/runs/{run_id}", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .send()
+            .await
+            .expect("run replay");
+        let status = res.status().as_u16();
+        (status, res.text().await.expect("body"))
+    }
+
+    async fn hide(&self, access: &str, run_id: &str) -> u16 {
+        self.client
+            .post(format!("{}/ag-ui/runs/{run_id}/hide", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .send()
+            .await
+            .expect("hide")
+            .status()
+            .as_u16()
+    }
+
     async fn thread_json(&self, access: &str, thread_id: &str, query: &str) -> Value {
         let (status, body) = self.thread(access, thread_id, query).await;
         assert_eq!(status, 200, "{body}");
@@ -612,4 +635,79 @@ async fn asking_without_the_frames_still_says_which_runs_exist() {
         json!("a long answer, one frame at a time"),
         "the frames are the default: {whole}"
     );
+}
+
+/// A turn the person hid is not offered to any of their clients, and is not destroyed.
+///
+/// Deleting a turn in NativeChat is a request not to see it again, on that machine or the next
+/// one they sign in from. So the run stays whole — its frames, and the coworker's memory of it —
+/// and what changes is that a thread stops handing it over. The client that did the hiding is
+/// told which runs were withheld, so its own cache of the thread can put the same turns out of
+/// sight rather than painting what another machine deleted.
+#[tokio::test]
+async fn a_hidden_turn_is_withheld_from_every_client_and_still_kept() {
+    let database_url = database_or_skip!();
+    let email = format!("thread-hidden-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let base = now_ms();
+
+    let first = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        base + 1_000,
+        &["the first answer"],
+        Ending::Finished,
+    )
+    .await;
+    let second = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        base + 2_000,
+        &["the second answer"],
+        Ending::Finished,
+    )
+    .await;
+
+    let before = h.thread_json(&access, &thread, "").await;
+    assert_eq!(ids_of(&before), vec![first.as_str(), second.as_str()]);
+
+    assert_eq!(h.hide(&access, first.as_str()).await, 204);
+    // Asking twice is the same answer: a client that retries has not un-hidden anything.
+    assert_eq!(h.hide(&access, first.as_str()).await, 204);
+
+    let after = h.thread_json(&access, &thread, "").await;
+    assert_eq!(
+        ids_of(&after),
+        vec![second.as_str()],
+        "the hidden turn is not offered"
+    );
+    assert_eq!(
+        after["hiddenRunIds"]
+            .as_array()
+            .expect("the withheld ids are named")
+            .iter()
+            .map(|id| id.as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>(),
+        vec![first.as_str().to_string()],
+        "and the client is told which turn it was, so its own copy can go too"
+    );
+
+    // Nothing was destroyed: the run answers for itself exactly as before.
+    let (status, body) = h.run(&access, first.as_str()).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains("the first answer"),
+        "the turn is kept whole: {body}"
+    );
+
+    // Somebody else's run is no such run, and hiding it changes nothing.
+    let stranger = format!("stranger-{}@og.local", uuid::Uuid::now_v7().simple());
+    let (_, other) = h.person(&stranger).await;
+    assert_eq!(h.hide(&other, second.as_str()).await, 404);
+    let still = h.thread_json(&access, &thread, "").await;
+    assert_eq!(ids_of(&still), vec![second.as_str()]);
 }

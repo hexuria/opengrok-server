@@ -691,6 +691,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
+        .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route(
@@ -2936,7 +2937,48 @@ pub async fn replay_thread(
         });
     }
 
-    Json(serde_json::json!({ "threadId": thread_id, "runs": runs })).into_response()
+    // The turns this account hid, named rather than silently missing: a client keeps its own
+    // copy of a thread, and without this the machine that did not do the hiding would go on
+    // painting from its cache what the person deleted somewhere else.
+    let hidden = state
+        .auth
+        .store
+        .hidden_runs_in_thread(&thread_id, &account_id, limit)
+        .await
+        .unwrap_or_default();
+
+    Json(serde_json::json!({ "threadId": thread_id, "runs": runs, "hiddenRunIds": hidden }))
+        .into_response()
+}
+
+/// Hide a turn from every client of the account that owns it.
+///
+/// The person deleting a turn in their app is not asking for it to be destroyed. They are asking
+/// not to be shown it again — and on the next machine they sign in from, not to be shown it
+/// there either. So nothing here is removed: the run keeps its frames, and the coworker keeps
+/// its memory of the turn. What changes is that a thread stops offering the run, so no client
+/// paints it and the one that hid it does not fetch it back.
+///
+/// LAYER 4 (`docs/PLAN.md` §4.5): the account comes from the bearer and another account's run is
+/// "no such run", the same answer as one that never existed.
+pub async fn hide_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    match state
+        .auth
+        .store
+        .hide_run(&run_id, &account_id, now_ms())
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
