@@ -1854,7 +1854,10 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              verification on the same page), call this again with otp fields, \
              challengeKind \"otp\", the page host as liveHost and the field's `at`; \
              NativeChat offers the person's saved authenticator code for that site on the \
-             card. Never re-raise a form that already settled. Captcha, \
+             card. Never re-raise a form that already settled. A passkey prompt: call this with \
+             challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site \
+             offers to add one and the person asked), no fields, liveHost set; when the result \
+             says it is loaded, click the site's passkey button. Captcha, \
              passkey, or a page outside this box is not another password form: the person \
              finishes on the computer (Open the screen). If they dismiss or decline, continue \
              without those credentials and do not loop.",
@@ -1863,9 +1866,13 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "properties": {
                     "title": { "type": "string", "description": "Short title shown on the card." },
                     "instruction": { "type": "string", "description": "What the person should do." },
+                    "passkeyMode": {
+                        "type": "string",
+                        "description": "With challengeKind passkey: use (sign in with the person's passkey) or register (the site offers to add one)."
+                    },
                     "challengeKind": {
                         "type": "string",
-                        "description": "Optional hint: password, otp, captcha, passkey, outside_sandbox. Captcha/passkey/outside-sandbox must not be another password form."
+                        "description": "Optional hint: password, otp, passkey, captcha, outside_sandbox. passkey takes no fields (with passkeyMode use|register). Captcha/outside-sandbox must not be another password form."
                     },
                     "samePage": {
                         "type": "boolean",

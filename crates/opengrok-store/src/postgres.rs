@@ -1343,12 +1343,17 @@ impl PgStore {
         };
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
-            "insert into site_login (id, account_id, origin, username, label, kind, notes, created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+            "insert into site_login (id, account_id, origin, username, label, kind, notes, created_at_ms, updated_at_ms,
+                                     passkey_credential_id, passkey_rp_id, passkey_user_handle)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11)
              on conflict (account_id, origin, username) do update set
                label = excluded.label, kind = excluded.kind, notes = excluded.notes,
-               updated_at_ms = excluded.updated_at_ms
-             returning id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               passkey_credential_id = coalesce(excluded.passkey_credential_id, site_login.passkey_credential_id),
+               passkey_rp_id = coalesce(excluded.passkey_rp_id, site_login.passkey_rp_id),
+               passkey_user_handle = coalesce(excluded.passkey_user_handle, site_login.passkey_user_handle)
+             returning id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms,
+                       passkey_credential_id, passkey_rp_id, passkey_user_handle",
         )
         .bind(&candidate)
         .bind(account_id.as_str())
@@ -1358,6 +1363,9 @@ impl PgStore {
         .bind(login.kind)
         .bind(login.notes)
         .bind(at_ms)
+        .bind(login.passkey.as_ref().map(|p| p.credential_id_b64.as_str()))
+        .bind(login.passkey.as_ref().map(|p| p.rp_id.as_str()))
+        .bind(login.passkey.as_ref().map(|p| p.user_handle_b64.as_str()))
         .fetch_one(&mut *tx)
         .await?;
         let row = site_login_row(row)?;

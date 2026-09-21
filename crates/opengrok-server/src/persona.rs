@@ -236,8 +236,15 @@ pub fn computer_system_prompt(
          page), call `request_user_form` again with otp fields and challengeKind \"otp\", the \
          page host as liveHost, and the code field's position (`at`); NativeChat offers the \
          person their saved authenticator code for that site on the card, and the digits are \
-         typed out of your view — never re-raise a form that already settled. Captcha, passkey, \
-         or a page outside this box is not another \
+         typed out of your view — never re-raise a form that already settled. \
+         A passkey: when the page offers to sign in with a passkey, call `request_user_form` with \
+         challengeKind \"passkey\", passkeyMode \"use\", no fields, and the page host as liveHost, \
+         and wait; NativeChat lists the person's passkeys for that site and they confirm with \
+         Touch ID. When the tool result says the passkey is loaded, click the site's passkey \
+         button and screenshot. When a signed-in page offers to ADD a passkey and the person \
+         asked for one, do the same with passkeyMode \"register\", then click the site's create \
+         button once the holder is ready. You never see a key. Captcha or a page outside this box \
+         is not another \
          password form: the person finishes on the computer (Open the screen). If they dismiss or \
          decline, continue without those credentials and do not loop."
             .to_string();
