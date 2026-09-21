@@ -24,7 +24,7 @@ pub use review::{
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
 pub mod credential;
-pub use credential::{OFFER_SAVE, REQUEST_CREDENTIAL};
+pub use credential::OFFER_SAVE;
 pub mod mcp;
 
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
@@ -1008,7 +1008,6 @@ impl Executor {
             "open_url",
             "computer",
             REQUEST_USER_FORM,
-            REQUEST_CREDENTIAL,
             RUN_RECIPE,
         ]
     }
@@ -1067,16 +1066,11 @@ impl Executor {
     }
 
     /// Accept the model's OpenAI-safe name or a legacy dotted qualify. Policy, sessions and
-    /// `split_qualified` keep the dotted form. `credential.request` is a builtin with a
-    /// dot — OpenAI rejects it — so the wire name is `credential_request`.
+    /// `split_qualified` keep the dotted form. Every builtin is already a legal OpenAI name,
+    /// so only a plugin tool can arrive under a name other than its own.
     fn internal_tool_name(&self, call_name: &str) -> String {
         if let Some(tool) = self.lookup_plugin_tool(call_name) {
             return tool.qualified_name.clone();
-        }
-        for builtin in Self::reserved_openai_names() {
-            if call_name == builtin || crate::mcp::openai_safe_tool_name(builtin) == call_name {
-                return builtin.to_string();
-            }
         }
         call_name.to_string()
     }
@@ -1372,32 +1366,6 @@ impl Executor {
                 );
             }
             return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
-        }
-
-        // HITL wait, not fill-then-run. NativeChat brokers a session out of agent view;
-        // we never see the password and must not type one into the box.
-        // A missing origin is a refusal the model can retry, not a hang.
-        if tool_name == REQUEST_CREDENTIAL {
-            if let Gate::Deny(why) = &gate {
-                return ToolResult::refused(&call.id, why.as_str());
-            }
-            if context.screen_hold {
-                return ToolResult::refused(
-                    &call.id,
-                    "a form, saved-login session, or computer handoff is already open on this conversation; wait for the person to finish it",
-                );
-            }
-            if crate::credential::origin_of(&arguments).is_none() {
-                return ToolResult::refused(
-                    &call.id,
-                    "call again with origin set to the page host (e.g. accounts.google.com); do not send a password",
-                );
-            }
-            return ToolResult::awaiting(
-                &call.id,
-                AwaitingReason::Credential,
-                "Waiting for a saved session",
-            );
         }
 
         if context.screen_hold && matches!(tool_name.as_str(), "computer" | "open_url" | RUN_RECIPE)
@@ -1869,10 +1837,8 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
         )),
         REQUEST_USER_FORM => Some((
             "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
-             If a saved login for this origin is likely, call `credential.request` first and wait; \
-             on filled the authenticated session is ready (observe the page — you did not receive \
-             a password and must not type one with `computer`); on denied, missing, or error, \
-             then raise this. \
+             NativeChat offers the person their saved logins for that site on the card; they \
+             confirm with Touch ID, and the values are typed into the page out of your view. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
              fills in chat; the server clicks each field at the position you give (`at`, in \
@@ -1882,8 +1848,8 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              fields TOGETHER (Facebook, most sites), raise ONE card with both fields and \
              `samePage: true` — do not split them. Only a page that asks for the email alone \
              (Google) gets an email-only card: raise it, observe, and if a password page comes \
-             next prefer `credential.request` when a saved login is likely, otherwise call \
-             this again with a password-only form (new entryId, challengeKind \"password\"). \
+             next call this again with a password-only form (new entryId, challengeKind \
+             \"password\"). \
              If another in-sandbox challenge appears (OTP, phone \
              verification on the same page), call this again with otp fields and \
              challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
@@ -1931,29 +1897,6 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                     "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
                 },
                 "required": ["title", "fields"],
-            }),
-        )),
-        REQUEST_CREDENTIAL => Some((
-            "Ask NativeChat to broker a saved login for this origin, out of your view. Prefer \
-             this before a password `request_user_form` when a match is likely (the person saved \
-             this site, or you already collected a username here). Wait. On filled, the \
-             authenticated session is ready: cookies/profile were applied to the box. You did \
-             not receive a password and must not type one with `computer`. Screenshot the page. \
-             On denied, missing, or error, fall back to `request_user_form`. Do not send a \
-             password.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "origin": {
-                        "type": "string",
-                        "description": "Page host, e.g. accounts.google.com. Required."
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Optional username or email to match."
-                    }
-                },
-                "required": ["origin"],
             }),
         )),
         USER_MACHINE_SHELL => Some((
@@ -2785,14 +2728,6 @@ mod tests {
             "names longer than 64 must be truncated on the wire: {names:?}"
         );
         assert!(names.contains(&"shell".to_string()), "{names:?}");
-        assert!(
-            names.contains(&"credential_request".to_string()),
-            "credential.request is a dotted builtin and must be sanitised: {names:?}"
-        );
-        assert!(
-            !names.iter().any(|name| name == REQUEST_CREDENTIAL),
-            "{names:?}"
-        );
         assert!(
             names.contains(&"gmail_api_send".to_string()),
             "gmail.api.send must be advertised without dots: {names:?}"
@@ -3730,10 +3665,6 @@ mod tests {
             names.iter().any(|name| name == REQUEST_USER_FORM),
             "the form tool does not need a display: {names:?}"
         );
-        assert!(
-            names.iter().any(|name| name == REQUEST_CREDENTIAL),
-            "saved-login session does not need a display to be offered: {names:?}"
-        );
         assert!(!headless.has_screen());
 
         let with_screen = allowing(spy).with_screen(true);
@@ -4287,54 +4218,6 @@ mod tests {
         assert!(result.image.is_none(), "{result:?}");
         assert_eq!(spy.last_box(), None, "await must not type");
         assert!(!result.content.contains("s3cret"), "{result:?}");
-    }
-
-    #[tokio::test]
-    async fn credential_request_awaits_and_does_not_type() {
-        let spy = Arc::new(SpyComputer::default());
-        let executor = allowing(spy.clone());
-        let context = context_with_box("box_mine");
-        let result = executor
-            .execute(
-                &context,
-                &call(
-                    REQUEST_CREDENTIAL,
-                    json!({
-                        "origin": "accounts.google.com",
-                        "username": "ada@example.com",
-                        "password": "s3cret"
-                    }),
-                ),
-            )
-            .await;
-        assert!(result.awaiting_approval, "{result:?}");
-        assert_eq!(result.awaiting_reason, Some(AwaitingReason::Credential));
-        assert!(result.content.contains("Waiting"), "{result:?}");
-        assert!(result.image.is_none(), "{result:?}");
-        assert_eq!(spy.last_box(), None, "await must not type");
-        assert!(!result.content.contains("s3cret"), "{result:?}");
-
-        let via_wire = executor
-            .execute(
-                &context,
-                &call(
-                    "credential_request",
-                    json!({ "origin": "accounts.google.com" }),
-                ),
-            )
-            .await;
-        assert!(
-            via_wire.awaiting_approval,
-            "OpenAI-safe name must map back to the builtin: {via_wire:?}"
-        );
-        assert_eq!(via_wire.awaiting_reason, Some(AwaitingReason::Credential));
-
-        let missing = executor
-            .execute(&context, &call(REQUEST_CREDENTIAL, json!({})))
-            .await;
-        assert!(!missing.ok, "{missing:?}");
-        assert!(!missing.awaiting_approval, "{missing:?}");
-        assert!(missing.content.contains("origin"), "{missing:?}");
     }
 
     #[tokio::test]

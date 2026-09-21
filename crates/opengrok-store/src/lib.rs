@@ -40,8 +40,8 @@ pub use gateway::{
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
-    ArtifactRow, CredentialHint, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow,
-    RecipeRunRow, RecipeShareRow, RecipeVersionRow, SiteLoginRow, ThreadRun,
+    ArtifactRow, CredentialUpdate, PgStore, RecipeGrantRow, RecipeRow, RecipeRunRow,
+    RecipeShareRow, RecipeVersionRow, SiteLoginRow, ThreadRun,
 };
 pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};

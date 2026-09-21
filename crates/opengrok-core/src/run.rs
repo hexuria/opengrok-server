@@ -94,11 +94,6 @@ pub enum SuspendReason {
     /// approval of a tool that will then run: submit types into the box outside `computer_use`,
     /// and the tool result is synthesised so a secret never re-enters the executor.
     UserForm,
-    /// The bot asked NativeChat to broker a saved site login (`credential.request`). Not an
-    /// approval that then runs a tool: NativeChat establishes the session out of agent view
-    /// and POSTs a status. The box gets cookies/session, never a typed password. Site
-    /// passwords never enter the vault, the journal, or a tool result.
-    Credential,
 }
 
 impl SuspendReason {
@@ -108,7 +103,6 @@ impl SuspendReason {
             Self::PolicyApproval => "policy-approval",
             Self::AutoReview => "auto-review",
             Self::UserForm => "user-form",
-            Self::Credential => "credential",
         }
     }
 
@@ -119,7 +113,6 @@ impl SuspendReason {
             "policy-approval" => Self::PolicyApproval,
             "auto-review" => Self::AutoReview,
             "user-form" => Self::UserForm,
-            "credential" => Self::Credential,
             _ => Self::ExecConsent,
         }
     }
@@ -1101,7 +1094,6 @@ mod tests {
             SuspendReason::PolicyApproval,
             SuspendReason::AutoReview,
             SuspendReason::UserForm,
-            SuspendReason::Credential,
         ] {
             assert_eq!(SuspendReason::from_stored(reason.as_str()), reason);
         }

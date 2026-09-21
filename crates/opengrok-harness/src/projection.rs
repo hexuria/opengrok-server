@@ -257,22 +257,14 @@ impl Projection {
         events.extend(self.close_open());
         // Deliberately NOT setting `finished`: the run has not ended, and a later answer must be
         // able to add to it.
-        // NativeChat is coordinated on CUSTOM `credential.request`, not a generic approval card.
-        let name = if reason == opengrok_tools::AwaitingReason::Credential {
-            opengrok_tools::REQUEST_CREDENTIAL
-        } else {
-            "run-awaiting-approval"
-        };
         let arguments = if reason == opengrok_tools::AwaitingReason::UserForm {
             opengrok_tools::user_form::sanitize_arguments(&waiting.arguments)
-        } else if reason == opengrok_tools::AwaitingReason::Credential {
-            opengrok_tools::credential::sanitize_request(&waiting.arguments)
         } else {
             waiting.arguments.clone()
         };
-        let mut event = self
+        let event = self
             .event(EventType::Custom)
-            .with("name", name)
+            .with("name", "run-awaiting-approval")
             .with("threadId", self.thread_id.clone())
             .with("runId", self.run_id.clone())
             // WHICH call, and with what arguments. A person asked to approve "shell" without
@@ -286,15 +278,6 @@ impl Projection {
             .with("reason", reason.as_str())
             // The gate's own words, for the card. Empty when it had none.
             .with("why", why.unwrap_or_default());
-        if reason == opengrok_tools::AwaitingReason::Credential {
-            event = event.with("requestId", waiting.id.clone());
-            if let Some(origin) = arguments.get("origin").cloned() {
-                event = event.with("origin", origin);
-            }
-            if let Some(username) = arguments.get("username").cloned() {
-                event = event.with("username", username);
-            }
-        }
         events.push(event);
         events
     }
@@ -631,50 +614,6 @@ mod tests {
             last.extra
                 .get("arguments")
                 .and_then(|v| v.get("values"))
-                .is_none(),
-            "{dumped}"
-        );
-    }
-
-    #[test]
-    fn awaiting_a_credential_request_is_the_locked_custom_and_drops_a_password() {
-        let mut projection = Projection::new("t1", "r1", 100);
-        let waiting = projection.awaiting_approval(
-            &opengrok_tools::ToolCall {
-                id: "c1".to_string(),
-                name: opengrok_tools::REQUEST_CREDENTIAL.to_string(),
-                arguments: serde_json::json!({
-                    "origin": "accounts.google.com",
-                    "username": "ada@example.com",
-                    "password": "s3cret-should-never-land"
-                }),
-            },
-            opengrok_tools::AwaitingReason::Credential,
-            Some("Waiting for a saved session"),
-        );
-        let last = waiting.last().unwrap();
-        let dumped = format!("{:?}", last.extra);
-        assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
-        assert_eq!(
-            last.extra.get("name").and_then(|v| v.as_str()),
-            Some(opengrok_tools::REQUEST_CREDENTIAL)
-        );
-        assert_eq!(
-            last.extra.get("reason").and_then(|v| v.as_str()),
-            Some("credential")
-        );
-        assert_eq!(
-            last.extra.get("origin").and_then(|v| v.as_str()),
-            Some("accounts.google.com")
-        );
-        assert_eq!(
-            last.extra.get("requestId").and_then(|v| v.as_str()),
-            Some("c1")
-        );
-        assert!(
-            last.extra
-                .get("arguments")
-                .and_then(|v| v.get("password"))
                 .is_none(),
             "{dumped}"
         );

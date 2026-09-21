@@ -71,8 +71,11 @@ async fn a_grant_of_the_old_builtin_set_follows_the_builtins_and_a_chosen_list_d
         .expect("migrations");
 
     let widened = store.policy_for(&account, &old).await.expect("policy");
-    // The widening statements chain, so a row written as the three-tool set arrives at today's
-    // full built-in set in one boot — which is what "follows the built-ins" has to mean.
+    // The widening statements chain, so a row written as the three-tool set arrives at the
+    // last widened set in one boot — which is what "follows the built-ins" has to mean.
+    // `credential.request` is no longer a built-in, but the backfill that added it is a
+    // historical statement and stays as written, so a widened row keeps the name. A name no
+    // executor offers grants nothing.
     let expected = only(&[
         "computer",
         "credential.request",

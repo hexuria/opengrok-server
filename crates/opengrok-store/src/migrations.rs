@@ -920,7 +920,8 @@ create table if not exists site_login (
 );
 create index if not exists site_login_account on site_login (account_id);
 
--- Site-login matching metadata only. NEVER a password. Vault stays connector/API secrets.
+-- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
+-- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (
     account_id     text   not null,
     coworker_id    text   not null,

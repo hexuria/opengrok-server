@@ -893,7 +893,7 @@ pub fn scrub_streamed_tool_args(events: Vec<Event>) -> Vec<Event> {
                     .extra
                     .get("toolCallName")
                     .and_then(serde_json::Value::as_str),
-                Some(opengrok_tools::REQUEST_USER_FORM) | Some(opengrok_tools::REQUEST_CREDENTIAL)
+                Some(opengrok_tools::REQUEST_USER_FORM)
             )
         })
         .filter_map(|event| {
@@ -2435,52 +2435,6 @@ mod tests {
             .collect();
         assert_eq!(shell_args.len(), 3, "an ordinary tool is untouched");
         assert!(text.contains("ls"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn the_journal_scrubs_a_password_off_credential_request() {
-        let journal = MemoryJournal::new();
-        let runner = tool_runner_with(|executor| executor);
-        let events = run_conversation(
-            &MockDoor::asking_for_credential(),
-            Some(&runner),
-            &journal,
-            request("sign in"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let custom = events.iter().find(|event| {
-            event.event_type == EventType::Custom
-                && event.extra.get("name").and_then(|v| v.as_str())
-                    == Some(opengrok_tools::REQUEST_CREDENTIAL)
-        });
-        let custom = custom.expect("credential.request CUSTOM");
-        assert_eq!(
-            custom.extra.get("origin").and_then(|v| v.as_str()),
-            Some("accounts.google.com")
-        );
-        assert!(
-            custom
-                .extra
-                .get("arguments")
-                .and_then(|v| v.get("password"))
-                .is_none(),
-            "{custom:?}"
-        );
-        let journaled = serde_json::to_string(&journal.batches()).unwrap_or_default();
-        assert!(
-            !journaled.contains("s3cret-should-never-land"),
-            "journal must not keep a site password: {journaled}"
-        );
-        assert!(journaled.contains("credential.request"), "{journaled}");
-        assert!(
-            !serde_json::to_string(&custom)
-                .unwrap_or_default()
-                .contains("s3cret-should-never-land"),
-            "{custom:?}"
-        );
     }
 
     #[tokio::test]

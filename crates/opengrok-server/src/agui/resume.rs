@@ -174,10 +174,7 @@ pub(crate) struct Suspension {
 }
 
 pub(crate) fn is_suspend_custom(name: Option<&str>) -> bool {
-    matches!(
-        name,
-        Some("run-awaiting-approval") | Some(opengrok_tools::REQUEST_CREDENTIAL)
-    )
+    name == Some("run-awaiting-approval")
 }
 
 pub(crate) fn find_suspension(events: &[opengrok_wire::agui::Event]) -> Option<Suspension> {
@@ -299,8 +296,6 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             now_ms(),
             &suspension.call_id,
         )),
-        // NativeChat paints CUSTOM `credential.request`. No Grok Bot chrome.
-        SuspendReason::Credential => None,
         // Reverse-exec consent on anything but user_machine_shell: nothing renders it.
         _ => None,
     }
@@ -320,7 +315,7 @@ pub(crate) async fn emit_suspension(
     suspension: &Suspension,
 ) -> bool {
     let card = card_for(suspension);
-    if card.is_none() && suspension.reason != opengrok_core::run::SuspendReason::Credential {
+    if card.is_none() {
         tracing::warn!(
             tool = %suspension.tool,
             reason = suspension.reason.as_str(),
@@ -338,30 +333,19 @@ pub(crate) async fn emit_suspension(
     {
         tracing::error!(%error, "could not append the suspension card entry");
     }
-    match suspension.reason {
-        opengrok_core::run::SuspendReason::UserForm => {
-            super::user_form::spawn_form_hold_timeout(
-                state.clone(),
-                account.clone(),
-                coworker_id.clone(),
-                agent_id.to_string(),
-            );
-        }
-        opengrok_core::run::SuspendReason::Credential => {
-            super::credential::spawn_credential_hold_timeout(
-                state.clone(),
-                account.clone(),
-                coworker_id.clone(),
-                agent_id.to_string(),
-            );
-        }
-        _ => {}
+    if suspension.reason == opengrok_core::run::SuspendReason::UserForm {
+        super::user_form::spawn_form_hold_timeout(
+            state.clone(),
+            account.clone(),
+            coworker_id.clone(),
+            agent_id.to_string(),
+        );
     }
     true
 }
 
 /// Mint a card for every HITL CUSTOM in the batch. `true` when at least one pause
-/// should hold the turn (a card went out, or a credential CUSTOM with no Grok chrome).
+/// should hold the turn (a card went out).
 pub(crate) async fn emit_suspensions(
     state: &HostState,
     coworker_id: &CoworkerId,

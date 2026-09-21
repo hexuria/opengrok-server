@@ -358,7 +358,7 @@ pub(crate) async fn tools_for_coworker(
         Err(_) => false,
     };
     context.screen_hold =
-        transcript_hold || pending_form_or_credential_hold(state, account_id, &coworker_id).await;
+        transcript_hold || pending_form_hold(state, account_id, &coworker_id).await;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -420,9 +420,9 @@ pub(crate) async fn tools_for_coworker(
     Some(ToolRunner::new(executor, context))
 }
 
-/// An unresolved user-form **or** a pending `credential.request` must hold the screen even
-/// when NativeChat never minted a gateway card for the credential wait.
-async fn pending_form_or_credential_hold(
+/// A run suspended on a user-form holds the screen whether or not the transcript has a card
+/// for it: the pending row is the truth, the card is chrome.
+async fn pending_form_hold(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
@@ -439,10 +439,7 @@ async fn pending_form_or_credential_hold(
         }
         if matches!(
             run.pending.as_ref().map(|pending| pending.reason),
-            Some(
-                opengrok_core::run::SuspendReason::UserForm
-                    | opengrok_core::run::SuspendReason::Credential
-            )
+            Some(opengrok_core::run::SuspendReason::UserForm)
         ) {
             return true;
         }
@@ -1661,12 +1658,7 @@ async fn list_tools(
             let name = function.get("name")?.as_str()?.to_string();
             // OpenAI-safe plugin names have no dots (`gmail_api_send`). Kind is
             // "not a builtin", not "contains a dot".
-            let kind = if opengrok_tools::Executor::builtin_tool_names()
-                .iter()
-                .any(|builtin| {
-                    *builtin == name.as_str()
-                        || opengrok_tools::openai_safe_tool_name(builtin) == name
-                })
+            let kind = if opengrok_tools::Executor::builtin_tool_names().contains(&name.as_str())
                 || name == opengrok_tools::USER_MACHINE_SHELL
             {
                 "builtin"
@@ -3032,17 +3024,6 @@ fn resume_outcome(
                 "The person dismissed the form without filling anything. Continue without those credentials; do not type secrets with `computer`.".to_string()
             })
         }
-        opengrok_core::run::SuspendReason::Credential => {
-            opengrok_harness::ResumeOutcome::Settled(if approved {
-                opengrok_tools::credential::tool_result_content(
-                    opengrok_tools::credential::CredentialStatus::Filled,
-                )
-            } else {
-                opengrok_tools::credential::tool_result_content(
-                    opengrok_tools::credential::CredentialStatus::Denied,
-                )
-            })
-        }
         _ if approved => opengrok_harness::ResumeOutcome::Approved,
         opengrok_core::run::SuspendReason::AutoReview => opengrok_harness::ResumeOutcome::Refused(
             "the user declined this on the auto-review card".to_string(),
@@ -3477,7 +3458,6 @@ fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
             "This would run on your own computer, so it needs your consent."
         }
         SuspendReason::UserForm => "The coworker is asking you to fill something in.",
-        SuspendReason::Credential => "The coworker is asking for a saved login to be brokered.",
     };
     format!("{asking} {what}")
 }
@@ -3952,16 +3932,6 @@ mod tests {
                 opengrok_harness::ResumeOutcome::Settled(_)
             ),
             "a yes on a user-form must not re-run request_user_form"
-        );
-        assert!(
-            matches!(
-                resume_outcome(
-                    true,
-                    &pending(opengrok_core::run::SuspendReason::Credential)
-                ),
-                opengrok_harness::ResumeOutcome::Settled(_)
-            ),
-            "a yes on credential.request must not re-run the tool"
         );
 
         // None of them blames the model or reads as an error. A refusal is a decision somebody
