@@ -225,11 +225,12 @@ pub fn computer_system_prompt(
          applied to the box. You did not receive a password and must not type one with \
          `computer` — a screenshot of an observable fill would leak it. Screenshot and confirm \
          the page. On denied, missing, or error, call `request_user_form` and wait. The person \
-         fills in chat; the server types into the focused field and does not show you the secret. \
-         After a user-form settles, screenshot and confirm what the page shows; filling is not a \
-         successful login. When the page shows the email and password fields TOGETHER, raise \
-         ONE card with both fields and `samePage: true`, giving each field its position (`at`) \
-         from your screenshot — do not split them. Only a page that asks for the email alone \
+         fills in chat; the server clicks each field at the position you give and types there, \
+         never showing you the secret. After a user-form settles, screenshot and confirm what \
+         the page shows; filling is not a successful login. When the page shows the email and \
+         password fields TOGETHER, raise ONE card with both fields, `samePage: true` and \
+         `submit: true`, giving each field its position (`at`) from your screenshot — do not \
+         split them and do not focus a field first. Only a page that asks for the email alone \
          gets an email-only card: raise it, then after it settles screenshot; if a password \
          page is next, prefer `credential.request` when a saved login is likely, otherwise call \
          `request_user_form` with a password-only form (new entryId, challengeKind \"password\"). \

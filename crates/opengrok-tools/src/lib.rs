@@ -1901,11 +1901,11 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                     },
                     "samePage": {
                         "type": "boolean",
-                        "description": "Fields share one HTML page: Tab between them. Default false — type only the first focused field (Facebook email then password)."
+                        "description": "The fields share one page (Facebook's email and password do). Set it on every one-page card. Without it and without positions, only the first field is typed."
                     },
                     "submit": {
                         "type": "boolean",
-                        "description": "Press Return after a successful fill. Default false. Combined forms must set this; a single field still Returns."
+                        "description": "Press Return after the fill, i.e. press the page's own Log in. Set it on a one-page login card. A single field, and a fully positioned login, Return on their own."
                     },
                     "fields": {
                         "type": "array",
