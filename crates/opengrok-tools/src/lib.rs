@@ -1850,9 +1850,11 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              (Google) gets an email-only card: raise it, observe, and if a password page comes \
              next call this again with a password-only form (new entryId, challengeKind \
              \"password\"). \
-             If another in-sandbox challenge appears (OTP, phone \
-             verification on the same page), call this again with otp fields and \
-             challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
+             If another in-sandbox challenge appears (an authenticator code, phone \
+             verification on the same page), call this again with otp fields, \
+             challengeKind \"otp\", the page host as liveHost and the field's `at`; \
+             NativeChat offers the person's saved authenticator code for that site on the \
+             card. Never re-raise a form that already settled. Captcha, \
              passkey, or a page outside this box is not another password form: the person \
              finishes on the computer (Open the screen). If they dismiss or decline, continue \
              without those credentials and do not loop.",
