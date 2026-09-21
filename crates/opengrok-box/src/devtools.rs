@@ -82,6 +82,29 @@ pub fn platform_authenticator_options() -> Value {
     })
 }
 
+/// A page session, and whether a tab was opened for it.
+#[derive(Debug, Clone)]
+pub struct AttachedPage {
+    pub session_id: String,
+    pub opened: bool,
+}
+
+/// Whether a page URL is on `host`: that host exactly, or a name under it.
+pub fn url_is_on_host(url: &str, host: &str) -> bool {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let page_host = authority
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    page_host == host || page_host.ends_with(&format!(".{host}"))
+}
+
 impl DevTools {
     /// Run `docker exec -i <box> box-chromium-pipe <url>` and take its pipe.
     pub async fn spawn(box_id: &str, url: &str) -> BoxResult<Self> {
@@ -161,24 +184,14 @@ impl DevTools {
         }
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        let mut bytes = serde_json::to_vec(&message)
-            .map_err(|error| BoxError::Unreachable(format!("could not encode a call: {error}")))?;
-        bytes.push(0);
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(&bytes).await.map_err(|error| {
-                BoxError::Unreachable(format!("the DevTools pipe is closed: {error}"))
-            })?;
-            stdin.flush().await.map_err(|error| {
-                BoxError::Unreachable(format!("the DevTools pipe is closed: {error}"))
-            })?;
-        }
-        let answer = tokio::time::timeout(CALL_TIMEOUT, rx)
-            .await
-            .map_err(|_| {
-                BoxError::Unreachable(format!("{method}: no answer on the DevTools pipe"))
-            })?
-            .map_err(|_| BoxError::Unreachable(format!("{method}: the DevTools pipe closed")))?;
+        let answer = match self.send_and_wait(id, method, &message, rx).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                // A call that failed to go out or timed out leaves nothing waiting for it.
+                self.pending.lock().await.remove(&id);
+                return Err(error);
+            }
+        };
         if let Some(error) = answer.get("error") {
             let text = error
                 .get("message")
@@ -190,6 +203,33 @@ impl DevTools {
             });
         }
         Ok(answer.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    async fn send_and_wait(
+        &self,
+        _id: u64,
+        method: &str,
+        message: &Value,
+        rx: oneshot::Receiver<Value>,
+    ) -> BoxResult<Value> {
+        let mut bytes = serde_json::to_vec(message)
+            .map_err(|error| BoxError::Unreachable(format!("could not encode a call: {error}")))?;
+        bytes.push(0);
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(&bytes).await.map_err(|error| {
+                BoxError::Unreachable(format!("the DevTools pipe is closed: {error}"))
+            })?;
+            stdin.flush().await.map_err(|error| {
+                BoxError::Unreachable(format!("the DevTools pipe is closed: {error}"))
+            })?;
+        }
+        tokio::time::timeout(CALL_TIMEOUT, rx)
+            .await
+            .map_err(|_| {
+                BoxError::Unreachable(format!("{method}: no answer on the DevTools pipe"))
+            })?
+            .map_err(|_| BoxError::Unreachable(format!("{method}: the DevTools pipe closed")))
     }
 
     /// Events as they come. Subscribe before the call that causes them.
@@ -220,8 +260,10 @@ impl DevTools {
         }
     }
 
-    /// The page target whose URL contains `url_part` (or the first page), attached flat.
-    pub async fn attach_to_page(&self, url_part: Option<&str>) -> BoxResult<String> {
+    /// The page on `host` (that host or a name under it; the newest such tab), attached
+    /// flat. When no tab is on the site, a new tab is opened at its front page rather than
+    /// taking one the bot is using; the flag says so. With no host, the newest page.
+    pub async fn attach_to_page(&self, host: Option<&str>) -> BoxResult<AttachedPage> {
         let targets = self.call("Target.getTargets", json!({}), None).await?;
         let empty = Vec::new();
         let list = targets
@@ -232,20 +274,34 @@ impl DevTools {
             .iter()
             .filter(|t| t.get("type").and_then(Value::as_str) == Some("page"))
             .collect();
-        let chosen = url_part
-            .and_then(|part| {
-                pages.iter().find(|t| {
-                    t.get("url")
+        let on_site = |t: &&&Value| {
+            t.get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|u| host.is_none_or(|h| url_is_on_host(u, h)))
+        };
+        let (target_id, opened) = match pages.iter().rev().find(on_site) {
+            Some(page) => (
+                page.get("targetId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| BoxError::Unreachable("a page without a target id".to_string()))?
+                    .to_string(),
+                false,
+            ),
+            None => {
+                let url =
+                    host.map_or_else(|| "about:blank".to_string(), |h| format!("https://{h}/"));
+                let made = self
+                    .call("Target.createTarget", json!({ "url": url }), None)
+                    .await?;
+                (
+                    made.get("targetId")
                         .and_then(Value::as_str)
-                        .is_some_and(|u| u.contains(part))
-                })
-            })
-            .or_else(|| pages.first())
-            .ok_or_else(|| BoxError::Unreachable("the browser has no page".to_string()))?;
-        let target_id = chosen
-            .get("targetId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BoxError::Unreachable("a page without a target id".to_string()))?;
+                        .ok_or_else(|| BoxError::Unreachable("no tab was opened".to_string()))?
+                        .to_string(),
+                    true,
+                )
+            }
+        };
         let attached = self
             .call(
                 "Target.attachToTarget",
@@ -253,11 +309,23 @@ impl DevTools {
                 None,
             )
             .await?;
-        attached
+        let session_id = attached
             .get("sessionId")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .ok_or_else(|| BoxError::Unreachable("attach gave no session".to_string()))
+            .ok_or_else(|| BoxError::Unreachable("attach gave no session".to_string()))?;
+        Ok(AttachedPage { session_id, opened })
+    }
+
+    /// Let go of a page session taken by [`Self::attach_to_page`].
+    pub async fn detach(&self, session_id: &str) -> BoxResult<()> {
+        self.call(
+            "Target.detachFromTarget",
+            json!({ "sessionId": session_id }),
+            None,
+        )
+        .await?;
+        Ok(())
     }
 
     /// The browser's page URLs, for choosing a target and for tests.
@@ -374,27 +442,41 @@ impl DevTools {
         session_id: &str,
         authenticator_id: &str,
     ) -> BoxResult<()> {
+        // Only the authenticator: `WebAuthn.disable` would tear down every authenticator on
+        // the page, another sign-in's included.
         self.call(
             "WebAuthn.removeVirtualAuthenticator",
             json!({ "authenticatorId": authenticator_id }),
             Some(session_id),
         )
         .await?;
-        let _ = self
-            .call("WebAuthn.disable", json!({}), Some(session_id))
-            .await;
         Ok(())
-    }
-
-    /// Whether the exec (and so the pipe) is still alive.
-    pub fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_is_on_its_host_or_a_name_under_it_and_nowhere_else() {
+        assert!(url_is_on_host("https://webauthn.io/", "webauthn.io"));
+        assert!(url_is_on_host(
+            "https://accounts.google.com/signin?x=1",
+            "google.com"
+        ));
+        assert!(url_is_on_host(
+            "https://user@Mail.Google.com:443/a#b",
+            "google.com"
+        ));
+        assert!(!url_is_on_host("https://notgoogle.com/", "google.com"));
+        assert!(!url_is_on_host("https://google.com.evil.io/", "google.com"));
+        assert!(!url_is_on_host(
+            "https://evil.io/?u=https://google.com/",
+            "google.com"
+        ));
+        assert!(!url_is_on_host("about:blank", "google.com"));
+    }
 
     #[test]
     fn the_authenticator_looks_like_a_platform_one() {

@@ -253,6 +253,12 @@ pub trait Computer: Send + Sync {
     /// Start something long-running and return immediately.
     async fn start(&self, box_id: &str, command: &str) -> BoxResult<StartedCommand>;
 
+    /// Whether [`Computer::devtools`] can work here. Asked before anything in the box is
+    /// touched on a pipe's behalf, so a provider without one never has its browser replaced.
+    fn offers_a_pipe(&self) -> bool {
+        false
+    }
+
     /// Chromium on a DevTools pipe this process holds (see [`devtools`]). Only a provider that
     /// can run the box's `box-chromium-pipe` offers it; the rest have no passkeys.
     async fn devtools(&self, _box_id: &str, _url: &str) -> BoxResult<devtools::DevTools> {

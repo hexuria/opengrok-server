@@ -1857,10 +1857,10 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              card. Never re-raise a form that already settled. A passkey prompt: call this with \
              challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site \
              offers to add one and the person asked), no fields, liveHost set; when the result \
-             says it is loaded, click the site's passkey button. Captcha, \
-             passkey, or a page outside this box is not another password form: the person \
-             finishes on the computer (Open the screen). If they dismiss or decline, continue \
-             without those credentials and do not loop.",
+             says it is loaded, click the site's passkey button. A captcha, or a page \
+             outside this box, is not another password form: the person finishes on the \
+             computer (Open the screen). If they dismiss or decline, continue without those \
+             credentials and do not loop.",
             serde_json::json!({
                 "type": "object",
                 "properties": {

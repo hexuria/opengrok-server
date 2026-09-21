@@ -295,6 +295,15 @@ impl DockerComputer {
 
 #[async_trait]
 impl Computer for DockerComputer {
+    fn offers_a_pipe(&self) -> bool {
+        true
+    }
+
+    /// `docker exec -i <box> box-chromium-pipe <url>`, held by this process.
+    async fn devtools(&self, box_id: &str, url: &str) -> BoxResult<crate::devtools::DevTools> {
+        crate::devtools::DevTools::spawn(box_id, url).await
+    }
+
     /// The desktop ports are published when the container is created and cannot change after,
     /// so the container's own port bindings say whether it has a screen — awake or not, and
     /// whatever the image env says today. A box Docker cannot describe falls back to that env.

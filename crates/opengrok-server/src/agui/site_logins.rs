@@ -273,10 +273,8 @@ async fn reveal(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if headers.get(header::AUTHORIZATION).is_none() {
-        return sign_in_first();
-    }
-    let Some(account_id) = signed_in(&state, &headers) else {
+    let Some(account_id) = crate::agui::routes::account_from_header_bearer(&state.agui, &headers)
+    else {
         return sign_in_first();
     };
     let Some(vault) = state.agui.vault.as_deref() else {
@@ -308,21 +306,61 @@ async fn reveal(
 
 // ---- icons -------------------------------------------------------------------------------
 
-/// How long an icon, or the fact that a site has none, is kept.
+/// How long an icon is kept.
 const ICON_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long "this site has no icon" is kept.
+const NO_ICON_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long a fetch that failed (a lookup, a timeout) is kept before it is tried again.
+const FAILED_TTL: Duration = Duration::from_secs(5 * 60);
+/// The cache is bounded: past this many entries the oldest go.
+const ICON_CACHE_MAX: usize = 4_096;
 /// An icon larger than this is not an icon.
 const ICON_MAX_BYTES: usize = 64 * 1024;
 /// How much of a site's front page is read to find its `<link rel="icon">`.
 const PAGE_MAX_BYTES: usize = 256 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(6);
+/// The image types an icon may be served as. Never SVG, which is a document with scripts.
+const ICON_MIMES: [&str; 6] = [
+    "image/png",
+    "image/x-icon",
+    "image/vnd.microsoft.icon",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+];
+
+#[derive(Clone)]
+enum Fetched {
+    Icon(String, Vec<u8>),
+    NoIcon,
+    Failed,
+}
+
+impl Fetched {
+    fn ttl(&self) -> Duration {
+        match self {
+            Fetched::Icon(..) => ICON_TTL,
+            Fetched::NoIcon => NO_ICON_TTL,
+            Fetched::Failed => FAILED_TTL,
+        }
+    }
+}
 
 struct CachedIcon {
     at: Instant,
-    icon: Option<(String, Vec<u8>)>,
+    icon: Fetched,
 }
 
-fn icon_cache() -> &'static Mutex<HashMap<String, CachedIcon>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CachedIcon>>> = OnceLock::new();
+impl CachedIcon {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < self.icon.ttl()
+    }
+}
+
+/// Keyed by account and host: what one person looked up says nothing to another, in
+/// content or in timing.
+fn icon_cache() -> &'static Mutex<HashMap<(String, String), CachedIcon>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), CachedIcon>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -333,25 +371,34 @@ async fn icon(
     headers: HeaderMap,
     Path(origin): Path<String>,
 ) -> Response {
-    if signed_in(&state, &headers).is_none() {
+    let Some(account_id) = signed_in(&state, &headers) else {
         return sign_in_first();
-    }
+    };
     let Some(host) = icon_host(&origin) else {
         return reply(400, json!({ "error": "origin is not a site" }));
     };
+    let key = (account_id.as_str().to_string(), host.clone());
     if let Some(hit) = icon_cache().lock().ok().and_then(|cache| {
         cache
-            .get(&host)
-            .filter(|c| c.at.elapsed() < ICON_TTL)
+            .get(&key)
+            .filter(|c| c.fresh())
             .map(|c| c.icon.clone())
     }) {
         return icon_reply(hit);
     }
     let found = fetch_icon(&host).await;
     if let Ok(mut cache) = icon_cache().lock() {
-        cache.retain(|_, c| c.at.elapsed() < ICON_TTL);
+        cache.retain(|_, c| c.fresh());
+        if cache.len() >= ICON_CACHE_MAX
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, c)| c.at)
+                .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest);
+        }
         cache.insert(
-            host.clone(),
+            key,
             CachedIcon {
                 at: Instant::now(),
                 icon: found.clone(),
@@ -361,18 +408,31 @@ async fn icon(
     icon_reply(found)
 }
 
-fn icon_reply(icon: Option<(String, Vec<u8>)>) -> Response {
+fn icon_reply(icon: Fetched) -> Response {
     match icon {
-        Some((mime, bytes)) => (
+        Fetched::Icon(mime, bytes) => (
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, mime),
                 (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+                (
+                    header::CONTENT_SECURITY_POLICY,
+                    "default-src 'none'; sandbox".to_string(),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"icon\"".to_string(),
+                ),
             ],
             bytes,
         )
             .into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+        Fetched::NoIcon | Fetched::Failed => (
+            StatusCode::NO_CONTENT,
+            [(header::CACHE_CONTROL, "private, max-age=3600".to_string())],
+        )
+            .into_response(),
     }
 }
 
@@ -415,7 +475,8 @@ fn public_ip(ip: IpAddr) -> bool {
                 || (o[0] == 198 && (18..=19).contains(&o[1])))
         }
         IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // Both the mapped (`::ffff:a.b.c.d`) and the compatible (`::a.b.c.d`) forms.
+            if let Some(v4) = v6.to_ipv4() {
                 return public_ip(IpAddr::V4(v4));
             }
             let seg = v6.segments();
@@ -424,56 +485,79 @@ fn public_ip(ip: IpAddr) -> bool {
                 || v6.is_multicast()
                 || (seg[0] & 0xfe00) == 0xfc00
                 || (seg[0] & 0xffc0) == 0xfe80
-                || seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] & 0xffc0) == 0xfec0
+                || (seg[0] == 0x2001 && seg[1] == 0x0db8)
+                || (seg[0] == 0x2001 && seg[1] == 0)
+                || seg[0] == 0x2002
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b)
+                || (seg[0] == 0x0100 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0))
         }
     }
 }
 
-async fn resolves_to_public(host: &str) -> bool {
-    match tokio::net::lookup_host((host, 443)).await {
-        Ok(addrs) => {
-            let addrs: Vec<IpAddr> = addrs.map(|a| a.ip()).collect();
-            !addrs.is_empty() && addrs.into_iter().all(public_ip)
-        }
-        Err(_) => false,
-    }
+/// The addresses a host resolves to, when every one of them is public.
+async fn public_addresses(host: &str) -> Option<Vec<std::net::SocketAddr>> {
+    let addrs: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((host, 443)).await.ok()?.collect();
+    (!addrs.is_empty() && addrs.iter().all(|a| public_ip(a.ip()))).then_some(addrs)
 }
 
-async fn fetch_icon(host: &str) -> Option<(String, Vec<u8>)> {
-    if !resolves_to_public(host).await {
-        return None;
-    }
-    let client = reqwest::Client::builder()
+async fn fetch_icon(host: &str) -> Fetched {
+    // The fetch goes to the addresses that were vetted, not to a second lookup that could
+    // answer differently.
+    let Some(addrs) = public_addresses(host).await else {
+        return Fetched::Failed;
+    };
+    let Ok(client) = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(FETCH_TIMEOUT)
         .user_agent("opengrok-site-icon/1")
+        .resolve_to_addrs(host, &addrs)
         .build()
-        .ok()?;
-    if let Some(icon) = fetch_image(&client, &format!("https://{host}/favicon.ico")).await {
-        return Some(icon);
+    else {
+        return Fetched::Failed;
+    };
+    match fetch_image(&client, &format!("https://{host}/favicon.ico")).await {
+        Ok(Some(icon)) => return Fetched::Icon(icon.0, icon.1),
+        Ok(None) => {}
+        Err(()) => return Fetched::Failed,
     }
-    let page = fetch_capped(&client, &format!("https://{host}/"), PAGE_MAX_BYTES).await?;
+    let page = match fetch_capped(&client, &format!("https://{host}/"), PAGE_MAX_BYTES, true).await
+    {
+        Ok(Some(page)) => page,
+        Ok(None) => return Fetched::NoIcon,
+        Err(()) => return Fetched::Failed,
+    };
     let page = String::from_utf8_lossy(&page.1);
-    let href = icon_link(&page)?;
-    let url = same_site_url(host, &href)?;
-    fetch_image(&client, &url).await
+    let Some(url) = icon_link(&page).and_then(|href| same_site_url(host, &href)) else {
+        return Fetched::NoIcon;
+    };
+    match fetch_image(&client, &url).await {
+        Ok(Some(icon)) => Fetched::Icon(icon.0, icon.1),
+        Ok(None) => Fetched::NoIcon,
+        Err(()) => Fetched::Failed,
+    }
 }
 
-/// A response body up to `cap` bytes, with its content type; more than the cap is not read.
+/// A response body up to `cap` bytes, with its content type. `Ok(None)` is a site that
+/// answered without what was asked for (a 404, too big); `Err` is a site that could not be
+/// reached. With `truncate`, a body past the cap is cut there instead of refused.
 async fn fetch_capped(
     client: &reqwest::Client,
     url: &str,
     cap: usize,
-) -> Option<(String, Vec<u8>)> {
-    let mut response = client.get(url).send().await.ok()?;
+    truncate: bool,
+) -> Result<Option<(String, Vec<u8>)>, ()> {
+    let mut response = client.get(url).send().await.map_err(|_| ())?;
     if !response.status().is_success() {
-        return None;
+        return Ok(None);
     }
-    if response
-        .content_length()
-        .is_some_and(|len| len as usize > cap)
+    if !truncate
+        && response
+            .content_length()
+            .is_some_and(|len| len as usize > cap)
     {
-        return None;
+        return Ok(None);
     }
     let mime = response
         .headers()
@@ -488,25 +572,38 @@ async fn fetch_capped(
     let mut body = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
         if body.len() + chunk.len() > cap {
-            return None;
+            if truncate {
+                body.extend_from_slice(&chunk[..cap - body.len()]);
+                break;
+            }
+            return Ok(None);
         }
         body.extend_from_slice(&chunk);
     }
-    Some((mime, body))
+    Ok(Some((mime, body)))
 }
 
-async fn fetch_image(client: &reqwest::Client, url: &str) -> Option<(String, Vec<u8>)> {
-    let (mime, bytes) = fetch_capped(client, url, ICON_MAX_BYTES).await?;
-    let mime = if mime.starts_with("image/") {
-        mime
-    } else if url.ends_with(".ico") && looks_like_ico(&bytes) {
-        "image/x-icon".to_string()
-    } else if looks_like_png(&bytes) {
-        "image/png".to_string()
-    } else {
-        return None;
+async fn fetch_image(client: &reqwest::Client, url: &str) -> Result<Option<(String, Vec<u8>)>, ()> {
+    let Some((mime, bytes)) = fetch_capped(client, url, ICON_MAX_BYTES, false).await? else {
+        return Ok(None);
     };
-    (!bytes.is_empty()).then_some((mime, bytes))
+    Ok(icon_mime(&mime, url, &bytes).map(|mime| (mime.to_string(), bytes)))
+}
+
+/// The type an icon is served as: one of the raster types the list can paint, taken from
+/// the site's word when it is one of them, else read from the bytes. Anything else, SVG
+/// above all, is not an icon here.
+fn icon_mime(mime: &str, url: &str, bytes: &[u8]) -> Option<&'static str> {
+    if bytes.is_empty() {
+        return None;
+    }
+    if let Some(known) = ICON_MIMES.iter().find(|m| **m == mime) {
+        return Some(known);
+    }
+    if url.ends_with(".ico") && looks_like_ico(bytes) {
+        return Some("image/x-icon");
+    }
+    looks_like_png(bytes).then_some("image/png")
 }
 
 fn looks_like_ico(bytes: &[u8]) -> bool {
@@ -625,6 +722,12 @@ mod tests {
             "fc00::1",
             "fe80::1",
             "::ffff:10.0.0.1",
+            "::10.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+            "2002:c0a8:101::",
+            "fec0::1",
+            "2001::1",
+            "100::1",
         ] {
             assert!(
                 bad.parse::<IpAddr>().is_ok_and(|ip| !public_ip(ip)),
@@ -634,6 +737,41 @@ mod tests {
         for good in ["8.8.8.8", "2606:4700::1111"] {
             assert!(good.parse::<IpAddr>().is_ok_and(public_ip), "{good}");
         }
+    }
+
+    #[test]
+    fn an_icon_is_served_only_as_a_raster_image() {
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3];
+        assert_eq!(
+            icon_mime("image/png", "https://x.com/i", &png),
+            Some("image/png")
+        );
+        assert_eq!(
+            icon_mime(
+                "image/svg+xml",
+                "https://x.com/i.svg",
+                b"<svg><script/></svg>"
+            ),
+            None
+        );
+        assert_eq!(
+            icon_mime("text/html", "https://x.com/i.png", b"<html>"),
+            None
+        );
+        // A site's wrong word is overruled by the bytes, never the other way round.
+        assert_eq!(
+            icon_mime("text/plain", "https://x.com/i", &png),
+            Some("image/png")
+        );
+        assert_eq!(
+            icon_mime(
+                "application/octet-stream",
+                "https://x.com/favicon.ico",
+                &[0, 0, 1, 0, 1, 0, 0, 0]
+            ),
+            Some("image/x-icon")
+        );
+        assert_eq!(icon_mime("image/png", "https://x.com/i", &[]), None);
     }
 
     #[test]

@@ -48,6 +48,7 @@ const EMAIL: &str = "ada@example.com";
 #[derive(Default)]
 struct FillStub {
     acts: Mutex<Vec<CuaAction>>,
+    ran: Mutex<Vec<String>>,
     shots: Mutex<u32>,
     egress: Mutex<Option<EgressTunnel>>,
     last_egress_box: Mutex<Option<String>>,
@@ -76,9 +77,10 @@ impl Computer for FillStub {
     async fn run(
         &self,
         _box_id: &str,
-        _command: &str,
+        command: &str,
         _timeout_seconds: u32,
     ) -> BoxResult<CommandOutput> {
+        self.ran.lock().expect("ran").push(command.to_string());
         Ok(CommandOutput {
             exit_code: 0,
             stdout: String::new(),
@@ -2087,5 +2089,11 @@ async fn a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_o
     assert!(
         h.stub.acts.lock().expect("acts").is_empty(),
         "a passkey card types nothing"
+    );
+    // A computer without a pipe has nothing in it touched: no browser is killed.
+    let ran = h.stub.ran.lock().expect("ran").clone();
+    assert!(
+        ran.iter().all(|c| !c.contains("pkill")),
+        "nothing is killed on a computer without a pipe: {ran:?}"
     );
 }

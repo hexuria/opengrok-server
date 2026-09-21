@@ -939,6 +939,11 @@ alter table site_login add column if not exists last_used_at_ms bigint;
 alter table site_login add column if not exists passkey_credential_id text;
 alter table site_login add column if not exists passkey_rp_id text;
 alter table site_login add column if not exists passkey_user_handle text;
+-- A password and a passkey for one username on one site are two rows: the kind is part of
+-- the key, so saving one never turns the other into it.
+alter table site_login drop constraint if exists site_login_account_id_origin_username_key;
+create unique index if not exists site_login_owner_site_name_kind
+    on site_login (account_id, origin, username, kind);
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

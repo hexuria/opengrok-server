@@ -264,7 +264,7 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
         ),
         (
             "secret_store (site logins)",
-            "select count(*) from secret_store where id like 'site-login:' || $1 || ':%' or id like 'site-login-otp:' || $1 || ':%'",
+            "select count(*) from secret_store where id like 'site-login:' || $1 || ':%' or id like 'site-login-otp:' || $1 || ':%' or id like 'site-login-passkey:' || $1 || ':%'",
             &account,
         ),
     ] {

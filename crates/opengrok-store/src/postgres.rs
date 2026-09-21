@@ -1325,7 +1325,6 @@ impl PgStore {
     /// Save (or replace) one site login: the row keyed by (account, origin, username), the
     /// password and the code seed sealed into secret_store under the row's id. A secret
     /// given as `None` is left as it was. Returns the row, which never holds a secret.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_site_login(
         &self,
         vault: &Vault,
@@ -1346,8 +1345,8 @@ impl PgStore {
             "insert into site_login (id, account_id, origin, username, label, kind, notes, created_at_ms, updated_at_ms,
                                      passkey_credential_id, passkey_rp_id, passkey_user_handle)
              values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11)
-             on conflict (account_id, origin, username) do update set
-               label = excluded.label, kind = excluded.kind, notes = excluded.notes,
+             on conflict (account_id, origin, username, kind) do update set
+               label = excluded.label, notes = excluded.notes,
                updated_at_ms = excluded.updated_at_ms,
                passkey_credential_id = coalesce(excluded.passkey_credential_id, site_login.passkey_credential_id),
                passkey_rp_id = coalesce(excluded.passkey_rp_id, site_login.passkey_rp_id),
@@ -1375,6 +1374,10 @@ impl PgStore {
                 login.password,
             ),
             (Self::site_login_code_id(account_id, &row.id), login.otpauth),
+            (
+                Self::site_login_passkey_id(account_id, &row.id),
+                login.passkey.as_ref().map(|p| p.private_key_b64.as_str()),
+            ),
         ] {
             let Some(secret) = secret else {
                 continue;

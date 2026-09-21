@@ -38,18 +38,25 @@ fn pipes() -> &'static Mutex<HashMap<String, Arc<DevTools>>> {
 
 /// The box's Chromium on the pipe: the one already held, or a fresh one. A browser started
 /// any other way (the dock, an earlier server) has no pipe and is replaced, tabs and all;
-/// the page is reopened by the caller.
+/// the page is reopened by the caller. Nothing in the box is touched unless the computer
+/// offers a pipe at all. Returns the pipe and whether the browser was replaced.
 async fn ensure_devtools(
     computer: &Arc<dyn opengrok_box::Computer>,
     box_id: &str,
-) -> Result<Arc<DevTools>, String> {
-    if let Some(held) = pipes().lock().await.get(box_id).cloned()
+) -> Result<(Arc<DevTools>, bool), String> {
+    if !computer.offers_a_pipe() {
+        return Err("this computer has no DevTools pipe".to_string());
+    }
+    // The registry lock is held only to look, never across a call on the pipe: a hung pipe
+    // on one box must not stall every other box's passkey.
+    let held = pipes().lock().await.get(box_id).cloned();
+    if let Some(held) = held
         && held
             .call("Browser.getVersion", serde_json::json!({}), None)
             .await
             .is_ok()
     {
-        return Ok(held);
+        return Ok((held, false));
     }
     let _ = computer
         .run(
@@ -67,7 +74,27 @@ async fn ensure_devtools(
         .lock()
         .await
         .insert(box_id.to_string(), fresh.clone());
-    Ok(fresh)
+    Ok((fresh, true))
+}
+
+/// A page attached for one passkey, and what the bot has to be told about it.
+struct ReadyPage {
+    devtools: Arc<DevTools>,
+    session: String,
+    /// The tab was opened just now at the site's front page (the browser was replaced, or
+    /// no tab was on the site): the bot has to find its way back to the sign-in page.
+    reopened: bool,
+}
+
+impl ReadyPage {
+    fn where_to_click(&self) -> &'static str {
+        if self.reopened {
+            "The browser was reopened at the site's front page: go back to the sign-in page \
+             first, then click"
+        } else {
+            "Click"
+        }
+    }
 }
 
 /// The box and the page the card is about, attached and ready for WebAuthn.
@@ -76,7 +103,7 @@ async fn page_session(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     form: &FormRequest,
-) -> Result<(Arc<DevTools>, String), String> {
+) -> Result<ReadyPage, String> {
     let runner = crate::agui::routes::tools_for_coworker(
         &state.agui,
         account_id,
@@ -91,29 +118,25 @@ async fn page_session(
         .fill_target()
         .ok_or_else(|| "this bot has no computer".to_string())?;
     runner.wake_fill_target().await?;
-    let devtools = ensure_devtools(&computer, &box_id).await?;
+    let (devtools, replaced) = ensure_devtools(&computer, &box_id).await?;
     let host = form
         .live_host
         .as_deref()
         .or(form.domain.as_deref())
         .map(opengrok_tools::credential::normalize_origin)
         .filter(|h| !h.is_empty());
-    let session = devtools
+    let page = devtools
         .attach_to_page(host.as_deref())
         .await
         .map_err(|error| format!("could not attach to the page: {error}"))?;
-    // A browser that was just replaced shows a blank tab: put the page back.
-    if let Some(host) = &host {
-        let urls = devtools.page_urls().await.unwrap_or_default();
-        if !urls.iter().any(|u| u.contains(host.as_str())) {
-            devtools
-                .navigate(&session, &format!("https://{host}/"))
-                .await
-                .map_err(|error| format!("could not open the page: {error}"))?;
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
+    if page.opened {
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    Ok((devtools, session))
+    Ok(ReadyPage {
+        devtools,
+        session: page.session_id,
+        reopened: replaced || page.opened,
+    })
 }
 
 /// Load the person's passkey into the page for one sign-in. Returns the sentence the bot is
@@ -144,6 +167,8 @@ pub async fn use_passkey(
         .passkey
         .clone()
         .ok_or_else(|| "that row has no passkey".to_string())?;
+    // The page first: the key is opened only once there is somewhere to put it.
+    let page = page_session(state, account_id, coworker_id, form).await?;
     let key = state
         .agui
         .auth
@@ -160,7 +185,10 @@ pub async fn use_passkey(
         private_key_b64: key,
         user_name: row.username.clone(),
     };
-    let (devtools, session) = page_session(state, account_id, coworker_id, form).await?;
+    let where_to_click = page.where_to_click();
+    let ReadyPage {
+        devtools, session, ..
+    } = page;
     let events = devtools.events();
     let authenticator = devtools
         .add_platform_authenticator(&session)
@@ -198,12 +226,13 @@ pub async fn use_passkey(
         let _ = devtools
             .remove_authenticator(&session, &authenticator)
             .await;
+        let _ = devtools.detach(&session).await;
     });
     Ok(format!(
-        "The passkey for {} as {} is loaded in the browser for the next two minutes. Click the \
-         site's passkey button now (\"Sign in with a passkey\", \"Continue\", or the key icon); \
-         the site's challenge is signed out of your view and no password is typed. Then screenshot \
-         and confirm what the page shows.",
+        "The passkey for {} as {} is loaded in the browser for the next two minutes. \
+         {where_to_click} the site's passkey button now (\"Sign in with a passkey\", \
+         \"Continue\", or the key icon); the site's challenge is signed out of your view and no \
+         password is typed. Then screenshot and confirm what the page shows.",
         meta.rp_id, row.username
     ))
 }
@@ -220,7 +249,11 @@ pub async fn register_passkey(
     if state.agui.vault.is_none() {
         return Err("the credential vault is not configured on this server".to_string());
     }
-    let (devtools, session) = page_session(state, account_id, coworker_id, form).await?;
+    let page = page_session(state, account_id, coworker_id, form).await?;
+    let where_to_click = page.where_to_click();
+    let ReadyPage {
+        devtools, session, ..
+    } = page;
     let events = devtools.events();
     let authenticator = devtools
         .add_platform_authenticator(&session)
@@ -258,11 +291,13 @@ pub async fn register_passkey(
         let _ = devtools
             .remove_authenticator(&session, &authenticator)
             .await;
+        let _ = devtools.detach(&session).await;
     });
     Ok(format!(
-        "A passkey holder is ready in the browser for the next two minutes. Click the site's \
-         \"Create a passkey\" / \"Add a passkey\" button now; the site makes one, and it is saved \
-         to the person's logins for {site}. Then screenshot and confirm what the page shows."
+        "A passkey holder is ready in the browser for the next two minutes. {where_to_click} \
+         the site's \"Create a passkey\" / \"Add a passkey\" button now; the site makes one, and \
+         it is saved to the person's logins for {site}. Then screenshot and confirm what the page \
+         shows."
     ))
 }
 

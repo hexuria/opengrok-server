@@ -43,10 +43,13 @@ async fn chromium_answers_on_the_pipe_and_holds_a_passkey_for_one_sign_in() {
         "9222 (0x2406) is not open"
     );
 
-    let session = devtools
-        .attach_to_page(Some("about:blank"))
+    // No tab is on the site yet: one is opened for it, and it is the one attached.
+    let page = devtools
+        .attach_to_page(Some("webauthn.io"))
         .await
         .expect("attach");
+    assert!(page.opened, "a tab was opened for the site");
+    let session = page.session_id;
     let authenticator = devtools
         .add_platform_authenticator(&session)
         .await
@@ -81,6 +84,7 @@ async fn chromium_answers_on_the_pipe_and_holds_a_passkey_for_one_sign_in() {
         .remove_authenticator(&session, &authenticator)
         .await
         .expect("remove authenticator");
+    devtools.detach(&session).await.expect("detach");
 
     // A tab opened by the dock launcher lands in this instance.
     let opened = std::process::Command::new("docker")

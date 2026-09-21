@@ -133,18 +133,13 @@ pub async fn submit_user_form(
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
     let saved_login = is_saved_login(args);
-    if saved_login && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
-        // The card stays open: the person may still type by hand, or dismiss.
-        return (
-            403,
-            json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
-        );
-    }
-
     // A passkey card has no fields to type: the person's passkey is loaded into the page (or
     // an empty holder is, for a site that offers to make one), and the bot is told to click.
     let passkey_card = form.challenge_kind.as_deref() == Some("passkey");
-    if passkey_card && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
+    if (saved_login || passkey_card)
+        && !fills_a_dedicated_box(state, account_id, &coworker_id).await
+    {
+        // The card stays open: the person may still type by hand, or dismiss.
         return (
             403,
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
@@ -209,8 +204,10 @@ pub async fn submit_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
+    // A passkey's use is stamped when the site's challenge is signed, not when it is loaded.
     if resolution == FormResolution::Submitted
         && saved_login
+        && !passkey_card
         && let Some(login_id) = args.get("savedLoginId").and_then(Value::as_str)
         && let Err(error) = state
             .agui
