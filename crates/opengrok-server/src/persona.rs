@@ -248,19 +248,19 @@ pub fn computer_system_prompt(
          run a command or create, read or change a file, it happens on YOUR box, and you must say so \
          plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" \
          Never describe work done on your box as done on the user's computer. When a page asks \
-         for a site login, prefer `credential.request` (origin = the page host, username if you \
-         know it) when a saved login is likely and wait. NativeChat brokers the login out of \
-         your view. On filled, the authenticated session is ready: cookies and profile were \
-         applied to the box. You did not receive a password and must not type one with \
-         `computer` — a screenshot of an observable fill would leak it. Screenshot and confirm \
-         the page. On denied, missing, or error, call `request_user_form` and wait. The person \
-         fills in chat; the server types into the focused field and does not show you the secret. \
-         After a user-form settles, screenshot and confirm what the page shows; filling is not a \
-         successful login. Auth is one challenge per form: raise email, then after it settles \
-         screenshot; if a password page is next, prefer `credential.request` when a saved login \
-         is likely, otherwise call `request_user_form` with a password-only form (new entryId, \
+         for a site login, call `request_user_form` and wait. NativeChat offers the person their \
+         saved logins for that site on the card; they confirm with Touch ID, and the values are \
+         typed into the page out of your view. You never receive a password and must not type \
+         one with `computer`. The person fills in chat; the server clicks each field at the \
+         position you give and types there, never showing you the secret. After a user-form \
+         settles, screenshot and confirm what \
+         the page shows; filling is not a successful login. When the page shows the email and \
+         password fields TOGETHER, raise ONE card with both fields, `samePage: true` and \
+         `submit: true`, giving each field its position (`at`) from your screenshot — do not \
+         split them and do not focus a field first. Only a page that asks for the email alone \
+         gets an email-only card: raise it, then after it settles screenshot; if a password \
+         page is next, call `request_user_form` with a password-only form (new entryId, \
          challengeKind \"password\"). \
-         Do not put email and password on the same card unless they share a page (`samePage`). \
          If another in-sandbox challenge appears (OTP, a phone code on the same page), call \
          `request_user_form` again with otp fields and challengeKind \"otp\" — never re-raise a \
          form that already settled. Captcha, passkey, or a page outside this box is not another \
@@ -588,24 +588,15 @@ mod tests {
             "no box ⇒ the form tool is not offered: {none}"
         );
         assert!(
-            !none.contains("credential.request"),
-            "no box ⇒ saved-login session is not offered: {none}"
-        );
-        assert!(
             box_only.contains("`request_user_form`"),
             "the form tool is a built-in on a box: {box_only}"
         );
         assert!(
-            box_only.contains("`credential.request`"),
-            "prefer a brokered saved-login session before a password form: {box_only}"
+            box_only.contains("saved logins") && box_only.contains("Touch ID"),
+            "the saved login is offered on the card, never brokered by a tool: {box_only}"
         );
         assert!(
-            box_only.contains("authenticated session is ready")
-                && box_only.contains("You did not receive a password"),
-            "filled = authenticated session ready, never a typed password: {box_only}"
-        );
-        assert!(
-            box_only.contains("one challenge per form"),
+            box_only.contains("raise ONE card with both fields"),
             "stepped login contract: {box_only}"
         );
         assert!(

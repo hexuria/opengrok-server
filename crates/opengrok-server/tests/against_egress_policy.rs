@@ -482,12 +482,9 @@ impl Harness {
     }
 }
 
-const BROWSER_TOOLS: [&str; 4] = [
-    "computer",
-    "open_url",
-    "request_user_form",
-    "credential.request",
-];
+// `credential.request` was the second login hand-off; it is gone, and the form card does
+// its work now.
+const BROWSER_TOOLS: [&str; 3] = ["computer", "open_url", "request_user_form"];
 
 fn has(names: &[String], tool: &str) -> bool {
     names

@@ -309,10 +309,10 @@ impl PgStore {
             &coworkers,
             &accounts
         );
+        // The sealed passwords go with the secret_store sweep below: their ids carry the account.
         delete!(
-            "credential_hint",
-            "delete from credential_hint where coworker_id = any($1) or account_id = any($2)",
-            &coworkers,
+            "site_login",
+            "delete from site_login where account_id = any($1)",
             &accounts
         );
         delete!(

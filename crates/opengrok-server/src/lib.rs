@@ -56,7 +56,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(health::router(host.clone()))
         .merge(hooks::router(host.clone()))
         .merge(agui::user_form::agui_router(host.clone()))
-        .merge(agui::credential::agui_router(host.clone()))
+        .merge(agui::site_logins::agui_router(host.clone()))
         // `POST /ag-ui` needs `HostState` so a UserForm CUSTOM can mint the gateway
         // card and stamp `entryId` on the SSE frame. Other AG-UI routes stay on `AgUiState`.
         .merge(agui::run_router(host.clone()))

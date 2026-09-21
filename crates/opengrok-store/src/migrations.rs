@@ -918,8 +918,33 @@ update grant_view
 update ceiling_view
    set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
  where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` left with the broker (Sep 2026): the saved login is offered on the
+-- ordinary form card. The widening just above still matches today's default grant, so it
+-- would put the dead name on every fresh bot at every boot; this takes it out again.
+update grant_view
+   set profile = jsonb_set(profile, '{only}', (profile->'only') - 'credential.request')
+ where profile->'only' ? 'credential.request';
+update ceiling_view
+   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request')
+ where tools->'only' ? 'credential.request';
 
--- Site-login matching metadata only. NEVER a password. Vault stays connector/API secrets.
+-- A person's saved site logins, so the same rows follow them to every Mac. The password
+-- is sealed in secret_store under `site-login:<account>:<id>` (the account id in the key is
+-- what the purge finds it by); only the owner's own app ever opens it, over the bearer door.
+create table if not exists site_login (
+    id             text   primary key,
+    account_id     text   not null,
+    origin         text   not null,
+    username       text   not null,
+    label          text   not null default '',
+    created_at_ms  bigint not null,
+    updated_at_ms  bigint not null,
+    unique (account_id, origin, username)
+);
+create index if not exists site_login_account on site_login (account_id);
+
+-- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
+-- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (
     account_id     text   not null,
     coworker_id    text   not null,

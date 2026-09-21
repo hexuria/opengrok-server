@@ -1475,115 +1475,6 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
     assert_eq!(body["shareScope"], "user", "{body}");
 }
 
-#[tokio::test]
-async fn credential_request_round_trips_a_status_and_never_stores_a_password() {
-    let database_url = database_or_skip!();
-    let email = format!(
-        "credential-result-{}@og.local",
-        uuid::Uuid::now_v7().simple()
-    );
-    let h = harness_with_door(
-        &database_url,
-        &email,
-        Arc::new(MockDoor::asking_for_credential()),
-    )
-    .await;
-    let token = h.access_token(&email);
-    let agent = h.hire(&token, "Dot").await;
-    let thread_id = format!("thr-{}", uuid::Uuid::now_v7());
-    let run_id = uuid::Uuid::now_v7().to_string();
-
-    let res = h
-        .client
-        .post(format!("{}/ag-ui", h.base))
-        .header("authorization", format!("Bearer {token}"))
-        .json(&json!({
-            "threadId": thread_id,
-            "runId": run_id,
-            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
-            "forwardedProps": { "coworkerId": agent },
-        }))
-        .send()
-        .await
-        .expect("post ag-ui");
-    assert_eq!(res.status().as_u16(), 200, "ag-ui turn status");
-    let sse = res.text().await.expect("sse");
-    let mut request_id = None;
-    for chunk in sse.split("\n\n") {
-        let Some(payload) = chunk.lines().find_map(|line| line.strip_prefix("data: ")) else {
-            continue;
-        };
-        let Ok(event) = serde_json::from_str::<Value>(payload) else {
-            continue;
-        };
-        if event["type"] == "CUSTOM" && event["name"] == "credential.request" {
-            let dump = event.to_string();
-            assert!(
-                !dump.contains("s3cret-should-never-land"),
-                "CUSTOM must not carry a password: {dump}"
-            );
-            assert_eq!(event["origin"], "accounts.google.com", "{event}");
-            assert_eq!(event["reason"], "credential", "{event}");
-            request_id = event["requestId"]
-                .as_str()
-                .or_else(|| event["callId"].as_str())
-                .map(str::to_string);
-        }
-    }
-    let request_id = request_id.expect("credential.request CUSTOM with requestId");
-
-    let res = h
-        .client
-        .post(format!("{}/ag-ui/credential/result", h.base))
-        .header("authorization", format!("Bearer {token}"))
-        .json(&json!({
-            "agentId": agent,
-            "requestId": request_id,
-            "status": "filled",
-            "credentialId": "cred_nativechat_1",
-            "password": SECRET
-        }))
-        .send()
-        .await
-        .expect("credential result");
-    assert_eq!(res.status().as_u16(), 200, "credential result status");
-    let body: Value = res.json().await.expect("result json");
-    assert_eq!(body["status"], "filled", "{body}");
-    assert!(!body.to_string().contains(SECRET), "{body}");
-
-    let replay = h
-        .client
-        .get(format!("{}/ag-ui/threads/{thread_id}", h.base))
-        .header("authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .expect("replay thread");
-    assert_eq!(replay.status().as_u16(), 200, "thread replay");
-    let replayed: Value = replay.json().await.expect("replay json");
-    let replay_dump = replayed.to_string();
-    assert!(
-        !replay_dump.contains(SECRET),
-        "secret in AG-UI replay: {replay_dump}"
-    );
-    assert!(
-        replay_dump.contains("credential.request"),
-        "replay must keep the request CUSTOM: {replay_dump}"
-    );
-
-    let hints = h
-        .store
-        .credential_hints(
-            &h.account,
-            &opengrok_core::id::CoworkerId::from_stored(agent),
-        )
-        .await
-        .expect("hints");
-    assert_eq!(hints.len(), 1, "{hints:?}");
-    assert_eq!(hints[0].origin, "accounts.google.com");
-    assert_eq!(hints[0].credential_id, "cred_nativechat_1");
-    assert!(!format!("{hints:?}").contains(SECRET), "{hints:?}");
-}
-
 fn sse_events(sse: &str) -> Vec<Value> {
     sse.split("\n\n")
         .filter_map(|chunk| {
@@ -2000,5 +1891,129 @@ async fn escalate_still_holds_until_hand_back_and_is_not_an_interrupt() {
     assert!(
         h.pending_user_form_runs().await >= 1,
         "escalate must not resume or interrupt"
+    );
+}
+
+/// A saved login is the person's own. On a box the account shares (the default sharing
+/// mode), the submit that carries it is refused and the card stays open; once the bot has
+/// its own box, the same submit fills. A hand-typed submit was never subject to the rule.
+#[tokio::test]
+async fn a_saved_login_fills_only_a_dedicated_box() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-saved-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    let submit = json!({
+        "entryId": entry_id,
+        "agentId": agent,
+        "savedLogin": true,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", submit.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert!(
+        h.stub.acts.lock().expect("acts").is_empty(),
+        "nothing was typed into the shared box"
+    );
+    let still_open = h.wait_for_form(&agent).await;
+    assert!(
+        still_open.get("formResolution").is_none()
+            && still_open["message"].get("formResolution").is_none(),
+        "the card is still open: {still_open}"
+    );
+
+    // A bot hired once the account gives each bot its own computer fills from the same card.
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let own = h.hire(&token, "Bea").await;
+    h.turn(&token, &own, "sign in").await;
+    let card = h.wait_for_form(&own).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"].as_str().expect("entry id"),
+                "agentId": own,
+                "savedLogin": true,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert!(
+        !h.stub.acts.lock().expect("acts").is_empty(),
+        "the dedicated box was typed into"
+    );
+    // A login that came from the vault is not offered to the vault again, and nothing of it
+    // is shared back to the model.
+    assert!(
+        body.get("sharedValues")
+            .and_then(Value::as_object)
+            .is_none_or(|shared| shared.is_empty()),
+        "a saved login shares nothing: {body}"
+    );
+    let replay = h
+        .client
+        .get(format!("{}/ag-ui/threads/gateway-{own}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay thread");
+    let replayed: Value = replay.json().await.expect("replay json");
+    let offered = replayed["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run["events"].as_array())
+        .flatten()
+        .any(|event| event["name"] == "credential.offer_save");
+    assert!(!offered, "no save offer after a vault fill: {replayed}");
+
+    // A bot the person shares with their org is driven by everyone in it: its box never gets
+    // a saved login, even though the box is the bot's own.
+    let shown = h.hire(&token, "Dee").await;
+    let patched = h
+        .client
+        .patch(format!("{}/coworkers/{shown}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "visibility": "org" }))
+        .send()
+        .await
+        .expect("patch visibility");
+    assert!(patched.status().is_success(), "{}", patched.status());
+    h.turn(&token, &shown, "sign in").await;
+    let card = h.wait_for_form(&shown).await;
+    let acts_before = h.stub.acts.lock().expect("acts").len();
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"].as_str().expect("entry id"),
+                "agentId": shown,
+                "savedLogin": true,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert_eq!(
+        h.stub.acts.lock().expect("acts").len(),
+        acts_before,
+        "nothing typed into an org-visible bot's box"
     );
 }
