@@ -8,6 +8,7 @@ pub mod credential;
 pub mod provision;
 pub mod resume;
 pub mod routes;
+pub mod site_logins;
 pub mod user_form;
 
 pub use routes::{AgUiState, router, run_router, to_chat_messages};

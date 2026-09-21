@@ -1,0 +1,289 @@
+//! Saved site logins: the person's own rows, sealed passwords, one reveal door.
+//!
+//! Needs Postgres; skips loudly without OG_DATABASE_URL.
+
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
+use opengrok_core::id::AccountId;
+use opengrok_harness::MockDoor;
+use opengrok_server::agui::AgUiState;
+use opengrok_server::auth::{AuthState, TokenMinter};
+use opengrok_server::connections::routes::Connectors;
+use opengrok_server::host_state::HostState;
+use opengrok_store::{PgStore, Vault};
+use serde_json::{Value, json};
+
+const KEK: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const PASSWORD: &str = "SuperSecretPassword!";
+
+macro_rules! database_or_skip {
+    () => {
+        match std::env::var("OG_DATABASE_URL") {
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
+            Err(_) => {
+                eprintln!("skipping: OG_DATABASE_URL is not set");
+                return;
+            }
+        }
+    };
+}
+
+async fn seed_account(store: &PgStore, email: &str) -> AccountId {
+    let id = AccountId::new();
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let events = Account::default()
+        .decide(AccountCommand::Register {
+            email: email.to_string(),
+            password_hash: "x".to_string(),
+            first_name: "Host".to_string(),
+            last_name: String::new(),
+            org_id: String::new(),
+            plan: Plan::Ultra,
+            verified: true,
+            enabled: true,
+            at_ms,
+        })
+        .expect("register");
+    let view = AccountView {
+        id: id.clone(),
+        email: email.to_string(),
+        plan: Plan::Ultra,
+        trial: false,
+        updated_at_ms: at_ms,
+        password_hash: Some("x".to_string()),
+        first_name: "Host".to_string(),
+        last_name: String::new(),
+        org_id: None,
+        verified: true,
+        enabled: true,
+        avatar_url: None,
+    };
+    store
+        .append_account(&id, 0, &events, &view)
+        .await
+        .expect("append account");
+    id
+}
+
+struct Harness {
+    base: String,
+    agui: AgUiState,
+    store: PgStore,
+    client: reqwest::Client,
+}
+
+async fn harness(database_url: &str, with_vault: bool) -> Harness {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(database_url)
+        .await
+        .expect("connect to Postgres");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
+    let store = PgStore::new(pool);
+    let auth = AuthState::new(
+        store.clone(),
+        Arc::new(TokenMinter::new(b"site-logins-secret")),
+        "host@og.local".to_string(),
+    );
+    let agui = AgUiState {
+        auth,
+        door: Arc::new(MockDoor::echoing()),
+        model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
+        computer: None,
+        vault: with_vault.then(|| Arc::new(Vault::from_base64_key(KEK).expect("vault"))),
+        connectors: Connectors {
+            providers: Arc::new(BTreeMap::new()),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+        },
+        plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
+    };
+    let gateway = HostState::new(agui.clone(), None);
+    let app = opengrok_server::router(agui.clone(), gateway);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    Harness {
+        base: format!("http://127.0.0.1:{}", addr.port()),
+        agui,
+        store,
+        client: reqwest::Client::new(),
+    }
+}
+
+impl Harness {
+    async fn person(&self, email: &str) -> String {
+        let account = seed_account(&self.store, email).await;
+        self.agui
+            .auth
+            .minter
+            .mint_access(
+                account.as_str(),
+                "sess-test",
+                email,
+                "ultra",
+                chrono::Utc::now().timestamp(),
+                3600,
+            )
+            .expect("mint access")
+    }
+
+    async fn call(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value, String) {
+        let url = format!("{}{path}", self.base);
+        let request = match method {
+            "GET" => self.client.get(url),
+            "POST" => self.client.post(url),
+            "DELETE" => self.client.delete(url),
+            _ => unreachable!(),
+        }
+        .header("authorization", format!("Bearer {token}"));
+        let request = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        };
+        let response = request.send().await.expect("send");
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("text");
+        let value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        (status, value, text)
+    }
+}
+
+#[tokio::test]
+async fn a_saved_login_is_listed_without_its_password_and_revealed_only_to_its_owner() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+    let bob = h
+        .person(&format!("bob-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+
+    let (status, list, _) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(list, json!([]));
+
+    let (status, row, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "The-Internet.herokuapp.com", "username": "tomsmith", "password": PASSWORD })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        row["origin"], "the-internet.herokuapp.com",
+        "stored lowercase: {row}"
+    );
+    assert_eq!(row["username"], "tomsmith");
+    assert!(
+        !text.contains(PASSWORD),
+        "the save reply carries no password: {text}"
+    );
+    let id = row["id"].as_str().expect("id").to_string();
+
+    let (_, list, text) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(1), "{list}");
+    assert!(
+        !text.contains(PASSWORD),
+        "the list carries no password: {text}"
+    );
+
+    // Saving the same site and name again replaces the password, not the row.
+    let (status, again, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "the-internet.herokuapp.com", "username": "tomsmith", "password": "changed!" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(again["id"], id, "{again}");
+    let (status, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(status, 200, "{opened}");
+    assert_eq!(opened["password"], "changed!");
+
+    // Bob sees nothing of Ada's, cannot open it, cannot delete it.
+    let (_, bobs, _) = h.call(&bob, "GET", "/site-logins", None).await;
+    assert_eq!(bobs, json!([]));
+    let (status, _, _) = h
+        .call(&bob, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(status, 404);
+    let (status, _, _) = h
+        .call(&bob, "DELETE", &format!("/site-logins/{id}"), None)
+        .await;
+    assert_eq!(status, 404);
+
+    // Ada deletes it: row and sealed secret both gone.
+    let (status, _, _) = h
+        .call(&ada, "DELETE", &format!("/site-logins/{id}"), None)
+        .await;
+    assert_eq!(status, 200);
+    let (_, list, _) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(list, json!([]));
+    let sealed: Option<String> = sqlx::query_scalar("select id from secret_store where id like $1")
+        .bind(format!("%{id}%"))
+        .fetch_optional(h.store.pool())
+        .await
+        .expect("query");
+    assert_eq!(sealed, None, "the sealed password is gone with the row");
+}
+
+#[tokio::test]
+async fn a_bad_save_is_refused_and_a_server_without_a_vault_says_so() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "" })),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, _, _) = h.call("nope", "GET", "/site-logins", None).await;
+    assert_eq!(status, 401);
+
+    let bare = harness(&database_url, false).await;
+    let ada = bare
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+    let (status, body, _) = bare
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "a", "password": "b" })),
+        )
+        .await;
+    assert_eq!(status, 503, "{body}");
+    let (status, list, _) = bare.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(status, 200, "listing needs no vault: {list}");
+}

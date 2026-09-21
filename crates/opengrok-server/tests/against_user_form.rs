@@ -2002,3 +2002,68 @@ async fn escalate_still_holds_until_hand_back_and_is_not_an_interrupt() {
         "escalate must not resume or interrupt"
     );
 }
+
+/// A saved login is the person's own. On a box the account shares (the default sharing
+/// mode), the submit that carries it is refused and the card stays open; once the bot has
+/// its own box, the same submit fills. A hand-typed submit was never subject to the rule.
+#[tokio::test]
+async fn a_saved_login_fills_only_a_dedicated_box() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-saved-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    let submit = json!({
+        "entryId": entry_id,
+        "agentId": agent,
+        "savedLogin": true,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", submit.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert!(
+        h.stub.acts.lock().expect("acts").is_empty(),
+        "nothing was typed into the shared box"
+    );
+    let still_open = h.wait_for_form(&agent).await;
+    assert!(
+        still_open.get("formResolution").is_none()
+            && still_open["message"].get("formResolution").is_none(),
+        "the card is still open: {still_open}"
+    );
+
+    // A bot hired once the account gives each bot its own computer fills from the same card.
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let own = h.hire(&token, "Bea").await;
+    h.turn(&token, &own, "sign in").await;
+    let card = h.wait_for_form(&own).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"].as_str().expect("entry id"),
+                "agentId": own,
+                "savedLogin": true,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert!(
+        !h.stub.acts.lock().expect("acts").is_empty(),
+        "the dedicated box was typed into"
+    );
+}

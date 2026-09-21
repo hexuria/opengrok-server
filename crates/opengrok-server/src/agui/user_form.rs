@@ -132,6 +132,13 @@ pub async fn submit_user_form(
     let form = form_request_from(&entry);
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
+    if is_saved_login(args) && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
+        // The card stays open: the person may still type by hand, or dismiss.
+        return (
+            403,
+            json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
+        );
+    }
 
     let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
     let resolution = overall_resolution(&outcomes);
@@ -560,6 +567,31 @@ fn call_id_of(entry: &Value) -> Option<&str> {
         .get("callId")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
+}
+
+/// The wire word NativeChat reads when a saved login is refused.
+pub const SHARED_COMPUTER: &str = "shared-computer";
+pub const SHARED_COMPUTER_MESSAGE: &str = "This computer is shared with other bots or people, so a saved login is not used on it. Type the login by hand, or give this bot its own computer.";
+
+/// `savedLogin: true` marks values NativeChat took from the person's saved logins after
+/// Touch ID, as opposed to values they typed into the card just now.
+fn is_saved_login(args: &Value) -> bool {
+    args.get("savedLogin")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// A saved login is the person's own; it lands only on a box that is one bot's own. A box
+/// shared by the account, a group or an org never receives it, whatever the bot asked for.
+/// Decided here, at fill time, from the box's scope — not from what the app believes.
+async fn fills_a_dedicated_box(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> bool {
+    let (_, _, _, _, mode) =
+        super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
+    mode == opengrok_core::coworker::BoxMode::Dedicated
 }
 
 fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
