@@ -311,6 +311,18 @@ impl Harness {
         (status, res.text().await.expect("body"))
     }
 
+    async fn approvals(&self, access: &str) -> Value {
+        let res = self
+            .client
+            .get(format!("{}/ag-ui/approvals", self.base))
+            .header("Authorization", format!("Bearer {access}"))
+            .send()
+            .await
+            .expect("approvals");
+        assert_eq!(res.status().as_u16(), 200);
+        res.json().await.expect("json body")
+    }
+
     async fn hide(&self, access: &str, run_id: &str) -> u16 {
         self.client
             .post(format!("{}/ag-ui/runs/{run_id}/hide", self.base))
@@ -710,4 +722,83 @@ async fn a_hidden_turn_is_withheld_from_every_client_and_still_kept() {
     assert_eq!(h.hide(&other, second.as_str()).await, 404);
     let still = h.thread_json(&access, &thread, "").await;
     assert_eq!(ids_of(&still), vec![second.as_str()]);
+}
+
+/// A turn the person hid stops asking to be looked at.
+///
+/// A card is the loudest surface in the app: it is what the person is pulled back to. A turn
+/// they deleted while it was still waiting on them must not come back through that door.
+#[tokio::test]
+async fn a_hidden_turn_stops_waiting_on_the_person() {
+    let database_url = database_or_skip!();
+    let email = format!("thread-waiting-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let base = now_ms();
+
+    let waiting = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        base + 1_000,
+        &["may I run this?"],
+        Ending::AwaitingApproval,
+    )
+    .await;
+
+    let queue = h.approvals(&access).await;
+    assert_eq!(
+        queue.as_array().map(|items| items.len()),
+        Some(1),
+        "the card is waiting: {queue}"
+    );
+
+    assert_eq!(h.hide(&access, waiting.as_str()).await, 204);
+    let queue = h.approvals(&access).await;
+    assert_eq!(
+        queue.as_array().map(|items| items.len()),
+        Some(0),
+        "and stops waiting once the person deletes it: {queue}"
+    );
+}
+
+/// A thread whose every turn is hidden still says which turns they were.
+///
+/// This is the case the feature exists for — the person deleted the only turn — and it is the
+/// one where a client most needs to be told, since it is holding that turn in its own cache.
+/// Answering "no such thread" would leave it painting that turn for good.
+#[tokio::test]
+async fn a_thread_hidden_to_the_last_turn_still_names_what_it_withheld() {
+    let database_url = database_or_skip!();
+    let email = format!("thread-emptied-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+
+    let only = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        now_ms() + 1_000,
+        &["the only answer"],
+        Ending::Finished,
+    )
+    .await;
+    assert_eq!(h.hide(&access, only.as_str()).await, 204);
+
+    let after = h.thread_json(&access, &thread, "").await;
+    assert!(runs_of(&after).is_empty(), "nothing is offered");
+    assert_eq!(
+        after["hiddenRunIds"]
+            .as_array()
+            .expect("the withheld ids are named")
+            .len(),
+        1,
+        "and the client is told why the thread is empty: {after}"
+    );
+
+    // A thread that never existed still reads as one that never existed.
+    let (status, _) = h.thread(&access, "th-nobody", "").await;
+    assert_eq!(status, 404);
 }

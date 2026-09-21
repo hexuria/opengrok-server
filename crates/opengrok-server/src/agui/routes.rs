@@ -2873,7 +2873,23 @@ pub async fn replay_thread(
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
         }
     };
-    if newest_first.is_empty() {
+    // The turns this account hid, named rather than silently missing: a client keeps its own
+    // copy of a thread, and a name it is not told stays on its screen. Asked before the empty
+    // check, because a thread whose every turn was hidden is exactly the one whose client most
+    // needs to hear which names to put away — and it is also the answer that would otherwise
+    // read as "no such thread" and leave that client painting from its cache for good.
+    let hidden = match state
+        .auth
+        .store
+        .hidden_runs_in_thread(&thread_id, &account_id)
+        .await
+    {
+        Ok(hidden) => hidden,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+    if newest_first.is_empty() && hidden.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
 
@@ -2941,16 +2957,6 @@ pub async fn replay_thread(
         });
     }
 
-    // The turns this account hid, named rather than silently missing: a client keeps its own
-    // copy of a thread, and without this the machine that did not do the hiding would go on
-    // painting from its cache what the person deleted somewhere else.
-    let hidden = state
-        .auth
-        .store
-        .hidden_runs_in_thread(&thread_id, &account_id, limit)
-        .await
-        .unwrap_or_default();
-
     Json(serde_json::json!({ "threadId": thread_id, "runs": runs, "hiddenRunIds": hidden }))
         .into_response()
 }
@@ -2976,7 +2982,7 @@ pub async fn hide_run(
     match state
         .auth
         .store
-        .hide_run(&run_id, &account_id, now_ms())
+        .hide_run(&RunId::from_stored(run_id), &account_id, now_ms())
         .await
     {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -3591,7 +3597,14 @@ pub async fn list_awaiting(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    match state.auth.store.awaiting_approval(&account_id).await {
+    // The queue the person is shown, not the one the machinery walks: a card is the loudest
+    // surface in the app, and a turn they deleted must not come back asking to be looked at.
+    match state
+        .auth
+        .store
+        .awaiting_approval_to_show(&account_id)
+        .await
+    {
         Ok(runs) => {
             let mut waiting = Vec::new();
             for run_id in runs {
