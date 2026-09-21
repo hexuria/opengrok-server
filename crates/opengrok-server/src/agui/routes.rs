@@ -2728,6 +2728,10 @@ pub async fn replay_run(
         "runId": run_id.as_str(),
         "threadId": run.thread_id,
         "status": run.status.as_str(),
+        // When the turn began. A client that picks a run up after a restart has no bubble for
+        // it and has to make one; without this it would stamp that bubble with the moment it
+        // noticed, and the turn would sort to the wrong place in the thread for good.
+        "startedAtMs": started_at_ms,
         "failure": run.failure,
         "pending": run.pending,
         "events": events,
