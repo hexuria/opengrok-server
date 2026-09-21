@@ -146,9 +146,6 @@ impl Persona {
 /// Lives here, next to `system_message`, so every run path (desktop, AG-UI, autonomy) can pass the
 /// same tail rather than each inventing one. The two halves MUST track the tool list: a prompt
 /// that contradicts the offering silently disables the tool.
-#[must_use]
-/// What the person reached for this turn, said once, at the end of the computer prompt.
-///
 /// Why the browser tools are missing this turn, when they are: the person routes this
 /// computer's traffic through their own desktop and has said this computer may not use it. Said
 /// so the model does not go looking for `open_url`, and does not claim it cannot see at all.
@@ -157,14 +154,19 @@ pub fn network_off_line(network_off: bool) -> String {
         return String::new();
     }
     " Your box's web traffic would go out through the person's own network, and they have \
-     switched that off for this computer, so the browser and screen tools are not available \
-     this turn. Your shell and files still work. If asked to browse, open a page or look at \
-     your screen, say that THEY switched off this computer's use of their network (Settings \
-     → Computer, or the Computer pane) and can turn it back on — do not say you have no \
-     screen or that screen access is unavailable in this chat, which is not the reason."
+     switched that off for this computer, so this turn you have NO browser or screen tools: \
+     `open_url`, `computer`, `credential.request` and `request_user_form` are not available, \
+     and the login instructions above do not apply. Your shell and files still work. If asked \
+     to browse, open a page, log in somewhere or look at your screen, say that THEY switched \
+     off this computer's use of their network (Settings → Computer, or the Computer pane) and \
+     can turn it back on — do not say you have no screen or that screen access is unavailable \
+     in this chat, which is not the reason."
         .to_string()
 }
 
+#[must_use]
+/// What the person reached for this turn, said once, at the end of the computer prompt.
+///
 /// The tools are already on offer; this only tells the model which ones the person named, and
 /// says plainly that the rest are still there. Without the second half a model reads a named
 /// tool as the only permitted one and gives up when it does not fit.

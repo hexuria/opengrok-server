@@ -57,9 +57,12 @@ fn now_ms() -> i64 {
 const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// A box with a screen whose guest says the tunnel is attached, that records what touched it.
+/// When `only_for` names a box, only that box's guest says so: the frozen-id test needs the
+/// two ids to answer differently, or it cannot tell which one was asked.
 #[derive(Default)]
 struct TunnelBox {
     touched: Mutex<Vec<String>>,
+    only_for: Mutex<Option<String>>,
 }
 
 impl TunnelBox {
@@ -148,7 +151,11 @@ impl Computer for TunnelBox {
         self.note("act");
         Ok(())
     }
-    async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
+    async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
+        let only = self.only_for.lock().expect("only_for").clone();
+        if only.as_deref().is_some_and(|live| live != box_id) {
+            return None;
+        }
         Some(EgressTunnel {
             enabled: true,
             ready: true,
@@ -488,6 +495,8 @@ async fn host_settings_asks_the_scoped_box_not_the_frozen_id() {
         .await
         .expect("move the scoped box");
     assert_ne!(frozen_id, live_id);
+    // Only the live box's guest advertises a tunnel; a probe of the frozen id gets nothing.
+    *h.tunnel_box.only_for.lock().expect("only_for") = Some(live_id.clone());
 
     h.route_traffic(&token, true).await;
     let (status, settings) = h
@@ -705,6 +714,26 @@ async fn bypass_skips_the_card_and_a_deny_does_not_consent_the_run() {
         "ask raises the card: {sse}"
     );
     let (run_id, first_call) = h.wait_for_pending(None).await;
+    // The queue carries the ask's own sentence, so a card rebuilt from it (the app after a
+    // relaunch) is still the tunnel's card and not a judge's.
+    let (status, queue) = h.get(&token, "/ag-ui/approvals").await;
+    assert_eq!(status, 200, "{queue}");
+    let item = queue
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["callId"].as_str() == Some(first_call.as_str()))
+        })
+        .cloned()
+        .expect("the waiting call is on the queue");
+    assert_eq!(item["reason"], json!("auto-review"), "{item}");
+    assert!(
+        item["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("egress tunnel")),
+        "the queue carries the tunnel's own sentence: {item}"
+    );
     let answered = h.answer(&token, run_id.as_str(), &first_call, false).await;
     assert_eq!(answered["approved"], false, "{answered}");
     let (again, second_call) = h.wait_for_pending(Some(&first_call)).await;

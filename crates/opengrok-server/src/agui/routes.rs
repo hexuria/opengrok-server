@@ -346,15 +346,7 @@ pub(crate) async fn tools_for_coworker(
     // The person's standing answer for THIS computer to the tunnel's card, keyed by the scope
     // the box lives under so a reset or takeover that changes the box id keeps the choice.
     // No row is `ask`: one card per run, as before there was a choice.
-    let egress_policy = state
-        .auth
-        .store
-        .egress_policy_mode(scope, &scope_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
-        .unwrap_or_default();
+    let egress_policy = provision::egress_policy_of(state, scope, &scope_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -1633,13 +1625,15 @@ struct EgressPolicyBody {
     mode: String,
 }
 
-/// The coworker's scoped box for a policy read or write, or the refusal: 401 without a bearer,
-/// 404 for another account's coworker or one with no computer.
+/// The coworker's scoped box row for a policy read or write, or the refusal: 401 without a
+/// bearer, 404 for another account's coworker or one with no computer. The provider is not
+/// needed — the preference is a row keyed by the scope, and the pane paints the control even
+/// while the provider cannot be built.
 async fn egress_policy_box(
     state: &AgUiState,
     headers: &axum::http::HeaderMap,
     coworker_id: String,
-) -> Result<(AccountId, CoworkerId, provision::ScopedBox), Response> {
+) -> Result<(AccountId, CoworkerId, provision::ScopedBoxRow), Response> {
     let Some(account_id) = account_from_bearer(state, headers) else {
         return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
     };
@@ -1649,8 +1643,8 @@ async fn egress_policy_box(
         Ok(false) => return Err((StatusCode::NOT_FOUND, "no such coworker").into_response()),
         Err(refusal) => return Err(refusal),
     }
-    match provision::scoped_box_for(state, &account_id, &coworker_id).await {
-        Some(scoped) => Ok((account_id, coworker_id, scoped)),
+    match provision::scoped_box_row_for(state, &account_id, &coworker_id).await {
+        Some(row) => Ok((account_id, coworker_id, row)),
         None => Err((StatusCode::NOT_FOUND, "this coworker has no computer").into_response()),
     }
 }
@@ -1691,6 +1685,14 @@ async fn set_egress_policy(
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
+    // An org-shared computer is every member's: its standing consent is the org admin's to
+    // set, like the org's sharing mode. A member's own box, or the box of a group they run,
+    // is theirs.
+    if scoped.scope == "org"
+        && let Err(refusal) = crate::account_api::admin_org(&state.auth, &headers).await
+    {
+        return refusal;
+    }
     match state
         .auth
         .store
@@ -3537,8 +3539,10 @@ pub async fn list_awaiting(
                         // land in this one queue, and a client that cannot tell them apart can
                         // only offer one word for all four. The run's own word, not a new one.
                         "reason": pending.reason.as_str(),
-                        // And why, in a sentence. Built from the run alone — see `why_of`.
-                        "why": why_of(&pending),
+                        // And why, in a sentence: the ask's own words when the run journalled
+                        // them, else a sentence built from the reason — see `why_of`.
+                        "why": journalled_why(&run.emitted, &pending.call_id)
+                            .unwrap_or_else(|| why_of(&pending)),
                     }));
                 }
             }
@@ -3549,13 +3553,34 @@ pub async fn list_awaiting(
     }
 }
 
-/// Why this call is waiting, in a sentence: which question is being asked, and what the call
-/// would do if the answer is yes.
+/// The ask's own sentence, as the run journalled it on its `run-awaiting-approval` event for
+/// this call. The egress tunnel's card and a judge's card are both `auto-review` on the run,
+/// and only this sentence tells them apart — a client that rebuilds the card from the queue
+/// (NativeChat after a relaunch) needs the same words the stream carried, or the tunnel's card
+/// comes back as a judge's. Read from the loaded run's own events; no other row is touched.
+fn journalled_why(emitted: &[serde_json::Value], call_id: &str) -> Option<String> {
+    let text = |event: &serde_json::Value, key: &str| -> Option<String> {
+        event
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    emitted.iter().rev().find_map(|event| {
+        (text(event, "type").as_deref() == Some("CUSTOM")
+            && text(event, "name").as_deref() == Some("run-awaiting-approval")
+            && text(event, "callId").as_deref() == Some(call_id))
+        .then(|| text(event, "why"))
+        .flatten()
+        .map(|why| why.trim().to_string())
+        .filter(|why| !why.is_empty())
+    })
+}
+
+/// Why this call is waiting, in a sentence, when the run journalled no words of its own: which
+/// question is being asked, and what the call would do if the answer is yes.
 ///
-/// FROM THE RUN AND NOTHING ELSE. The card in the transcript carries the ask's own words, but
-/// reading it would mean a transcript scan per waiting coworker on a queue a client polls — and
-/// the run already holds the reason, the tool and the arguments, which is what the sentence is
-/// made of. The opening line says which of the four questions this is; `cards::summary_for`
+/// FROM THE RUN AND NOTHING ELSE. The run already holds the reason, the tool and the arguments,
+/// which is what the sentence is made of. The opening line says which of the four questions this is; `cards::summary_for`
 /// writes the rest, the same words the card itself uses for what is about to happen.
 fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
     use opengrok_core::run::SuspendReason;

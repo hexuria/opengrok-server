@@ -719,15 +719,18 @@ pub async fn egress_policy_of(
     scope: &str,
     scope_id: &str,
 ) -> opengrok_tools::EgressPolicy {
-    state
-        .auth
-        .store
-        .egress_policy_mode(scope, scope_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
-        .unwrap_or_default()
+    match state.auth.store.egress_policy_mode(scope, scope_id).await {
+        Ok(mode) => mode
+            .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
+            .unwrap_or_default(),
+        // A store that cannot answer reads as `ask`: the card still asks a person, so nothing
+        // runs on a consent nobody gave — and a `never` read as `ask` is one card, not a run
+        // let through. Said in the log, because a `never` the pane shows as `ask` is a lie.
+        Err(error) => {
+            tracing::warn!(%error, scope, scope_id, "could not read the egress policy; treating it as ask");
+            opengrok_tools::EgressPolicy::Ask
+        }
+    }
 }
 
 /// The Computer pane carries the choice next to `shareScope`, so the client can paint the
@@ -768,6 +771,39 @@ pub async fn scoped_box_for(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Option<ScopedBox> {
+    let row = scoped_box_row_for(state, account_id, coworker_id).await?;
+    let computer = lookup_provider(state, row.org_id.as_deref(), &row.kind)
+        .await
+        .computer?;
+    Some(ScopedBox {
+        scope: row.scope,
+        scope_id: row.scope_id,
+        box_id: row.box_id,
+        kind: row.kind,
+        stopped: row.stopped,
+        org_id: row.org_id,
+        computer,
+    })
+}
+
+/// The recorded box of a coworker's scope, without its provider. What a setting keyed by the
+/// scope needs: a preference about a box is still writable when the box's provider cannot be
+/// built right now (an org key sealed under a rotated KEK), and the Computer pane paints the
+/// control in exactly that state.
+pub struct ScopedBoxRow {
+    pub scope: &'static str,
+    pub scope_id: String,
+    pub box_id: String,
+    pub kind: String,
+    pub stopped: bool,
+    pub org_id: Option<String>,
+}
+
+pub async fn scoped_box_row_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<ScopedBoxRow> {
     let (_, org_id, scope, scope_id, _) = scope_of(state, account_id, coworker_id.as_str()).await;
     let (box_id, kind, stopped) = state
         .auth
@@ -776,17 +812,13 @@ pub async fn scoped_box_for(
         .await
         .ok()
         .flatten()?;
-    let computer = lookup_provider(state, org_id.as_deref(), &kind)
-        .await
-        .computer?;
-    Some(ScopedBox {
+    Some(ScopedBoxRow {
         scope,
         scope_id,
         box_id,
         kind,
         stopped,
         org_id,
-        computer,
     })
 }
 
