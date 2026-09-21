@@ -157,8 +157,11 @@ pub fn network_off_line(network_off: bool) -> String {
         return String::new();
     }
     " Your box's web traffic would go out through the person's own network, and they have \
-     switched that off for this computer, so the browser and screen tools are not available. \
-     Your shell and files still work, and the person can turn it back on."
+     switched that off for this computer, so the browser and screen tools are not available \
+     this turn. Your shell and files still work. If asked to browse, open a page or look at \
+     your screen, say that THEY switched off this computer's use of their network (Settings \
+     → Computer, or the Computer pane) and can turn it back on — do not say you have no \
+     screen or that screen access is unavailable in this chat, which is not the reason."
         .to_string()
 }
 
