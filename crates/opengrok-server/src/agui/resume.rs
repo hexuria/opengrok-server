@@ -599,10 +599,11 @@ async fn resume_suspended_run(
     else {
         return;
     };
-    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click.
+    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click. A no is not (see `continue_run`).
     let runner = runner.with_egress_consented(
-        pending.reason == opengrok_core::run::SuspendReason::AutoReview
+        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+            && pending.reason == opengrok_core::run::SuspendReason::AutoReview
             && opengrok_tools::leaves_the_box(&pending.tool),
     );
     // The system message this turn OPENED with, not a fresh composition: a role or title edited

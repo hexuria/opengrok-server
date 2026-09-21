@@ -343,6 +343,11 @@ pub(crate) async fn tools_for_coworker(
     } else {
         opengrok_tools::EgressTunnelMode::Off
     };
+    // The person's standing answer for THIS computer to the tunnel's card, keyed by the scope
+    // the box lives under so a reset or takeover that changes the box id keeps the choice.
+    // No row is `ask`: one card per run, as before there was a choice.
+    let (egress_policy, egress_unconfirmed) =
+        provision::egress_policy_for_turn(state, scope, &scope_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -374,7 +379,9 @@ pub(crate) async fn tools_for_coworker(
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel_mode(egress_tunnel);
+        .with_egress_tunnel_mode(egress_tunnel)
+        .with_egress_policy(egress_policy)
+        .with_egress_policy_unconfirmed(egress_unconfirmed);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -729,6 +736,10 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/computer/update",
             post(computer_update),
+        )
+        .route(
+            "/coworkers/{coworker_id}/computer/egress-policy",
+            get(get_egress_policy).put(set_egress_policy),
         )
         .route(
             "/coworkers/{coworker_id}/computer/reset",
@@ -1632,6 +1643,106 @@ async fn computer_status(
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
+/// The person's standing answer, for this coworker's computer, to the tunnel's card.
+#[derive(serde::Deserialize)]
+struct EgressPolicyBody {
+    mode: String,
+}
+
+/// The coworker's scoped box row for a policy read or write, or the refusal: 401 without a
+/// bearer, 404 for another account's coworker or one with no computer. The provider is not
+/// needed — the preference is a row keyed by the scope, and the pane paints the control even
+/// while the provider cannot be built.
+async fn egress_policy_box(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+    coworker_id: String,
+) -> Result<(AccountId, CoworkerId, provision::ScopedBoxRow), Response> {
+    let Some(account_id) = account_from_bearer(state, headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::NOT_FOUND, "no such coworker").into_response()),
+        Err(refusal) => return Err(refusal),
+    }
+    match provision::scoped_box_row_for(state, &account_id, &coworker_id).await {
+        Some(row) => Ok((account_id, coworker_id, row)),
+        None => Err((StatusCode::NOT_FOUND, "this coworker has no computer").into_response()),
+    }
+}
+
+/// `GET /coworkers/{id}/computer/egress-policy` — `{ scope, scopeId, boxId, mode }`; an unset
+/// policy reads as `ask`, which is what it means.
+async fn get_egress_policy(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let (_, _, scoped) = match egress_policy_box(&state, &headers, coworker_id).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let Ok(mode) = provision::egress_policy_read(&state, scoped.scope, &scoped.scope_id).await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the network policy could not be read right now",
+        )
+            .into_response();
+    };
+    Json(serde_json::json!({
+        "scope": provision::share_scope_of(scoped.scope),
+        "scopeId": scoped.scope_id,
+        "boxId": scoped.box_id,
+        "mode": mode.as_stored(),
+    }))
+    .into_response()
+}
+
+/// `PUT /coworkers/{id}/computer/egress-policy` `{ "mode": "bypass" | "ask" | "never" }` — 204.
+/// The choice is kept whether or not the tunnel is on right now: it says what happens when it is.
+async fn set_egress_policy(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    Json(body): Json<EgressPolicyBody>,
+) -> Response {
+    if !opengrok_tools::EgressPolicy::is_valid(&body.mode) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown mode").into_response();
+    }
+    let (_, _, scoped) = match egress_policy_box(&state, &headers, coworker_id).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    // An org-shared computer is every member's: its standing consent is the org admin's to
+    // set, like the org's sharing mode. A member's own box, or the box of a group they run,
+    // is theirs.
+    if scoped.scope == "org"
+        && let Err(refusal) = crate::account_api::admin_org(&state.auth, &headers).await
+    {
+        return refusal;
+    }
+    match state
+        .auth
+        .store
+        .set_egress_policy_mode(
+            scoped.scope,
+            &scoped.scope_id,
+            &body.mode,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not set the egress policy");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
 /// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile
 /// and for an explicit observe / Open the screen. Same shape as `TOOL_CALL_RESULT.image`,
 /// with `visibility: transcript` so a client that fetches this on purpose may persist it.
@@ -2227,6 +2338,10 @@ pub async fn run(
                 None
             };
             let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
+            let network_off = tools.as_ref().is_some_and(|runner| runner.network_off());
+            let network_unconfirmed = tools
+                .as_ref()
+                .is_some_and(|runner| runner.network_unconfirmed());
             let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
             // What the person named this turn, kept to what this bot can actually run.
             let preferred = honour_preferences(&preferred_tools_from(&input), tools.as_ref());
@@ -2248,7 +2363,7 @@ pub async fn run(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2256,6 +2371,7 @@ pub async fn run(
                         reaches_user_machine,
                         user_machine_label.as_deref(),
                     ),
+                    crate::persona::network_off_line(network_off, network_unconfirmed),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
                 )),
@@ -3344,10 +3460,13 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
-    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click.
+    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click. A no is not: this once consented on
+    // any answer, so a Deny on the tunnel card let the model's next screen action through with
+    // no card at all (21 Sep 2026).
     let runner = runner.with_egress_consented(
-        answered.reason == opengrok_core::run::SuspendReason::AutoReview
+        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+            && answered.reason == opengrok_core::run::SuspendReason::AutoReview
             && opengrok_tools::leaves_the_box(&answered.tool),
     );
 
@@ -3431,7 +3550,7 @@ pub async fn list_awaiting(
             let mut waiting = Vec::new();
             for run_id in runs {
                 if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
-                    && let Some(pending) = run.pending
+                    && let Some(pending) = run.pending.clone()
                 {
                     waiting.push(serde_json::json!({
                         "runId": run_id.as_str(),
@@ -3446,8 +3565,9 @@ pub async fn list_awaiting(
                         // land in this one queue, and a client that cannot tell them apart can
                         // only offer one word for all four. The run's own word, not a new one.
                         "reason": pending.reason.as_str(),
-                        // And why, in a sentence. Built from the run alone — see `why_of`.
-                        "why": why_of(&pending),
+                        // And why, in a sentence: the ask's own words when the run journalled
+                        // them, else a sentence built from the reason — see `why_of`.
+                        "why": journalled_why(&run, &pending).unwrap_or_else(|| why_of(&pending)),
                     }));
                 }
             }
@@ -3458,13 +3578,42 @@ pub async fn list_awaiting(
     }
 }
 
-/// Why this call is waiting, in a sentence: which question is being asked, and what the call
-/// would do if the answer is yes.
+/// The ask's own sentence, as the run journalled it on its `run-awaiting-approval` event for
+/// this call. The egress tunnel's card and a judge's card are both `auto-review` on the run,
+/// and only this sentence tells them apart — a client that rebuilds the card from the queue
+/// (NativeChat after a relaunch) needs the same words the stream carried, or the tunnel's card
+/// comes back as a judge's. Read from the loaded run's own events; no other row is touched.
+fn journalled_why(
+    run: &opengrok_core::run::Run,
+    pending: &opengrok_core::run::PendingApproval,
+) -> Option<String> {
+    // Only the one ambiguous kind. A form's or a policy card's journalled words are the
+    // ask's bare line ("Waiting for you"), and `why_of` says more for those.
+    if pending.reason != opengrok_core::run::SuspendReason::AutoReview {
+        return None;
+    }
+    let text = |event: &serde_json::Value, key: &str| -> Option<String> {
+        event
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    run.emitted.iter().rev().find_map(|event| {
+        (text(event, "type").as_deref() == Some("CUSTOM")
+            && text(event, "name").as_deref() == Some("run-awaiting-approval")
+            && text(event, "callId").as_deref() == Some(pending.call_id.as_str()))
+        .then(|| text(event, "why"))
+        .flatten()
+        .map(|why| why.trim().to_string())
+        .filter(|why| !why.is_empty())
+    })
+}
+
+/// Why this call is waiting, in a sentence, when the run journalled no words of its own: which
+/// question is being asked, and what the call would do if the answer is yes.
 ///
-/// FROM THE RUN AND NOTHING ELSE. The card in the transcript carries the ask's own words, but
-/// reading it would mean a transcript scan per waiting coworker on a queue a client polls — and
-/// the run already holds the reason, the tool and the arguments, which is what the sentence is
-/// made of. The opening line says which of the four questions this is; `cards::summary_for`
+/// FROM THE RUN AND NOTHING ELSE. The run already holds the reason, the tool and the arguments,
+/// which is what the sentence is made of. The opening line says which of the four questions this is; `cards::summary_for`
 /// writes the rest, the same words the card itself uses for what is about to happen.
 fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
     use opengrok_core::run::SuspendReason;
@@ -3562,9 +3711,11 @@ async fn host_settings_reply(
     Json(record).into_response()
 }
 
-/// Host intent, then the coworker: it must be named, be this account's, have a computer, and
-/// that box must say the tunnel is ready. Each miss is a plain false, never an error — the
-/// settings page still has its record to show.
+/// Host intent, then the coworker: it must be named, be this account's, have a computer in its
+/// scope, and that box must say the tunnel is ready. Each miss is a plain false, never an error
+/// — the settings page still has its record to show. The box is the SCOPE's live one, through
+/// its own provider, the same one the Computer pane and a turn's tools use; this once read the
+/// id frozen on the coworker's row with the boot-time provider and disagreed with both.
 async fn egress_tunnel_available_for(
     state: &AgUiState,
     account_id: &AccountId,
@@ -3573,7 +3724,7 @@ async fn egress_tunnel_available_for(
     if !state.egress_tunnel_enabled() {
         return false;
     }
-    let (Some(coworker), Some(computer)) = (coworker, state.computer.as_ref()) else {
+    let Some(coworker) = coworker else {
         return false;
     };
     let coworker_id = CoworkerId::from_stored(coworker.to_string());
@@ -3587,13 +3738,12 @@ async fn egress_tunnel_available_for(
     if !owns {
         return false;
     }
-    let Ok((loaded, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+    let Some(scoped) = provision::scoped_box_for(state, account_id, &coworker_id).await else {
         return false;
     };
-    let Some(box_id) = loaded.computer().map(|id| id.as_str().to_string()) else {
-        return false;
-    };
-    state.egress_tunnel_for(computer.as_ref(), &box_id).await
+    state
+        .egress_tunnel_for(scoped.computer.as_ref(), &scoped.box_id)
+        .await
 }
 
 /// The message a reply points at, as the one bracketed line `reply_context` writes for the
