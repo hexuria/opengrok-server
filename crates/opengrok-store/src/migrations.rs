@@ -243,6 +243,19 @@ alter table run_view add column if not exists leased_until_ms bigint;
 -- When the run began: set on the first append and never moved, so a routine's run list can say
 -- when each run started without replaying it.
 alter table run_view add column if not exists started_at_ms bigint;
+-- When the person hid this turn, for a turn they hid.
+--
+-- A person deleting a turn in NativeChat is not asking for it to be destroyed: they are asking
+-- not to see it again, on this machine or any other they sign in from. Nothing here is removed —
+-- the run, its frames and everything the coworker was told stay exactly as they were, so the
+-- coworker's own memory of the conversation is untouched. What changes is what a client is
+-- offered when it asks a thread what happened, and what it is shown waiting on it: a hidden run
+-- is in neither answer, so no client paints it and none asks the person to look at it again.
+--
+-- Asking for a run by name still answers with the whole of it. That is deliberate: a turn can be
+-- hidden while it is still running, and the machine that hid it goes on following that run to its
+-- end. Only the owner can ask, and only with a name they already hold.
+alter table run_view add column if not exists hidden_at_ms bigint;
 
 create index if not exists run_view_lease_idx on run_view (status, leased_until_ms);
 

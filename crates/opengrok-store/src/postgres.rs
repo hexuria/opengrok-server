@@ -488,6 +488,51 @@ impl PgStore {
         Ok(row.try_get("unfinished")?)
     }
 
+    /// Hide a run from every client of the account that owns it.
+    ///
+    /// Nothing is destroyed: the run, its frames and the coworker's memory of the turn are
+    /// untouched. What changes is that no thread offers it again. Answers whether it was this
+    /// account's run to hide, so a run belonging to somebody else reads as no such run.
+    pub async fn hide_run(
+        &self,
+        run_id: &RunId,
+        account: &AccountId,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let hidden = sqlx::query(
+            "update run_view set hidden_at_ms = coalesce(hidden_at_ms, $3)
+             where id = $1 and account_id = $2",
+        )
+        .bind(run_id.as_str())
+        .bind(account.as_str())
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(hidden.rows_affected() > 0)
+    }
+
+    /// The runs of a thread this account has hidden, so a client can put the same turns out of
+    /// sight in its own cache rather than painting what another machine deleted.
+    ///
+    /// Not rationed by the page size the turns themselves use: a client is holding its own copy
+    /// of the whole thread, and a name it is not told stays on its screen. Names are cheap.
+    pub async fn hidden_runs_in_thread(
+        &self,
+        thread_id: &str,
+        account: &AccountId,
+    ) -> StoreResult<Vec<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "select id from run_view
+             where thread_id = $1 and account_id = $2 and hidden_at_ms is not null
+             order by hidden_at_ms desc",
+        )
+        .bind(thread_id)
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// The runs of one thread that THIS ACCOUNT may read, newest first.
     ///
     /// LAYER 4 (`docs/PLAN.md` §4.5) in the shape a thread needs it: the owner is a condition of
@@ -512,7 +557,7 @@ impl PgStore {
     ) -> StoreResult<Vec<ThreadRun>> {
         let rows = sqlx::query(
             "select id, status, started_at_ms, updated_at_ms from run_view
-             where thread_id = $1 and account_id = $2
+             where thread_id = $1 and account_id = $2 and hidden_at_ms is null
              order by coalesce(started_at_ms, updated_at_ms) desc, id desc limit $3",
         )
         .bind(thread_id)
@@ -557,6 +602,26 @@ impl PgStore {
     ///
     /// A suspended run that nobody can find is a run nobody will ever answer, which is the same as
     /// a lost one — so this is not a convenience, it is what makes suspension safe.
+    /// The same, minus the turns the person hid.
+    ///
+    /// `awaiting_approval` answers for the machinery — finding a parked run, resuming it,
+    /// stopping it — which has to see every suspended run whatever the person did with the
+    /// bubble. This answers for the person: a card is the loudest surface there is, and a turn
+    /// they deleted must not come back asking to be looked at.
+    pub async fn awaiting_approval_to_show(&self, account: &AccountId) -> StoreResult<Vec<RunId>> {
+        let rows = sqlx::query(
+            "select id from run_view
+             where status = 'awaiting-approval' and account_id = $1 and hidden_at_ms is null
+             order by updated_at_ms",
+        )
+        .bind(account.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
+            .collect()
+    }
+
     pub async fn awaiting_approval(&self, account: &AccountId) -> StoreResult<Vec<RunId>> {
         let rows = sqlx::query(
             "select id from run_view

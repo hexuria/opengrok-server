@@ -691,6 +691,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
+        .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route(
@@ -2727,6 +2728,10 @@ pub async fn replay_run(
         "runId": run_id.as_str(),
         "threadId": run.thread_id,
         "status": run.status.as_str(),
+        // When the turn began. A client that picks a run up after a restart has no bubble for
+        // it and has to make one; without this it would stamp that bubble with the moment it
+        // noticed, and the turn would sort to the wrong place in the thread for good.
+        "startedAtMs": started_at_ms,
         "failure": run.failure,
         "pending": run.pending,
         "events": events,
@@ -2868,7 +2873,23 @@ pub async fn replay_thread(
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
         }
     };
-    if newest_first.is_empty() {
+    // The turns this account hid, named rather than silently missing: a client keeps its own
+    // copy of a thread, and a name it is not told stays on its screen. Asked before the empty
+    // check, because a thread whose every turn was hidden is exactly the one whose client most
+    // needs to hear which names to put away — and it is also the answer that would otherwise
+    // read as "no such thread" and leave that client painting from its cache for good.
+    let hidden = match state
+        .auth
+        .store
+        .hidden_runs_in_thread(&thread_id, &account_id)
+        .await
+    {
+        Ok(hidden) => hidden,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+    if newest_first.is_empty() && hidden.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
 
@@ -2936,7 +2957,38 @@ pub async fn replay_thread(
         });
     }
 
-    Json(serde_json::json!({ "threadId": thread_id, "runs": runs })).into_response()
+    Json(serde_json::json!({ "threadId": thread_id, "runs": runs, "hiddenRunIds": hidden }))
+        .into_response()
+}
+
+/// Hide a turn from every client of the account that owns it.
+///
+/// The person deleting a turn in their app is not asking for it to be destroyed. They are asking
+/// not to be shown it again — and on the next machine they sign in from, not to be shown it
+/// there either. So nothing here is removed: the run keeps its frames, and the coworker keeps
+/// its memory of the turn. What changes is that a thread stops offering the run, so no client
+/// paints it and the one that hid it does not fetch it back.
+///
+/// LAYER 4 (`docs/PLAN.md` §4.5): the account comes from the bearer and another account's run is
+/// "no such run", the same answer as one that never existed.
+pub async fn hide_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    match state
+        .auth
+        .store
+        .hide_run(&RunId::from_stored(run_id), &account_id, now_ms())
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3545,7 +3597,14 @@ pub async fn list_awaiting(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    match state.auth.store.awaiting_approval(&account_id).await {
+    // The queue the person is shown, not the one the machinery walks: a card is the loudest
+    // surface in the app, and a turn they deleted must not come back asking to be looked at.
+    match state
+        .auth
+        .store
+        .awaiting_approval_to_show(&account_id)
+        .await
+    {
         Ok(runs) => {
             let mut waiting = Vec::new();
             for run_id in runs {
