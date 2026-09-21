@@ -671,16 +671,21 @@ async fn connect_plugins(
 }
 
 /// `POST /ag-ui` lives on `HostState` so a UserForm CUSTOM can mint the gateway card and
-/// stamp `entryId` on the SSE frame NativeChat receives. Other AG-UI routes stay on
-/// `AgUiState`. The SSE still forwards CUSTOM `run-awaiting-approval`; the card is additive.
+/// stamp `entryId` on the SSE frame NativeChat receives. So does the answer to a card: the
+/// run it continues can raise a form of its own, and a form with no card entry has no
+/// `entryId` for NativeChat to submit to — its Log in button stayed grey (21 Sep 2026).
+/// Other AG-UI routes stay on `AgUiState`. The SSE still forwards CUSTOM
+/// `run-awaiting-approval`; the card is additive.
 pub fn run_router(state: crate::host_state::HostState) -> Router {
-    Router::new().route("/ag-ui", post(run)).with_state(state)
+    Router::new()
+        .route("/ag-ui", post(run))
+        .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .with_state(state)
 }
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
-        .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
@@ -2821,11 +2826,12 @@ pub struct AnswerRequest {
 /// after the first, and the store's sequence check makes the concurrent case safe — the loser gets
 /// a conflict and re-reads to find the call already answered.
 pub async fn answer_run(
-    State(state): State<AgUiState>,
+    State(host): State<crate::host_state::HostState>,
     headers: axum::http::HeaderMap,
     Path(run_id): Path<String>,
     Json(request): Json<AnswerRequest>,
 ) -> Response {
+    let state = host.agui.clone();
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
@@ -2985,11 +2991,11 @@ pub async fn answer_run(
     let continuing = pending.is_some();
     if let Some(pending) = pending {
         let outcome = resume_outcome(request.approved, &pending);
-        let state = state.clone();
+        let host = host.clone();
         let account_id = account_id.clone();
         let run_id = run_id.clone();
         tokio::spawn(async move {
-            continue_run(state, account_id, run_id, pending, resumed_seq, outcome).await;
+            continue_run(host, account_id, run_id, pending, resumed_seq, outcome).await;
         });
     }
 
@@ -3286,13 +3292,14 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
 /// that is answered and unfinished, which `interrupted_runs` can find and this can be told to do
 /// again.
 async fn continue_run(
-    state: AgUiState,
+    host: crate::host_state::HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     answered: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
 ) {
+    let state = host.agui.clone();
     let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
         return;
@@ -3400,6 +3407,11 @@ async fn continue_run(
     .await;
 
     tracing::info!(run = %run_id, events = events.len(), "continued an answered run");
+    // The continued run may pause again — on a user form, a saved-login request — and that
+    // pause needs its card in the transcript exactly as a fresh turn's does: without the
+    // card there is no `entryId`, and NativeChat cannot submit what the person typed.
+    let agent_id = coworker_id.as_str().to_string();
+    super::resume::emit_suspensions(&host, &coworker_id, &account_id, &agent_id, &events).await;
 }
 
 /// Runs waiting on this person.
