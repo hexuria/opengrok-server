@@ -723,12 +723,14 @@ pub async fn egress_policy_of(
         Ok(mode) => mode
             .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
             .unwrap_or_default(),
-        // A store that cannot answer reads as `ask`: the card still asks a person, so nothing
-        // runs on a consent nobody gave — and a `never` read as `ask` is one card, not a run
-        // let through. Said in the log, because a `never` the pane shows as `ask` is a lie.
+        // A store that cannot answer fails CLOSED: `never` for this turn. `ask` would still
+        // put the tunnel card in front of a person for the screen tools, but the two login
+        // hand-offs have no card of their own — under `ask` a stored `never` would let a
+        // person type a site password into a box whose traffic then leaves through their
+        // network. One turn of a withheld browser during a store error is the cheaper wrong.
         Err(error) => {
-            tracing::warn!(%error, scope, scope_id, "could not read the egress policy; treating it as ask");
-            opengrok_tools::EgressPolicy::Ask
+            tracing::warn!(%error, scope, scope_id, "could not read the egress policy; failing closed (never) for this turn");
+            opengrok_tools::EgressPolicy::Never
         }
     }
 }

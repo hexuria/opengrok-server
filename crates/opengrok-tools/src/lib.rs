@@ -652,6 +652,7 @@ const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
 const BROWSER_TOOLS: &[&str] = &[
     "open_url",
     "computer",
+    RUN_RECIPE,
     REQUEST_USER_FORM,
     REQUEST_CREDENTIAL,
 ];
@@ -772,6 +773,16 @@ impl Executor {
     /// refuses in words instead, once the guest has been asked.
     pub fn network_off(&self) -> bool {
         self.egress_policy == EgressPolicy::Never && self.egress_tunnel == EgressTunnelMode::On
+    }
+
+    /// `network_off`, asked once the box is awake: under a standing `never` with the tunnel
+    /// mode undecided at turn start (`AskTheBoxAfterWake`), the woken guest's word settles it.
+    /// For the paths that wake a box and act on it outside `execute` (the user-form fill).
+    pub async fn network_off_now(&self, box_id: &str) -> bool {
+        self.network_off()
+            || (self.egress_policy == EgressPolicy::Never
+                && self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
+                && self.tunnel_is_there(box_id).await)
     }
 
     /// The person's standing answer for this computer to the tunnel's card.
@@ -2163,6 +2174,8 @@ mod tests {
     struct SpyComputer {
         ran_on: Mutex<Vec<(String, String)>>,
         fail_with: Option<BoxError>,
+        /// The guest advertises an attached tunnel (`/v1/info`), for the after-wake tests.
+        tunnel_ready: bool,
     }
 
     impl SpyComputer {
@@ -2176,6 +2189,12 @@ mod tests {
 
     #[async_trait]
     impl Computer for SpyComputer {
+        async fn egress_tunnel(&self, _box_id: &str) -> Option<opengrok_box::EgressTunnel> {
+            self.tunnel_ready.then_some(opengrok_box::EgressTunnel {
+                enabled: true,
+                ready: true,
+            })
+        }
         async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
             Ok("box_new".to_string())
         }
@@ -2774,6 +2793,7 @@ mod tests {
         let spy = Arc::new(SpyComputer {
             ran_on: Mutex::new(Vec::new()),
             fail_with: Some(BoxError::NoSuchBox),
+            tunnel_ready: false,
         });
         let executor = allowing(spy);
         let result = executor
@@ -3637,6 +3657,51 @@ mod tests {
             .await;
         assert!(!result.awaiting_approval, "{result:?}");
         assert!(!result.content.contains("switched off"), "{result:?}");
+    }
+
+    /// The box was asleep at turn start and the guest, asked after the wake, says a tunnel IS
+    /// attached: under `never` the browser call is refused in words, where `ask` would raise
+    /// the card. `run_recipe` is a browser sequence and is caught the same way.
+    #[tokio::test]
+    async fn a_standing_never_refuses_once_the_woken_guest_says_the_tunnel_is_there() {
+        let spy = Arc::new(SpyComputer {
+            tunnel_ready: true,
+            ..SpyComputer::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake)
+            .with_egress_policy(EgressPolicy::Never);
+        assert!(!executor.network_off(), "not known before the wake");
+        assert!(executor.network_off_now("box_mine").await);
+        for (tool, args) in [
+            ("computer", json!({ "action": "screenshot" })),
+            ("open_url", json!({ "url": "https://example.com" })),
+            (RUN_RECIPE, json!({ "recipe": "r1" })),
+        ] {
+            let result = executor
+                .execute(&context_with_box("box_mine"), &call(tool, args))
+                .await;
+            assert!(
+                !result.awaiting_approval,
+                "{tool}: no card under never: {result:?}"
+            );
+            assert!(
+                result.content.contains("switched off"),
+                "{tool}: {result:?}"
+            );
+        }
+        // The same state under `ask` is the card, as before.
+        let asking = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake);
+        let result = asking
+            .execute(
+                &context_with_box("box_mine"),
+                &call("computer", json!({ "action": "screenshot" })),
+            )
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
     }
 
     /// The two hand-off cards are browser tools too: under `never` they are refused before a

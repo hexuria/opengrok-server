@@ -3524,7 +3524,7 @@ pub async fn list_awaiting(
             let mut waiting = Vec::new();
             for run_id in runs {
                 if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
-                    && let Some(pending) = run.pending
+                    && let Some(pending) = run.pending.clone()
                 {
                     waiting.push(serde_json::json!({
                         "runId": run_id.as_str(),
@@ -3541,8 +3541,7 @@ pub async fn list_awaiting(
                         "reason": pending.reason.as_str(),
                         // And why, in a sentence: the ask's own words when the run journalled
                         // them, else a sentence built from the reason — see `why_of`.
-                        "why": journalled_why(&run.emitted, &pending.call_id)
-                            .unwrap_or_else(|| why_of(&pending)),
+                        "why": journalled_why(&run, &pending).unwrap_or_else(|| why_of(&pending)),
                     }));
                 }
             }
@@ -3558,17 +3557,25 @@ pub async fn list_awaiting(
 /// and only this sentence tells them apart — a client that rebuilds the card from the queue
 /// (NativeChat after a relaunch) needs the same words the stream carried, or the tunnel's card
 /// comes back as a judge's. Read from the loaded run's own events; no other row is touched.
-fn journalled_why(emitted: &[serde_json::Value], call_id: &str) -> Option<String> {
+fn journalled_why(
+    run: &opengrok_core::run::Run,
+    pending: &opengrok_core::run::PendingApproval,
+) -> Option<String> {
+    // Only the one ambiguous kind. A form's or a policy card's journalled words are the
+    // ask's bare line ("Waiting for you"), and `why_of` says more for those.
+    if pending.reason != opengrok_core::run::SuspendReason::AutoReview {
+        return None;
+    }
     let text = |event: &serde_json::Value, key: &str| -> Option<String> {
         event
             .get(key)
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
     };
-    emitted.iter().rev().find_map(|event| {
+    run.emitted.iter().rev().find_map(|event| {
         (text(event, "type").as_deref() == Some("CUSTOM")
             && text(event, "name").as_deref() == Some("run-awaiting-approval")
-            && text(event, "callId").as_deref() == Some(call_id))
+            && text(event, "callId").as_deref() == Some(pending.call_id.as_str()))
         .then(|| text(event, "why"))
         .flatten()
         .map(|why| why.trim().to_string())

@@ -28,7 +28,8 @@ use opengrok_box::{
     BoxResult, CommandOutput, Computer, CuaAction, EgressTunnel, Screenshot, StartedCommand,
 };
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, OrgId};
+use opengrok_core::org::{Org, OrgCommand};
 use opengrok_core::run::RunStatus;
 use opengrok_harness::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 use opengrok_server::agui::AgUiState;
@@ -197,15 +198,21 @@ impl ModelDoor for LookingModel {
 }
 
 async fn seed_account(store: &PgStore, email: &str) -> AccountId {
+    seed_member(store, email, None).await
+}
+
+/// An account, in an org when one is named.
+async fn seed_member(store: &PgStore, email: &str, org: Option<&OrgId>) -> AccountId {
     let id = AccountId::new();
     let at_ms = now_ms();
+    let org_id = org.map(|org| org.to_string());
     let events = Account::default()
         .decide(AccountCommand::Register {
             email: email.to_string(),
             password_hash: "x".to_string(),
             first_name: "Host".to_string(),
             last_name: String::new(),
-            org_id: String::new(),
+            org_id: org_id.clone().unwrap_or_default(),
             plan: Plan::Ultra,
             verified: true,
             enabled: true,
@@ -221,7 +228,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         password_hash: Some("x".to_string()),
         first_name: "Host".to_string(),
         last_name: String::new(),
-        org_id: None,
+        org_id,
         verified: true,
         enabled: true,
         avatar_url: None,
@@ -231,6 +238,29 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         .await
         .expect("append account");
     id
+}
+
+/// An org whose admin is `admin`, sharing one computer among its members.
+async fn seed_org_sharing_one_box(store: &PgStore, org: &OrgId, admin: &AccountId, email: &str) {
+    let at_ms = now_ms();
+    let domain = email.rsplit('@').next().expect("domain").to_string();
+    let events = Org::default()
+        .decide(OrgCommand::Create {
+            name: format!("org of {email}"),
+            admin: admin.clone(),
+            domains: vec![domain],
+            at_ms,
+        })
+        .expect("create org");
+    let state = Org::replay(&events);
+    store
+        .append_org(org, 0, &events, &state, at_ms)
+        .await
+        .expect("append org");
+    store
+        .set_sharing_mode("org", org.as_str(), "per-org", at_ms)
+        .await
+        .expect("per-org");
 }
 
 struct Harness {
@@ -299,11 +329,15 @@ async fn harness(database_url: &str, email: &str) -> Harness {
 
 impl Harness {
     fn access_token(&self, email: &str) -> String {
+        self.token_for(&self.account, email)
+    }
+
+    fn token_for(&self, account: &AccountId, email: &str) -> String {
         self.agui
             .auth
             .minter
             .mint_access(
-                self.account.as_str(),
+                account.as_str(),
                 "sess-test",
                 email,
                 "ultra",
@@ -756,5 +790,56 @@ async fn bypass_skips_the_card_and_a_deny_does_not_consent_the_run() {
         5,
         "the approved look and the one after it ran: {:?}",
         h.tunnel_box.touched()
+    );
+}
+
+/// An org-shared computer's standing consent is the org admin's to set: a member may read it
+/// and may not write it, because a `bypass` there removes the card for every member's runs.
+#[tokio::test]
+async fn an_org_shared_box_takes_its_choice_from_the_admin_only() {
+    let database_url = database_or_skip!();
+    let stamp = uuid::Uuid::now_v7().simple();
+    let admin_email = format!("egress-org-admin-{stamp}@og.local");
+    let h = harness(&database_url, &format!("egress-org-host-{stamp}@og.local")).await;
+    // An admin and a member, both registered into one org that shares one computer.
+    let org = OrgId::new();
+    let store = h.store.clone();
+    let admin = seed_member(&store, &admin_email, Some(&org)).await;
+    seed_org_sharing_one_box(&store, &org, &admin, &admin_email).await;
+    let member_email = format!("egress-org-member-{stamp}@og.local");
+    let member = seed_member(&store, &member_email, Some(&org)).await;
+
+    let admin_token = h.token_for(&admin, &admin_email);
+    let member_token = h.token_for(&member, &member_email);
+    let admin_bot = h.hire(&admin_token, "Admin's bot").await;
+    let member_bot = h.hire(&member_token, "Member's bot").await;
+    let admin_path = format!("/coworkers/{admin_bot}/computer/egress-policy");
+    let member_path = format!("/coworkers/{member_bot}/computer/egress-policy");
+
+    // One box, the org's: both bots resolve to the same scope.
+    let (_, seen_by_admin) = h.get(&admin_token, &admin_path).await;
+    let (_, seen_by_member) = h.get(&member_token, &member_path).await;
+    assert_eq!(seen_by_admin["scope"], json!("org"), "{seen_by_admin}");
+    assert_eq!(
+        seen_by_admin["scopeId"], seen_by_member["scopeId"],
+        "{seen_by_member}"
+    );
+
+    let (status, body) = h
+        .put(&member_token, &member_path, &json!({ "mode": "bypass" }))
+        .await;
+    assert_eq!(
+        status, 403,
+        "a member may not remove the card for the whole org: {body}"
+    );
+    let (status, _) = h
+        .put(&admin_token, &admin_path, &json!({ "mode": "never" }))
+        .await;
+    assert_eq!(status, 204);
+    let (_, seen_by_member) = h.get(&member_token, &member_path).await;
+    assert_eq!(
+        seen_by_member["mode"],
+        json!("never"),
+        "the admin's choice reaches the member: {seen_by_member}"
     );
 }

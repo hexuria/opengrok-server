@@ -93,6 +93,18 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.network_off())
     }
 
+    /// The same, asked once the box is awake, for a path that wakes the box itself (the
+    /// user-form fill). See `Executor::network_off_now`.
+    pub async fn network_off_now(&self) -> bool {
+        match self.executor.as_ref() {
+            Some((executor, context)) => match context.box_id.as_ref() {
+                Some(box_id) => executor.network_off_now(box_id.as_str()).await,
+                None => executor.network_off(),
+            },
+            None => false,
+        }
+    }
+
     /// The person said yes, in this run, to a leave-box action: the tunnel is not asked about
     /// again. See `Executor::with_egress_consented`.
     #[must_use]

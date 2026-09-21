@@ -791,6 +791,11 @@ async fn fill_on_box(
     if runner.wake_fill_target().await.is_err() {
         return failed();
     }
+    // And, awake, the guest can say whether a tunnel is attached: a standing `never` that
+    // could not be decided while the box slept is decided here, before a password is typed.
+    if runner.network_off_now().await {
+        return failed();
+    }
     fill_into_focus(computer.as_ref(), &box_id, form, values).await
 }
 
