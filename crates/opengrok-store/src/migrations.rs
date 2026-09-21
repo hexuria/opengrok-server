@@ -928,6 +928,12 @@ create table if not exists site_login (
     unique (account_id, origin, username)
 );
 create index if not exists site_login_account on site_login (account_id);
+-- What kind of thing the row is (a password, an authenticator code, a passkey), the
+-- person's notes, and when a bot last used it. A code's seed is sealed beside the password
+-- under `site-login-otp:<account>:<id>`.
+alter table site_login add column if not exists kind text not null default 'password';
+alter table site_login add column if not exists notes text not null default '';
+alter table site_login add column if not exists last_used_at_ms bigint;
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

@@ -164,6 +164,18 @@ pub async fn submit_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
+    if resolution == FormResolution::Submitted
+        && saved_login
+        && let Some(login_id) = args.get("savedLoginId").and_then(Value::as_str)
+        && let Err(error) = state
+            .agui
+            .auth
+            .store
+            .touch_site_login_used(account_id, login_id, chrono::Utc::now().timestamp_millis())
+            .await
+    {
+        tracing::warn!(%error, "could not stamp a site login's last use");
+    }
     // A login that came from the vault is not offered to the vault again.
     if resolution == FormResolution::Submitted && !saved_login {
         super::credential::offer_save_after_submit(

@@ -1293,17 +1293,22 @@ impl PgStore {
         Ok(row.is_some())
     }
 
-    /// The secret_store key of a saved site login. The account id sits in the key so the
-    /// purge's substring sweep finds it.
+    /// The secret_store key of a saved site login's password. The account id sits in the
+    /// key so the purge's substring sweep finds it.
     pub fn site_login_secret_id(account_id: &AccountId, id: &str) -> String {
         format!("site-login:{}:{id}", account_id.as_str())
     }
 
-    /// A person's saved site logins, never the passwords. Ordered for a settings list.
+    /// The key of the row's authenticator-code seed (an `otpauth://` URI), beside the password.
+    pub fn site_login_code_id(account_id: &AccountId, id: &str) -> String {
+        format!("site-login-otp:{}:{id}", account_id.as_str())
+    }
+
+    /// A person's saved site logins, never the secrets. Ordered for a settings list.
     pub async fn site_logins(&self, account_id: &AccountId) -> StoreResult<Vec<SiteLoginRow>> {
         let rows = sqlx::query(
-            "select id, origin, username, label, created_at_ms, updated_at_ms
-             from site_login where account_id = $1 order by origin, username",
+            "select id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms
+             from site_login where account_id = $1 order by label, origin, username",
         )
         .bind(account_id.as_str())
         .fetch_all(&self.pool)
@@ -1311,59 +1316,117 @@ impl PgStore {
         rows.into_iter().map(site_login_row).collect()
     }
 
-    /// Save (or replace) one site login: the password sealed into secret_store, the row
-    /// keyed by (account, origin, username). Returns the row, which never holds the password.
+    /// Save (or replace) one site login: the row keyed by (account, origin, username), the
+    /// password and the code seed sealed into secret_store under the row's id. A secret
+    /// given as `None` is left as it was. Returns the row, which never holds a secret.
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_site_login(
         &self,
         vault: &Vault,
         account_id: &AccountId,
-        origin: &str,
-        username: &str,
-        password: &str,
+        login: &SiteLoginWrite<'_>,
         at_ms: i64,
     ) -> StoreResult<SiteLoginRow> {
         // The row first, in the transaction: on a conflict the existing id comes back, so two
         // saves racing for the same login end with one row and one secret under its id.
         let candidate = format!("sl_{}", uuid::Uuid::now_v7());
-        let label = format!("{username} on {origin}");
+        let label = if login.label.trim().is_empty() {
+            format!("{} on {}", login.username, login.origin)
+        } else {
+            login.label.trim().to_string()
+        };
         let mut tx = self.pool.begin().await?;
         let row = sqlx::query(
-            "insert into site_login (id, account_id, origin, username, label, created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $6)
+            "insert into site_login (id, account_id, origin, username, label, kind, notes, created_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $8)
              on conflict (account_id, origin, username) do update set
-               label = excluded.label, updated_at_ms = excluded.updated_at_ms
-             returning id, origin, username, label, created_at_ms, updated_at_ms",
+               label = excluded.label, kind = excluded.kind, notes = excluded.notes,
+               updated_at_ms = excluded.updated_at_ms
+             returning id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms",
         )
         .bind(&candidate)
         .bind(account_id.as_str())
-        .bind(origin)
-        .bind(username)
+        .bind(login.origin)
+        .bind(login.username)
         .bind(&label)
+        .bind(login.kind)
+        .bind(login.notes)
         .bind(at_ms)
         .fetch_one(&mut *tx)
         .await?;
         let row = site_login_row(row)?;
-        let secret_id = Self::site_login_secret_id(account_id, &row.id);
-        let sealed = vault.seal(&secret_id, password)?;
-        sqlx::query(
-            "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
-             values ($1, $2, $3, $4)
-             on conflict (id) do update set
-               nonce = excluded.nonce,
-               ciphertext = excluded.ciphertext,
-               updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(&secret_id)
-        .bind(&sealed.nonce)
-        .bind(&sealed.ciphertext)
-        .bind(at_ms)
-        .execute(&mut *tx)
-        .await?;
+        for (key, secret) in [
+            (
+                Self::site_login_secret_id(account_id, &row.id),
+                login.password,
+            ),
+            (Self::site_login_code_id(account_id, &row.id), login.otpauth),
+        ] {
+            let Some(secret) = secret else {
+                continue;
+            };
+            let sealed = vault.seal(&key, secret)?;
+            sqlx::query(
+                "insert into secret_store (id, nonce, ciphertext, updated_at_ms)
+                 values ($1, $2, $3, $4)
+                 on conflict (id) do update set
+                   nonce = excluded.nonce,
+                   ciphertext = excluded.ciphertext,
+                   updated_at_ms = excluded.updated_at_ms",
+            )
+            .bind(&key)
+            .bind(&sealed.nonce)
+            .bind(&sealed.ciphertext)
+            .bind(at_ms)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
         Ok(row)
     }
 
-    /// Delete one of the person's own site logins, password included. False when there was
+    /// The title and notes of one of the person's own rows. False when the row is not theirs.
+    pub async fn update_site_login(
+        &self,
+        account_id: &AccountId,
+        id: &str,
+        label: Option<&str>,
+        notes: Option<&str>,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let changed = sqlx::query(
+            "update site_login set
+               label = coalesce($3, label), notes = coalesce($4, notes), updated_at_ms = $5
+             where account_id = $1 and id = $2",
+        )
+        .bind(account_id.as_str())
+        .bind(id)
+        .bind(label)
+        .bind(notes)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed > 0)
+    }
+
+    /// A bot just used this login (a `savedLogin` fill landed).
+    pub async fn touch_site_login_used(
+        &self,
+        account_id: &AccountId,
+        id: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query("update site_login set last_used_at_ms = $3 where account_id = $1 and id = $2")
+            .bind(account_id.as_str())
+            .bind(id)
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Delete one of the person's own site logins, secrets included. False when there was
     /// no such row of theirs (another account's id is "no such row" too).
     pub async fn delete_site_login(&self, account_id: &AccountId, id: &str) -> StoreResult<bool> {
         let mut tx = self.pool.begin().await?;
@@ -1376,22 +1439,23 @@ impl PgStore {
         if deleted == 0 {
             return Ok(false);
         }
-        sqlx::query("delete from secret_store where id = $1")
+        sqlx::query("delete from secret_store where id = $1 or id = $2")
             .bind(Self::site_login_secret_id(account_id, id))
+            .bind(Self::site_login_code_id(account_id, id))
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(true)
     }
 
-    /// The password of one of the person's own site logins, opened for their app alone.
-    /// None when the row is not theirs or has no sealed secret.
+    /// The secrets of one of the person's own site logins, opened for their app alone.
+    /// None when the row is not theirs.
     pub async fn open_site_login(
         &self,
         vault: &Vault,
         account_id: &AccountId,
         id: &str,
-    ) -> StoreResult<Option<String>> {
+    ) -> StoreResult<Option<SiteLoginSecrets>> {
         let owned: Option<String> =
             sqlx::query_scalar("select id from site_login where account_id = $1 and id = $2")
                 .bind(account_id.as_str())
@@ -1401,8 +1465,13 @@ impl PgStore {
         if owned.is_none() {
             return Ok(None);
         }
-        self.open_credential(vault, &Self::site_login_secret_id(account_id, id))
-            .await
+        let password = self
+            .open_credential(vault, &Self::site_login_secret_id(account_id, id))
+            .await?;
+        let otpauth = self
+            .open_credential(vault, &Self::site_login_code_id(account_id, id))
+            .await?;
+        Ok(Some(SiteLoginSecrets { password, otpauth }))
     }
 
     /// Open a connection's credential. The one place a token is ever in plaintext.
@@ -3194,15 +3263,46 @@ impl PgStore {
     }
 }
 
-/// One saved site login as the settings list shows it. Never the password.
+/// One saved site login as the settings list shows it. Never a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteLoginRow {
     pub id: String,
     pub origin: String,
     pub username: String,
     pub label: String,
+    /// `password`, `code` (an authenticator code with no password) or `passkey`.
+    pub kind: String,
+    pub notes: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub last_used_at_ms: Option<i64>,
+}
+
+/// What a save carries. A secret given as `None` is left as it was.
+pub struct SiteLoginWrite<'a> {
+    pub origin: &'a str,
+    pub username: &'a str,
+    pub label: &'a str,
+    pub kind: &'a str,
+    pub notes: &'a str,
+    pub password: Option<&'a str>,
+    pub otpauth: Option<&'a str>,
+}
+
+/// The secrets of one row, opened for the owner's app. Debug never shows them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SiteLoginSecrets {
+    pub password: Option<String>,
+    pub otpauth: Option<String>,
+}
+
+impl std::fmt::Debug for SiteLoginSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SiteLoginSecrets")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("otpauth", &self.otpauth.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 fn site_login_row(row: sqlx::postgres::PgRow) -> StoreResult<SiteLoginRow> {
@@ -3211,7 +3311,10 @@ fn site_login_row(row: sqlx::postgres::PgRow) -> StoreResult<SiteLoginRow> {
         origin: row.try_get("origin")?,
         username: row.try_get("username")?,
         label: row.try_get("label")?,
+        kind: row.try_get("kind")?,
+        notes: row.try_get("notes")?,
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
+        last_used_at_ms: row.try_get("last_used_at_ms")?,
     })
 }

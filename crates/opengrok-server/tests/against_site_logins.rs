@@ -150,6 +150,7 @@ impl Harness {
         let request = match method {
             "GET" => self.client.get(url),
             "POST" => self.client.post(url),
+            "PATCH" => self.client.patch(url),
             "DELETE" => self.client.delete(url),
             _ => unreachable!(),
         }
@@ -332,4 +333,125 @@ async fn a_bad_save_is_refused_and_a_server_without_a_vault_says_so() {
     assert_eq!(status, 503, "{body}");
     let (status, list, _) = bare.call(&ada, "GET", "/site-logins", None).await;
     assert_eq!(status, 200, "listing needs no vault: {list}");
+}
+
+#[tokio::test]
+async fn a_row_carries_its_kind_notes_and_code_and_the_icon_route_refuses_what_is_not_a_site() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+
+    // A password row with a title, notes and an authenticator seed.
+    let (status, row, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({
+                "origin": "github.com", "username": "ada", "password": PASSWORD,
+                "label": "GitHub (work)", "notes": "recovery codes in the safe",
+                "otpauth": "otpauth://totp/GitHub:ada?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(row["kind"], "password");
+    assert_eq!(row["label"], "GitHub (work)");
+    assert_eq!(row["notes"], "recovery codes in the safe");
+    assert!(row["lastUsedAtMs"].is_null());
+    assert!(
+        !text.contains("JBSWY3DP"),
+        "the seed is not in the reply: {text}"
+    );
+    let id = row["id"].as_str().expect("id").to_string();
+
+    let (_, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(opened["password"], PASSWORD);
+    assert_eq!(
+        opened["otpauth"],
+        "otpauth://totp/GitHub:ada?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+    );
+
+    // Notes and the title change in place; the secrets stay.
+    let (status, _, _) = h
+        .call(
+            &ada,
+            "PATCH",
+            &format!("/site-logins/{id}"),
+            Some(json!({ "notes": "moved the codes" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, list, _) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(list[0]["notes"], "moved the codes", "{list}");
+    let (_, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(opened["password"], PASSWORD);
+
+    // A code-only row needs a seed and no password; a password row needs a password.
+    let (status, code, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({
+                "origin": "aws.amazon.com", "username": "root", "kind": "code",
+                "otpauth": "otpauth://totp/AWS:root?secret=JBSWY3DPEHPK3PXP"
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(code["kind"], "code");
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "a", "kind": "code" })),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body, _) = h
+        .call(&ada, "POST", "/site-logins", Some(json!({ "origin": "x.com", "username": "a", "otpauth": "not-a-uri", "password": "p" })))
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "a", "password": "p", "kind": "passkey" })),
+        )
+        .await;
+    assert_eq!(status, 400, "passkeys are not posted here: {body}");
+
+    // Deleting a code row removes its seed.
+    let code_id = code["id"].as_str().expect("id").to_string();
+    let (status, _, _) = h
+        .call(&ada, "DELETE", &format!("/site-logins/{code_id}"), None)
+        .await;
+    assert_eq!(status, 200);
+    let sealed: i64 = sqlx::query_scalar("select count(*) from secret_store where id like $1")
+        .bind(format!("%{code_id}%"))
+        .fetch_one(h.store.pool())
+        .await
+        .expect("query");
+    assert_eq!(sealed, 0);
+
+    // The icon route takes a public host and nothing else.
+    for bad in ["localhost", "127.0.0.1", "10.0.0.1", "x.local", "a"] {
+        let (status, _, _) = h
+            .call(&ada, "GET", &format!("/site-logins/icon/{bad}"), None)
+            .await;
+        assert_eq!(status, 400, "{bad}");
+    }
+    let (status, _, _) = h
+        .call("nope", "GET", "/site-logins/icon/github.com", None)
+        .await;
+    assert_eq!(status, 401);
 }
