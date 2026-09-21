@@ -934,6 +934,11 @@ create index if not exists site_login_account on site_login (account_id);
 alter table site_login add column if not exists kind text not null default 'password';
 alter table site_login add column if not exists notes text not null default '';
 alter table site_login add column if not exists last_used_at_ms bigint;
+-- A passkey row: the credential id and user handle (base64) and the relying party the key
+-- answers for. The private key is sealed under `site-login-passkey:<account>:<id>`.
+alter table site_login add column if not exists passkey_credential_id text;
+alter table site_login add column if not exists passkey_rp_id text;
+alter table site_login add column if not exists passkey_user_handle text;
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

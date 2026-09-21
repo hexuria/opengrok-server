@@ -79,6 +79,11 @@ fn row_json(row: &opengrok_store::SiteLoginRow) -> Value {
         "createdAtMs": row.created_at_ms,
         "updatedAtMs": row.updated_at_ms,
         "lastUsedAtMs": row.last_used_at_ms,
+        "passkey": row.passkey.as_ref().map(|p| json!({
+            "credentialId": p.credential_id_b64,
+            "rpId": p.rp_id,
+            "userHandle": p.user_handle_b64,
+        })),
     })
 }
 
@@ -168,6 +173,7 @@ async fn save(
         notes: &notes,
         password: password.as_deref(),
         otpauth: otpauth.as_deref(),
+        passkey: None,
     };
     match state
         .agui
@@ -285,6 +291,8 @@ async fn reveal(
     {
         Ok(Some(secrets)) => {
             tracing::info!(account = %account_id, id = %id, "revealed a site login to its owner's app");
+            // The passkey's private key is not in this reply: it is used on the server, in
+            // the box's browser, and never leaves for the Mac.
             reply(
                 200,
                 json!({ "id": id, "password": secrets.password, "otpauth": secrets.otpauth }),

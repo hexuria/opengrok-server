@@ -1304,10 +1304,16 @@ impl PgStore {
         format!("site-login-otp:{}:{id}", account_id.as_str())
     }
 
+    /// The key of a passkey row's private key (PKCS#8, base64).
+    pub fn site_login_passkey_id(account_id: &AccountId, id: &str) -> String {
+        format!("site-login-passkey:{}:{id}", account_id.as_str())
+    }
+
     /// A person's saved site logins, never the secrets. Ordered for a settings list.
     pub async fn site_logins(&self, account_id: &AccountId) -> StoreResult<Vec<SiteLoginRow>> {
         let rows = sqlx::query(
-            "select id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms
+            "select id, origin, username, label, kind, notes, created_at_ms, updated_at_ms, last_used_at_ms,
+                    passkey_credential_id, passkey_rp_id, passkey_user_handle
              from site_login where account_id = $1 order by label, origin, username",
         )
         .bind(account_id.as_str())
@@ -1439,9 +1445,10 @@ impl PgStore {
         if deleted == 0 {
             return Ok(false);
         }
-        sqlx::query("delete from secret_store where id = $1 or id = $2")
+        sqlx::query("delete from secret_store where id = $1 or id = $2 or id = $3")
             .bind(Self::site_login_secret_id(account_id, id))
             .bind(Self::site_login_code_id(account_id, id))
+            .bind(Self::site_login_passkey_id(account_id, id))
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -1471,7 +1478,14 @@ impl PgStore {
         let otpauth = self
             .open_credential(vault, &Self::site_login_code_id(account_id, id))
             .await?;
-        Ok(Some(SiteLoginSecrets { password, otpauth }))
+        let passkey_key = self
+            .open_credential(vault, &Self::site_login_passkey_id(account_id, id))
+            .await?;
+        Ok(Some(SiteLoginSecrets {
+            password,
+            otpauth,
+            passkey_key,
+        }))
     }
 
     /// Open a connection's credential. The one place a token is ever in plaintext.
@@ -3276,6 +3290,16 @@ pub struct SiteLoginRow {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub last_used_at_ms: Option<i64>,
+    /// A passkey row's public half: the credential id and user handle (base64) and the
+    /// relying party. The key itself is sealed apart.
+    pub passkey: Option<PasskeyMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyMeta {
+    pub credential_id_b64: String,
+    pub rp_id: String,
+    pub user_handle_b64: String,
 }
 
 /// What a save carries. A secret given as `None` is left as it was.
@@ -3287,6 +3311,25 @@ pub struct SiteLoginWrite<'a> {
     pub notes: &'a str,
     pub password: Option<&'a str>,
     pub otpauth: Option<&'a str>,
+    pub passkey: Option<PasskeyWrite>,
+}
+
+/// A passkey to file: its public half and its private key (PKCS#8, base64).
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasskeyWrite {
+    pub credential_id_b64: String,
+    pub rp_id: String,
+    pub user_handle_b64: String,
+    pub private_key_b64: String,
+}
+
+impl std::fmt::Debug for PasskeyWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasskeyWrite")
+            .field("rp_id", &self.rp_id)
+            .field("private_key_b64", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The secrets of one row, opened for the owner's app. Debug never shows them.
@@ -3294,6 +3337,7 @@ pub struct SiteLoginWrite<'a> {
 pub struct SiteLoginSecrets {
     pub password: Option<String>,
     pub otpauth: Option<String>,
+    pub passkey_key: Option<String>,
 }
 
 impl std::fmt::Debug for SiteLoginSecrets {
@@ -3301,6 +3345,10 @@ impl std::fmt::Debug for SiteLoginSecrets {
         f.debug_struct("SiteLoginSecrets")
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("otpauth", &self.otpauth.as_ref().map(|_| "<redacted>"))
+            .field(
+                "passkey_key",
+                &self.passkey_key.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -3316,5 +3364,17 @@ fn site_login_row(row: sqlx::postgres::PgRow) -> StoreResult<SiteLoginRow> {
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
         last_used_at_ms: row.try_get("last_used_at_ms")?,
+        passkey: match (
+            row.try_get::<Option<String>, _>("passkey_credential_id")?,
+            row.try_get::<Option<String>, _>("passkey_rp_id")?,
+            row.try_get::<Option<String>, _>("passkey_user_handle")?,
+        ) {
+            (Some(credential_id_b64), Some(rp_id), Some(user_handle_b64)) => Some(PasskeyMeta {
+                credential_id_b64,
+                rp_id,
+                user_handle_b64,
+            }),
+            _ => None,
+        },
     })
 }

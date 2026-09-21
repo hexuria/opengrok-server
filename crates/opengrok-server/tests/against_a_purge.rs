@@ -195,6 +195,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
                 notes: "",
                 password: Some("pw"),
                 otpauth: Some("otpauth://totp/x?secret=ABCDEFGHIJKLMNOP"),
+                passkey: None,
             },
             at_ms,
         )
