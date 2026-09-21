@@ -702,7 +702,7 @@ fn stamp_egress_fields(screen: &mut Value, host_wants: bool, cap: Option<EgressT
 /// policy stays `per-bot|per-account|per-org`. This is the client-facing
 /// placement name (`dedicated` = bot sidebar, `user` = Settings→Computer,
 /// `group` = group sidebar, `org` = admin console).
-fn share_scope_of(scope: &str) -> &'static str {
+pub fn share_scope_of(scope: &str) -> &'static str {
     match scope {
         "bot" => "dedicated",
         "account" => "user",
@@ -713,11 +713,81 @@ fn share_scope_of(scope: &str) -> &'static str {
     }
 }
 
+/// The standing answer for a computer scope; no row is `ask`.
+pub async fn egress_policy_of(
+    state: &AgUiState,
+    scope: &str,
+    scope_id: &str,
+) -> opengrok_tools::EgressPolicy {
+    state
+        .auth
+        .store
+        .egress_policy_mode(scope, scope_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
+        .unwrap_or_default()
+}
+
+/// The Computer pane carries the choice next to `shareScope`, so the client can paint the
+/// control without a second request.
+async fn stamp_egress_policy(state: &AgUiState, screen: &mut Value, scope: &str, scope_id: &str) {
+    screen["egressPolicy"] = json!(egress_policy_of(state, scope, scope_id).await.as_stored());
+}
+
 fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
     screen["shareScope"] = json!(share_scope_of(scope));
     if scope == "group" {
         screen["groupId"] = json!(scope_id);
     }
+}
+
+/// A coworker's live box, found the one way every door must find it: the account's sharing
+/// mode, then the scope that mode puts this coworker in, then that scope's recorded box and the
+/// provider of its kind. The id frozen on the coworker's own row is NOT consulted: after an
+/// update, a heal or a takeover it names a container that no longer exists (four of the dev
+/// account's coworkers carried `6c21ce5cd833` while the account's box was `box-box-1`, 21 Sep
+/// 2026), and host-settings, which read it, said the tunnel was off for a box whose guest said
+/// it was on.
+pub struct ScopedBox {
+    pub scope: &'static str,
+    pub scope_id: String,
+    pub box_id: String,
+    pub kind: String,
+    pub stopped: bool,
+    pub org_id: Option<String>,
+    pub computer: Arc<dyn Computer>,
+}
+
+/// `None` when the coworker has no box in its scope or its kind has no provider here. The
+/// Computer pane (`coworker_screen`) walks the same steps itself because it has to say WHY
+/// each one failed; the callers here (host-settings, the egress policy) only need the box.
+pub async fn scoped_box_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<ScopedBox> {
+    let (_, org_id, scope, scope_id, _) = scope_of(state, account_id, coworker_id.as_str()).await;
+    let (box_id, kind, stopped) = state
+        .auth
+        .store
+        .scoped_computer_full(scope, &scope_id)
+        .await
+        .ok()
+        .flatten()?;
+    let computer = lookup_provider(state, org_id.as_deref(), &kind)
+        .await
+        .computer?;
+    Some(ScopedBox {
+        scope,
+        scope_id,
+        box_id,
+        kind,
+        stopped,
+        org_id,
+        computer,
+    })
 }
 
 /// Live screen NativeChat paints. Same facts as gateway `getForeverBoxStatus`, on the AG-UI
@@ -795,6 +865,7 @@ pub async fn coworker_screen(
         });
         stamp_egress_fields(&mut body, host_wants, None);
         stamp_share_scope(&mut body, scope, &scope_id);
+        stamp_egress_policy(state, &mut body, scope, &scope_id).await;
         return body;
     };
     let live_state = provider
@@ -827,6 +898,7 @@ pub async fn coworker_screen(
     });
     stamp_egress_fields(&mut screen, host_wants, cap);
     stamp_share_scope(&mut screen, scope, &scope_id);
+    stamp_egress_policy(state, &mut screen, scope, &scope_id).await;
     screen
 }
 

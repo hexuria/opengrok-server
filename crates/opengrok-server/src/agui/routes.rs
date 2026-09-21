@@ -343,6 +343,18 @@ pub(crate) async fn tools_for_coworker(
     } else {
         opengrok_tools::EgressTunnelMode::Off
     };
+    // The person's standing answer for THIS computer to the tunnel's card, keyed by the scope
+    // the box lives under so a reset or takeover that changes the box id keeps the choice.
+    // No row is `ask`: one card per run, as before there was a choice.
+    let egress_policy = state
+        .auth
+        .store
+        .egress_policy_mode(scope, &scope_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
+        .unwrap_or_default();
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -374,7 +386,8 @@ pub(crate) async fn tools_for_coworker(
         .with_plugin_tools(sessions, tools)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
-        .with_egress_tunnel_mode(egress_tunnel);
+        .with_egress_tunnel_mode(egress_tunnel)
+        .with_egress_policy(egress_policy);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -727,6 +740,10 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/computer/update",
             post(computer_update),
+        )
+        .route(
+            "/coworkers/{coworker_id}/computer/egress-policy",
+            get(get_egress_policy).put(set_egress_policy),
         )
         .route(
             "/coworkers/{coworker_id}/computer/reset",
@@ -1610,6 +1627,89 @@ async fn computer_status(
     Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
 }
 
+/// The person's standing answer, for this coworker's computer, to the tunnel's card.
+#[derive(serde::Deserialize)]
+struct EgressPolicyBody {
+    mode: String,
+}
+
+/// The coworker's scoped box for a policy read or write, or the refusal: 401 without a bearer,
+/// 404 for another account's coworker or one with no computer.
+async fn egress_policy_box(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+    coworker_id: String,
+) -> Result<(AccountId, CoworkerId, provision::ScopedBox), Response> {
+    let Some(account_id) = account_from_bearer(state, headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::NOT_FOUND, "no such coworker").into_response()),
+        Err(refusal) => return Err(refusal),
+    }
+    match provision::scoped_box_for(state, &account_id, &coworker_id).await {
+        Some(scoped) => Ok((account_id, coworker_id, scoped)),
+        None => Err((StatusCode::NOT_FOUND, "this coworker has no computer").into_response()),
+    }
+}
+
+/// `GET /coworkers/{id}/computer/egress-policy` — `{ scope, scopeId, boxId, mode }`; an unset
+/// policy reads as `ask`, which is what it means.
+async fn get_egress_policy(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+) -> Response {
+    let (_, _, scoped) = match egress_policy_box(&state, &headers, coworker_id).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let mode = provision::egress_policy_of(&state, scoped.scope, &scoped.scope_id).await;
+    Json(serde_json::json!({
+        "scope": provision::share_scope_of(scoped.scope),
+        "scopeId": scoped.scope_id,
+        "boxId": scoped.box_id,
+        "mode": mode.as_stored(),
+    }))
+    .into_response()
+}
+
+/// `PUT /coworkers/{id}/computer/egress-policy` `{ "mode": "bypass" | "ask" | "never" }` — 204.
+/// The choice is kept whether or not the tunnel is on right now: it says what happens when it is.
+async fn set_egress_policy(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(coworker_id): Path<String>,
+    Json(body): Json<EgressPolicyBody>,
+) -> Response {
+    if !opengrok_tools::EgressPolicy::is_valid(&body.mode) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown mode").into_response();
+    }
+    let (_, _, scoped) = match egress_policy_box(&state, &headers, coworker_id).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match state
+        .auth
+        .store
+        .set_egress_policy_mode(
+            scoped.scope,
+            &scoped.scope_id,
+            &body.mode,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "could not set the egress policy");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        }
+    }
+}
+
 /// `GET /coworkers/{id}/screen` — the box's display as a PNG, for the Computer pane's tile
 /// and for an explicit observe / Open the screen. Same shape as `TOOL_CALL_RESULT.image`,
 /// with `visibility: transcript` so a client that fetches this on purpose may persist it.
@@ -2210,6 +2310,7 @@ pub async fn run(
                 None
             };
             let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
+            let network_off = tools.as_ref().is_some_and(|runner| runner.network_off());
             let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
             // What the person named this turn, kept to what this bot can actually run.
             let preferred = honour_preferences(&preferred_tools_from(&input), tools.as_ref());
@@ -2231,7 +2332,7 @@ pub async fn run(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}",
+                    "{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2239,6 +2340,7 @@ pub async fn run(
                         reaches_user_machine,
                         user_machine_label.as_deref(),
                     ),
+                    crate::persona::network_off_line(network_off),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
                 )),
@@ -3336,10 +3438,13 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
-    // A yes on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click.
+    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click. A no is not: this once consented on
+    // any answer, so a Deny on the tunnel card let the model's next screen action through with
+    // no card at all (21 Sep 2026).
     let runner = runner.with_egress_consented(
-        answered.reason == opengrok_core::run::SuspendReason::AutoReview
+        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+            && answered.reason == opengrok_core::run::SuspendReason::AutoReview
             && opengrok_tools::leaves_the_box(&answered.tool),
     );
 
@@ -3549,9 +3654,11 @@ async fn host_settings_reply(
     Json(record).into_response()
 }
 
-/// Host intent, then the coworker: it must be named, be this account's, have a computer, and
-/// that box must say the tunnel is ready. Each miss is a plain false, never an error — the
-/// settings page still has its record to show.
+/// Host intent, then the coworker: it must be named, be this account's, have a computer in its
+/// scope, and that box must say the tunnel is ready. Each miss is a plain false, never an error
+/// — the settings page still has its record to show. The box is the SCOPE's live one, through
+/// its own provider, the same one the Computer pane and a turn's tools use; this once read the
+/// id frozen on the coworker's row with the boot-time provider and disagreed with both.
 async fn egress_tunnel_available_for(
     state: &AgUiState,
     account_id: &AccountId,
@@ -3560,7 +3667,7 @@ async fn egress_tunnel_available_for(
     if !state.egress_tunnel_enabled() {
         return false;
     }
-    let (Some(coworker), Some(computer)) = (coworker, state.computer.as_ref()) else {
+    let Some(coworker) = coworker else {
         return false;
     };
     let coworker_id = CoworkerId::from_stored(coworker.to_string());
@@ -3574,13 +3681,12 @@ async fn egress_tunnel_available_for(
     if !owns {
         return false;
     }
-    let Ok((loaded, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+    let Some(scoped) = provision::scoped_box_for(state, account_id, &coworker_id).await else {
         return false;
     };
-    let Some(box_id) = loaded.computer().map(|id| id.as_str().to_string()) else {
-        return false;
-    };
-    state.egress_tunnel_for(computer.as_ref(), &box_id).await
+    state
+        .egress_tunnel_for(scoped.computer.as_ref(), &scoped.box_id)
+        .await
 }
 
 /// The message a reply points at, as the one bracketed line `reply_context` writes for the

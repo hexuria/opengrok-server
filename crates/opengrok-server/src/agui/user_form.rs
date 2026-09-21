@@ -778,6 +778,11 @@ async fn fill_on_box(
     else {
         return failed();
     };
+    // The fill types into the box's browser outside the executor, so the executor's withholding
+    // of the browser tools does not reach it: the same rule is applied here.
+    if runner.network_off() {
+        return failed();
+    }
     let Some((computer, box_id)) = runner.fill_target() else {
         return failed();
     };

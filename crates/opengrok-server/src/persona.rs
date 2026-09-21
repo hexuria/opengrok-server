@@ -149,6 +149,19 @@ impl Persona {
 #[must_use]
 /// What the person reached for this turn, said once, at the end of the computer prompt.
 ///
+/// Why the browser tools are missing this turn, when they are: the person routes this
+/// computer's traffic through their own desktop and has said this computer may not use it. Said
+/// so the model does not go looking for `open_url`, and does not claim it cannot see at all.
+pub fn network_off_line(network_off: bool) -> String {
+    if !network_off {
+        return String::new();
+    }
+    " Your box's web traffic would go out through the person's own network, and they have \
+     switched that off for this computer, so the browser and screen tools are not available. \
+     Your shell and files still work, and the person can turn it back on."
+        .to_string()
+}
+
 /// The tools are already on offer; this only tells the model which ones the person named, and
 /// says plainly that the rest are still there. Without the second half a model reads a named
 /// tool as the only permitted one and gives up when it does not fit.

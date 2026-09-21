@@ -85,6 +85,14 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
+    /// The computer may not use the person's network while the tunnel is on: the browser tools
+    /// are withheld and the prompt says why. See `Executor::network_off`.
+    pub fn network_off(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.network_off())
+    }
+
     /// The person said yes, in this run, to a leave-box action: the tunnel is not asked about
     /// again. See `Executor::with_egress_consented`.
     #[must_use]

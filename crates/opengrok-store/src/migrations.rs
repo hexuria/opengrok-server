@@ -133,6 +133,20 @@ create table if not exists computer_sharing (
     primary key (scope, scope_id)
 );
 
+-- The person's standing answer, per computer, to the egress tunnel's Review-an-action card.
+-- Keyed like `scoped_computer` and `computer_sharing`, so a takeover, update or reset that
+-- changes the box id keeps the choice. mode is 'bypass' (always allow) | 'ask' | 'never'.
+-- Absent ⇒ ask, which is what the card did before there was a choice: behaviour-preserving.
+-- (The neighbouring `local_exec_policy` is absent ⇒ never because that channel starts off;
+-- this one governs a card that already existed.)
+create table if not exists egress_policy (
+    scope         text   not null,
+    scope_id      text   not null,
+    mode          text   not null,
+    updated_at_ms bigint not null,
+    primary key (scope, scope_id)
+);
+
 create index if not exists coworker_view_account_idx on coworker_view (account_id, updated_at_ms desc);
 
 -- An authentication that happened. The token is NOT here — it is in `secret_store`, encrypted, and

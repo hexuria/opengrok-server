@@ -1392,6 +1392,49 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- Egress policy: the standing answer to the tunnel card, per computer scope ----
+
+    /// The stored mode for a computer scope, or `None` when unset (the server reads that as
+    /// `ask`, one card per run).
+    pub async fn egress_policy_mode(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<String>> {
+        let row = sqlx::query("select mode from egress_policy where scope = $1 and scope_id = $2")
+            .bind(scope)
+            .bind(scope_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|row| row.try_get::<String, _>("mode"))
+            .transpose()?)
+    }
+
+    /// Set the mode for a computer scope; mode is "bypass" | "ask" | "never" (the server
+    /// validates the word).
+    pub async fn set_egress_policy_mode(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        mode: &str,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into egress_policy (scope, scope_id, mode, updated_at_ms)
+             values ($1, $2, $3, $4)
+             on conflict (scope, scope_id) do update set
+               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(mode)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ---- Reverse-exec consent, per (account, machine). Raw pieces only — the server assembles the
     //      LocalExecPolicy and runs the gate; this crate stays free of that logic. ----
 
