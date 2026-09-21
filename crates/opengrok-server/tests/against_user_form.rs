@@ -2017,3 +2017,75 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
         "nothing typed into an org-visible bot's box"
     );
 }
+
+/// A passkey card typed nothing and asked the box for its DevTools pipe. The stub box has
+/// none, so the card settles as Not filled with the reason, and the bot is told not to type
+/// a password; on a shared box the card is refused before anything is asked.
+#[tokio::test]
+async fn a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_one() {
+    let database_url = database_or_skip!();
+    let email = format!("passkey-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::with_script(vec![
+            opengrok_harness::ModelDelta::Text("passkey time".to_string()),
+            opengrok_harness::ModelDelta::ToolCallStart {
+                id: "pk-1".to_string(),
+                name: "request_user_form".to_string(),
+            },
+            opengrok_harness::ModelDelta::ToolCallArgs {
+                id: "pk-1".to_string(),
+                delta: r#"{"title":"Sign in with your passkey","challengeKind":"passkey","passkeyMode":"use","liveHost":"webauthn.io","fields":[]}"#.to_string(),
+            },
+            opengrok_harness::ModelDelta::ToolCallEnd {
+                id: "pk-1".to_string(),
+            },
+        ])),
+    )
+    .await;
+    let token = h.access_token(&email);
+
+    // Shared box (the default sharing mode): refused, the card stays open.
+    let shared = h.hire(&token, "Ada").await;
+    h.turn(&token, &shared, "sign in").await;
+    let card = h.wait_for_form(&shared).await;
+    assert_eq!(
+        card["message"]["formRequest"]["challengeKind"], "passkey",
+        "{card}"
+    );
+    assert_eq!(
+        card["message"]["formRequest"]["passkeyMode"], "use",
+        "{card}"
+    );
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": shared, "savedLoginId": "sl_x", "values": {} }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+
+    // Own box: the pipe is asked for; the stub has none; the card says so.
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let own = h.hire(&token, "Bea").await;
+    h.turn(&token, &own, "sign in").await;
+    let card = h.wait_for_form(&own).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": own, "savedLoginId": "sl_missing", "values": {} }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "fill_failed", "{body}");
+    assert!(
+        h.stub.acts.lock().expect("acts").is_empty(),
+        "a passkey card types nothing"
+    );
+}
