@@ -227,11 +227,12 @@ pub fn computer_system_prompt(
          the page. On denied, missing, or error, call `request_user_form` and wait. The person \
          fills in chat; the server types into the focused field and does not show you the secret. \
          After a user-form settles, screenshot and confirm what the page shows; filling is not a \
-         successful login. Auth is one challenge per form: raise email, then after it settles \
-         screenshot; if a password page is next, prefer `credential.request` when a saved login \
-         is likely, otherwise call `request_user_form` with a password-only form (new entryId, \
-         challengeKind \"password\"). \
-         Do not put email and password on the same card unless they share a page (`samePage`). \
+         successful login. When the page shows the email and password fields TOGETHER, raise \
+         ONE card with both fields and `samePage: true`, giving each field its position (`at`) \
+         from your screenshot — do not split them. Only a page that asks for the email alone \
+         gets an email-only card: raise it, then after it settles screenshot; if a password \
+         page is next, prefer `credential.request` when a saved login is likely, otherwise call \
+         `request_user_form` with a password-only form (new entryId, challengeKind \"password\"). \
          If another in-sandbox challenge appears (OTP, a phone code on the same page), call \
          `request_user_form` again with otp fields and challengeKind \"otp\" — never re-raise a \
          form that already settled. Captcha, passkey, or a page outside this box is not another \
@@ -576,7 +577,7 @@ mod tests {
             "filled = authenticated session ready, never a typed password: {box_only}"
         );
         assert!(
-            box_only.contains("one challenge per form"),
+            box_only.contains("raise ONE card with both fields"),
             "stepped login contract: {box_only}"
         );
         assert!(

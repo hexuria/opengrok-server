@@ -38,6 +38,19 @@ pub struct FormField {
     /// Explicit mask. `password` / `otp` types are secret even when this is absent.
     #[serde(default)]
     pub secret: bool,
+    /// Where the field is on the box's screen, in the pixels of the model's own screenshot.
+    /// With it, the fill clicks the field before typing; without it, the fill types into
+    /// whatever the browser has focused — which is how a password once landed in the email box
+    /// after Facebook redrew its page with an error (21 Sep 2026).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<FieldAt>,
+}
+
+/// A point on the box's screen, as the model saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldAt {
+    pub x: i32,
+    pub y: i32,
 }
 
 impl FormField {
@@ -128,6 +141,16 @@ impl FormResolution {
 /// Pull a form out of tool arguments or a transcript `formRequest`, ignoring identity keys the
 /// executor stamps and any values the model must never keep.
 #[must_use]
+/// `at: {x, y}` on a field, when the model gave one and both numbers are there.
+fn field_at(field: &Value) -> Option<FieldAt> {
+    let at = field.get("at")?;
+    let number = |key: &str| at.get(key).and_then(Value::as_i64).map(|n| n as i32);
+    Some(FieldAt {
+        x: number("x")?,
+        y: number("y")?,
+    })
+}
+
 pub fn form_request_from(value: &Value) -> FormRequest {
     let source = value
         .get("formRequest")
@@ -164,6 +187,7 @@ pub fn form_request_from(value: &Value) -> FormRequest {
                             .get("secret")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
+                        at: field_at(field),
                     })
                 })
                 .collect()
@@ -490,9 +514,12 @@ pub fn should_press_return(form: &FormRequest, typed_count: usize) -> bool {
     typed_count == 1 && (kind.eq_ignore_ascii_case("otp") || kind.eq_ignore_ascii_case("password"))
 }
 
-/// Type into the currently focused field. Default multi-field: first field only, no Tab,
-/// no Return. `samePage` Tabs; `submit` (or a single / otp / password field) Returns.
-/// No screenshot — the model observes after settle.
+/// Type the form into the box. A field that carries `at` is clicked first, its contents
+/// selected, then typed — so the value lands in THAT field whatever the browser had focused.
+/// A field without `at` is typed into the focused field, as before: default multi-field
+/// types the first field only, no Tab, no Return; `samePage` Tabs from field to field (past a
+/// skipped one too, or the next value would land in the previous box); `submit` (or a single
+/// / otp / password field) Returns. No screenshot — the model observes after settle.
 pub async fn fill_into_focus(
     computer: &dyn Computer,
     box_id: &str,
@@ -500,35 +527,51 @@ pub async fn fill_into_focus(
     values: &BTreeMap<String, String>,
 ) -> Vec<FieldOutcome> {
     let mut outcomes = Vec::new();
-    let mut previous_typed = false;
     let mut typed_count = 0usize;
     let type_limit = if types_only_first_field(form) {
         form.fields.len().min(1)
     } else {
         form.fields.len()
     };
-    for field in form.fields.iter().take(type_limit) {
-        let value = values.get(&field.id).cloned().unwrap_or_default();
-        if field.required && value.is_empty() {
+    let mut give_up = false;
+    for (index, field) in form.fields.iter().take(type_limit).enumerate() {
+        if give_up {
             outcomes.push(FieldOutcome {
                 id: field.id.clone(),
                 filled: false,
                 fill_failed: true,
             });
-            previous_typed = false;
             continue;
         }
+        let value = values.get(&field.id).cloned().unwrap_or_default();
+        // On a same-page form without positions, focus walks the fields by Tab — for every
+        // field after the first, typed or skipped, or the next value lands in the wrong box.
+        let tab_here = form.same_page && index > 0 && field.at.is_none();
         if value.is_empty() {
+            if tab_here
+                && let Err(error) = computer
+                    .act(
+                        box_id,
+                        &CuaAction::Key {
+                            key: "Tab".to_string(),
+                        },
+                    )
+                    .await
+            {
+                tracing::warn!(field = %field.label, %error, "user-form: Tab past a blank field failed");
+                give_up = true;
+            }
             outcomes.push(FieldOutcome {
                 id: field.id.clone(),
-                filled: true,
-                fill_failed: false,
+                filled: !field.required && !give_up,
+                fill_failed: field.required || give_up,
             });
-            previous_typed = false;
             continue;
         }
-        if previous_typed
-            && let Err(error) = computer
+        // Reach the field: by its position when the model gave one, else by Tab.
+        let reach = match field.at {
+            Some(at) => aim_at(computer, box_id, at).await,
+            None if tab_here => computer
                 .act(
                     box_id,
                     &CuaAction::Key {
@@ -536,28 +579,22 @@ pub async fn fill_into_focus(
                     },
                 )
                 .await
-        {
+                .map_err(|error| error.to_string()),
+            None => Ok(()),
+        };
+        if let Err(error) = reach {
             tracing::warn!(
                 field = %field.label,
-                %error,
-                "user-form: Tab between fields failed; remaining fields will not be typed"
+                error,
+                "user-form: could not reach the field; it and the rest will not be typed"
             );
             outcomes.push(FieldOutcome {
                 id: field.id.clone(),
                 filled: false,
                 fill_failed: true,
             });
-            for rest in form.fields.iter().skip(outcomes.len()) {
-                if outcomes.iter().any(|seen| seen.id == rest.id) {
-                    continue;
-                }
-                outcomes.push(FieldOutcome {
-                    id: rest.id.clone(),
-                    filled: false,
-                    fill_failed: true,
-                });
-            }
-            break;
+            give_up = true;
+            continue;
         }
         match computer.act(box_id, &CuaAction::Type { text: value }).await {
             Ok(()) => {
@@ -566,7 +603,6 @@ pub async fn fill_into_focus(
                     filled: true,
                     fill_failed: false,
                 });
-                previous_typed = true;
                 typed_count += 1;
             }
             Err(error) => {
@@ -576,7 +612,6 @@ pub async fn fill_into_focus(
                     filled: false,
                     fill_failed: true,
                 });
-                previous_typed = false;
             }
         }
     }
@@ -604,6 +639,31 @@ pub async fn fill_into_focus(
     outcomes
 }
 
+/// Click the field and select what is in it, so the typed value replaces rather than appends
+/// (Facebook keeps the email typed on the previous attempt).
+async fn aim_at(computer: &dyn Computer, box_id: &str, at: FieldAt) -> Result<(), String> {
+    computer
+        .act(
+            box_id,
+            &CuaAction::Click {
+                x: at.x,
+                y: at.y,
+                button: None,
+            },
+        )
+        .await
+        .map_err(|error| format!("click: {error}"))?;
+    computer
+        .act(
+            box_id,
+            &CuaAction::Key {
+                key: "ctrl+a".to_string(),
+            },
+        )
+        .await
+        .map_err(|error| format!("select all: {error}"))
+}
+
 #[must_use]
 pub fn overall_resolution(outcomes: &[FieldOutcome]) -> FormResolution {
     if outcomes.iter().any(|outcome| outcome.fill_failed) {
@@ -629,6 +689,7 @@ mod tests {
             r#type: "password".into(),
             required: true,
             secret: false,
+            at: None,
         };
         let otp = FormField {
             id: "o".into(),
@@ -636,6 +697,7 @@ mod tests {
             r#type: "otp".into(),
             required: true,
             secret: false,
+            at: None,
         };
         let email = FormField {
             id: "e".into(),
@@ -643,6 +705,7 @@ mod tests {
             r#type: "email".into(),
             required: true,
             secret: false,
+            at: None,
         };
         assert!(password.is_secret());
         assert!(otp.is_secret());
@@ -709,6 +772,7 @@ mod tests {
                     r#type: "email".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
                 FormField {
                     id: "password".into(),
@@ -716,6 +780,7 @@ mod tests {
                     r#type: "password".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
             ],
             domain: None,
@@ -834,6 +899,142 @@ mod tests {
         }
     }
 
+    fn field(id: &str, kind: &str, at: Option<(i32, i32)>) -> FormField {
+        FormField {
+            id: id.into(),
+            label: id.into(),
+            r#type: kind.into(),
+            required: true,
+            secret: false,
+            at: at.map(|(x, y)| FieldAt { x, y }),
+        }
+    }
+
+    /// With positions, every field is clicked, emptied and typed: the password lands in the
+    /// password box whatever the browser had focused (the Facebook mistype of 21 Sep 2026).
+    #[tokio::test]
+    async fn positioned_fields_are_clicked_before_they_are_typed() {
+        let spy = FillSpy::default();
+        let form = FormRequest {
+            title: "Log in".into(),
+            instruction: String::new(),
+            fields: vec![
+                field("email", "email", Some((640, 512))),
+                field("password", "password", Some((640, 560))),
+            ],
+            domain: None,
+            live_host: None,
+            challenge_kind: None,
+            same_page: true,
+            submit: true,
+        };
+        let values = BTreeMap::from([
+            ("email".into(), "ada@example.com".into()),
+            ("password".into(), "s3cret-pass".into()),
+        ]);
+        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+        assert!(
+            outcomes.iter().all(|o| o.filled && !o.fill_failed),
+            "{outcomes:?}"
+        );
+        let acts = spy.acts.lock().unwrap().clone();
+        assert_eq!(
+            acts,
+            vec![
+                CuaAction::Click {
+                    x: 640,
+                    y: 512,
+                    button: None
+                },
+                CuaAction::Key {
+                    key: "ctrl+a".into()
+                },
+                CuaAction::Type {
+                    text: "ada@example.com".into()
+                },
+                CuaAction::Click {
+                    x: 640,
+                    y: 560,
+                    button: None
+                },
+                CuaAction::Key {
+                    key: "ctrl+a".into()
+                },
+                CuaAction::Type {
+                    text: "s3cret-pass".into()
+                },
+                CuaAction::Key {
+                    key: "Return".into()
+                },
+            ],
+            "click, select, type per field, no Tab, then Return: {acts:?}"
+        );
+    }
+
+    /// A same-page form that skips an optional blank field still Tabs past it, so the next
+    /// value does not land in the blank field's box (a pre-existing miss).
+    #[tokio::test]
+    async fn a_skipped_field_on_a_same_page_form_is_still_tabbed_past() {
+        let spy = FillSpy::default();
+        let mut optional = field("nickname", "text", None);
+        optional.required = false;
+        let form = FormRequest {
+            title: "Sign up".into(),
+            instruction: String::new(),
+            fields: vec![
+                field("email", "email", None),
+                optional,
+                field("password", "password", None),
+            ],
+            domain: None,
+            live_host: None,
+            challenge_kind: None,
+            same_page: true,
+            submit: false,
+        };
+        let values = BTreeMap::from([
+            ("email".into(), "ada@example.com".into()),
+            ("password".into(), "s3cret-pass".into()),
+        ]);
+        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+        assert!(
+            outcomes.iter().all(|o| o.filled && !o.fill_failed),
+            "{outcomes:?}"
+        );
+        let acts = spy.acts.lock().unwrap().clone();
+        assert_eq!(
+            acts,
+            vec![
+                CuaAction::Type {
+                    text: "ada@example.com".into()
+                },
+                CuaAction::Key { key: "Tab".into() },
+                CuaAction::Key { key: "Tab".into() },
+                CuaAction::Type {
+                    text: "s3cret-pass".into()
+                },
+            ],
+            "two Tabs: one past the blank optional field: {acts:?}"
+        );
+    }
+
+    /// `at` is read from the tool call, and a half-given point is no point.
+    #[test]
+    fn a_field_position_is_read_from_the_request() {
+        let form = form_request_from(&serde_json::json!({
+            "title": "Log in",
+            "samePage": true,
+            "fields": [
+                { "id": "email", "label": "Email", "type": "email", "at": { "x": 640, "y": 512 } },
+                { "id": "password", "label": "Password", "type": "password", "at": { "x": 640 } },
+                { "id": "otp", "label": "Code" }
+            ]
+        }));
+        assert_eq!(form.fields[0].at, Some(FieldAt { x: 640, y: 512 }));
+        assert_eq!(form.fields[1].at, None, "x without y is no position");
+        assert_eq!(form.fields[2].at, None);
+    }
+
     #[tokio::test]
     async fn fill_types_only_the_first_field_by_default() {
         let spy = FillSpy::default();
@@ -847,6 +1048,7 @@ mod tests {
                     r#type: "email".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
                 FormField {
                     id: "password".into(),
@@ -854,6 +1056,7 @@ mod tests {
                     r#type: "password".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
             ],
             domain: None,
@@ -898,6 +1101,7 @@ mod tests {
                 r#type: "password".into(),
                 required: true,
                 secret: false,
+                at: None,
             }],
             domain: None,
             live_host: None,
@@ -936,6 +1140,7 @@ mod tests {
                     r#type: "email".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
                 FormField {
                     id: "password".into(),
@@ -943,6 +1148,7 @@ mod tests {
                     r#type: "password".into(),
                     required: true,
                     secret: false,
+                    at: None,
                 },
             ],
             domain: None,
@@ -984,6 +1190,7 @@ mod tests {
             r#type: "email".into(),
             required: true,
             secret: false,
+            at: None,
         };
         let password = FormField {
             id: "password".into(),
@@ -991,6 +1198,7 @@ mod tests {
             r#type: "password".into(),
             required: true,
             secret: false,
+            at: None,
         };
         let multi = FormRequest {
             fields: vec![email.clone(), password.clone()],
@@ -1028,6 +1236,7 @@ mod tests {
                 r#type: "email".into(),
                 required: true,
                 secret: false,
+                at: None,
             }],
             domain: None,
             live_host: None,
@@ -1130,6 +1339,7 @@ mod tests {
                 r#type: "password".into(),
                 required: true,
                 secret: false,
+                at: None,
             }],
             domain: None,
             live_host: None,

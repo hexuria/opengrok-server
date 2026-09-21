@@ -1875,13 +1875,16 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              then raise this. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
              attaches a screenshot of what was typed. Raise this instead and wait. The person \
-             fills in chat; the server types into the focused field on the page and never shows \
-             you the secret. After it settles, screenshot and confirm what the page shows — \
-             filling is not login. Auth is one challenge per form: raise email, then observe; \
-             if a password page is next, prefer `credential.request` when a saved login is \
-             likely, otherwise call this again with a password-only form (new entryId, \
-             challengeKind \"password\"). Do not put email and password on the same card unless \
-             they share a page (`samePage`). If another in-sandbox challenge appears (OTP, phone \
+             fills in chat; the server clicks each field at the position you give (`at`, in \
+             your screenshot's pixels) and types there, never showing you the secret. Give \
+             `at` for every field you can see. After it settles, screenshot and confirm what \
+             the page shows — filling is not login. When the page shows the email and password \
+             fields TOGETHER (Facebook, most sites), raise ONE card with both fields and \
+             `samePage: true` — do not split them. Only a page that asks for the email alone \
+             (Google) gets an email-only card: raise it, observe, and if a password page comes \
+             next prefer `credential.request` when a saved login is likely, otherwise call \
+             this again with a password-only form (new entryId, challengeKind \"password\"). \
+             If another in-sandbox challenge appears (OTP, phone \
              verification on the same page), call this again with otp fields and \
              challengeKind \"otp\"; never re-raise a form that already settled. Captcha, \
              passkey, or a page outside this box is not another password form: the person \
@@ -1913,7 +1916,13 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                                 "label": { "type": "string" },
                                 "type": { "type": "string", "description": "text, email, password, otp, …" },
                                 "required": { "type": "boolean" },
-                                "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." }
+                                "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." },
+                                "at": {
+                                    "type": "object",
+                                    "description": "Where this field is on your screenshot, in its pixels: the fill clicks it before typing, so the value lands in this field whatever the page has focused. Give it whenever you can see the field.",
+                                    "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
+                                    "required": ["x", "y"]
+                                }
                             },
                             "required": ["id", "label"]
                         }
