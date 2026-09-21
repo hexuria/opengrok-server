@@ -642,6 +642,9 @@ pub struct Executor {
     /// The person's standing answer for this computer. `Always` is consent given in advance;
     /// `Never`, with the tunnel on, takes the leave-box tools off the offer (see `has_screen`).
     egress_policy: EgressPolicy,
+    /// The policy could not be read this turn and `Never` is the fail-closed stand-in, not the
+    /// person's word: the prompt must not say they chose it.
+    egress_policy_unconfirmed: bool,
 }
 
 /// The built-ins that need a display.
@@ -720,6 +723,7 @@ impl Executor {
             egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             egress_consented: false,
             egress_policy: EgressPolicy::default(),
+            egress_policy_unconfirmed: false,
         }
     }
 
@@ -747,6 +751,7 @@ impl Executor {
             egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             egress_consented: false,
             egress_policy: EgressPolicy::default(),
+            egress_policy_unconfirmed: false,
         }
     }
 
@@ -790,6 +795,19 @@ impl Executor {
     pub fn with_egress_policy(mut self, policy: EgressPolicy) -> Self {
         self.egress_policy = policy;
         self
+    }
+
+    /// The policy is a fail-closed stand-in this turn, not something the person chose.
+    #[must_use]
+    pub fn with_egress_policy_unconfirmed(mut self, unconfirmed: bool) -> Self {
+        self.egress_policy_unconfirmed = unconfirmed;
+        self
+    }
+
+    /// The browser is withheld this turn because the policy could not be read, not because
+    /// the person said no — the prompt says so in those words.
+    pub fn network_unconfirmed(&self) -> bool {
+        self.egress_policy_unconfirmed && self.network_off()
     }
 
     /// How long the first box-bound tool call of a turn waits for a sleeping box.

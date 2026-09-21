@@ -149,9 +149,20 @@ impl Persona {
 /// Why the browser tools are missing this turn, when they are: the person routes this
 /// computer's traffic through their own desktop and has said this computer may not use it. Said
 /// so the model does not go looking for `open_url`, and does not claim it cannot see at all.
-pub fn network_off_line(network_off: bool) -> String {
+pub fn network_off_line(network_off: bool, unconfirmed: bool) -> String {
     if !network_off {
         return String::new();
+    }
+    if unconfirmed {
+        // The withholding is the server's caution, not the person's choice: say that, and do
+        // not point them at a setting they never touched.
+        return " This turn you have NO browser or screen tools: `open_url`, `computer`, \
+                 `credential.request` and `request_user_form` are not available, and the login \
+                 instructions above do not apply, because this computer's use of the person's \
+                 network could not be confirmed right now. Your shell and files still work. If \
+                 asked to browse, open a page, log in somewhere or look at your screen, say that \
+                 your network access could not be confirmed this turn and to try again shortly."
+            .to_string();
     }
     " Your box's web traffic would go out through the person's own network, and they have \
      switched that off for this computer, so this turn you have NO browser or screen tools: \

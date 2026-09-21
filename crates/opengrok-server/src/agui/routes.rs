@@ -346,7 +346,8 @@ pub(crate) async fn tools_for_coworker(
     // The person's standing answer for THIS computer to the tunnel's card, keyed by the scope
     // the box lives under so a reset or takeover that changes the box id keeps the choice.
     // No row is `ask`: one card per run, as before there was a choice.
-    let egress_policy = provision::egress_policy_of(state, scope, &scope_id).await;
+    let (egress_policy, egress_unconfirmed) =
+        provision::egress_policy_for_turn(state, scope, &scope_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
     let transcript_hold = match state
         .auth
@@ -379,7 +380,8 @@ pub(crate) async fn tools_for_coworker(
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
         .with_egress_tunnel_mode(egress_tunnel)
-        .with_egress_policy(egress_policy);
+        .with_egress_policy(egress_policy)
+        .with_egress_policy_unconfirmed(egress_unconfirmed);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin.
@@ -1660,7 +1662,14 @@ async fn get_egress_policy(
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
-    let mode = provision::egress_policy_of(&state, scoped.scope, &scoped.scope_id).await;
+    let Ok(mode) = provision::egress_policy_read(&state, scoped.scope, &scoped.scope_id).await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the network policy could not be read right now",
+        )
+            .into_response();
+    };
     Json(serde_json::json!({
         "scope": provision::share_scope_of(scoped.scope),
         "scopeId": scoped.scope_id,
@@ -2313,6 +2322,9 @@ pub async fn run(
             };
             let has_screen = tools.as_ref().is_some_and(|runner| runner.has_screen());
             let network_off = tools.as_ref().is_some_and(|runner| runner.network_off());
+            let network_unconfirmed = tools
+                .as_ref()
+                .is_some_and(|runner| runner.network_unconfirmed());
             let has_recipes = tools.as_ref().is_some_and(|runner| runner.has_recipes());
             // What the person named this turn, kept to what this bot can actually run.
             let preferred = honour_preferences(&preferred_tools_from(&input), tools.as_ref());
@@ -2342,7 +2354,7 @@ pub async fn run(
                         reaches_user_machine,
                         user_machine_label.as_deref(),
                     ),
-                    crate::persona::network_off_line(network_off),
+                    crate::persona::network_off_line(network_off, network_unconfirmed),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
                 )),

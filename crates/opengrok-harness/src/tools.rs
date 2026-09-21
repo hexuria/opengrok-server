@@ -93,6 +93,14 @@ impl ToolRunner {
             .is_some_and(|(executor, _)| executor.network_off())
     }
 
+    /// The withholding is a fail-closed stand-in, not the person's choice. See
+    /// `Executor::network_unconfirmed`.
+    pub fn network_unconfirmed(&self) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.network_unconfirmed())
+    }
+
     /// The same, asked once the box is awake, for a path that wakes the box itself (the
     /// user-form fill). See `Executor::network_off_now`.
     pub async fn network_off_now(&self) -> bool {

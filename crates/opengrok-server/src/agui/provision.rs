@@ -713,32 +713,50 @@ pub fn share_scope_of(scope: &str) -> &'static str {
     }
 }
 
-/// The standing answer for a computer scope; no row is `ask`.
-pub async fn egress_policy_of(
+/// The standing answer for a computer scope; no row is `ask`. `Err` when the store could not
+/// answer — the caller decides what that means where it stands: the run path fails closed,
+/// the pane says nothing, the GET says 503.
+pub async fn egress_policy_read(
     state: &AgUiState,
     scope: &str,
     scope_id: &str,
-) -> opengrok_tools::EgressPolicy {
+) -> Result<opengrok_tools::EgressPolicy, ()> {
     match state.auth.store.egress_policy_mode(scope, scope_id).await {
-        Ok(mode) => mode
+        Ok(mode) => Ok(mode
             .map(|mode| opengrok_tools::EgressPolicy::from_stored(&mode))
-            .unwrap_or_default(),
-        // A store that cannot answer fails CLOSED: `never` for this turn. `ask` would still
-        // put the tunnel card in front of a person for the screen tools, but the two login
-        // hand-offs have no card of their own — under `ask` a stored `never` would let a
-        // person type a site password into a box whose traffic then leaves through their
-        // network. One turn of a withheld browser during a store error is the cheaper wrong.
+            .unwrap_or_default()),
         Err(error) => {
-            tracing::warn!(%error, scope, scope_id, "could not read the egress policy; failing closed (never) for this turn");
-            opengrok_tools::EgressPolicy::Never
+            tracing::warn!(%error, scope, scope_id, "could not read the egress policy");
+            Err(())
         }
     }
 }
 
+/// The policy for a turn, and whether it is a stand-in. A store that cannot answer fails
+/// CLOSED: `never` for this turn. `ask` would still put the tunnel card in front of a person
+/// for the screen tools, but the two login hand-offs have no card of their own — under `ask`
+/// a stored `never` would let a person type a site password into a box whose traffic then
+/// leaves through their network. One turn of a withheld browser during a store error is the
+/// cheaper wrong, and the `unconfirmed` flag keeps the prompt from calling it the person's
+/// choice.
+pub async fn egress_policy_for_turn(
+    state: &AgUiState,
+    scope: &str,
+    scope_id: &str,
+) -> (opengrok_tools::EgressPolicy, bool) {
+    match egress_policy_read(state, scope, scope_id).await {
+        Ok(policy) => (policy, false),
+        Err(()) => (opengrok_tools::EgressPolicy::Never, true),
+    }
+}
+
 /// The Computer pane carries the choice next to `shareScope`, so the client can paint the
-/// control without a second request.
+/// control without a second request. Nothing is stamped when the store cannot answer: the
+/// client hides the control rather than showing a word nobody chose.
 async fn stamp_egress_policy(state: &AgUiState, screen: &mut Value, scope: &str, scope_id: &str) {
-    screen["egressPolicy"] = json!(egress_policy_of(state, scope, scope_id).await.as_stored());
+    if let Ok(policy) = egress_policy_read(state, scope, scope_id).await {
+        screen["egressPolicy"] = json!(policy.as_stored());
+    }
 }
 
 fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
