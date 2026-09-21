@@ -428,9 +428,14 @@ fn icon_reply(icon: Fetched) -> Response {
             bytes,
         )
             .into_response(),
-        Fetched::NoIcon | Fetched::Failed => (
+        // The client is told the same wait the server keeps, so a site that could not be
+        // reached is asked for again soon and one that simply has no icon is not.
+        ref other => (
             StatusCode::NO_CONTENT,
-            [(header::CACHE_CONTROL, "private, max-age=3600".to_string())],
+            [(
+                header::CACHE_CONTROL,
+                format!("private, max-age={}", other.ttl().as_secs()),
+            )],
         )
             .into_response(),
     }
@@ -517,10 +522,10 @@ async fn fetch_icon(host: &str) -> Fetched {
     else {
         return Fetched::Failed;
     };
-    match fetch_image(&client, &format!("https://{host}/favicon.ico")).await {
-        Ok(Some(icon)) => return Fetched::Icon(icon.0, icon.1),
-        Ok(None) => {}
-        Err(()) => return Fetched::Failed,
+    // A site whose favicon.ico is missing, slow or unreachable may still name its icon on
+    // its front page, so either answer moves on to look.
+    if let Ok(Some(icon)) = fetch_image(&client, &format!("https://{host}/favicon.ico")).await {
+        return Fetched::Icon(icon.0, icon.1);
     }
     let page = match fetch_capped(&client, &format!("https://{host}/"), PAGE_MAX_BYTES, true).await
     {

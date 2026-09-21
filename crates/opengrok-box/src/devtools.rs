@@ -82,27 +82,44 @@ pub fn platform_authenticator_options() -> Value {
     })
 }
 
-/// A page session, and whether a tab was opened for it.
+/// A page session, the target behind it, and whether a tab was opened for it.
 #[derive(Debug, Clone)]
 pub struct AttachedPage {
     pub session_id: String,
+    pub target_id: String,
     pub opened: bool,
 }
 
 /// Whether a page URL is on `host`: that host exactly, or a name under it.
 pub fn url_is_on_host(url: &str, host: &str) -> bool {
-    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    match page_host(url) {
+        Some(page) => {
+            let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+            !host.is_empty() && (page == host || page.ends_with(&format!(".{host}")))
+        }
+        None => false,
+    }
+}
+
+/// The host a page URL is on: `https://a.b.com:8443/x` → `a.b.com`. Only a real
+/// `scheme://` counts, so a `mailto:` whose query happens to carry one is not read as an
+/// address, and an address in brackets keeps its address rather than its bracket.
+fn page_host(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme_ok = scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !scheme_ok {
+        return None;
+    }
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let page_host = authority
-        .rsplit('@')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
-    page_host == host || page_host.ends_with(&format!(".{host}"))
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(after) => after.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 impl DevTools {
@@ -314,7 +331,11 @@ impl DevTools {
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| BoxError::Unreachable("attach gave no session".to_string()))?;
-        Ok(AttachedPage { session_id, opened })
+        Ok(AttachedPage {
+            session_id,
+            target_id,
+            opened,
+        })
     }
 
     /// Let go of a page session taken by [`Self::attach_to_page`].
@@ -325,6 +346,22 @@ impl DevTools {
             None,
         )
         .await?;
+        Ok(())
+    }
+
+    /// Let go of a page, and close the tab when this process was the one that opened it,
+    /// so a run of sign-ins does not leave a row of tabs behind. A tab that was already
+    /// there is only detached from.
+    pub async fn close_page(&self, page: &AttachedPage) -> BoxResult<()> {
+        self.detach(&page.session_id).await?;
+        if page.opened {
+            self.call(
+                "Target.closeTarget",
+                json!({ "targetId": page.target_id }),
+                None,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -476,6 +513,17 @@ mod tests {
             "google.com"
         ));
         assert!(!url_is_on_host("about:blank", "google.com"));
+        // A scheme is a scheme, not any "://" further along the line.
+        assert!(!url_is_on_host(
+            "mailto:ada@example.com?subject=http://webauthn.io/x",
+            "webauthn.io"
+        ));
+        // An address in brackets keeps its address.
+        assert!(url_is_on_host(
+            "https://[2001:db8::1]:8443/x",
+            "2001:db8::1"
+        ));
+        assert!(!url_is_on_host("https://[2001:db8::1]/x", "2001:db8::2"));
     }
 
     #[test]

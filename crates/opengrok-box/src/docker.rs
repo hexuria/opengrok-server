@@ -296,7 +296,9 @@ impl DockerComputer {
 #[async_trait]
 impl Computer for DockerComputer {
     fn offers_a_pipe(&self) -> bool {
-        true
+        // A headless image has no Chromium and no `box-chromium-pipe`; saying it has a
+        // pipe would send the flow in to kill a browser that is not there.
+        self.wants_desktop()
     }
 
     /// `docker exec -i <box> box-chromium-pipe <url>`, held by this process.

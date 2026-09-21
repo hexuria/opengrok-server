@@ -80,7 +80,7 @@ async fn ensure_devtools(
 /// A page attached for one passkey, and what the bot has to be told about it.
 struct ReadyPage {
     devtools: Arc<DevTools>,
-    session: String,
+    page: opengrok_box::devtools::AttachedPage,
     /// The tab was opened just now at the site's front page (the browser was replaced, or
     /// no tab was on the site): the bot has to find its way back to the sign-in page.
     reopened: bool,
@@ -134,8 +134,8 @@ async fn page_session(
     }
     Ok(ReadyPage {
         devtools,
-        session: page.session_id,
         reopened: replaced || page.opened,
+        page,
     })
 }
 
@@ -167,17 +167,29 @@ pub async fn use_passkey(
         .passkey
         .clone()
         .ok_or_else(|| "that row has no passkey".to_string())?;
-    // The page first: the key is opened only once there is somewhere to put it.
-    let page = page_session(state, account_id, coworker_id, form).await?;
-    let key = state
+    // The page first: the key is opened only once there is somewhere to put it. From here
+    // on every way out gives the page back, so a tab this flow opened is not left behind.
+    let ready = page_session(state, account_id, coworker_id, form).await?;
+    let where_to_click = ready.where_to_click();
+    let ReadyPage { devtools, page, .. } = ready;
+    let key = match state
         .agui
         .auth
         .store
         .open_site_login(vault, account_id, login_id)
         .await
-        .map_err(|error| error.to_string())?
-        .and_then(|secrets| secrets.passkey_key)
-        .ok_or_else(|| "the passkey's key is missing".to_string())?;
+    {
+        Ok(Some(secrets)) => secrets.passkey_key,
+        Ok(None) => None,
+        Err(error) => {
+            let _ = devtools.close_page(&page).await;
+            return Err(error.to_string());
+        }
+    };
+    let Some(key) = key else {
+        let _ = devtools.close_page(&page).await;
+        return Err("the passkey's key is missing".to_string());
+    };
     let passkey = Passkey {
         rp_id: meta.rp_id.clone(),
         credential_id_b64: meta.credential_id_b64.clone(),
@@ -185,19 +197,25 @@ pub async fn use_passkey(
         private_key_b64: key,
         user_name: row.username.clone(),
     };
-    let where_to_click = page.where_to_click();
-    let ReadyPage {
-        devtools, session, ..
-    } = page;
+    let session = page.session_id.clone();
     let events = devtools.events();
-    let authenticator = devtools
-        .add_platform_authenticator(&session)
-        .await
-        .map_err(|error| format!("could not add the authenticator: {error}"))?;
-    devtools
+    let authenticator = match devtools.add_platform_authenticator(&session).await {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = devtools.close_page(&page).await;
+            return Err(format!("could not add the authenticator: {error}"));
+        }
+    };
+    if let Err(error) = devtools
         .add_credential(&session, &authenticator, &passkey)
         .await
-        .map_err(|error| format!("could not load the passkey: {error}"))?;
+    {
+        let _ = devtools
+            .remove_authenticator(&session, &authenticator)
+            .await;
+        let _ = devtools.close_page(&page).await;
+        return Err(format!("could not load the passkey: {error}"));
+    }
     let store = state.agui.auth.store.clone();
     let account = account_id.clone();
     let id = login_id.to_string();
@@ -226,7 +244,7 @@ pub async fn use_passkey(
         let _ = devtools
             .remove_authenticator(&session, &authenticator)
             .await;
-        let _ = devtools.detach(&session).await;
+        let _ = devtools.close_page(&page).await;
     });
     Ok(format!(
         "The passkey for {} as {} is loaded in the browser for the next two minutes. \
@@ -249,16 +267,18 @@ pub async fn register_passkey(
     if state.agui.vault.is_none() {
         return Err("the credential vault is not configured on this server".to_string());
     }
-    let page = page_session(state, account_id, coworker_id, form).await?;
-    let where_to_click = page.where_to_click();
-    let ReadyPage {
-        devtools, session, ..
-    } = page;
+    let ready = page_session(state, account_id, coworker_id, form).await?;
+    let where_to_click = ready.where_to_click();
+    let ReadyPage { devtools, page, .. } = ready;
+    let session = page.session_id.clone();
     let events = devtools.events();
-    let authenticator = devtools
-        .add_platform_authenticator(&session)
-        .await
-        .map_err(|error| format!("could not add the authenticator: {error}"))?;
+    let authenticator = match devtools.add_platform_authenticator(&session).await {
+        Ok(id) => id,
+        Err(error) => {
+            let _ = devtools.close_page(&page).await;
+            return Err(format!("could not add the authenticator: {error}"));
+        }
+    };
     let state = state.clone();
     let account = account_id.clone();
     let hint = username_hint.to_string();
@@ -291,7 +311,7 @@ pub async fn register_passkey(
         let _ = devtools
             .remove_authenticator(&session, &authenticator)
             .await;
-        let _ = devtools.detach(&session).await;
+        let _ = devtools.close_page(&page).await;
     });
     Ok(format!(
         "A passkey holder is ready in the browser for the next two minutes. {where_to_click} \

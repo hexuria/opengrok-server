@@ -49,7 +49,7 @@ async fn chromium_answers_on_the_pipe_and_holds_a_passkey_for_one_sign_in() {
         .await
         .expect("attach");
     assert!(page.opened, "a tab was opened for the site");
-    let session = page.session_id;
+    let session = page.session_id.clone();
     let authenticator = devtools
         .add_platform_authenticator(&session)
         .await
@@ -84,7 +84,14 @@ async fn chromium_answers_on_the_pipe_and_holds_a_passkey_for_one_sign_in() {
         .remove_authenticator(&session, &authenticator)
         .await
         .expect("remove authenticator");
-    devtools.detach(&session).await.expect("detach");
+    // The tab this test opened is closed again, not left behind.
+    let before = devtools.page_urls().await.expect("pages").len();
+    devtools.close_page(&page).await.expect("close");
+    let after = devtools.page_urls().await.expect("pages").len();
+    assert!(
+        after < before,
+        "the opened tab is gone: {before} -> {after}"
+    );
 
     // A tab opened by the dock launcher lands in this instance.
     let opened = std::process::Command::new("docker")
