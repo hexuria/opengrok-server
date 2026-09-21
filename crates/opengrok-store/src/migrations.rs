@@ -942,6 +942,22 @@ create table if not exists site_login (
     unique (account_id, origin, username)
 );
 create index if not exists site_login_account on site_login (account_id);
+-- What kind of thing the row is (a password, an authenticator code, a passkey), the
+-- person's notes, and when a bot last used it. A code's seed is sealed beside the password
+-- under `site-login-otp:<account>:<id>`.
+alter table site_login add column if not exists kind text not null default 'password';
+alter table site_login add column if not exists notes text not null default '';
+alter table site_login add column if not exists last_used_at_ms bigint;
+-- A passkey row: the credential id and user handle (base64) and the relying party the key
+-- answers for. The private key is sealed under `site-login-passkey:<account>:<id>`.
+alter table site_login add column if not exists passkey_credential_id text;
+alter table site_login add column if not exists passkey_rp_id text;
+alter table site_login add column if not exists passkey_user_handle text;
+-- A password and a passkey for one username on one site are two rows: the kind is part of
+-- the key, so saving one never turns the other into it.
+alter table site_login drop constraint if exists site_login_account_id_origin_username_key;
+create unique index if not exists site_login_owner_site_name_kind
+    on site_login (account_id, origin, username, kind);
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

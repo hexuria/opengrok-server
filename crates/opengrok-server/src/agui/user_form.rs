@@ -133,24 +133,64 @@ pub async fn submit_user_form(
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
     let saved_login = is_saved_login(args);
-    if saved_login && !fills_a_dedicated_box(state, account_id, &coworker_id).await {
+    // A passkey card has no fields to type: the person's passkey is loaded into the page (or
+    // an empty holder is, for a site that offers to make one), and the bot is told to click.
+    let passkey_card = form.challenge_kind.as_deref() == Some("passkey");
+    if (saved_login || passkey_card)
+        && !fills_a_dedicated_box(state, account_id, &coworker_id).await
+    {
         // The card stays open: the person may still type by hand, or dismiss.
         return (
             403,
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
         );
     }
-
-    let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
-    let resolution = overall_resolution(&outcomes);
-    // A saved login is secret whatever the model called its fields: nothing of it is shared
-    // back to the model or the journal.
-    let shared = if saved_login {
+    let (outcomes, resolution, content) = if passkey_card {
+        let told = if form.passkey_mode.as_deref() == Some("register") {
+            let hint = args
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            super::passkeys::register_passkey(state, account_id, &coworker_id, &form, &hint).await
+        } else {
+            match args.get("savedLoginId").and_then(Value::as_str) {
+                Some(login_id) => {
+                    super::passkeys::use_passkey(state, account_id, &coworker_id, &form, login_id)
+                        .await
+                }
+                None => Err("no passkey was chosen".to_string()),
+            }
+        };
+        match told {
+            Ok(sentence) => (Vec::new(), FormResolution::Submitted, sentence),
+            Err(why) => (
+                Vec::new(),
+                FormResolution::FillFailed,
+                format!(
+                    "The passkey could not be readied: {why}. The person may pick another way \
+                     in; do not type a password."
+                ),
+            ),
+        }
+    } else {
+        let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
+        let resolution = overall_resolution(&outcomes);
+        // A saved login is secret whatever the model called its fields: nothing of it is
+        // shared back to the model or the journal.
+        let shared = if saved_login {
+            BTreeMap::new()
+        } else {
+            shared_values(&form, &values)
+        };
+        let content = tool_result_content(&form, resolution, &shared, false);
+        (outcomes, resolution, content)
+    };
+    let shared: BTreeMap<String, String> = if saved_login || passkey_card {
         BTreeMap::new()
     } else {
         shared_values(&form, &values)
     };
-    let content = tool_result_content(&form, resolution, &shared, false);
 
     let settled = settle_entry(entry, resolution, &shared, false, &outcomes, false);
     if let Err(error) = state
@@ -164,8 +204,23 @@ pub async fn submit_user_form(
         return (500, json!({ "error": "transcript unavailable" }));
     }
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
-    // A login that came from the vault is not offered to the vault again.
-    if resolution == FormResolution::Submitted && !saved_login {
+    // A passkey's use is stamped when the site's challenge is signed, not when it is loaded.
+    if resolution == FormResolution::Submitted
+        && saved_login
+        && !passkey_card
+        && let Some(login_id) = args.get("savedLoginId").and_then(Value::as_str)
+        && let Err(error) = state
+            .agui
+            .auth
+            .store
+            .touch_site_login_used(account_id, login_id, chrono::Utc::now().timestamp_millis())
+            .await
+    {
+        tracing::warn!(%error, "could not stamp a site login's last use");
+    }
+    // A login that came from the vault is not offered to the vault again, and a passkey card
+    // typed nothing worth saving.
+    if resolution == FormResolution::Submitted && !saved_login && !passkey_card {
         super::credential::offer_save_after_submit(
             state,
             account_id,

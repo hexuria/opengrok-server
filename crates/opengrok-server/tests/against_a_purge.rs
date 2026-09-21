@@ -184,7 +184,21 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         opengrok_store::Vault::from_base64_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
             .expect("vault");
     store
-        .upsert_site_login(&vault, &account, "example.com", "ada", "pw", at_ms)
+        .upsert_site_login(
+            &vault,
+            &account,
+            &opengrok_store::SiteLoginWrite {
+                origin: "example.com",
+                username: "ada",
+                label: "",
+                kind: "password",
+                notes: "",
+                password: Some("pw"),
+                otpauth: Some("otpauth://totp/x?secret=ABCDEFGHIJKLMNOP"),
+                passkey: None,
+            },
+            at_ms,
+        )
         .await
         .expect("site login");
 
@@ -250,7 +264,7 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
         ),
         (
             "secret_store (site logins)",
-            "select count(*) from secret_store where id like 'site-login:' || $1 || ':%'",
+            "select count(*) from secret_store where id like 'site-login:' || $1 || ':%' or id like 'site-login-otp:' || $1 || ':%' or id like 'site-login-passkey:' || $1 || ':%'",
             &account,
         ),
     ] {

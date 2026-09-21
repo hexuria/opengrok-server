@@ -1493,6 +1493,26 @@ pub(crate) fn account_from_bearer(
     }
 }
 
+/// Whose account this is, from an `Authorization: Bearer` header and nothing else: the
+/// console's cookie does not count here. For the doors only the person's own app may open.
+pub(crate) fn account_from_header_bearer(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+) -> Option<opengrok_core::id::AccountId> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?;
+    match state.auth.minter.verify_access(token) {
+        Ok(claims) => Some(opengrok_core::id::AccountId::from_stored(claims.sub)),
+        Err(error) => {
+            tracing::warn!(%error, token_len = token.len(), "a bearer access token did not verify");
+            None
+        }
+    }
+}
+
 pub(crate) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }

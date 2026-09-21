@@ -14,7 +14,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
-use opengrok_store::{PgStore, Vault};
+use opengrok_store::{PasskeyWrite, PgStore, SiteLoginWrite, Vault};
 use serde_json::{Value, json};
 
 const KEK: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -150,6 +150,7 @@ impl Harness {
         let request = match method {
             "GET" => self.client.get(url),
             "POST" => self.client.post(url),
+            "PATCH" => self.client.patch(url),
             "DELETE" => self.client.delete(url),
             _ => unreachable!(),
         }
@@ -332,4 +333,266 @@ async fn a_bad_save_is_refused_and_a_server_without_a_vault_says_so() {
     assert_eq!(status, 503, "{body}");
     let (status, list, _) = bare.call(&ada, "GET", "/site-logins", None).await;
     assert_eq!(status, 200, "listing needs no vault: {list}");
+}
+
+#[tokio::test]
+async fn a_row_carries_its_kind_notes_and_code_and_the_icon_route_refuses_what_is_not_a_site() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+
+    // A password row with a title, notes and an authenticator seed.
+    let (status, row, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({
+                "origin": "github.com", "username": "ada", "password": PASSWORD,
+                "label": "GitHub (work)", "notes": "recovery codes in the safe",
+                "otpauth": "otpauth://totp/GitHub:ada?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(row["kind"], "password");
+    assert_eq!(row["label"], "GitHub (work)");
+    assert_eq!(row["notes"], "recovery codes in the safe");
+    assert!(row["lastUsedAtMs"].is_null());
+    assert!(
+        !text.contains("JBSWY3DP"),
+        "the seed is not in the reply: {text}"
+    );
+    let id = row["id"].as_str().expect("id").to_string();
+
+    let (_, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(opened["password"], PASSWORD);
+    assert_eq!(
+        opened["otpauth"],
+        "otpauth://totp/GitHub:ada?secret=JBSWY3DPEHPK3PXP&issuer=GitHub"
+    );
+
+    // Notes and the title change in place; the secrets stay.
+    let (status, _, _) = h
+        .call(
+            &ada,
+            "PATCH",
+            &format!("/site-logins/{id}"),
+            Some(json!({ "notes": "moved the codes" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let (_, list, _) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(list[0]["notes"], "moved the codes", "{list}");
+    let (_, opened, _) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_eq!(opened["password"], PASSWORD);
+
+    // A code-only row needs a seed and no password; a password row needs a password.
+    let (status, code, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({
+                "origin": "aws.amazon.com", "username": "root", "kind": "code",
+                "otpauth": "otpauth://totp/AWS:root?secret=JBSWY3DPEHPK3PXP"
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(code["kind"], "code");
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "a", "kind": "code" })),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body, _) = h
+        .call(&ada, "POST", "/site-logins", Some(json!({ "origin": "x.com", "username": "a", "otpauth": "not-a-uri", "password": "p" })))
+        .await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "x.com", "username": "a", "password": "p", "kind": "passkey" })),
+        )
+        .await;
+    assert_eq!(status, 400, "passkeys are not posted here: {body}");
+
+    // Deleting a code row removes its seed.
+    let code_id = code["id"].as_str().expect("id").to_string();
+    let (status, _, _) = h
+        .call(&ada, "DELETE", &format!("/site-logins/{code_id}"), None)
+        .await;
+    assert_eq!(status, 200);
+    let sealed: i64 = sqlx::query_scalar("select count(*) from secret_store where id like $1")
+        .bind(format!("%{code_id}%"))
+        .fetch_one(h.store.pool())
+        .await
+        .expect("query");
+    assert_eq!(sealed, 0);
+
+    // The icon route takes a public host and nothing else.
+    for bad in ["localhost", "127.0.0.1", "10.0.0.1", "x.local", "a"] {
+        let (status, _, _) = h
+            .call(&ada, "GET", &format!("/site-logins/icon/{bad}"), None)
+            .await;
+        assert_eq!(status, 400, "{bad}");
+    }
+    let (status, _, _) = h
+        .call("nope", "GET", "/site-logins/icon/github.com", None)
+        .await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn a_passkey_is_sealed_beside_the_password_row_and_the_reveal_door_takes_no_cookie() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!(
+            "ada-pk-{}@og.local",
+            uuid::Uuid::now_v7().simple()
+        ))
+        .await;
+    let account =
+        AccountId::from_stored(h.agui.auth.minter.verify_access(&ada).expect("claims").sub);
+    let vault = h.agui.vault.as_deref().expect("vault");
+
+    // A password row for ada on github.com...
+    let (status, password_row, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "github.com", "username": "ada", "password": "pw-1" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    // ...and a passkey the site made for the same name: a second row, the key sealed.
+    let passkey = h
+        .store
+        .upsert_site_login(
+            vault,
+            &account,
+            &SiteLoginWrite {
+                origin: "github.com",
+                username: "ada",
+                label: "github.com passkey",
+                kind: "passkey",
+                notes: "",
+                password: None,
+                otpauth: None,
+                passkey: Some(PasskeyWrite {
+                    credential_id_b64: "AQID".to_string(),
+                    rp_id: "github.com".to_string(),
+                    user_handle_b64: "dXNlcg==".to_string(),
+                    private_key_b64: "PKCS8-TEST".to_string(),
+                }),
+            },
+            1,
+        )
+        .await
+        .expect("upsert passkey");
+    assert_ne!(passkey.id, password_row["id"], "two rows, not one flipped");
+    assert_eq!(passkey.kind, "passkey");
+    let (status, rows, _) = h.call(&ada, "GET", "/site-logins", None).await;
+    assert_eq!(status, 200);
+    let kinds: Vec<&str> = rows
+        .as_array()
+        .expect("rows")
+        .iter()
+        .filter(|r| r["origin"] == "github.com" && r["username"] == "ada")
+        .filter_map(|r| r["kind"].as_str())
+        .collect();
+    assert_eq!(kinds.len(), 2, "{rows}");
+    assert!(
+        kinds.contains(&"password") && kinds.contains(&"passkey"),
+        "{rows}"
+    );
+    let secrets = h
+        .store
+        .open_site_login(vault, &account, &passkey.id)
+        .await
+        .expect("open")
+        .expect("row");
+    assert_eq!(secrets.passkey_key.as_deref(), Some("PKCS8-TEST"));
+    assert_eq!(secrets.password, None);
+    // The password row still opens as itself.
+    let password_id = password_row["id"].as_str().expect("id");
+    let secrets = h
+        .store
+        .open_site_login(vault, &account, password_id)
+        .await
+        .expect("open")
+        .expect("row");
+    assert_eq!(secrets.password.as_deref(), Some("pw-1"));
+    assert_eq!(secrets.passkey_key, None);
+
+    // The reveal never gives out the passkey's key, and never opens for the console's
+    // cookie, whatever else is in the request.
+    let (status, body, _) = h
+        .call(
+            &ada,
+            "POST",
+            &format!("/site-logins/{}/reveal", passkey.id),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.get("passkeyKey").is_none() && body.get("privateKey").is_none(),
+        "{body}"
+    );
+    assert_eq!(body["password"], Value::Null);
+    let response = h
+        .client
+        .post(format!("{}/site-logins/{password_id}/reveal", h.base))
+        .header("authorization", "x")
+        .header("cookie", format!("og_access={ada}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "the cookie does not open the reveal"
+    );
+    // The list, by contrast, takes the cookie: it carries no secret.
+    let response = h
+        .client
+        .get(format!("{}/site-logins", h.base))
+        .header("cookie", format!("og_access={ada}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status().as_u16(), 200);
+
+    // Deleting the passkey row takes its key with it.
+    let (status, _, _) = h
+        .call(
+            &ada,
+            "DELETE",
+            &format!("/site-logins/{}", passkey.id),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200);
+    let sealed: i64 = sqlx::query_scalar("select count(*) from secret_store where id like $1")
+        .bind(format!("%{}%", passkey.id))
+        .fetch_one(h.store.pool())
+        .await
+        .expect("query");
+    assert_eq!(sealed, 0);
 }

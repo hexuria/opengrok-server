@@ -86,6 +86,14 @@ pub struct FormRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub challenge_kind: Option<String>,
+    /// With `challengeKind: "passkey"`: `use` (the site offers to sign in with a passkey the
+    /// person has) or `register` (the site offers to add one). No fields either way.
+    #[serde(
+        default,
+        rename = "passkeyMode",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub passkey_mode: Option<String>,
     /// Fields share one HTML page: Tab between them. Default false — type only the first
     /// focused field so a stepped login (Facebook email, then password) cannot mistype.
     #[serde(
@@ -236,6 +244,11 @@ pub fn form_request_from(value: &Value) -> FormRequest {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        passkey_mode: source
+            .get("passkeyMode")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         same_page: source
             .get("samePage")
             .and_then(Value::as_bool)
@@ -262,6 +275,9 @@ pub fn sanitize_arguments(arguments: &Value) -> Value {
     }
     if let Some(host) = form.live_host {
         body["liveHost"] = json!(host);
+    }
+    if let Some(mode) = form.passkey_mode {
+        body["passkeyMode"] = json!(mode);
     }
     if let Some(kind) = form.challenge_kind {
         body["challengeKind"] = json!(kind);
@@ -412,9 +428,9 @@ pub fn tool_result_content(
     let observe = if types_only_first_field(form) {
         "Only the FIRST field was typed: this card had several fields but no `samePage`, and not every field had a position, so the rest could not be placed. Screenshot and confirm what the page shows now; do not claim login succeeded. If the remaining fields are on the same page, raise ONE new card for them with `samePage: true` and each field's `at`; if a password page is next, call request_user_form with a password-only form (new entryId, challengeKind \"password\"). Never re-raise a form that already settled."
     } else if fully_positioned(form) {
-        "Each field was clicked at the position you gave, then typed. Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If the page had moved since your screenshot and a value landed in the wrong field, raise the card again with fresh positions. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form."
+        "Each field was clicked at the position you gave, then typed. Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If the page had moved since your screenshot and a value landed in the wrong field, raise the card again with fresh positions. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. A passkey prompt is a passkey card (challengeKind \"passkey\"); a captcha, or a page outside this box, is handoff, not another password form."
     } else {
-        "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. Captcha, passkey, or a page outside this box is handoff, not another password form."
+        "Screenshot and confirm what the page shows now; do not claim login succeeded until you see it. If another in-sandbox challenge (OTP, phone verification on the same page) appears, call request_user_form again with otp fields — never re-raise a form that already settled. A passkey prompt is a passkey card (challengeKind \"passkey\"); a captcha, or a page outside this box, is handoff, not another password form."
     };
     match resolution {
         FormResolution::Submitted => {
@@ -828,6 +844,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };
@@ -967,6 +984,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: true,
             submit: true,
         };
@@ -1030,6 +1048,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };
@@ -1099,6 +1118,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: true,
             submit: false,
         };
@@ -1172,6 +1192,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };
@@ -1216,6 +1237,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: Some("password".into()),
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };
@@ -1264,6 +1286,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: true,
             submit: true,
         };
@@ -1322,6 +1345,7 @@ mod tests {
         let single = FormRequest {
             fields: vec![password.clone()],
             challenge_kind: Some("password".into()),
+            passkey_mode: None,
             ..FormRequest::default()
         };
         assert!(should_press_return(&single, 1));
@@ -1351,6 +1375,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };
@@ -1454,6 +1479,7 @@ mod tests {
             domain: None,
             live_host: None,
             challenge_kind: None,
+            passkey_mode: None,
             same_page: false,
             submit: false,
         };

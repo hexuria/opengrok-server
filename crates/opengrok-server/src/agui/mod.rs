@@ -5,6 +5,7 @@
 
 pub mod chat_ui;
 pub mod credential;
+pub mod passkeys;
 pub mod provision;
 pub mod resume;
 pub mod routes;

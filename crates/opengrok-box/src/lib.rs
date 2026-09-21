@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod ascii;
+pub mod devtools;
 pub mod docker;
 
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
@@ -251,6 +252,21 @@ pub trait Computer: Send + Sync {
 
     /// Start something long-running and return immediately.
     async fn start(&self, box_id: &str, command: &str) -> BoxResult<StartedCommand>;
+
+    /// Whether [`Computer::devtools`] can work here. Asked before anything in the box is
+    /// touched on a pipe's behalf, so a provider without one never has its browser replaced.
+    fn offers_a_pipe(&self) -> bool {
+        false
+    }
+
+    /// Chromium on a DevTools pipe this process holds (see [`devtools`]). Only a provider that
+    /// can run the box's `box-chromium-pipe` offers it; the rest have no passkeys.
+    async fn devtools(&self, _box_id: &str, _url: &str) -> BoxResult<devtools::DevTools> {
+        Err(BoxError::Refused {
+            status: 501,
+            body: "this computer has no DevTools pipe".to_string(),
+        })
+    }
 
     /// Ask again. The tail is bounded by the provider; see the note about truncation above.
     async fn watch(&self, box_id: &str, process_id: &str) -> BoxResult<StartedCommand>;
