@@ -85,14 +85,19 @@ impl CloakedDoor {
     /// holds two transcripts, so it is two conversations. Supply your own when
     /// you have a better key to hand.
     #[must_use]
-    pub fn keyed_by(mut self, key: impl Fn(&ModelRequest) -> String + Send + Sync + 'static) -> Self {
+    pub fn keyed_by(
+        mut self,
+        key: impl Fn(&ModelRequest) -> String + Send + Sync + 'static,
+    ) -> Self {
         self.key = Arc::new(key);
         self
     }
 
     /// The session a request belongs to.
     fn session_for(&self, request: &ModelRequest) -> Result<Session, ModelError> {
-        self.sessions.session((self.key)(request)).map_err(as_model_error)
+        self.sessions
+            .session((self.key)(request))
+            .map_err(as_model_error)
     }
 }
 
@@ -411,7 +416,10 @@ mod tests {
     }
 
     async fn collect(stream: DeltaStream) -> Vec<ModelDelta> {
-        stream.filter_map(|item| async move { item.ok() }).collect().await
+        stream
+            .filter_map(|item| async move { item.ok() })
+            .collect()
+            .await
     }
 
     fn said(deltas: &[ModelDelta]) -> String {
@@ -485,17 +493,18 @@ mod tests {
 
         // The provider streams it one character at a time, the worst case.
         let mut script = vec![ModelDelta::Text("connect to ".to_string())];
-        script.extend(
-            stand_in
-                .chars()
-                .map(|c| ModelDelta::Text(c.to_string())),
-        );
+        script.extend(stand_in.chars().map(|c| ModelDelta::Text(c.to_string())));
         script.push(ModelDelta::Text(" and retry".to_string()));
 
         let (inner, _) = ScriptedDoor::wired(script);
         let door = CloakedDoor::new(inner, sessions);
 
-        let out = collect(door.stream(request("check db.prod.internal")).await.unwrap()).await;
+        let out = collect(
+            door.stream(request("check db.prod.internal"))
+                .await
+                .unwrap(),
+        )
+        .await;
         assert_eq!(said(&out), "connect to db.prod.internal and retry");
     }
 
@@ -534,7 +543,12 @@ mod tests {
 
         let (inner, _) = ScriptedDoor::wired(script);
         let door = CloakedDoor::new(inner, sessions);
-        let out = collect(door.stream(request("check db.prod.internal")).await.unwrap()).await;
+        let out = collect(
+            door.stream(request("check db.prod.internal"))
+                .await
+                .unwrap(),
+        )
+        .await;
 
         let arguments: String = out
             .iter()
@@ -552,7 +566,10 @@ mod tests {
         assert_eq!(parsed["command"], "uptime");
 
         // The bracket order the projection depends on is preserved.
-        assert!(matches!(out.first(), Some(ModelDelta::ToolCallStart { .. })));
+        assert!(matches!(
+            out.first(),
+            Some(ModelDelta::ToolCallStart { .. })
+        ));
         assert!(matches!(out.last(), Some(ModelDelta::ToolCallEnd { .. })));
     }
 
@@ -606,7 +623,11 @@ mod tests {
         let door = CloakedDoor::new(inner, sessions);
 
         drop(door.stream(request("mail dana@corp.com")).await.unwrap());
-        drop(door.stream(request("remind dana@corp.com again")).await.unwrap());
+        drop(
+            door.stream(request("remind dana@corp.com again"))
+                .await
+                .unwrap(),
+        );
 
         let sent = seen.lock().unwrap();
         let first = sent[0].messages[0].content.replace("mail ", "");
