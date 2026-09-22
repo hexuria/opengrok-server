@@ -290,11 +290,11 @@ fn load_skills(dir: &Path) -> Result<Vec<Skill>, PluginError> {
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
-        let (description, body) = split_frontmatter(&text);
+        let parsed = split_frontmatter(&text);
         skills.push(Skill {
             name,
-            description,
-            body,
+            description: parsed.description,
+            body: parsed.body,
         });
     }
     // Sorted, so a coworker is given its skills in the same order every time — an unstable prompt
@@ -303,19 +303,40 @@ fn load_skills(dir: &Path) -> Result<Vec<Skill>, PluginError> {
     Ok(skills)
 }
 
-/// Pull `description` out of YAML-ish frontmatter and return the body without it.
+/// A `SKILL.md` taken apart: what its frontmatter claimed, and the instructions under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frontmatter {
+    /// The frontmatter `name`. The folder loader ignores it — a skill on disk is named by its
+    /// directory — but an uploaded `SKILL.md` has no directory, so this is the only name it can
+    /// have arrived with.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// The instructions themselves, frontmatter stripped.
+    pub body: String,
+}
+
+/// Pull `name` and `description` out of YAML-ish frontmatter and return the body without it.
 ///
 /// Deliberately not a YAML parser: frontmatter here is a handful of `key: value` lines, and adding
-/// a YAML dependency to read one field would be a large surface for a small gain. Anything it
+/// a YAML dependency to read two fields would be a large surface for a small gain. Anything it
 /// cannot read is left in the body rather than lost.
-fn split_frontmatter(text: &str) -> (Option<String>, String) {
+///
+/// THE ONE PARSER. The server's `/skills` upload path reads the same bytes this does, and a second
+/// implementation there would mean an uploaded skill and an installed one disagreeing about where
+/// a body starts — the disagreement would show up as frontmatter leaking into a system message.
+pub fn split_frontmatter(text: &str) -> Frontmatter {
     let trimmed = text.trim_start_matches('\u{feff}');
     if !trimmed.starts_with("---") {
-        return (None, trimmed.to_string());
+        return Frontmatter {
+            name: None,
+            description: None,
+            body: trimmed.to_string(),
+        };
     }
     let mut lines = trimmed.lines();
     lines.next(); // the opening ---
 
+    let mut name = None;
     let mut description = None;
     let mut consumed = trimmed.len();
     let mut seen = trimmed.lines().next().map_or(0, |l| l.len() + 1);
@@ -326,14 +347,11 @@ fn split_frontmatter(text: &str) -> (Option<String>, String) {
             consumed = seen + line_len;
             break;
         }
+        if let Some(value) = line.strip_prefix("name:") {
+            name = Some(unquote(value));
+        }
         if let Some(value) = line.strip_prefix("description:") {
-            description = Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+            description = Some(unquote(value));
         }
         seen += line_len;
     }
@@ -343,7 +361,19 @@ fn split_frontmatter(text: &str) -> (Option<String>, String) {
         .unwrap_or("")
         .trim_start()
         .to_string();
-    (description.filter(|d| !d.is_empty()), body)
+    Frontmatter {
+        name: name.filter(|value| !value.is_empty()),
+        description: description.filter(|value| !value.is_empty()),
+        body,
+    }
+}
+
+fn unquote(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -464,6 +494,21 @@ mod tests {
             !skill.body.contains("---"),
             "frontmatter should be stripped"
         );
+    }
+
+    /// The upload path has no folder to take a name from, so the frontmatter `name` has to
+    /// survive the parse even though the folder loader above does not use it.
+    #[test]
+    fn frontmatter_carries_the_name_for_a_skill_that_arrived_without_a_folder() {
+        let parsed = split_frontmatter(
+            "---\nname: writing-replies\ndescription: \"How to draft a good reply\"\n---\nBe brief.\n",
+        );
+        assert_eq!(parsed.name.as_deref(), Some("writing-replies"));
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("How to draft a good reply")
+        );
+        assert_eq!(parsed.body.trim(), "Be brief.");
     }
 
     /// A skill without frontmatter is still a skill; its body must survive whole.
