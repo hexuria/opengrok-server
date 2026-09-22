@@ -64,9 +64,22 @@ pub const MAX_COMPUTER_ROUNDS: usize = 24;
 /// that is not happening, and the honest thing is to say so rather than to keep looking.
 pub const SAME_SCREEN_LIMIT: usize = 4;
 
+/// Assistant text a tool-capable round may emit before a `ToolCallStart`.
+///
+/// Seen live (NativeChat Shot A): a model offered tools wrote a plan of the work as
+/// `TEXT_MESSAGE` and never started a call. Words without a call are a reply; a flood of
+/// them is the model stalling. The bound is a couple of short paragraphs — enough for
+/// "I'll look that up" plus a real answer, not enough for a repeated plan of unused tools.
+/// The same lesson is a sentence in `computer_system_prompt`; this is the stop that
+/// prompt text alone did not provide.
+pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
+
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
 /// bar_chart again in the same request.
+///
+/// THESE ARE THE `chat_ui::attach` LOCALS (`bar_chart`, `form`, and the name
+/// spellings a model actually emits). They are paint widgets, not work tools.
 pub fn is_client_render_tool(name: &str) -> bool {
     matches!(
         name.trim()
@@ -81,6 +94,18 @@ pub fn is_client_render_tool(name: &str) -> bool {
             | "show-form"
             | "render-form"
     )
+}
+
+/// Shot A is unused *work* tools (shell, `user_machine_shell`, computer). A
+/// schema list that is only `bar_chart` / `form` is still chat: production
+/// AG-UI always runs `chat_ui::attach`, which adds those two even when there
+/// is no computer.
+fn work_tools_offered(schemas: &[serde_json::Value]) -> bool {
+    schemas.iter().any(|schema| {
+        schema["function"]["name"]
+            .as_str()
+            .is_some_and(|name| !is_client_render_tool(name))
+    })
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -178,7 +203,10 @@ pub async fn run_conversation(
     at_ms: i64,
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
-    converse(door, tools, journal, request, projection, run_id, None).await
+    converse(
+        door, tools, journal, request, projection, run_id, None, false,
+    )
+    .await
 }
 
 /// `run_conversation`, with a sink that sees each event as it is produced.
@@ -205,6 +233,7 @@ pub async fn run_conversation_streaming(
         projection,
         run_id,
         Some(sink),
+        false,
     )
     .await
 }
@@ -348,6 +377,9 @@ pub async fn resume_conversation(
         return all;
     }
 
+    // The first half already recorded ToolCallStart (that is why this run is
+    // resuming). converse_raw would otherwise start with started_a_tool = false
+    // and treat a long post-HITL summary as a plan-only flood.
     let mut rest = converse(
         door,
         Some(tools),
@@ -356,6 +388,7 @@ pub async fn resume_conversation(
         projection,
         &run_id,
         None,
+        true,
     )
     .await;
     all.append(&mut rest);
@@ -432,12 +465,24 @@ async fn converse(
     projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
+    already_started_a_tool: bool,
 ) -> Vec<Event> {
     scrub_streamed_tool_args(
-        converse_raw(door, tools, journal, request, projection, run_id, sink).await,
+        converse_raw(
+            door,
+            tools,
+            journal,
+            request,
+            projection,
+            run_id,
+            sink,
+            already_started_a_tool,
+        )
+        .await,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn converse_raw(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -446,6 +491,7 @@ async fn converse_raw(
     mut projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
+    already_started_a_tool: bool,
 ) -> Vec<Event> {
     let mut all = Vec::new();
 
@@ -455,6 +501,15 @@ async fn converse_raw(
     if let Some(runner) = tools {
         request.tools = runner.tool_schemas();
     }
+    // Not `!request.tools.is_empty()`. Production AG-UI always runs
+    // `chat_ui::attach` (opengrok-server `agui/chat_ui.rs`, offered from
+    // `agui/routes.rs` on every turn, including coworkers with no computer),
+    // which adds `bar_chart` and `form`. Those are paint widgets NativeChat
+    // draws from TOOL_CALL frames. A long prose answer that never calls them
+    // is normal chat, not Shot A — Shot A is unused shell / user_machine_shell
+    // / computer. Count the plan-only flood only when a non-paint tool is on
+    // the schema list.
+    let tools_offered = work_tools_offered(&request.tools);
 
     let mut opening = projection.start();
     if let Err(error) = journal.record(run_id, &opening).await {
@@ -474,6 +529,11 @@ async fn converse_raw(
     // for exactly the same thing again is not going to get a different answer, and
     // burning the remaining rounds on it only delays telling the person.
     let mut last_refused: Option<Vec<(String, serde_json::Value)>> = None;
+    // Across the whole run, not the round: a tool call then a long summary is work,
+    // not a plan. Resetting this each round — or on resume, which is a new
+    // converse_raw — would fail that summary as plan-only text.
+    let mut started_a_tool = already_started_a_tool;
+    let mut plan_only_chars = 0usize;
     // Rounds that ended in words or box tools, and rounds spent on the screen: two budgets.
     let mut spoken_rounds = 0usize;
     let mut computer_rounds = 0usize;
@@ -534,6 +594,13 @@ async fn converse_raw(
                         any_delta = true;
                         if let ModelDelta::Text(text) = &delta {
                             said.push_str(text);
+                            if tools_offered && !started_a_tool {
+                                plan_only_chars =
+                                    plan_only_chars.saturating_add(text.chars().count());
+                            }
+                        }
+                        if matches!(delta, ModelDelta::ToolCallStart { .. }) {
+                            started_a_tool = true;
                         }
                         let produced = projection.push(delta);
                         // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
@@ -544,6 +611,27 @@ async fn converse_raw(
                         // own tool args reached NativeChat verbatim.
                         emit_live(sink, &produced).await;
                         round_events.extend(produced);
+                        if tools_offered
+                            && !started_a_tool
+                            && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
+                        {
+                            let mut ending = projection.fail(format!(
+                                "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
+                            ));
+                            pin_last_agent_shot(
+                                sink,
+                                &mut last_agent_shot,
+                                opengrok_tools::ImageVisibility::Failure,
+                                &mut round_events,
+                            )
+                            .await;
+                            let _ = record_round(journal, run_id, &round_events).await;
+                            let _ = record_round(journal, run_id, &ending).await;
+                            emit_live(sink, &ending).await;
+                            all.append(&mut round_events);
+                            all.append(&mut ending);
+                            return all;
+                        }
                     }
                     Err(error) => {
                         pin_last_agent_shot(
@@ -1857,6 +1945,263 @@ mod tests {
             message.contains("user_machine_shell") && message.contains("twice"),
             "{message}"
         );
+    }
+
+    /// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
+    /// as text, and never started a call. Crossing the character bound ends the run with a
+    /// reason, instead of streaming the rest of the flood — including a tool call that
+    /// arrives only after it.
+    #[tokio::test]
+    async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
+        struct PlanDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for PlanDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                let script = vec![
+                    ModelDelta::Text(flood),
+                    ModelDelta::Text(" and then I will call the tool.".to_string()),
+                    ModelDelta::ToolCallStart {
+                        id: "late".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "late".to_string(),
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let journal = MemoryJournal::new();
+        let runner = tool_runner();
+        assert!(
+            !runner.tool_schemas().is_empty(),
+            "this test is the tools-offered case"
+        );
+        let events = run_conversation(
+            &PlanDoor,
+            Some(&runner),
+            &journal,
+            request("list the forms"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallStart),
+            "must stop before a tool call that arrives only after the flood: {events:?}"
+        );
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunError);
+        let message = last
+            .extra
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default();
+        assert!(message.contains("plan-only text"), "{message}");
+    }
+
+    /// The bound is "tools offered and unused", not "the model wrote a lot". A coworker
+    /// with an empty toolbox may still answer at length.
+    #[tokio::test]
+    async fn plan_only_text_does_not_stop_when_no_tools_are_offered() {
+        struct PlanDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for PlanDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                Ok(Box::pin(futures::stream::iter(
+                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
+                )))
+            }
+        }
+
+        let events = run_conversation(
+            &PlanDoor,
+            None,
+            &MemoryJournal::new(),
+            request("explain at length"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    /// Production AG-UI always attaches `bar_chart` and `form` (`chat_ui::attach`),
+    /// even when there is no computer. Those paint widgets must not trip the
+    /// plan-only stop: a long chat answer is still a chat answer.
+    #[tokio::test]
+    async fn plan_only_text_does_not_stop_when_only_paint_tools_are_offered() {
+        struct PlanDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for PlanDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                Ok(Box::pin(futures::stream::iter(
+                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
+                )))
+            }
+        }
+
+        let painted: LocalTool =
+            Arc::new(|call| opengrok_tools::ToolResult::ok(&call.id, "painted"));
+        let runner = ToolRunner::local_only()
+            .with_local(
+                serde_json::json!({
+                    "type": "function",
+                    "function": { "name": "bar_chart" }
+                }),
+                painted.clone(),
+            )
+            .with_local(
+                serde_json::json!({
+                    "type": "function",
+                    "function": { "name": "form" }
+                }),
+                painted,
+            );
+        assert!(
+            !work_tools_offered(&runner.tool_schemas()),
+            "bar_chart/form are paint widgets, not work tools: {:?}",
+            runner.tool_schemas()
+        );
+
+        let events = run_conversation(
+            &PlanDoor,
+            Some(&runner),
+            &MemoryJournal::new(),
+            request("explain at length"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+    }
+
+    /// A tool call, then a long answer, is work. The character bound must not fire on
+    /// the summary just because this round had no second ToolCallStart.
+    #[tokio::test]
+    async fn a_tool_call_then_text_is_not_plan_only() {
+        struct ToolThenTextDoor(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for ToolThenTextDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                let script = if round == 1 {
+                    vec![
+                        ModelDelta::ToolCallStart {
+                            id: "c1".to_string(),
+                            name: "shell".to_string(),
+                        },
+                        ModelDelta::ToolCallArgs {
+                            id: "c1".to_string(),
+                            delta: r#"{"command":"ls"}"#.to_string(),
+                        },
+                        ModelDelta::ToolCallEnd {
+                            id: "c1".to_string(),
+                        },
+                    ]
+                } else {
+                    vec![ModelDelta::Text("x".repeat(PLAN_ONLY_TEXT_LIMIT + 1))]
+                };
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let events = run_conversation(
+            &ToolThenTextDoor(Mutex::new(0)),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("list files"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallStart),
+            "{events:?}"
+        );
+    }
+
+    /// Resume starts a fresh converse_raw. The first half already ran a tool;
+    /// a long summary after HITL is work, not a plan-only flood.
+    #[tokio::test]
+    async fn a_resumed_run_does_not_treat_a_long_summary_as_plan_only() {
+        struct SummaryDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for SummaryDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                Ok(Box::pin(futures::stream::iter(
+                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
+                )))
+            }
+        }
+
+        let call = opengrok_tools::ToolCall {
+            id: "c1".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+        let events = resume_conversation(
+            &SummaryDoor,
+            &tool_runner(),
+            &MemoryJournal::new(),
+            request("list files"),
+            RunContext::new("t1", "r1", 1),
+            Resumption::approved(call, 1),
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+        assert!(
+            !events.iter().any(|event| {
+                event.event_type == EventType::RunError
+                    && event
+                        .extra
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .is_some_and(|m| m.contains("plan-only text"))
+            }),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_reply_with_tools_offered_still_finishes() {
+        let events = run_conversation(
+            &MockDoor::echoing(),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     }
 
     /// A run that cannot be recorded must not proceed: it would produce work a reconnect can never
