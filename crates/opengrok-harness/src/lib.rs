@@ -174,6 +174,82 @@ fn looks_like_listing_or_show(command: &str) -> bool {
         || command.contains(" invoke ")
 }
 
+/// `find ~` and `find /Users/<name>` exited 0 after about 90s on the demo machine.
+/// That success cleared the work-fail streak and the turn kept going. A deeper
+/// path is one directory and still runs.
+fn is_broad_filesystem_walk(command: &str) -> bool {
+    command
+        .replace("&&", ";")
+        .replace("||", ";")
+        .split(['\n', ';', '|'])
+        .any(segment_is_broad_find)
+}
+
+fn segment_is_broad_find(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let mut index = 0;
+    while index < tokens.len()
+        && (tokens[index].contains('=')
+            || tokens[index] == "export"
+            || tokens[index] == "command"
+            || tokens[index] == "sudo")
+    {
+        index += 1;
+    }
+    if tokens.get(index) != Some(&"find") {
+        return false;
+    }
+    index += 1;
+    while index < tokens.len() {
+        let token = tokens[index].trim_matches(|ch| ch == '"' || ch == '\'');
+        if token.starts_with('-') || token == "(" || token == "!" {
+            break;
+        }
+        if is_broad_find_root(token) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_broad_find_root(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    if path == "~"
+        || path.starts_with("~/")
+        || path == "$HOME"
+        || path.starts_with("$HOME/")
+        || path == "${HOME}"
+        || path.starts_with("${HOME}/")
+    {
+        return true;
+    }
+    if path == "/Users" || path == "/Volumes" {
+        return true;
+    }
+    if let Some(rest) = path.strip_prefix("/Users/") {
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    if let Some(rest) = path.strip_prefix("/Volumes/") {
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    false
+}
+
+fn is_broad_walk_call(call: &opengrok_tools::ToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "shell" | opengrok_tools::USER_MACHINE_SHELL
+    ) && is_broad_filesystem_walk(shell_command(&call.arguments))
+}
+
+fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolResult {
+    opengrok_tools::ToolResult::refused(
+        &call.id,
+        "do not search the disk for AGENT.md or this skill. The invoke names already in the skill are the catalog.",
+    )
+}
+
 /// First work tool is a read-only shell/invoke for listing or showing — the
 /// NativeChat BIR `profile.list` / `dues.list` / `gpui-agent hello` case.
 fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
@@ -986,6 +1062,47 @@ async fn converse_raw(
                         .collect();
                     let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
                     ((results, times), 0)
+                } else if calls.iter().any(is_broad_walk_call) {
+                    let runnable: Vec<_> = calls
+                        .iter()
+                        .filter(|call| !is_broad_walk_call(call))
+                        .cloned()
+                        .collect();
+                    let (ran, ran_times, review_ms) = if runnable.is_empty() {
+                        (Vec::new(), Vec::new(), 0)
+                    } else {
+                        let ((ran, times), ms) =
+                            review::time_auto_review(runner.run_all_timed(&runnable)).await;
+                        (ran, times, ms)
+                    };
+                    let mut ran = ran.into_iter();
+                    let mut ran_times = ran_times.into_iter();
+                    let results = calls
+                        .iter()
+                        .map(|call| {
+                            if is_broad_walk_call(call) {
+                                refused_broad_walk(call)
+                            } else {
+                                ran.next().unwrap_or_else(|| {
+                                    opengrok_tools::ToolResult::refused(
+                                        &call.id,
+                                        "the tool did not run",
+                                    )
+                                })
+                            }
+                        })
+                        .collect();
+                    let times = calls
+                        .iter()
+                        .map(|call| {
+                            if is_broad_walk_call(call) {
+                                (call.name.clone(), 0)
+                            } else {
+                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
+                            }
+                        })
+                        .collect();
+                    ((results, times), review_ms)
                 } else {
                     review::time_auto_review(runner.run_all_timed(&calls)).await
                 };
@@ -1004,13 +1121,17 @@ async fn converse_raw(
                     remember_agent_shot(&produced, &mut last_agent_shot);
                     round_events.extend(produced);
                     let mut message = tool_result_message(result);
-                    if result.ok && is_readonly_listing_shell(call) {
+                    let shell_failed = intent::counts_as_work_failure(result.ok, &result.content);
+                    if result.ok && !shell_failed && is_readonly_listing_shell(call) {
                         had_successful_listing = true;
                         message.content.push_str("\n\n");
                         message.content.push_str(intent::READONLY_SHELL_NUDGE);
-                    } else if !result.ok && !result.awaiting_approval {
+                    } else if shell_failed && !result.awaiting_approval {
                         last_failure = Some(intent::short_failure_fact(&result.content));
-                        if work_fail_streak == 0 {
+                        if work_fail_streak == 0
+                            && !intent::is_unrecoverable_command_miss(&result.content)
+                            && !is_broad_walk_call(call)
+                        {
                             message.content.push_str("\n\n");
                             message.content.push_str(intent::FAILED_TOOL_NUDGE);
                         }
@@ -1018,14 +1139,26 @@ async fn converse_raw(
                     request.messages.push(message);
                 }
                 let work_failed = results.iter().zip(calls.iter()).any(|(result, call)| {
-                    !is_client_render_tool(&call.name) && !result.ok && !result.awaiting_approval
+                    !is_client_render_tool(&call.name)
+                        && !result.awaiting_approval
+                        && intent::counts_as_work_failure(result.ok, &result.content)
                 });
-                let work_ok = results
-                    .iter()
-                    .zip(calls.iter())
-                    .any(|(result, call)| !is_client_render_tool(&call.name) && result.ok);
+                let work_ok = results.iter().zip(calls.iter()).any(|(result, call)| {
+                    !is_client_render_tool(&call.name)
+                        && result.ok
+                        && !intent::counts_as_work_failure(true, &result.content)
+                });
                 if work_failed {
-                    work_fail_streak = work_fail_streak.saturating_add(1);
+                    // A missing binary, or a find of the home directory, is not fixed by
+                    // rewording the same command. Stop this round.
+                    if results.iter().zip(calls.iter()).any(|(result, call)| {
+                        intent::is_unrecoverable_command_miss(&result.content)
+                            || is_broad_walk_call(call)
+                    }) {
+                        work_fail_streak = intent::MAX_FAILED_WORK_ROUNDS;
+                    } else {
+                        work_fail_streak = work_fail_streak.saturating_add(1);
+                    }
                 } else if work_ok {
                     work_fail_streak = 0;
                     last_failure = None;
@@ -3092,6 +3225,122 @@ mod tests {
         assert_eq!(timing["tool_rounds"], 2);
     }
 
+    /// Live NativeChat Hog Rider: `user_machine_shell` returns ok=true with
+    /// ExecOutcome::render `exit 127`. One model round, one short fact, no 8-call burn.
+    #[tokio::test]
+    async fn missing_binary_on_user_machine_ends_in_one_round() {
+        struct Door(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for Door {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                assert!(
+                    round <= 1,
+                    "a missing binary must not spend a silent retry: round {round}"
+                );
+                Ok(Box::pin(futures::stream::iter(
+                    ums_deltas("c1", "gpui-agent hello", "I'll pull the BIR host")
+                        .into_iter()
+                        .map(Ok),
+                )))
+            }
+        }
+
+        let miss: LocalTool = Arc::new(|call| {
+            opengrok_tools::ToolResult::ok(
+                &call.id,
+                "exit 127\n--- stderr ---\nzsh: command not found: gpui-agent",
+            )
+        });
+
+        let events = run_conversation(
+            &Door(Mutex::new(0)),
+            Some(&ums_runner(miss)),
+            &MemoryJournal::new(),
+            request("list profiles"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        let text = assistant_text(&events);
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("i'll pull"), "{text:?}");
+        assert!(
+            text.contains("command not found"),
+            "one short failure fact from the tool: {text:?}"
+        );
+        assert!(
+            text.chars().count() < 240,
+            "must not be a multi-paragraph diary: {text:?}"
+        );
+        let timing = run_timing_value(&events).expect("run-timing");
+        assert_eq!(timing["tool_rounds"], 1);
+        assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// The 4m 17s Hog Rider turn ran `find ~` and `find /Users/uriah` to locate AGENT.md.
+    /// Those commands must not reach the Mac, and the turn must end on that round.
+    #[tokio::test]
+    async fn a_home_directory_find_is_refused_before_it_runs() {
+        struct Door(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for Door {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                assert!(
+                    round <= 1,
+                    "a home-directory find must not get a retry: round {round}"
+                );
+                Ok(Box::pin(futures::stream::iter(
+                    ums_deltas("c1", "find ~ -name AGENT.md", "I'll look up AGENT.md")
+                        .into_iter()
+                        .map(Ok),
+                )))
+            }
+        }
+
+        let ran = Arc::new(Mutex::new(0usize));
+        let ran_tool = ran.clone();
+        let tool: LocalTool = Arc::new(move |call| {
+            *ran_tool.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(&call.id, "should not run")
+        });
+
+        let events = run_conversation(
+            &Door(Mutex::new(0)),
+            Some(&ums_runner(tool)),
+            &MemoryJournal::new(),
+            request("open the profile"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        assert_eq!(*ran.lock().unwrap(), 0, "find must not be dispatched");
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        let text = assistant_text(&events);
+        assert!(
+            text.contains("do not search the disk"),
+            "one short refusal: {text:?}"
+        );
+        assert!(!text.to_ascii_lowercase().contains("i'll look"), "{text:?}");
+        let timing = run_timing_value(&events).expect("run-timing");
+        assert_eq!(timing["tool_rounds"], 1);
+        assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(1));
+    }
+
     #[test]
     fn listing_and_show_commands_are_readonly_shell_fast_path() {
         let call = |name: &str, command: &str| opengrok_tools::ToolCall {
@@ -3121,6 +3370,29 @@ mod tests {
             "gpui-agent invoke profile.save"
         )));
         assert!(!is_readonly_listing_shell(&call("computer", "ls")));
+    }
+
+    #[test]
+    fn a_find_of_the_home_directory_is_a_broad_walk_and_a_deeper_path_is_not() {
+        assert!(is_broad_filesystem_walk("find ~ -name AGENT.md"));
+        assert!(is_broad_filesystem_walk(
+            "find /Users/uriah -name 'AGENT.md'"
+        ));
+        assert!(is_broad_filesystem_walk(
+            "find /Volumes/goldcoders -name AGENT.md"
+        ));
+        assert!(is_broad_filesystem_walk(
+            "export GPUI_AGENT_ADDR=127.0.0.1:17423\nfind $HOME -name AGENT.md"
+        ));
+        assert!(!is_broad_filesystem_walk(
+            "GPUI_AGENT_ADDR=127.0.0.1:17423 gpui-agent invoke profile.list"
+        ));
+        assert!(!is_broad_filesystem_walk(
+            "find /Volumes/goldcoders/reverse-engineer-ebir-forms/bir/crates/bir-desktop/docs -name AGENT.md"
+        ));
+        assert!(!is_broad_filesystem_walk(
+            "find /Users/uriah/code/bir -name AGENT.md"
+        ));
     }
 
     fn ums_deltas(id: &str, command: &str, text: &str) -> Vec<ModelDelta> {

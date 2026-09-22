@@ -19,7 +19,9 @@ Run `gpui-agent` and BIR binaries on the USER machine via `user_machine_shell` (
 
 ## Invokes
 
-Prefer host invokes from AGENT.md: `profile.search` / `profile.list` / `profile.set`, `profile.forms_set.get`, `dues.list`, `nav.go`, `form.*`, `filing.validate`. Never `profile.ensure`. `profile.create` opens the editor and writes nothing. Say a profile exists only after `profile.save` has returned ok. Save or queue only after Uriah confirms. If a search comes back empty, that is the answer — do not search again with the same words. Never skip lock screen / PIN / TOTP.
+These names are the whole catalog. Use them with `gpui-agent invoke`. Do not search the disk. This text is already the instruction.
+
+`profile.search`, `profile.list`, `profile.set`, `profile.forms_set.get`, `dues.list`, `nav.go`, `form.*`, `filing.validate`. Never `profile.ensure`. `profile.create` opens the editor and writes nothing. Say a profile exists only after `profile.save` has returned ok. Save or queue only after Uriah confirms. If a search comes back empty, that is the answer. Do not search again with the same words. Never skip lock screen / PIN / TOTP.
 
 ## Reply style
 

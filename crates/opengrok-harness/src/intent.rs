@@ -208,13 +208,79 @@ pub fn strip_intent_keep_facts(text: &str) -> Option<String> {
     }
 }
 
+/// Parse the exit the tools leave on the result body.
+/// Box `shell` appends `[exit code N]`. `user_machine_shell` renders `exit N` as the
+/// first line (`ExecOutcome::render` in opengrok-server local_exec). A command that
+/// merely prints `exit 1` plus more stdout is not that render.
+pub fn shell_exit_code(content: &str) -> Option<i32> {
+    if let Some(code) = bracketed_exit_code(content) {
+        return Some(code);
+    }
+    leading_render_exit_code(content)
+}
+
+fn bracketed_exit_code(content: &str) -> Option<i32> {
+    let marker = "[exit code ";
+    let start = content.rfind(marker)?;
+    let rest = &content[start + marker.len()..];
+    let end = rest.find(']')?;
+    rest[..end].trim().parse().ok()
+}
+
+fn leading_render_exit_code(content: &str) -> Option<i32> {
+    let first = content.lines().next()?.trim();
+    let rest = first.strip_prefix("exit ")?;
+    let code: i32 = rest.trim().parse().ok()?;
+    let is_render = content.lines().skip(1).any(|line| line.starts_with("--- "))
+        || content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            == 1;
+    is_render.then_some(code)
+}
+
+/// `command not found` / exit 127 will not be fixed by rewording the same binary name.
+pub fn is_unrecoverable_command_miss(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    if lower.contains("command not found") {
+        return true;
+    }
+    if shell_exit_code(content) == Some(127) {
+        return true;
+    }
+    // macOS / zsh variants
+    lower.contains("no such file or directory")
+        && (lower.contains("gpui-agent")
+            || lower.contains("not found")
+            || lower.contains("command"))
+}
+
+/// Work-fail streak must see non-zero shell exits even when ToolResult.ok is true
+/// (tools intentionally return ok so the model can read stdout — see opengrok-tools shell).
+pub fn counts_as_work_failure(ok: bool, content: &str) -> bool {
+    if !ok {
+        return true;
+    }
+    match shell_exit_code(content) {
+        Some(code) if code != 0 => true,
+        _ => is_unrecoverable_command_miss(content),
+    }
+}
+
 /// One sentence, bounded. Tool dumps must not become the diary we just suppressed.
 pub fn short_failure_fact(content: &str) -> String {
     let trimmed = content.trim();
     let line = trimmed
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("[harness]"))
+        .find(|line| !line.is_empty() && !is_shell_wrapper_line(line))
+        .or_else(|| {
+            trimmed
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("[harness]"))
+        })
         .unwrap_or("the tool failed");
     let sentence = line
         .split_once(". ")
@@ -232,6 +298,14 @@ pub fn short_failure_fact(content: &str) -> String {
     } else {
         fact
     }
+}
+
+fn is_shell_wrapper_line(line: &str) -> bool {
+    if line.starts_with("[harness]") || line.starts_with("--- ") {
+        return true;
+    }
+    line.strip_prefix("exit ")
+        .is_some_and(|rest| rest.trim().parse::<i32>().is_ok())
 }
 
 /// Dead-end search body: empty `result` array or explicit `not_found`.
@@ -361,5 +435,49 @@ mod tests {
         assert!(not_found.contains(EMPTY_RESULT_NUDGE), "{not_found}");
         let garbage = annotate_empty_result("not json at all");
         assert_eq!(garbage, "not json at all");
+    }
+
+    #[test]
+    fn non_zero_exit_code_counts_as_work_failure_even_when_ok() {
+        let box_shell = "zsh: command not found: gpui-agent\n[exit code 127]";
+        assert_eq!(shell_exit_code(box_shell), Some(127));
+        assert!(is_unrecoverable_command_miss(box_shell));
+        assert!(counts_as_work_failure(true, box_shell));
+        assert!(!counts_as_work_failure(
+            true,
+            "listed 3 profiles\n[exit code 0]"
+        ));
+        assert!(!counts_as_work_failure(true, "listed 3 profiles"));
+    }
+
+    #[test]
+    fn user_machine_render_exit_127_counts_as_work_failure_even_when_ok() {
+        // ExecOutcome::render in opengrok-server local_exec: first line is `exit N`.
+        let rendered = "exit 127\n--- stderr ---\nzsh: command not found: gpui-agent";
+        assert_eq!(shell_exit_code(rendered), Some(127));
+        assert!(is_unrecoverable_command_miss(rendered));
+        assert!(counts_as_work_failure(true, rendered));
+        assert_eq!(
+            short_failure_fact(rendered),
+            "zsh: command not found: gpui-agent"
+        );
+        // Empty streams still render as a single `exit N` line.
+        assert_eq!(shell_exit_code("exit 127"), Some(127));
+        assert!(is_unrecoverable_command_miss("exit 127"));
+        assert!(counts_as_work_failure(true, "exit 127"));
+        assert!(!counts_as_work_failure(true, "exit 0"));
+        assert!(!counts_as_work_failure(
+            true,
+            "exit 0\n--- stdout ---\nlisted 3 profiles"
+        ));
+        // A successful command that happens to print `exit 1` is not the render format.
+        assert_eq!(
+            shell_exit_code("exit 1\nmore output from the command"),
+            None
+        );
+        assert!(!counts_as_work_failure(
+            true,
+            "exit 1\nmore output from the command"
+        ));
     }
 }
