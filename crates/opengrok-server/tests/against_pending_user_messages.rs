@@ -636,3 +636,185 @@ async fn a_thread_the_account_has_never_run_does_not_grow_a_queue() {
         .await;
     assert_eq!(status, 404, "{body}");
 }
+
+#[tokio::test]
+async fn nullable_options_distinguish_omission_null_and_replacement() {
+    let database_url = database_or_skip!();
+    let stamp = stamp();
+    let h = harness(&database_url, &format!("pending-null-{stamp}@og.local")).await;
+    let (account, access) = h.person(&format!("pending-null-{stamp}@og.local")).await;
+    let thread = format!("th-null-{stamp}");
+    seed_run(&h.store, &account, &thread, now_ms()).await;
+    let path = format!("/ag-ui/threads/{thread}/pending");
+    let options = json!({"replyTo": "m1", "recipeId": "rec_1", "recipeValues": {"q": "old"}, "skillId": "skl_1"});
+    let mut body = options.clone();
+    body["content"] = json!("later");
+    let (status, created) = h
+        .pending(reqwest::Method::POST, Some(&access), &path, Some(&body))
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let id = created["pendingUserMessage"]["id"].as_str().unwrap();
+    let edit_path = format!("{path}/{id}");
+    for body in [json!({}), json!({"content": "edited"})] {
+        let (status, response) = h
+            .pending(
+                reqwest::Method::PATCH,
+                Some(&access),
+                &edit_path,
+                Some(&body),
+            )
+            .await;
+        assert_eq!(status, 200, "{response}");
+        for key in ["replyTo", "recipeId", "recipeValues", "skillId"] {
+            assert_eq!(response["pendingUserMessage"][key], options[key]);
+        }
+    }
+    let nulls = json!({"replyTo": null, "recipeId": null, "recipeValues": null, "skillId": null});
+    let (status, cleared) = h
+        .pending(
+            reqwest::Method::PATCH,
+            Some(&access),
+            &edit_path,
+            Some(&nulls),
+        )
+        .await;
+    assert_eq!(status, 200, "{cleared}");
+    let (status, listed) = h
+        .pending(reqwest::Method::GET, Some(&access), &path, None)
+        .await;
+    assert_eq!(status, 200, "{listed}");
+    for key in ["replyTo", "recipeId", "recipeValues", "skillId"] {
+        assert_eq!(cleared["pendingUserMessage"][key], Value::Null, "{key}");
+        assert_eq!(
+            cleared["event"]["value"]["message"][key],
+            Value::Null,
+            "{key}"
+        );
+        assert_eq!(listed["pendingUserMessages"][0][key], Value::Null, "{key}");
+    }
+    let stored = h
+        .store
+        .pending_user_message(id, &account)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        stored.reply_to.is_none()
+            && stored.recipe_id.is_none()
+            && stored.recipe_values.is_none()
+            && stored.skill_id.is_none()
+    );
+    let replacements = json!({"replyTo": {"messageId": "m2"}, "recipeId": "rec_2", "recipeValues": {"q": "new"}, "skillId": "skl_2"});
+    let (status, replaced) = h
+        .pending(
+            reqwest::Method::PATCH,
+            Some(&access),
+            &edit_path,
+            Some(&replacements),
+        )
+        .await;
+    assert_eq!(status, 200, "{replaced}");
+    for key in ["replyTo", "recipeId", "recipeValues", "skillId"] {
+        assert_eq!(replaced["pendingUserMessage"][key], replacements[key]);
+    }
+    for invalid in [
+        json!({"replyTo": 7}),
+        json!({"recipeId": []}),
+        json!({"skillId": {}}),
+    ] {
+        let (status, response) = h
+            .pending(
+                reqwest::Method::PATCH,
+                Some(&access),
+                &edit_path,
+                Some(&invalid),
+            )
+            .await;
+        assert_eq!(status, 400, "{response}");
+    }
+    for mut body in [json!({}), nulls] {
+        body["content"] = json!("new send");
+        let (status, response) = h
+            .pending(reqwest::Method::POST, Some(&access), &path, Some(&body))
+            .await;
+        assert_eq!(status, 201, "{response}");
+        for key in ["replyTo", "recipeId", "recipeValues", "skillId"] {
+            assert_eq!(response["pendingUserMessage"][key], Value::Null, "{key}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_disjoint_edits_preserve_both_changes() {
+    let database_url = database_or_skip!();
+    let stamp = stamp();
+    let h = harness(&database_url, &format!("pending-race-{stamp}@og.local")).await;
+    let (account, access) = h.person(&format!("pending-race-{stamp}@og.local")).await;
+    let thread = format!("th-race-{stamp}");
+    seed_run(&h.store, &account, &thread, now_ms()).await;
+    let path = format!("/ag-ui/threads/{thread}/pending");
+    let (status, created) = h
+        .pending(
+            reqwest::Method::POST,
+            Some(&access),
+            &path,
+            Some(&json!({"content": "old", "skillId": "skl_old"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let id = created["pendingUserMessage"]["id"].as_str().unwrap();
+    let edit_path = format!("{path}/{id}");
+    // Hold the row until both writers have reached UPDATE. A read/modify/write
+    // implementation has already read the old values at this point.
+    let mut lock = h.store.pool().begin().await.unwrap();
+    let lock_pid: i32 = sqlx::query_scalar("select pg_backend_pid()")
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    sqlx::query("select id from pending_user_message where id = $1 for update")
+        .bind(id)
+        .fetch_one(&mut *lock)
+        .await
+        .unwrap();
+    let content = json!({"content": "new"});
+    let skill = json!({"skillId": "skl_new"});
+    let edits = async {
+        tokio::join!(
+            h.pending(
+                reqwest::Method::PATCH,
+                Some(&access),
+                &edit_path,
+                Some(&content)
+            ),
+            h.pending(
+                reqwest::Method::PATCH,
+                Some(&access),
+                &edit_path,
+                Some(&skill)
+            ),
+        )
+    };
+    let release = async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: i64 = sqlx::query_scalar(
+                    "select count(*) from pg_stat_activity a where $1 = any(pg_blocking_pids(a.pid)) or exists (select 1 from unnest(pg_blocking_pids(a.pid)) b(pid) where $1 = any(pg_blocking_pids(b.pid)))"
+                ).bind(lock_pid).fetch_one(h.store.pool()).await.unwrap();
+                if blocked >= 2 { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("both PATCH requests must reach the locked row");
+        lock.commit().await.unwrap();
+    };
+    let ((first, second), ()) = tokio::join!(edits, release);
+    assert_eq!(first.0, 200, "{}", first.1);
+    assert_eq!(second.0, 200, "{}", second.1);
+    let stored = h
+        .store
+        .pending_user_message(id, &account)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.content, "new");
+    assert_eq!(stored.skill_id.as_deref(), Some("skl_new"));
+}
