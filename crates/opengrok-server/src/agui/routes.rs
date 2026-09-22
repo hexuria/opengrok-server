@@ -160,7 +160,9 @@ fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<
 /// sentence: they named the task and its inputs. Carrying that through means the model does not
 /// have to infer a search term from prose — which is exactly how one turn came to search a word
 /// lifted from the conversation instead of the one that was asked for.
-fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String, String>)> {
+pub(super) fn chosen_recipe_from(
+    input: &RunAgentInput,
+) -> Option<(String, BTreeMap<String, String>)> {
     let recipe = input
         .forwarded_props
         .get("recipe")
@@ -168,9 +170,16 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
         .map(str::trim)
         .filter(|id| !id.is_empty())?
         .to_string();
-    let values = input
-        .forwarded_props
-        .get("recipeValues")
+    Some((
+        recipe,
+        recipe_values_from(input.forwarded_props.get("recipeValues")),
+    ))
+}
+
+/// A recipe's inputs as the text its steps receive. Also how a queued send's saved values are
+/// read, so a saved send and the turn that fires it cannot disagree about what was chosen.
+pub(super) fn recipe_values_from(values: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    values
         .and_then(|value| value.as_object())
         .map(|object| {
             object
@@ -188,8 +197,7 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    Some((recipe, values))
+        .unwrap_or_default()
 }
 
 /// The most a `forwardedProps.skill` may be before it is refused unread.
@@ -200,7 +208,7 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
 const MAX_SKILL_ID_CHARS: usize = 128;
 
 /// What `forwardedProps.skill` said this turn.
-enum ChosenSkill {
+pub(super) enum ChosenSkill {
     /// An id worth looking up: bounded, and of a shape an id we mint could have.
     Id(String),
     /// Something was sent and it cannot be an id — a number, an object, two megabytes of text. NOT
@@ -225,7 +233,7 @@ enum ChosenSkill {
 /// then compose identity and role with no tail at all, losing the skill along with the
 /// whose-computer discipline and the network line. That gap predates skills, and no turn that
 /// quotes one can reach it: a turn that composes a skill also journals the message it composed.
-fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
+pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     let value = input.forwarded_props.get("skill")?;
     // Absent and null are "no skill chosen", and so is blank — a composer that always sends the
     // key sends an empty string when nothing is picked. Everything else is a claim about a skill.
@@ -2400,6 +2408,44 @@ pub async fn run(
     } else if crate::agui::pending::pending_id_from(&input).is_some() {
         return (StatusCode::UNAUTHORIZED, "sign in to send a queued message").into_response();
     }
+
+    // PAST THE CLAIM, A HANG-UP MUST NOT CANCEL THE TURN. The queued send is drained now, and the
+    // setup below waits on a box wake, the store and the door. Run inline, a client that timed
+    // out there dropped this future and left the row drained under a run that never started. The
+    // turn itself was always spawned; now the setup that leads to it is too.
+    let turn = tokio::spawn(start_claimed_turn(
+        gateway,
+        input,
+        account_id,
+        run_coworker,
+        model,
+        coworker_name,
+        coworker_role,
+    ));
+    match turn.await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "a claimed turn's setup did not finish");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this turn could not be started",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Everything a turn does once any queued send it fires has been claimed.
+async fn start_claimed_turn(
+    gateway: crate::host_state::HostState,
+    input: RunAgentInput,
+    account_id: Option<opengrok_core::id::AccountId>,
+    run_coworker: Option<CoworkerId>,
+    model: String,
+    coworker_name: String,
+    coworker_role: Option<String>,
+) -> Response {
+    let state = gateway.agui.clone();
     if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
         crate::agui::resume::interrupt_parked_hitl(
             &gateway,

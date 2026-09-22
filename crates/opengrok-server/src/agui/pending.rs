@@ -546,9 +546,7 @@ fn matches_turn(row: &PendingUserMessageRow, input: &RunAgentInput) -> bool {
     if reply != row.reply_to.as_ref().filter(|value| !value.is_null()) {
         return false;
     }
-    let mut stored = message.clone();
-    stored.content = Some(row.content.clone());
-    let rendered = super::routes::with_reply_context(&row.content, &stored, &input.messages);
+    let rendered = super::routes::with_reply_context(&row.content, message, &input.messages);
     if !message
         .content
         .as_deref()
@@ -556,42 +554,28 @@ fn matches_turn(row: &PendingUserMessageRow, input: &RunAgentInput) -> bool {
     {
         return false;
     }
-    let selection = |value: Option<&Value>| -> Result<Option<String>, ()> {
-        match value {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::String(id)) => Ok((!id.trim().is_empty()).then(|| id.trim().to_string())),
-            _ => Err(()),
-        }
-    };
-    for (key, saved) in [
-        ("recipe", row.recipe_id.as_deref()),
-        ("skill", row.skill_id.as_deref()),
-    ] {
-        let saved = saved
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string);
-        if selection(input.forwarded_props.get(key)) != Ok(saved) {
-            return false;
-        }
+    // THE TURN'S OWN READERS, NOT A COPY OF THEIR RULES. What counts as "no recipe" or "no
+    // skill" is whatever the turn will act on; a second reading here drifted from it once
+    // already, refusing values that ride along with no recipe and a recipe that is not a string.
+    let saved_recipe = saved_id(row.recipe_id.as_deref()).map(|id| {
+        (
+            id.to_string(),
+            super::routes::recipe_values_from(row.recipe_values.as_ref()),
+        )
+    });
+    if super::routes::chosen_recipe_from(input) != saved_recipe {
+        return false;
     }
-    // Recipe inputs use scalar text when bound to a tool, including numeric and boolean values.
-    let values = |value: Option<&Value>| -> std::collections::BTreeMap<String, String> {
-        value
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-            .filter_map(|(key, value)| {
-                let text = match value {
-                    Value::String(text) => text.clone(),
-                    Value::Number(_) | Value::Bool(_) => value.to_string(),
-                    _ => return None,
-                };
-                Some((key.clone(), text))
-            })
-            .collect()
-    };
-    values(input.forwarded_props.get("recipeValues")) == values(row.recipe_values.as_ref())
+    let saved_skill = saved_id(row.skill_id.as_deref());
+    match super::routes::chosen_skill_from(input) {
+        None => saved_skill.is_none(),
+        Some(super::routes::ChosenSkill::Id(id)) => saved_skill == Some(id.as_str()),
+        Some(super::routes::ChosenSkill::Unusable(_)) => false,
+    }
+}
+
+fn saved_id(id: Option<&str>) -> Option<&str> {
+    id.map(str::trim).filter(|id| !id.is_empty())
 }
 
 /// Consume a queued send as this turn, or refuse so two machines cannot both fire it.
@@ -637,13 +621,33 @@ pub async fn consume_for_turn(
     };
     match result {
         Ok(DrainResult::Drained(_) | DrainResult::AlreadyThisRun(_)) => Ok(()),
-        Ok(DrainResult::Stale(row)) => Err((StatusCode::CONFLICT, Json(json!({
-            "v": PAYLOAD_V,
-            "error": "stale-pending-message",
-            "id": row.id,
-            "message": "This queued message changed. Refresh it before sending again.",
-            "event": custom_event(if row.status == "pending" { "edited" } else { "drained" }, thread_id, Some(&row)),
-        }))).into_response()),
+        Ok(DrainResult::Stale(row)) => {
+            // A same-run retry that changed its words is not a refresh away from sending: this
+            // run already spent the row, so there is nothing left to send.
+            let (op, message) = if row.status == "pending" {
+                (
+                    "edited",
+                    "This queued message changed. Refresh it before sending again.",
+                )
+            } else {
+                (
+                    "drained",
+                    "This run already sent this queued message with different words.",
+                )
+            };
+            Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "v": PAYLOAD_V,
+                    "error": "stale-pending-message",
+                    "id": row.id,
+                    "runId": row.drained_run_id,
+                    "message": message,
+                    "event": custom_event(op, thread_id, Some(&row)),
+                })),
+            )
+                .into_response())
+        }
         Ok(DrainResult::Missing) if pending_id_from(input).is_none() => Ok(()),
         Ok(DrainResult::Missing) => Err((
             StatusCode::CONFLICT,

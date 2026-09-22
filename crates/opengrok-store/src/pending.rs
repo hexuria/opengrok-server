@@ -92,7 +92,8 @@ pub enum EnqueueResult {
 
 /// Take a pending row for a turn. `AlreadyThisRun` is a retried `POST /ag-ui` with the same
 /// run id: the first request already consumed it, and starting the turn again is the existing
-/// AG-UI retry, not a second fire of the queue.
+/// AG-UI retry, not a second fire of the queue. `Stale` is a send whose words or options differ
+/// from the row it names, whether still pending or drained by this run; the row is untouched.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrainResult {
     Drained(PendingUserMessageRow),
@@ -293,7 +294,7 @@ impl PgStore {
         at_ms: i64,
         matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
-        self.checked_drain(("id", id), account, thread_id, run_id, at_ms, matches)
+        self.checked_drain(DrainKey::Id(id), account, thread_id, run_id, at_ms, matches)
             .await
     }
 
@@ -308,7 +309,7 @@ impl PgStore {
         matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
         self.checked_drain(
-            ("client_message_id", client_message_id),
+            DrainKey::ClientMessageId(client_message_id),
             account,
             thread_id,
             run_id,
@@ -320,20 +321,23 @@ impl PgStore {
 
     async fn checked_drain(
         &self,
-        key: (&str, &str),
+        key: DrainKey<'_>,
         account: &AccountId,
         thread_id: &str,
         run_id: &str,
         at_ms: i64,
         matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
+        let (column, value) = match key {
+            DrainKey::Id(id) => ("id", id),
+            DrainKey::ClientMessageId(id) => ("client_message_id", id),
+        };
         let mut tx = self.pool().begin().await?;
-        // The column is selected only by the two wrappers above, never by a request.
         let current = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{PENDING_SELECT} where {} = $1 and account_id = $2 and thread_id = $3 for update",
-            key.0
+            "{PENDING_SELECT} where {column} = $1 and account_id = $2 and thread_id = $3
+              for update"
         )))
-        .bind(key.1)
+        .bind(value)
         .bind(account.as_str())
         .bind(thread_id)
         .fetch_optional(&mut *tx)
@@ -347,17 +351,32 @@ impl PgStore {
             }
             Some(row) if !matches(&row) => DrainResult::Stale(row),
             Some(row) if row.status != "pending" => DrainResult::AlreadyThisRun(row),
-            Some(mut row) => {
-                sqlx::query("update pending_user_message set status = 'drained', updated_at_ms = $2, drained_at_ms = $2, drained_run_id = $3 where id = $1")
-                    .bind(&row.id).bind(at_ms).bind(run_id).execute(&mut *tx).await?;
-                row.status = "drained".to_string();
-                row.updated_at_ms = at_ms;
-                row.drained_at_ms = Some(at_ms);
-                row.drained_run_id = Some(run_id.to_string());
-                DrainResult::Drained(row)
+            Some(row) => {
+                let drained = sqlx::query(
+                    "update pending_user_message
+                        set status = 'drained', updated_at_ms = $2, drained_at_ms = $2,
+                            drained_run_id = $3
+                      where id = $1
+                      returning id, thread_id, account_id, content, reply_to, recipe_id,
+                                recipe_values, skill_id, client_message_id, status,
+                                created_at_ms, updated_at_ms, drained_at_ms, drained_run_id",
+                )
+                .bind(&row.id)
+                .bind(at_ms)
+                .bind(run_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                DrainResult::Drained(pending_row(&drained)?)
             }
         };
         tx.commit().await?;
         Ok(outcome)
     }
+}
+
+/// Which natural key names the row to drain. The column name is interpolated into SQL, so it
+/// comes from this closed set and never from a request.
+enum DrainKey<'a> {
+    Id(&'a str),
+    ClientMessageId(&'a str),
 }
