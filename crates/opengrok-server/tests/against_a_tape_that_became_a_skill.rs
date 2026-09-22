@@ -457,6 +457,9 @@ async fn a_tape_becomes_a_skill_whose_first_version_is_taught() {
         json!(false),
         "nobody has read it yet: {text}"
     );
+    // And the review is a FACT, not a switch position: a reviewed skill switched off later is
+    // byte-identical on `enabled`, so the queue a client draws cannot be built from that alone.
+    assert_eq!(made["approvedAtMs"], json!(null), "{text}");
 
     // The version itself says a model wrote it. The row's `source` is what a listing shows; the
     // version's `kind` is what a history has to be able to say when a person writes v2 by hand.
@@ -559,6 +562,22 @@ async fn the_person_approves_before_a_turn_can_have_it() {
         .await;
     assert_eq!(status, 200, "{text}");
     assert_eq!(updated["enabled"], json!(true), "{text}");
+    let approved = updated["approvedAtMs"].as_i64().expect("a stamp");
+    assert!(approved > 0, "approving stamps when: {text}");
+
+    // Switching it off and on again is not a second review, and there is no way to unsay one.
+    for enabled in [false, true] {
+        let (status, again, text) = h
+            .call(
+                &ada,
+                "PUT",
+                &format!("/skills/{id}"),
+                Some(json!({ "enabled": enabled })),
+            )
+            .await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(again["approvedAtMs"], json!(approved), "{text}");
+    }
 
     h.turn(&ada, &bot, &id).await;
     let after = h.door.turn_systems();

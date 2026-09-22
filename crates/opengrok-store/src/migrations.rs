@@ -1000,6 +1000,35 @@ create table if not exists skill (
 );
 create index if not exists skill_owner_idx on skill (owner_id);
 create index if not exists skill_org_idx on skill (org_id);
+-- WHEN SOMEBODY SAID THIS BODY WAS FIT TO USE. Null means nobody has, which is where a skill a
+-- MODEL wrote from a recording starts (`server/skills.rs`, `from_tape`). A skill a person wrote
+-- or uploaded is stamped as it is inserted, because writing it IS reading it.
+--
+-- A FACT, NOT THE ENFORCEMENT POINT. `enabled` decides what a turn may use and stays the only
+-- thing that decides it. This column exists because that switch cannot tell "nobody has read
+-- this" from "read, approved, and switched off again a month later" — the two rows are
+-- byte-identical — so a client drawing a review queue had to guess from `source = 'taught'` plus
+-- a switch position, a heuristic the server never promised and could quietly break.
+--
+-- THE CATALOGUE IS CHECKED FIRST, for the reason spelled out on `skill_file_version_fk` below and
+-- learned again here: `alter table` takes an ACCESS EXCLUSIVE lock on the table BEFORE it decides
+-- there is nothing to do, so a bare `add column if not exists` in a file replayed on every boot
+-- fights every write in flight. Written that way it deadlocked against a concurrent
+-- `add_skill_version` the first time the gate ran it. Guarded, the steady state reads one
+-- catalogue row and takes no lock at all.
+--
+-- The backfill sits inside the same guard and therefore runs exactly once: every skill that
+-- existed before this column was written or uploaded by its owner, and writing one is reading it.
+-- It deliberately does not touch `taught` rows — those are the ones whose review is the point.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_name = 'skill' and column_name = 'approved_at_ms'
+    ) then
+        alter table skill add column approved_at_ms bigint;
+        update skill set approved_at_ms = created_at_ms where source <> 'taught';
+    end if;
+end $do$;
 -- ONE `/name` MEANS ONE SKILL. Two live skills called `review` under one account make the
 -- invocation ambiguous, and the ambiguity would be resolved by whichever row sorted first.
 -- Partial, so a deleted row never blocks the name it used to hold.

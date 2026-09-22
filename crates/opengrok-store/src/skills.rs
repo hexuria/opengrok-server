@@ -27,6 +27,10 @@ pub struct SkillRow {
     /// `authored` | `uploaded` | `taught`. Written by the server from how the row was made.
     pub source: String,
     pub enabled: bool,
+    /// When somebody said this body was fit to use, or `None` when nobody has. See the column's
+    /// comment in `migrations`: a fact about review, never the enforcement point — that is
+    /// `enabled`, and only `enabled`.
+    pub approved_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub deleted_at_ms: Option<i64>,
@@ -56,7 +60,7 @@ pub struct SkillFileRow {
 }
 
 const SKILL_SELECT: &str = "select s.id, s.owner_id, s.org_id, s.name, s.description, s.source,
-        s.enabled, s.created_at_ms, s.updated_at_ms, s.deleted_at_ms,
+        s.enabled, s.approved_at_ms, s.created_at_ms, s.updated_at_ms, s.deleted_at_ms,
         (select count(*) from skill_version v where v.skill_id = s.id) as version_count,
         (select max(version) from skill_version v where v.skill_id = s.id) as latest_version
    from skill s";
@@ -70,6 +74,7 @@ fn skill_row(row: &sqlx::postgres::PgRow) -> StoreResult<SkillRow> {
         description: row.try_get("description")?,
         source: row.try_get("source")?,
         enabled: row.try_get("enabled")?,
+        approved_at_ms: row.try_get("approved_at_ms")?,
         created_at_ms: row.try_get("created_at_ms")?,
         updated_at_ms: row.try_get("updated_at_ms")?,
         deleted_at_ms: row.try_get("deleted_at_ms")?,
@@ -187,9 +192,12 @@ impl PgStore {
     ) -> StoreResult<()> {
         let mut tx = self.pool().begin().await?;
         sqlx::query(
+            // A skill born switched ON is a skill its owner wrote or uploaded, and writing it is
+            // reading it: it is approved at creation. One born switched OFF is the model-written
+            // one, and nobody has read it yet — `approved_at_ms` stays null until they do.
             "insert into skill (id, owner_id, org_id, name, description, source, enabled,
-                                created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
+                                approved_at_ms, created_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, case when $7 then $8 else null end, $8, $8)",
         )
         .bind(new.id)
         .bind(new.owner_id)
@@ -210,6 +218,12 @@ impl PgStore {
 
     /// Rename, re-describe, and turn a skill on or off. There is no owner argument on purpose:
     /// an update may never move a row to another account.
+    ///
+    /// SWITCHING ONE ON IS WHAT APPROVAL IS. `approved_at_ms` is stamped the first time this
+    /// makes a skill live and never moved afterwards — switching a reviewed skill off and on
+    /// again is not a second review, and `coalesce` is what says so. There is no way to UNsay it:
+    /// a person who has read a body has read it, and a route that could clear the stamp would be
+    /// a route that makes a read body look unread.
     pub async fn update_skill(
         &self,
         id: &str,
@@ -219,7 +233,8 @@ impl PgStore {
         at_ms: i64,
     ) -> StoreResult<()> {
         sqlx::query(
-            "update skill set name = $2, description = $3, enabled = $4, updated_at_ms = $5
+            "update skill set name = $2, description = $3, enabled = $4, updated_at_ms = $5,
+                    approved_at_ms = coalesce(approved_at_ms, case when $4 then $5 else null end)
               where id = $1",
         )
         .bind(id)

@@ -571,6 +571,13 @@ fn summary(skill: &SkillRow) -> Value {
         // Not in the first draft of the contract, and here because `PUT` accepts it: a client
         // that can set a switch it can never read back cannot draw that switch after a reload.
         "enabled": skill.enabled,
+        // WHETHER ANYBODY HAS READ THIS BODY, as a fact rather than a guess. Null on a skill a
+        // model wrote from a recording until its owner approves it; stamped at creation on one a
+        // person wrote, because writing it is reading it. `enabled` is still the only thing that
+        // decides whether a turn may have it — but "switched off" is also what a reviewed skill
+        // looks like a month later, and without this a client drawing a review queue had to
+        // infer one from `source` plus a switch position and hope the server kept agreeing.
+        "approvedAtMs": skill.approved_at_ms,
     })
 }
 
