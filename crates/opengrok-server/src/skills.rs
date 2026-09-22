@@ -48,20 +48,43 @@ pub const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 /// is a row, a path to validate and a file to write onto a box.
 pub const MAX_BUNDLE_FILES: usize = 32;
 
-/// No `DefaultBodyLimit` layer here, unlike `artifacts.rs`: 256 KiB of files base64-encoded is
-/// about 350 KB, and Axum's default request cap is 2 MB. Raising it would be raising it for
-/// nothing. If `MAX_BUNDLE_BYTES` ever goes past ~1.4 MiB this stops being true and the route
-/// needs the layer, or every large bundle is refused with a message about length instead of the
-/// sentence below about the bundle cap.
+/// The most a description may be.
+///
+/// It is not decoration: a description is what a coworker reads to decide whether a skill is
+/// relevant (`opengrok_plugins::Skill::description`), so it reaches the same system message the
+/// body cap above is an argument about — and unlike the body it is ALSO in every row of every
+/// listing. Uncapped, it was the way around the body cap: 8000 characters of "body" plus as many
+/// again of "description". A line or two, which is what it is for.
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 300;
+
+/// The most a whole request to a writing route may weigh: the bundle once base64 has grown it by
+/// a third, plus room for the body, the paths and the field names around them.
+///
+/// LOWERS Axum's 2 MB default rather than raising it, which is the opposite of what
+/// `artifacts.rs` needs and is deliberate. No valid request comes near it — that arithmetic is
+/// what said a layer was unnecessary, and it was wrong about the layer's other job. The cap below
+/// is counted while decoding, so without a ceiling on the request itself a caller could hand us
+/// an arbitrarily long base64 string and make the server hold it before any of that counting
+/// happens. The layer is the ceiling; `MAX_BUNDLE_BYTES` is the rule.
+const MAX_UPLOAD_BYTES: usize = MAX_BUNDLE_BYTES / 3 * 4 + 64 * 1024;
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
-        .route("/skills", get(list).post(create))
+        .route(
+            "/skills",
+            get(list)
+                .post(create)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/skills/{id}", get(detail).put(update).delete(remove))
-        .route("/skills/{id}/versions", post(add_version))
+        .route(
+            "/skills/{id}/versions",
+            post(add_version).layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -85,9 +108,14 @@ pub(crate) enum Action {
 
 /// The one answer to "may this person do that to this skill".
 ///
-/// A truth table rather than a check per route: the checks drift, the table cannot. Sharing a
-/// skill to one person is not here because nothing writes such a row yet — when it does, it adds
-/// a `Relation` and a line to this table and every route below inherits it.
+/// A truth table rather than a check per route, so a reader can see every answer at once and a
+/// new route cannot invent a seventh rule. It is not a guard against a new `Action` going
+/// unconsidered: the `(Owner, _)` arm answers yes to any action added later, which is the pattern
+/// inherited from `recipes::may` and is why an owner-only action needs no edit here — and why one
+/// that should NOT be owner-only needs a deliberate one.
+///
+/// Sharing a skill to one person is not here because nothing writes such a row yet — when it
+/// does, it adds a `Relation` and a line to this table and every route below inherits it.
 pub(crate) fn may(relation: Relation, action: Action) -> Result<(), &'static str> {
     use Action::*;
     use Relation::*;
@@ -191,70 +219,147 @@ struct FileIn {
     bytes: String,
 }
 
-/// The files of one write, decoded and bounded, or the sentence to refuse with.
-fn decode_files(files: &[FileIn]) -> Result<Vec<SkillFileRow>, String> {
+/// A refusal: the status it deserves and the sentence to say.
+///
+/// ONE TYPE FOR BOTH KINDS OF NO. When this was a bare `String` both call sites mapped every
+/// refusal to 413, so a path traversal came back as "Payload Too Large" — a caller reading the
+/// status alone was told to send less data when the real answer was "never send that path".
+type Refusal = (StatusCode, String);
+
+fn bad_request(why: String) -> Refusal {
+    (StatusCode::BAD_REQUEST, why)
+}
+
+fn too_large(why: String) -> Refusal {
+    (StatusCode::PAYLOAD_TOO_LARGE, why)
+}
+
+/// The files of one write, decoded and bounded, or the refusal.
+fn decode_files(files: &[FileIn]) -> Result<Vec<SkillFileRow>, Refusal> {
     if files.len() > MAX_BUNDLE_FILES {
-        return Err(format!(
+        return Err(too_large(format!(
             "a skill bundle carries at most {MAX_BUNDLE_FILES} files; this one has {}",
             files.len()
-        ));
+        )));
     }
-    let mut out = Vec::with_capacity(files.len());
+    let mut out: Vec<SkillFileRow> = Vec::with_capacity(files.len());
     let mut total = 0usize;
     for file in files {
-        let path = file.path.trim();
-        check_path(path)?;
+        let path = normalise_path(&file.path);
+        check_path(&path)?;
+
+        // THE SIZE IS CHECKED BEFORE THE DECODE, not after. Decoding first meant a caller could
+        // make the server materialise an arbitrarily large `Vec<u8>` and only then be told it was
+        // too big — the refusal was honest and the allocation had already happened. Base64 is four
+        // characters per three bytes, so the encoded length bounds the decoded one from above
+        // before a byte is written.
+        let claimed = file.bytes.len() / 4 * 3;
+        if total.saturating_add(claimed) > MAX_BUNDLE_BYTES {
+            return Err(too_large(format!(
+                "a skill bundle is at most {MAX_BUNDLE_BYTES} bytes; this one claims at least {}",
+                total + claimed
+            )));
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&file.bytes)
-            .map_err(|_| format!("{path} did not decode as base64"))?;
+            .map_err(|_| bad_request(format!("{path:?} did not decode as base64")))?;
         total += bytes.len();
         if total > MAX_BUNDLE_BYTES {
-            return Err(format!(
+            return Err(too_large(format!(
                 "a skill bundle is at most {MAX_BUNDLE_BYTES} bytes; this one reached {total}"
-            ));
+            )));
         }
-        if out.iter().any(|kept: &SkillFileRow| kept.path == path) {
-            return Err(format!("{path} is in the bundle twice"));
+
+        // Case-insensitively, because these become files on a disk: on macOS and Windows
+        // `Notes.md` and `notes.md` are two rows here and ONE file there, and the second write
+        // would silently replace the first.
+        if out.iter().any(|kept| kept.path.eq_ignore_ascii_case(&path)) {
+            return Err(bad_request(format!("{path:?} is in the bundle twice")));
         }
-        out.push(SkillFileRow {
-            path: path.to_string(),
-            bytes,
-        });
+        out.push(SkillFileRow { path, bytes });
     }
     Ok(out)
 }
 
+/// Trim the path and collapse nothing else.
+///
+/// Normalising is only for DECIDING — the refusals below and the duplicate check read this form,
+/// so `SKILL.md/` cannot slip past a check written against `SKILL.md`. What is stored is this
+/// same trimmed string: a path we quietly rewrote would be a file the skill's own body then
+/// failed to find.
+fn normalise_path(path: &str) -> String {
+    path.trim().trim_end_matches('/').to_string()
+}
+
 /// A path is refused, not sanitised. These files are written onto a coworker's computer before a
 /// turn that invoked the skill, so `../../.ssh/authorized_keys` is a traversal wearing a
-/// reference sheet's clothes — and a path we quietly rewrote would be a file the skill's own body
-/// then failed to find.
-fn check_path(path: &str) -> Result<(), String> {
+/// reference sheet's clothes.
+///
+/// THE LIST IS DELIBERATELY SHORT AND CLOSED. It is easier to allow a character later than to
+/// find out which of them mattered once something downstream is shelling out or untarring, and
+/// nothing consumes these files yet — this is the cheapest moment in the feature's life to say
+/// no.
+fn check_path(path: &str) -> Result<(), Refusal> {
     if path.is_empty() {
-        return Err("a bundled file needs a path".to_string());
+        return Err(bad_request("a bundled file needs a path".to_string()));
     }
     if path.len() > 200 {
-        return Err(format!("{path} is too long a path for a bundled file"));
+        return Err(bad_request(format!(
+            "{path:?} is too long a path for a bundled file"
+        )));
     }
-    if path.starts_with('/') || path.contains('\\') || path.contains('\0') {
-        return Err(format!(
-            "{path} must be a relative path inside the bundle, with forward slashes"
-        ));
+    // ASCII only, and no control characters. A newline or a NUL in a path is never a filename
+    // somebody meant; and a non-ASCII one is refused not because U+FF0F FULLWIDTH SOLIDUS is a
+    // separator today — nothing here treats it as one — but because it becomes one the moment
+    // anything downstream normalises Unicode, and that change would be made somewhere else by
+    // somebody who never read this function.
+    if !path.is_ascii() || path.chars().any(|c| c.is_ascii_control()) {
+        return Err(bad_request(format!(
+            "{path:?} must be printable ASCII: a bundle's paths become filenames"
+        )));
     }
-    if path.split('/').any(|part| part == ".." || part == ".") {
-        return Err(format!("{path} climbs out of the bundle"));
+    if path.starts_with('/') || path.starts_with('~') || path.contains('\\') {
+        return Err(bad_request(format!(
+            "{path:?} must be a relative path inside the bundle, with forward slashes"
+        )));
+    }
+    for part in path.split('/') {
+        if part.is_empty() {
+            return Err(bad_request(format!("{path:?} has an empty path component")));
+        }
+        if part == ".." || part == "." {
+            return Err(bad_request(format!("{path:?} climbs out of the bundle")));
+        }
+        // A leading dash is a flag, not a name: `cp -rf x` and `tar -P` are what a copier does
+        // with it the first time one of these bundles is unpacked by a shell.
+        if part.starts_with('-') {
+            return Err(bad_request(format!(
+                "{path:?} has a component starting with `-`, which a command line would read as a flag"
+            )));
+        }
     }
     if path.eq_ignore_ascii_case("SKILL.md") {
-        return Err(
+        return Err(bad_request(
             "the body IS the SKILL.md; a bundled file of that name would be a second one"
                 .to_string(),
-        );
+        ));
     }
     Ok(())
 }
 
+/// WHOSE SKILL A ROW IS, and it is on the summary rather than only the detail because a listing
+/// can hold two rows with the same `name`: per-owner uniqueness stops `/review` being ambiguous
+/// inside one account, and `filter=org` then lists a colleague's `review` beside your own.
+///
+/// THE PRECEDENCE RULE, decided here rather than by whichever branch loads skills into a turn:
+/// A NAME TYPED AFTER A SLASH RESOLVES TO THE CALLER'S OWN SKILL FIRST, and only then to an org
+/// one; two org skills with the same name resolve to neither and the person is asked which.
+/// Stated now because the wire shape ships with this PR and a client that cannot tell two rows
+/// apart has already drawn the wrong menu by the time the rule is written down.
 fn summary(skill: &SkillRow) -> Value {
     json!({
         "id": skill.id,
+        "ownerId": skill.owner_id,
         "name": skill.name,
         "description": skill.description,
         "source": skill.source,
@@ -322,6 +427,10 @@ struct ListQuery {
     filter: Option<String>,
 }
 
+/// What `filter` may say. A typo used to fall through every arm and answer `200 []`, which is
+/// indistinguishable from "you have none" — the reply a person blames their own account for.
+const FILTERS: [&str; 4] = ["mine", "shared", "org", "all"];
+
 /// `GET /skills?filter=mine|shared|org`
 async fn list(
     State(state): State<AgUiState>,
@@ -333,7 +442,22 @@ async fn list(
     };
     let org = org_of(&state, &account).await;
     let store = &state.auth.store;
-    let filter = query.filter.as_deref().unwrap_or("all");
+    let filter = query
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .unwrap_or("all");
+    if !FILTERS.contains(&filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{filter:?} is not a filter; it is one of {}, or leave it off for everything",
+                FILTERS.join(", ")
+            ),
+        )
+            .into_response();
+    }
     let mut out = Vec::new();
     if matches!(filter, "mine" | "all") {
         match store.skills_owned_by(account.as_str()).await {
@@ -393,6 +517,11 @@ async fn create(
         .body
         .as_deref()
         .map(opengrok_plugins::split_frontmatter);
+    if let Some(parsed) = &parsed
+        && !parsed.closed
+    {
+        return unclosed_fence();
+    }
 
     // The person's own words beat the file's: they are the one naming the thing they uploaded.
     let name = request
@@ -424,16 +553,19 @@ async fn create(
                 .and_then(|parsed| parsed.description.clone())
         })
         .unwrap_or_default();
+    if let Err(why) = check_description(&description) {
+        return why.into_response();
+    }
 
     let body = parsed.as_ref().map(|parsed| parsed.body.trim());
     if let Some(body) = body
         && let Err(why) = check_body(body)
     {
-        return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
+        return why.into_response();
     }
     let files = match decode_files(&request.files) {
         Ok(files) => files,
-        Err(why) => return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response(),
+        Err(why) => return why.into_response(),
     };
     if !files.is_empty() && body.is_none_or(str::is_empty) {
         return (
@@ -448,6 +580,8 @@ async fn create(
     };
 
     let store = &state.auth.store;
+    // Asked first so the ordinary collision gets the sentence that names the skill rather than
+    // the index's. The unique index is still what decides — see below.
     match store.skill_named(account.as_str(), &name).await {
         Ok(Some(_)) => return (StatusCode::CONFLICT, taken(&name)).into_response(),
         Ok(None) => {}
@@ -459,6 +593,19 @@ async fn create(
     let org = org_of(&state, &account).await;
     let id = format!("skl_{}", uuid::Uuid::now_v7());
     let at_ms = now_ms();
+    let first = body
+        .filter(|body| !body.is_empty())
+        .map(|body| NewSkillVersion {
+            kind,
+            body,
+            note: "",
+            files: &files,
+            created_by: account.as_str(),
+        });
+    // THE ROW AND ITS FIRST BODY GO IN TOGETHER. As two calls, a failure between them left a
+    // named, bodiless row holding the unique name — and the person's retry was refused with
+    // "you already have a skill called that" for a skill they had never successfully made, with
+    // no route that could delete it because they had never been shown its id.
     if let Err(error) = store
         .create_skill(
             NewSkill {
@@ -469,28 +616,12 @@ async fn create(
                 description: &description,
                 source: kind,
             },
+            first,
             at_ms,
         )
         .await
     {
-        return unavailable(error);
-    }
-    if let Some(body) = body.filter(|body| !body.is_empty())
-        && let Err(error) = store
-            .add_skill_version(
-                &id,
-                NewSkillVersion {
-                    kind,
-                    body,
-                    note: "",
-                    files: &files,
-                    created_by: account.as_str(),
-                },
-                at_ms,
-            )
-            .await
-    {
-        return unavailable(error);
+        return created_or_refused(error, &name);
     }
 
     match store.skill(&id).await {
@@ -501,6 +632,29 @@ async fn create(
         Ok(None) => (StatusCode::SERVICE_UNAVAILABLE, "the skill did not stick").into_response(),
         Err(error) => unavailable(error),
     }
+}
+
+/// A write that lost the name to somebody else says so in the same words the non-racing path
+/// uses.
+///
+/// The unique index is the real arbiter — the check above it is a read, and two requests can both
+/// pass it — and a lost race arrives here as `StoreError::Conflict`. Left alone it surfaced as a
+/// 503 saying "another writer got there first", so the SAME condition answered 409 or 503
+/// depending on timing, and a client could only handle one of them.
+fn created_or_refused(error: opengrok_store::StoreError, name: &str) -> Response {
+    match error {
+        opengrok_store::StoreError::Conflict => (StatusCode::CONFLICT, taken(name)).into_response(),
+        error => unavailable(error),
+    }
+}
+
+fn unclosed_fence() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        "this SKILL.md opens with `---` and never closes it, so where the frontmatter ends and \
+         the instructions begin cannot be told apart. Add the closing `---`.",
+    )
+        .into_response()
 }
 
 fn taken(name: &str) -> String {
@@ -522,14 +676,27 @@ fn check_name(name: &str) -> Result<(), String> {
     }
 }
 
-fn check_body(body: &str) -> Result<(), String> {
+fn check_body(body: &str) -> Result<(), Refusal> {
     let length = body.chars().count();
     if length > MAX_SKILL_BODY_CHARS {
-        return Err(format!(
+        return Err(too_large(format!(
             "the skill body is {length} characters, over the {MAX_SKILL_BODY_CHARS} allowed — a \
              skill shares one system message with the coworker's own role, and a longer one would \
              replace it rather than add to it"
-        ));
+        )));
+    }
+    Ok(())
+}
+
+fn check_description(description: &str) -> Result<(), Refusal> {
+    let length = description.chars().count();
+    if length > MAX_SKILL_DESCRIPTION_CHARS {
+        return Err(too_large(format!(
+            "the skill description is {length} characters, over the \
+             {MAX_SKILL_DESCRIPTION_CHARS} allowed — it rides in every row of every listing, and \
+             it is what a coworker reads to decide whether the skill is relevant, so it is a line \
+             rather than a second body"
+        )));
     }
     Ok(())
 }
@@ -603,6 +770,9 @@ async fn update(
         .map(str::trim)
         .map(str::to_string)
         .unwrap_or_else(|| skill.description.clone());
+    if let Err(why) = check_description(&description) {
+        return why.into_response();
+    }
     let enabled = request.enabled.unwrap_or(skill.enabled);
 
     if let Err(error) = state
@@ -611,7 +781,9 @@ async fn update(
         .update_skill(&skill.id, &name, &description, enabled, now_ms())
         .await
     {
-        return unavailable(error);
+        // A rename that lost the name to a concurrent write gets the same 409 as one that lost
+        // it to a row already there.
+        return created_or_refused(error, &name);
     }
     match state.auth.store.skill(&skill.id).await {
         Ok(Some(row)) => match detail_of(&state.auth.store, &row).await {
@@ -671,17 +843,24 @@ async fn add_version(
         Ok(found) => found,
         Err(response) => return response,
     };
+    // The frontmatter is STRIPPED here and its `name` and `description` are DISCARDED, unlike on
+    // create where both are honoured. Deliberate: renaming is `PUT`'s job, and this route answers
+    // with a `SkillVersion` — a body that quietly renamed the skill would change what `/name`
+    // means and reply without a word about it, so the person would learn it from a menu later.
     let parsed = opengrok_plugins::split_frontmatter(&request.body);
+    if !parsed.closed {
+        return unclosed_fence();
+    }
     let body = parsed.body.trim();
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "a version needs a body").into_response();
     }
     if let Err(why) = check_body(body) {
-        return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response();
+        return why.into_response();
     }
     let files = match decode_files(&request.files) {
         Ok(files) => files,
-        Err(why) => return (StatusCode::PAYLOAD_TOO_LARGE, why).into_response(),
+        Err(why) => return why.into_response(),
     };
     let kind = match kind_or_refusal(request.kind.as_deref(), !files.is_empty()) {
         Ok(kind) => kind,
@@ -734,15 +913,69 @@ mod tests {
         assert_eq!(may(Relation::None, Action::Read), Err("no such skill"));
     }
 
-    /// A path is refused rather than sanitised: these files are written onto a computer.
+    /// A path is refused rather than sanitised: these files are written onto a computer, and
+    /// every one of these got through at some point before somebody read the list again.
     #[test]
-    fn a_bundled_path_cannot_climb_out() {
+    fn a_bundled_path_cannot_climb_out_or_become_a_flag() {
         assert!(check_path("reference/cheatsheet.md").is_ok());
-        assert!(check_path("../../.ssh/authorized_keys").is_err());
-        assert!(check_path("/etc/passwd").is_err());
-        assert!(check_path("windows\\path").is_err());
-        assert!(check_path("SKILL.md").is_err());
-        assert!(check_path("").is_err());
+        assert!(check_path("a-b/c.d_e.md").is_ok());
+
+        for refused in [
+            "../../.ssh/authorized_keys",
+            "/etc/passwd",
+            "~/.ssh/authorized_keys", // a leading ~ is a home directory to every shell
+            "windows\\path",
+            "with\nnewline",
+            "bell\u{7}",
+            "wide\u{ff0f}slash", // not a separator here, and one the moment anything normalises
+            "SKILL.md",
+            "skill.md",
+            "SKILL.md/", // the trailing slash used to walk straight past the check above
+            "a//b",      // two rows, one file
+            "./here",
+            "-rf",
+            "dir/-P/x",
+            "",
+        ] {
+            assert!(
+                check_path(&normalise_path(refused)).is_err(),
+                "{refused:?} should be refused"
+            );
+        }
+    }
+
+    /// Every refusal from a bundle carries the status it deserves: a traversal is not a request
+    /// to send less data.
+    #[test]
+    fn a_bad_path_is_a_bad_request_and_a_big_bundle_is_too_large() {
+        let file = |path: &str, bytes: &str| FileIn {
+            path: path.to_string(),
+            bytes: bytes.to_string(),
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"hello");
+
+        let (status, why) = decode_files(&[file("../escape", &encoded)]).expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}");
+
+        let (status, why) = decode_files(&[file("a.md", "not base64 !!!")]).expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}");
+
+        let twice = [file("Notes.md", &encoded), file("notes.md", &encoded)];
+        let (status, why) = decode_files(&twice).expect_err("refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}");
+        assert!(why.contains("twice"), "a disk folds the case: {why}");
+
+        let many: Vec<FileIn> = (0..=MAX_BUNDLE_FILES)
+            .map(|n| file(&format!("f{n}.md"), &encoded))
+            .collect();
+        let (status, why) = decode_files(&many).expect_err("refused");
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{why}");
+
+        // The size is read off the ENCODED length, so this is refused without ever being decoded.
+        let fat = "A".repeat(MAX_BUNDLE_BYTES / 3 * 4 + 8);
+        let (status, why) = decode_files(&[file("big.bin", &fat)]).expect_err("refused");
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{why}");
+        assert!(why.contains(&MAX_BUNDLE_BYTES.to_string()), "{why}");
     }
 
     /// The refusal has to name the limit AND what arrived, or the person cannot tell how much
@@ -750,7 +983,8 @@ mod tests {
     #[test]
     fn an_over_long_body_is_refused_with_both_numbers() {
         let body = "x".repeat(MAX_SKILL_BODY_CHARS + 7);
-        let why = check_body(&body).expect_err("over the cap");
+        let (status, why) = check_body(&body).expect_err("over the cap");
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(why.contains("8000"), "{why}");
         assert!(
             why.contains(&(MAX_SKILL_BODY_CHARS + 7).to_string()),
@@ -763,6 +997,15 @@ mod tests {
     #[test]
     fn the_body_cap_counts_characters() {
         assert!(check_body(&"é".repeat(MAX_SKILL_BODY_CHARS)).is_ok());
+    }
+
+    /// The description was the way around the body cap: it reaches the same system message.
+    #[test]
+    fn a_description_is_a_line_not_a_second_body() {
+        assert!(check_description(&"x".repeat(MAX_SKILL_DESCRIPTION_CHARS)).is_ok());
+        let (_, why) = check_description(&"x".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1))
+            .expect_err("over the cap");
+        assert!(why.contains("300") && why.contains("301"), "{why}");
     }
 
     #[test]

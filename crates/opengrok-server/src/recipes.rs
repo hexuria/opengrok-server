@@ -304,6 +304,12 @@ pub(crate) fn summary(
     })
 }
 
+/// What `filter` may say. A typo used to fall through every arm and answer an empty list, which
+/// is indistinguishable from "nothing has been shared with you" — the reply a person blames their
+/// own account for. Shared in spirit with `skills::FILTERS`, not in code: the two listings are
+/// free to grow different words.
+const FILTERS: [&str; 4] = ["mine", "shared", "org", "all"];
+
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     /// `mine` | `shared` | `org` | (absent: everything visible)
@@ -325,7 +331,22 @@ async fn list(
     };
     let org = org_of(&state, &account).await;
     let store = &state.auth.store;
-    let filter = query.filter.as_deref().unwrap_or("all");
+    let filter = query
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .unwrap_or("all");
+    if !FILTERS.contains(&filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{filter:?} is not a filter; it is one of {}, or leave it off for everything",
+                FILTERS.join(", ")
+            ),
+        )
+            .into_response();
+    }
     let wanted = query
         .kind
         .as_deref()
