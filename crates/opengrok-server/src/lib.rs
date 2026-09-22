@@ -40,6 +40,7 @@ pub mod persona;
 pub mod points;
 pub mod recipes;
 pub mod recovery;
+pub mod skills;
 pub mod spend;
 pub mod templates;
 pub mod workflows;
@@ -67,6 +68,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(account_api::router(state.auth.clone()))
         .merge(recipes::router(state.clone()))
         .merge(workflows::router(state.clone()))
+        .merge(skills::router(state.clone()))
         .merge(artifacts::router(state.clone()));
     #[cfg(feature = "jev")]
     let app = app.merge(jev::routes::router(state.clone()));

@@ -136,7 +136,14 @@ pub(crate) fn may(relation: Relation, action: Action) -> Result<(), &'static str
     }
 }
 
-async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
+/// The org this person belongs to, or `None`.
+///
+/// AN EMPTY ORG IS NO ORG, and the filter is load-bearing rather than tidiness: `Register` takes
+/// `org_id` as a plain `String`, so an account created without one replays to `Some("")` rather
+/// than `None`. Two such people then have equal orgs, and anything that decides "same org, may
+/// read" from that comparison makes every person in no org a colleague of every other. Caught by
+/// `against_another_persons_skill`, where a stranger read a stranger's skill.
+pub(crate) async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
     state
         .auth
         .store
@@ -144,6 +151,7 @@ async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
         .await
         .ok()
         .and_then(|(account, _)| account.org_id)
+        .filter(|org| !org.is_empty())
 }
 
 /// Loads the recipe and checks the action; a deleted recipe is a 404 to everyone but its owner.
