@@ -25,6 +25,7 @@ pub mod autonomy;
 pub mod gateway;
 pub mod identity;
 pub mod migrations;
+pub mod pending;
 pub mod points;
 pub mod postgres;
 pub mod purge;
@@ -38,6 +39,10 @@ pub use autonomy::{DueSchedule, HookRow, LogEvent};
 pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
+};
+pub use pending::{
+    DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
+    PendingUserMessageRow,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
