@@ -192,6 +192,27 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
     Some((recipe, values))
 }
 
+/// The skill the person chose in the composer this turn, by id.
+///
+/// `forwardedProps.skill`, arriving exactly the way `chosen_recipe_from` reads a recipe. THERE IS
+/// NO `/name` PARSED OUT OF THE MESSAGE TEXT, here or anywhere: the composer already knows which
+/// skill the person picked from the list it drew them, and a second answer read out of their prose
+/// would fire on any message that happened to begin with a slash — a path, a date, a command they
+/// were quoting.
+///
+/// ONE TURN. The id is read off this request and nowhere else, so the skill reaches this turn's
+/// system message and no later one. A run suspended on a card resumes on the message it opened
+/// with (`run.system_for_resume`), which is the same turn and therefore the same skill.
+fn chosen_skill_from(input: &RunAgentInput) -> Option<String> {
+    input
+        .forwarded_props
+        .get("skill")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
     input
         .forwarded_props
@@ -2360,11 +2381,27 @@ pub async fn run(
                 }
                 _ => String::new(),
             };
+            // The skill the person chose, read against the account the token named and never
+            // against anything in the body. A skill that cannot be given does not cost the turn —
+            // it costs the skill, and the coworker is told to say so rather than answer as though
+            // it had followed instructions it never saw (CLAUDE.md #8).
+            let skill_line = match chosen_skill_from(&input) {
+                None => String::new(),
+                Some(id) => match crate::skills::for_turn(&state, account_id, &id).await {
+                    Ok(skill) => crate::persona::chosen_skill_line(&skill.name, &skill.body),
+                    Err(why) => {
+                        // Which case it was is recorded here and nowhere else: the sentence the
+                        // person reads deliberately does not tell them apart.
+                        tracing::warn!(skill = %id, %why, "a chosen skill was not given to a turn");
+                        crate::persona::SKILL_UNAVAILABLE_LINE.to_string()
+                    }
+                },
+            };
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}{}",
+                    "{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2375,6 +2412,12 @@ pub async fn run(
                     crate::persona::network_off_line(network_off, network_unconfirmed),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
+                    // LAST, AFTER EVERY SEGMENT THAT SAYS WHAT THIS COWORKER MAY DO. A skill body
+                    // is prose a person wrote; it must not be able to read as granting itself
+                    // something the segments above just withheld. `persona::chosen_skill_line`
+                    // carries the rest of the reason, and an empty one adds nothing at all — a
+                    // turn with no skill is byte-for-byte the turn we had before.
+                    skill_line,
                 )),
             );
             if text.is_empty() { None } else { Some(text) }

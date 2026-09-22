@@ -1,8 +1,9 @@
 //! Skills: a named, versioned bundle of instructions a person invokes for one turn by typing
 //! `/name`. A `SKILL.md` body, plus whatever small files sit beside it, owned by an account.
 //!
-//! STORAGE AND CRUD ONLY. Nothing here reaches the model — handing a skill to a turn is its own
-//! slice, and it reads these rows rather than re-deciding who may use what.
+//! CRUD, plus the one read a turn makes. `for_turn` is how a chosen skill reaches the model, and
+//! it goes through the same `may()` table as every route here rather than re-deciding who may use
+//! what — the checks drift, the table cannot. Nothing else in this module knows the model exists.
 //!
 //! Who may do what (`may`), in one place, so every route refuses alike:
 //! - the OWNER reads, renames, enables, adds versions, deletes;
@@ -180,6 +181,94 @@ pub(crate) async fn permitted(
         return Err((StatusCode::GONE, "that skill was deleted").into_response());
     }
     Ok((account, skill))
+}
+
+/// Why a skill the person chose cannot be given to this turn.
+///
+/// An enum rather than a sentence, because the two readers want different things: an operator's
+/// log wants which case it was, and the person's reply must not carry it — see
+/// `persona::SKILL_UNAVAILABLE_LINE` for why the cases collapse into one sentence there.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NotForThisTurn {
+    #[error("no skill with that id")]
+    NoSuchSkill,
+    #[error("the skill was deleted")]
+    Deleted,
+    #[error("the skill is switched off")]
+    Disabled,
+    #[error("the skill is not this account's to use")]
+    NotTheirs,
+    #[error("the skill has no body yet")]
+    Draft,
+    #[error("the skill could not be read: {0}")]
+    Unreadable(String),
+}
+
+/// A skill as a turn needs it: what to call it, and what it says.
+///
+/// A struct rather than a `(String, String)`, for `NewSkill`'s reason: two strings in a row, and
+/// the call site that swaps them compiles and puts the whole body where the name goes.
+pub(crate) struct SkillForTurn {
+    pub name: String,
+    pub body: String,
+}
+
+/// The skill the person chose for this turn, resolved against the account that signed the request.
+///
+/// THE ACCOUNT COMES OFF THE BEARER, NEVER OFF THE TURN (CLAUDE.md #7). `forwardedProps` carries an
+/// id and nothing about whose it is, so the relation is computed here from the authenticated
+/// account; an id belonging to somebody else is refused however confidently it was sent.
+///
+/// The same `may()` table the routes read, so a skill a person can see in their own list is one
+/// they can invoke, and a skill they cannot see stays one they cannot smuggle into a prompt by id.
+///
+/// A SWITCHED-OFF SKILL IS REFUSED EVEN TO ITS OWNER. `permitted` still lets the owner READ one —
+/// that is how they switch it back on — but switching a skill off is exactly the instruction not
+/// to use it, and a turn that used it anyway would be reading the switch as decoration.
+pub(crate) async fn for_turn(
+    state: &AgUiState,
+    account: &AccountId,
+    id: &str,
+) -> Result<SkillForTurn, NotForThisTurn> {
+    let skill = match state.auth.store.skill(id).await {
+        Ok(Some(skill)) => skill,
+        Ok(None) => return Err(NotForThisTurn::NoSuchSkill),
+        Err(error) => return Err(NotForThisTurn::Unreadable(error.to_string())),
+    };
+    let org = org_of(state, account).await;
+    // Visibility first, so what is recorded about a skill this account cannot see is that it
+    // cannot see it — not the state of somebody else's row.
+    if may(relation_to(account, org.as_deref(), &skill), Action::Read).is_err() {
+        return Err(NotForThisTurn::NotTheirs);
+    }
+    if skill.deleted_at_ms.is_some() {
+        return Err(NotForThisTurn::Deleted);
+    }
+    if !skill.enabled {
+        return Err(NotForThisTurn::Disabled);
+    }
+    let body = match state.auth.store.latest_skill_version(&skill.id).await {
+        Ok(Some(version)) => version.body,
+        Ok(None) => return Err(NotForThisTurn::Draft),
+        Err(error) => return Err(NotForThisTurn::Unreadable(error.to_string())),
+    };
+    // THE CAP IS ENFORCED ON WRITE (`check_body`), so a stored body over it is a row that got in
+    // around it — a bug in some writer, not a body to quietly cut here. Say it once, with the id
+    // and both numbers, and hand the body over whole: a silently truncated instruction is the one
+    // shape worse than a long one, because nothing downstream can tell it was cut.
+    let length = body.chars().count();
+    if length > MAX_SKILL_BODY_CHARS {
+        tracing::warn!(
+            skill = %skill.id,
+            length,
+            cap = MAX_SKILL_BODY_CHARS,
+            "a stored skill body is over the cap; something wrote past check_body"
+        );
+    }
+    Ok(SkillForTurn {
+        name: skill.name,
+        body,
+    })
 }
 
 /// What a person writes a skill down as, and what the row says it came from.
