@@ -333,7 +333,14 @@ pub struct Frontmatter {
 /// implementation there would mean an uploaded skill and an installed one disagreeing about where
 /// a body starts — the disagreement would show up as frontmatter leaking into a system message.
 pub fn split_frontmatter(text: &str) -> Frontmatter {
-    let trimmed = text.trim_start_matches('\u{feff}');
+    // LEADING WHITESPACE GOES BEFORE THE FENCE IS LOOKED FOR, and it is not tidiness. The test
+    // below is `starts_with("---")`, so ONE blank line in front of the fence made the whole
+    // frontmatter block body — and a body is what a model is later handed as instructions. Two
+    // documents one newline apart were then parsed in opposite ways: `---\nname: x` with no
+    // closing fence was refused as unreadable, and `\n---\nname: x` was stored with its `name:`
+    // line as the first line of the instructions. A model asked for a `SKILL.md` puts a newline
+    // after its opening marker as often as not, so this was reachable without anybody trying.
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
     if !trimmed.starts_with("---") {
         return Frontmatter {
             name: None,
@@ -584,6 +591,27 @@ mod tests {
 
         // A document with no frontmatter at all has nothing to close, so it is not "unclosed".
         assert!(split_frontmatter("Just instructions.\n").closed);
+    }
+
+    /// ONE BLANK LINE was enough to smuggle a whole frontmatter block into a body, and the body
+    /// is what a coworker is given as instructions. Reproduced by a reviewer on the from-tape
+    /// route, where the writer is a model rather than a person and puts one there by habit.
+    #[test]
+    fn a_fence_after_a_blank_line_is_still_frontmatter() {
+        for text in [
+            "\n---\nname: a\ndescription: d\n---\nBody\n",
+            "  \n\t---\nname: a\ndescription: d\n---\nBody\n",
+            "\u{feff}\n---\nname: a\ndescription: d\n---\nBody\n",
+        ] {
+            let parsed = split_frontmatter(text);
+            assert_eq!(parsed.name.as_deref(), Some("a"), "{text:?}");
+            assert_eq!(parsed.description.as_deref(), Some("d"), "{text:?}");
+            assert_eq!(parsed.body.trim(), "Body", "{text:?}");
+            assert!(parsed.closed, "{text:?}");
+        }
+        // And its unclosed twin is refusable rather than storable: the pair used to disagree.
+        assert!(!split_frontmatter("\n---\nname: a\nBody\n").closed);
+        assert!(!split_frontmatter("---\nname: a\nBody\n").closed);
     }
 
     /// A skill without frontmatter is still a skill; its body must survive whole.
