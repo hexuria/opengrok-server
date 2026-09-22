@@ -308,10 +308,10 @@ fn token_is_absent_bir_binary(token: &str) -> bool {
     if token.is_empty() || token.contains('=') {
         return false;
     }
-    match token.rsplit('/').next() {
-        Some("gpui-agent" | "bir-headless") => true,
-        _ => false,
-    }
+    matches!(
+        token.rsplit('/').next(),
+        Some("gpui-agent" | "bir-headless")
+    )
 }
 
 /// The arguments the file tools accept.
