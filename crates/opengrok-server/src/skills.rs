@@ -102,6 +102,13 @@ pub(crate) enum Relation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
     Read,
+    /// Run it in a turn: put its body inside a coworker's system message. A SEPARATE ACTION FROM
+    /// `Read` even though today's answer is the same, because the two are different questions.
+    /// Reading is seeing a name, a description and a body on a page. Invoking is up to 8000
+    /// characters of somebody's prose landing beside a coworker's box, its shell, its machine
+    /// shell and its saved-credential flow, chosen off a listing (`summary`) that does not carry
+    /// the body — so the chooser has very likely not read what they picked.
+    Invoke,
     Edit,
     AddVersion,
     Delete,
@@ -117,10 +124,19 @@ pub(crate) enum Action {
 ///
 /// Sharing a skill to one person is not here because nothing writes such a row yet — when it
 /// does, it adds a `Relation` and a line to this table and every route below inherits it.
+///
+/// `(OrgMember, Invoke)` IS ALLOWED, AND IT IS THE ONE LINE HERE WORTH ARGUING ABOUT. It lets a
+/// colleague's prose run inside this coworker's system message, and the person choosing it has
+/// been shown a name and a description and not a body. It is allowed anyway because the listing
+/// already offers it: a turn narrower than the menu would refuse a skill the composer had just
+/// held out, with no way for the person to tell why. The mitigation is not a narrower table, it
+/// is that the framing says whose words these are (`persona::SkillAuthor::Colleague`), so the
+/// model and the reply can both reflect it. Written down here rather than decided at the call
+/// site, so tightening it later is one edit to one line.
 pub(crate) fn may(relation: Relation, action: Action) -> Result<(), &'static str> {
     use Action::*;
     use Relation::*;
-    let ok = matches!((relation, action), (Owner, _) | (OrgMember, Read));
+    let ok = matches!((relation, action), (Owner, _) | (OrgMember, Read | Invoke));
     if ok {
         Ok(())
     } else {
@@ -192,6 +208,11 @@ pub(crate) async fn permitted(
 pub(crate) enum NotForThisTurn {
     #[error("no skill with that id")]
     NoSuchSkill,
+    /// The `skill` on the turn is not a shape any id we mint could have. Its own case because it
+    /// is a CLIENT bug, not a missing row: silence here would let a client shape change stop
+    /// applying skills with nothing anywhere saying so.
+    #[error("the id on the turn is not shaped like a skill id")]
+    NotAnId,
     #[error("the skill was deleted")]
     Deleted,
     #[error("the skill is switched off")]
@@ -200,8 +221,30 @@ pub(crate) enum NotForThisTurn {
     NotTheirs,
     #[error("the skill has no body yet")]
     Draft,
+    /// A stored body over the cap. Refused rather than quoted: `check_body` enforces the cap on
+    /// write, so this row got in around it, and a 200,000-character body does not cost the skill —
+    /// it costs the whole turn, by filling the context the person's own message needed.
+    #[error("the stored body is {length} characters, over the {cap} cap")]
+    TooLong { length: usize, cap: usize },
+    /// No marker could be minted that the body does not already contain (`persona::skill_marker`).
+    /// Unreachable by chance; reachable only by a body built against this code.
+    #[error("no unforgeable marker could be minted for that body")]
+    Unquotable,
     #[error("the skill could not be read: {0}")]
     Unreadable(String),
+}
+
+impl NotForThisTurn {
+    /// The sentence the coworker is given. One for every case but the draft, which the composer
+    /// already showed the chooser (`summary` carries `draft` and `versionCount`) and so can be
+    /// named without telling them anything they were not looking at. See
+    /// `persona::SKILL_UNAVAILABLE_LINE` for why the rest share one sentence that names no cause.
+    pub(crate) fn line(&self) -> &'static str {
+        match self {
+            Self::Draft => crate::persona::SKILL_DRAFT_LINE,
+            _ => crate::persona::SKILL_UNAVAILABLE_LINE,
+        }
+    }
 }
 
 /// A skill as a turn needs it: what to call it, and what it says.
@@ -211,6 +254,9 @@ pub(crate) enum NotForThisTurn {
 pub(crate) struct SkillForTurn {
     pub name: String,
     pub body: String,
+    /// Whether the person taking the turn wrote this, or a colleague did. The framing says which,
+    /// because the listing they chose from does not carry a body and "chose it" is not "read it".
+    pub author: crate::persona::SkillAuthor,
 }
 
 /// The skill the person chose for this turn, resolved against the account that signed the request.
@@ -238,8 +284,21 @@ pub(crate) async fn for_turn(
     let org = org_of(state, account).await;
     // Visibility first, so what is recorded about a skill this account cannot see is that it
     // cannot see it — not the state of somebody else's row.
-    if may(relation_to(account, org.as_deref(), &skill), Action::Read).is_err() {
-        return Err(NotForThisTurn::NotTheirs);
+    if may(relation_to(account, org.as_deref(), &skill), Action::Invoke).is_err() {
+        // `relation_to` folds `enabled` into `OrgMember`, so a COLLEAGUE'S switched-off skill
+        // arrives here looking exactly like a stranger's. Same refusal to the person either way;
+        // different sentence in the log, which is the only place the difference is any use — an
+        // operator asked why a shared skill stopped working goes and reads org membership when
+        // the answer was the switch.
+        let in_the_owners_org = matches!(
+            (skill.org_id.as_deref(), org.as_deref()),
+            (Some(theirs), Some(mine)) if theirs == mine
+        );
+        return Err(if in_the_owners_org && !skill.enabled {
+            NotForThisTurn::Disabled
+        } else {
+            NotForThisTurn::NotTheirs
+        });
     }
     if skill.deleted_at_ms.is_some() {
         return Err(NotForThisTurn::Deleted);
@@ -252,22 +311,33 @@ pub(crate) async fn for_turn(
         Ok(None) => return Err(NotForThisTurn::Draft),
         Err(error) => return Err(NotForThisTurn::Unreadable(error.to_string())),
     };
+    // ONE PLACE DECIDES WHAT "EMPTY" MEANS. A version row whose body is blank is the same thing to
+    // a turn as no version at all — no instructions — and it used to return `Ok` with an empty
+    // body, which emitted nothing: no quote, no refusal, no log, while a MISSING version was
+    // refused loudly. Two shapes of nothing must not get two different answers.
+    if body.trim().is_empty() {
+        return Err(NotForThisTurn::Draft);
+    }
     // THE CAP IS ENFORCED ON WRITE (`check_body`), so a stored body over it is a row that got in
-    // around it — a bug in some writer, not a body to quietly cut here. Say it once, with the id
-    // and both numbers, and hand the body over whole: a silently truncated instruction is the one
-    // shape worse than a long one, because nothing downstream can tell it was cut.
+    // around it. Refused, not quoted and not cut: quoting 200,000 characters does not cost the
+    // skill, it costs the turn, by crowding out the message the person actually sent; and cutting
+    // it would hand the model half an instruction that nothing downstream could tell from a whole
+    // one. The caller logs the numbers with the id.
     let length = body.chars().count();
     if length > MAX_SKILL_BODY_CHARS {
-        tracing::warn!(
-            skill = %skill.id,
+        return Err(NotForThisTurn::TooLong {
             length,
-            cap = MAX_SKILL_BODY_CHARS,
-            "a stored skill body is over the cap; something wrote past check_body"
-        );
+            cap: MAX_SKILL_BODY_CHARS,
+        });
     }
     Ok(SkillForTurn {
         name: skill.name,
         body,
+        author: if skill.owner_id == account.as_str() {
+            crate::persona::SkillAuthor::Chooser
+        } else {
+            crate::persona::SkillAuthor::Colleague
+        },
     })
 }
 
@@ -995,11 +1065,58 @@ mod tests {
     fn only_the_owner_writes_and_only_the_org_reads() {
         assert!(may(Relation::Owner, Action::Delete).is_ok());
         assert!(may(Relation::Owner, Action::AddVersion).is_ok());
+        assert!(may(Relation::Owner, Action::Invoke).is_ok());
         assert!(may(Relation::OrgMember, Action::Read).is_ok());
+        // The deliberate one: a colleague's skill may run inside this coworker's system message.
+        // If this ever tightens, it tightens here and every caller inherits it.
+        assert!(may(Relation::OrgMember, Action::Invoke).is_ok());
         assert!(may(Relation::OrgMember, Action::Edit).is_err());
         assert!(may(Relation::OrgMember, Action::Delete).is_err());
         assert!(may(Relation::None, Action::Read).is_err());
+        assert!(may(Relation::None, Action::Invoke).is_err());
         assert_eq!(may(Relation::None, Action::Read), Err("no such skill"));
+    }
+
+    /// The sentence a refusal reaches the model with. A draft is the caller's own skill, so it is
+    /// named; nothing else is, because an enumeration is a claim and it is false for at least two
+    /// of these — a database blip is not "no such skill".
+    #[test]
+    fn a_refusal_names_a_cause_only_where_naming_one_leaks_nothing() {
+        assert_eq!(
+            NotForThisTurn::Draft.line(),
+            crate::persona::SKILL_DRAFT_LINE
+        );
+        for refused in [
+            NotForThisTurn::NoSuchSkill,
+            NotForThisTurn::NotAnId,
+            NotForThisTurn::Deleted,
+            NotForThisTurn::Disabled,
+            NotForThisTurn::NotTheirs,
+            NotForThisTurn::Unquotable,
+            NotForThisTurn::TooLong {
+                length: 200_000,
+                cap: MAX_SKILL_BODY_CHARS,
+            },
+            NotForThisTurn::Unreadable("the pool is closed".to_string()),
+        ] {
+            assert_eq!(
+                refused.line(),
+                crate::persona::SKILL_UNAVAILABLE_LINE,
+                "{refused:?} must not describe a cause to the person"
+            );
+        }
+        for word in ["deleted", "switched off", "no such skill"] {
+            assert!(
+                !crate::persona::SKILL_UNAVAILABLE_LINE.contains(word),
+                "the shared sentence must stay true of a database blip too: {word}"
+            );
+        }
+        // The store error is the operator's, and it must not travel to the model.
+        assert!(
+            !NotForThisTurn::Unreadable("connection refused".to_string())
+                .line()
+                .contains("connection refused")
+        );
     }
 
     /// A path is refused rather than sanitised: these files are written onto a computer, and

@@ -192,6 +192,24 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
     Some((recipe, values))
 }
 
+/// The most a `forwardedProps.skill` may be before it is refused unread.
+///
+/// Ours are `skl_` plus a UUID — 40 characters. The bound is generous enough for a longer id shape
+/// later and small enough that a 2 MB `skill` field is refused before it reaches a log line: this
+/// value is caller-controlled, and a WARN that carries it is a record whose size the caller picks.
+const MAX_SKILL_ID_CHARS: usize = 128;
+
+/// What `forwardedProps.skill` said this turn.
+enum ChosenSkill {
+    /// An id worth looking up: bounded, and of a shape an id we mint could have.
+    Id(String),
+    /// Something was sent and it cannot be an id — a number, an object, two megabytes of text. NOT
+    /// the same as nothing chosen, and that distinction is the point: read as "no skill", a client
+    /// that changed the field's shape would stop applying skills with no refusal, no log and
+    /// nothing anywhere for anybody to notice. Carries the KIND, never the value.
+    Unusable(&'static str),
+}
+
 /// The skill the person chose in the composer this turn, by id.
 ///
 /// `forwardedProps.skill`, arriving exactly the way `chosen_recipe_from` reads a recipe. THERE IS
@@ -202,15 +220,87 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
 ///
 /// ONE TURN. The id is read off this request and nowhere else, so the skill reaches this turn's
 /// system message and no later one. A run suspended on a card resumes on the message it opened
-/// with (`run.system_for_resume`), which is the same turn and therefore the same skill.
-fn chosen_skill_from(input: &RunAgentInput) -> Option<String> {
-    input
-        .forwarded_props
-        .get("skill")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+/// with (`run.system_for_resume`), which is the same turn and therefore the same skill — WHEN one
+/// was captured. A run journalled before `system` was recorded has none, and both resume sites
+/// then compose identity and role with no tail at all, losing the skill along with the
+/// whose-computer discipline and the network line. That gap predates skills, and no turn that
+/// quotes one can reach it: a turn that composes a skill also journals the message it composed.
+fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
+    let value = input.forwarded_props.get("skill")?;
+    // Absent and null are "no skill chosen", and so is blank — a composer that always sends the
+    // key sends an empty string when nothing is picked. Everything else is a claim about a skill.
+    if value.is_null() {
+        return None;
+    }
+    let Some(id) = value.as_str() else {
+        return Some(ChosenSkill::Unusable("not a string"));
+    };
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if id.len() > MAX_SKILL_ID_CHARS {
+        return Some(ChosenSkill::Unusable("longer than any id"));
+    }
+    // Bounded above, and here restricted to characters an id we mint can contain. A newline in
+    // this value would otherwise be written into a WARN, where it forges a whole log record at a
+    // position the caller chooses.
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Some(ChosenSkill::Unusable("not shaped like an id"));
+    }
+    Some(ChosenSkill::Id(id.to_string()))
+}
+
+/// The skill segment of this turn's system message: the person's instructions quoted between
+/// unforgeable markers, or the sentence saying they were not.
+///
+/// EVERY PATH OUT OF HERE SAYS SOMETHING. A chosen skill that cannot be given is the case the
+/// refusal line exists for, so returning an empty string on any of these would be precisely the
+/// silence it was written to prevent.
+async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSkill) -> String {
+    // EVERY REFUSAL BELOW GOES THROUGH `NotForThisTurn::line`, including the two this function
+    // decides itself. A sentence chosen at the call site is a sentence that drifts from the table
+    // that decides the rest.
+    let id = match chosen {
+        ChosenSkill::Unusable(kind) => {
+            // The VALUE is not logged. It is caller-controlled and unbounded, so a WARN carrying
+            // it is a log record whose size and contents the caller writes; the kind is what tells
+            // a client shape change from somebody probing.
+            let why = crate::skills::NotForThisTurn::NotAnId;
+            tracing::warn!(kind, why = ?why, "a turn carried a `skill` that cannot be an id");
+            return why.line().to_string();
+        }
+        ChosenSkill::Id(id) => id,
+    };
+    let skill = match crate::skills::for_turn(state, account, id).await {
+        Ok(skill) => skill,
+        Err(why) => {
+            // `?` on both, not `%`: the id is caller-controlled and `why` carries a store error
+            // verbatim, and Display writes a newline as a newline — one forged log record per
+            // request, at a position the caller picks. Which case it was is recorded here and
+            // nowhere else: the sentence the person reads names no cause at all.
+            tracing::warn!(skill = ?id, why = ?why, "a chosen skill was not given to a turn");
+            return why.line().to_string();
+        }
+    };
+    let quoted = crate::persona::skill_marker(&skill.body)
+        .map(|marker| {
+            crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author)
+        })
+        .filter(|segment| !segment.is_empty());
+    match quoted {
+        Some(segment) => segment,
+        None => {
+            // No marker the body does not already contain, so the quote could not be closed where
+            // we say it closes. Refuse rather than quote it unbounded.
+            let why = crate::skills::NotForThisTurn::Unquotable;
+            tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+            why.line().to_string()
+        }
+    }
 }
 
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
@@ -2387,15 +2477,7 @@ pub async fn run(
             // it had followed instructions it never saw (CLAUDE.md #8).
             let skill_line = match chosen_skill_from(&input) {
                 None => String::new(),
-                Some(id) => match crate::skills::for_turn(&state, account_id, &id).await {
-                    Ok(skill) => crate::persona::chosen_skill_line(&skill.name, &skill.body),
-                    Err(why) => {
-                        // Which case it was is recorded here and nowhere else: the sentence the
-                        // person reads deliberately does not tell them apart.
-                        tracing::warn!(skill = %id, %why, "a chosen skill was not given to a turn");
-                        crate::persona::SKILL_UNAVAILABLE_LINE.to_string()
-                    }
-                },
+                Some(chosen) => skill_segment(&state, account_id, &chosen).await,
             };
             let text = crate::persona::system_message(
                 &coworker_name,
@@ -2422,7 +2504,19 @@ pub async fn run(
             );
             if text.is_empty() { None } else { Some(text) }
         }
-        _ => None,
+        // A turn with no coworker composes no persona — there is nobody to introduce, and loading
+        // a named coworker's role without a principal would leak configuration by the shape of the
+        // reply. A SKILL CHOSEN ON SUCH A TURN IS STILL SOMETHING THE PERSON ASKED FOR AND IS NOT
+        // GETTING, and dropping it here without a word was exactly the silence the refusal line
+        // exists to prevent. It is the generic sentence because there is no account to resolve the
+        // skill against, and trimmed because there is no paragraph above it to join.
+        _ => match chosen_skill_from(&input) {
+            Some(_) => {
+                tracing::warn!("a turn carried a chosen skill with no coworker to give it to");
+                Some(crate::persona::SKILL_UNAVAILABLE_LINE.trim().to_string())
+            }
+            None => None,
+        },
     };
 
     let mut messages = to_chat_messages(&input);
