@@ -37,8 +37,8 @@ use opengrok_core::run::{RunCommand, RunView};
 use opengrok_tools::user_form::{
     FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
     HOLD_TIMED_OUT_TOOL_RESULT, audit_lengths, fill_into_focus, form_request_from,
-    handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, overall_resolution,
-    shared_values, submitted_values, tool_result_content,
+    handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, model_facing_result,
+    overall_resolution, shared_values, submitted_values, tool_result_content,
 };
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
@@ -130,6 +130,7 @@ pub async fn submit_user_form(
     }
 
     let form = form_request_from(&entry);
+    let collect = opengrok_tools::user_form::is_chat_collection(&entry);
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
     let saved_login = is_saved_login(args);
@@ -145,6 +146,13 @@ pub async fn submit_user_form(
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
         );
     }
+    // A saved login is secret whatever the model called its fields. The initial result
+    // and persisted answers must use the same suppression, including on collect cards.
+    let shared = if saved_login || passkey_card {
+        BTreeMap::new()
+    } else {
+        shared_values(&form, &values)
+    };
     let (outcomes, resolution, content) = if passkey_card {
         let told = if form.passkey_mode.as_deref() == Some("register") {
             let hint = args
@@ -173,23 +181,14 @@ pub async fn submit_user_form(
                 ),
             ),
         }
+    } else if collect {
+        let content = opengrok_tools::user_form::collection_tool_result(&form, &shared);
+        (Vec::new(), FormResolution::Submitted, content)
     } else {
         let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
         let resolution = overall_resolution(&outcomes);
-        // A saved login is secret whatever the model called its fields: nothing of it is
-        // shared back to the model or the journal.
-        let shared = if saved_login {
-            BTreeMap::new()
-        } else {
-            shared_values(&form, &values)
-        };
         let content = tool_result_content(&form, resolution, &shared, false);
         (outcomes, resolution, content)
-    };
-    let shared: BTreeMap<String, String> = if saved_login || passkey_card {
-        BTreeMap::new()
-    } else {
-        shared_values(&form, &values)
     };
 
     let settled = settle_entry(entry, resolution, &shared, false, &outcomes, false);
@@ -220,7 +219,7 @@ pub async fn submit_user_form(
     }
     // A login that came from the vault is not offered to the vault again, and a passkey card
     // typed nothing worth saving.
-    if resolution == FormResolution::Submitted && !saved_login && !passkey_card {
+    if resolution == FormResolution::Submitted && !saved_login && !passkey_card && !collect {
         super::credential::offer_save_after_submit(
             state,
             account_id,
@@ -312,7 +311,7 @@ pub async fn dismiss_user_form(
         return (200, response);
     }
 
-    let content = tool_result_content(&form, resolution, &BTreeMap::new(), false);
+    let content = model_facing_result(&settled, &form, resolution, &BTreeMap::new(), false);
     resume_user_form(
         state,
         account_id,
@@ -443,7 +442,7 @@ pub async fn timeout_unresolved_form(
         return false;
     };
     let mut settled_any = false;
-    let mut form_for_result: Option<FormRequest> = None;
+    let mut settled_for_result: Option<Value> = None;
     for entry in entries {
         if !is_unresolved(&entry) {
             continue;
@@ -463,7 +462,6 @@ pub async fn timeout_unresolved_form(
         if !is_unresolved(&current) {
             continue;
         }
-        let form = form_request_from(&current);
         let settled = settle_entry(
             current,
             FormResolution::Dismissed,
@@ -483,13 +481,20 @@ pub async fn timeout_unresolved_form(
             continue;
         }
         journal_settled_form(state, account_id, coworker_id, &settled).await;
-        form_for_result = Some(form);
+        settled_for_result = Some(settled);
         settled_any = true;
     }
     if settled_any {
-        let content = match form_for_result {
-            Some(form) => {
-                tool_result_content(&form, FormResolution::Dismissed, &BTreeMap::new(), true)
+        let content = match settled_for_result {
+            Some(entry) => {
+                let form = form_request_from(&entry);
+                model_facing_result(
+                    &entry,
+                    &form,
+                    FormResolution::Dismissed,
+                    &BTreeMap::new(),
+                    true,
+                )
             }
             None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
         };
@@ -936,7 +941,7 @@ async fn heal_or_already(
         return (200, entry.clone());
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
-    let content = tool_result_content(&form, resolution, &shared, timed_out);
+    let content = model_facing_result(entry, &form, resolution, &shared, timed_out);
     if resume_user_form(
         state,
         account_id,
@@ -1484,226 +1489,5 @@ fn stamp_tool_calls(events: &mut [Value]) {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    fn email_form(id: &str, resolution: Option<&str>, at: i64) -> Value {
-        let mut entry = json!({
-            "kind": "send-message",
-            "id": id,
-            "timestampMs": at,
-            "message": {
-                "type": "user-form",
-                "formRequest": {
-                    "title": "Sign in",
-                    "fields": [{"id": "email", "label": "Email", "type": "email", "required": true}]
-                }
-            }
-        });
-        if let Some(word) = resolution {
-            entry["formResolution"] = json!(word);
-        }
-        entry
-    }
-
-    #[test]
-    fn hydrate_overlays_form_resolution_onto_the_awaiting_custom() {
-        let form = email_form("e_form", Some("submitted"), 50);
-        let events = vec![json!({
-            "type": "CUSTOM",
-            "name": "run-awaiting-approval",
-            "reason": "user-form",
-            "callId": "c1",
-            "entryId": "e_form",
-            "arguments": {
-                "title": "Sign in",
-                "fields": [{"id": "email", "label": "Email", "type": "email"}]
-            }
-        })];
-        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["formResolution"], "submitted");
-        assert_eq!(out[0]["message"]["type"], "user-form");
-        assert_eq!(out[0]["entryId"], "e_form");
-        let dump = serde_json::to_string(&out).unwrap();
-        assert!(!dump.contains("s3cret"), "{dump}");
-    }
-
-    #[test]
-    fn hydrate_injects_a_settled_card_when_the_run_never_stamped_entry_id() {
-        let form = email_form("e_form", Some("submitted"), 50);
-        let events = vec![json!({
-            "type": "CUSTOM",
-            "name": "run-awaiting-approval",
-            "reason": "user-form",
-            "callId": "c1",
-            "arguments": {
-                "title": "Sign in",
-                "fields": [{"id": "email", "label": "Email", "type": "email"}]
-            }
-        })];
-        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
-        assert_eq!(out[0]["entryId"], "e_form");
-        assert_eq!(out[0]["formResolution"], "submitted");
-        assert_eq!(out[0]["message"]["type"], "user-form");
-    }
-
-    #[test]
-    fn hydrate_skips_forms_outside_the_run_window() {
-        let other = email_form("e_other", Some("dismissed"), 10_000);
-        let events = vec![json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"})];
-        let out = hydrate_agui_events(events, std::slice::from_ref(&other), 0, 100);
-        assert_eq!(out.len(), 1);
-        assert!(out.iter().all(|event| event["name"] != "user-form"));
-    }
-
-    #[test]
-    fn hydrate_stamps_entry_id_onto_matching_tool_calls() {
-        let form = email_form("e_form", None, 50);
-        let mut form = form;
-        form["callId"] = json!("c1");
-        let events = vec![
-            json!({
-                "type": "TOOL_CALL_START",
-                "toolCallId": "c1",
-                "toolCallName": "request_user_form"
-            }),
-            json!({
-                "type": "CUSTOM",
-                "name": "run-awaiting-approval",
-                "reason": "user-form",
-                "callId": "c1",
-                "entryId": "e_form",
-                "arguments": {
-                    "title": "Sign in",
-                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
-                }
-            }),
-        ];
-        let out = hydrate_agui_events(events, std::slice::from_ref(&form), 0, 100);
-        assert_eq!(out[0]["entryId"], "e_form");
-        assert_eq!(out[1]["entryId"], "e_form");
-    }
-
-    #[test]
-    fn hydrate_joins_stacked_same_fingerprint_forms_by_call_id() {
-        let mut forms = Vec::new();
-        for (id, call) in [("e_3", "c3"), ("e_1", "c1"), ("e_2", "c2")] {
-            let mut form = email_form(id, None, 50);
-            form["callId"] = json!(call);
-            forms.push(form);
-        }
-        let events = vec![
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "request_user_form"}),
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c2", "toolCallName": "request_user_form"}),
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c3", "toolCallName": "request_user_form"}),
-            json!({
-                "type": "CUSTOM",
-                "name": "run-awaiting-approval",
-                "reason": "user-form",
-                "callId": "c1",
-                "arguments": {
-                    "title": "Sign in",
-                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
-                }
-            }),
-            json!({
-                "type": "CUSTOM",
-                "name": "run-awaiting-approval",
-                "reason": "user-form",
-                "callId": "c2",
-                "arguments": {
-                    "title": "Sign in",
-                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
-                }
-            }),
-            json!({
-                "type": "CUSTOM",
-                "name": "run-awaiting-approval",
-                "reason": "user-form",
-                "callId": "c3",
-                "arguments": {
-                    "title": "Sign in",
-                    "fields": [{"id": "email", "label": "Email", "type": "email"}]
-                }
-            }),
-        ];
-        let out = hydrate_agui_events(events, &forms, 0, 100);
-        let by_call: Vec<(&str, &str)> = out
-            .iter()
-            .filter(|event| event["type"] == "TOOL_CALL_START")
-            .map(|event| {
-                (
-                    event["toolCallId"].as_str().unwrap(),
-                    event["entryId"].as_str().unwrap(),
-                )
-            })
-            .collect();
-        assert_eq!(by_call, vec![("c1", "e_1"), ("c2", "e_2"), ("c3", "e_3")]);
-    }
-
-    #[test]
-    fn an_escalated_form_is_not_a_live_handoff() {
-        let form = email_form("e_form", Some("escalated"), 50);
-        assert!(is_escalated_form(&form));
-        assert!(!is_handoff_entry(&form));
-        assert!(!is_live_handoff(&form));
-    }
-
-    fn form_tool_start(call_id: &str) -> Event {
-        Event::new(EventType::ToolCallStart, 1)
-            .with("toolCallId", call_id)
-            .with("toolCallName", opengrok_tools::REQUEST_USER_FORM)
-    }
-
-    fn form_tool_args(call_id: &str) -> Event {
-        Event::new(EventType::ToolCallArgs, 2)
-            .with("toolCallId", call_id)
-            .with("delta", r#"{"title":"Website login"}"#)
-    }
-
-    /// Two same-title Website logins: each TOOL_CALL must leave with its own e_*, not the
-    /// raw `call-*-1` NativeChat used when live frames streamed before the gateway stamp.
-    #[test]
-    fn live_sse_holds_stacked_form_tool_calls_until_each_has_a_gateway_entry_id() {
-        let mut hold = UserFormSseHold::default();
-        assert!(hold.push(form_tool_start("call-42628be6")).is_none());
-        assert!(hold.push(form_tool_args("call-42628be6")).is_none());
-        assert!(hold.push(form_tool_start("call-42628be6-1")).is_none());
-        assert!(hold.push(form_tool_args("call-42628be6-1")).is_none());
-
-        let first = hold.release_for("call-42628be6", Some("e_aaa"));
-        assert_eq!(first.len(), 2, "{first:?}");
-        assert!(
-            first
-                .iter()
-                .all(|event| event.extra.get("entryId") == Some(&json!("e_aaa")))
-        );
-
-        let second = hold.release_for("call-42628be6-1", Some("e_bbb"));
-        assert_eq!(second.len(), 2, "{second:?}");
-        assert!(
-            second
-                .iter()
-                .all(|event| event.extra.get("entryId") == Some(&json!("e_bbb")))
-        );
-        assert_ne!(
-            first[0].extra.get("entryId"),
-            second[0].extra.get("entryId")
-        );
-    }
-
-    #[test]
-    fn shell_tool_calls_pass_through_the_user_form_hold() {
-        let mut hold = UserFormSseHold::default();
-        let event = Event::new(EventType::ToolCallStart, 1)
-            .with("toolCallId", "c1")
-            .with("toolCallName", "shell");
-        let passed = hold.push(event).unwrap();
-        assert_eq!(
-            passed.extra.get("toolCallName").and_then(Value::as_str),
-            Some("shell")
-        );
-        assert!(hold.release_rest().is_empty());
-    }
-}
+#[path = "../../tests/unit/user_form.rs"]
+mod tests;

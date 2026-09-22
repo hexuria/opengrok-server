@@ -1,0 +1,392 @@
+//! Durable pending user messages: NativeChat follow-ups that have not yet become a run.
+//!
+//! Mutable rows, not an event stream. Cancel is a delete and edit is an update because the
+//! product is "this send must never fire" / "fire this text instead", and an append-only log
+//! of those two would still need a projection that looks exactly like this table. WHO may
+//! touch a row is decided in the server, the same way skills are: every function here takes an
+//! account the caller has already authenticated, never one that arrived in a body.
+
+use opengrok_core::id::AccountId;
+use serde_json::Value;
+use sqlx::Row;
+
+use crate::StoreResult;
+use crate::postgres::PgStore;
+
+/// One queued send, as the store keeps it. `status` is `pending` or `drained`; cancelled rows
+/// are deleted rather than kept, so a bubble can be queued again after the person takes it back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingUserMessageRow {
+    pub id: String,
+    pub thread_id: String,
+    pub account_id: String,
+    pub content: String,
+    pub reply_to: Option<Value>,
+    pub recipe_id: Option<String>,
+    pub recipe_values: Option<Value>,
+    pub skill_id: Option<String>,
+    pub client_message_id: Option<String>,
+    pub status: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub drained_at_ms: Option<i64>,
+    pub drained_run_id: Option<String>,
+}
+
+const PENDING_SELECT: &str = "select id, thread_id, account_id, content, reply_to, recipe_id,
+        recipe_values, skill_id, client_message_id, status, created_at_ms, updated_at_ms,
+        drained_at_ms, drained_run_id
+   from pending_user_message";
+
+fn pending_row(row: &sqlx::postgres::PgRow) -> StoreResult<PendingUserMessageRow> {
+    Ok(PendingUserMessageRow {
+        id: row.try_get("id")?,
+        thread_id: row.try_get("thread_id")?,
+        account_id: row.try_get("account_id")?,
+        content: row.try_get("content")?,
+        reply_to: row.try_get("reply_to")?,
+        recipe_id: row.try_get("recipe_id")?,
+        recipe_values: row.try_get("recipe_values")?,
+        skill_id: row.try_get("skill_id")?,
+        client_message_id: row.try_get("client_message_id")?,
+        status: row.try_get("status")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+        updated_at_ms: row.try_get("updated_at_ms")?,
+        drained_at_ms: row.try_get("drained_at_ms")?,
+        drained_run_id: row.try_get("drained_run_id")?,
+    })
+}
+
+/// What a create writes, minus timestamps and status. Gathered so `account_id` and `thread_id`
+/// cannot be swapped at a call site — both are `&str` and either permutation would compile.
+#[derive(Debug, Clone)]
+pub struct NewPendingUserMessage<'a> {
+    pub id: &'a str,
+    pub thread_id: &'a str,
+    pub account_id: &'a str,
+    pub content: &'a str,
+    pub reply_to: Option<&'a Value>,
+    pub recipe_id: Option<&'a str>,
+    pub recipe_values: Option<&'a Value>,
+    pub skill_id: Option<&'a str>,
+    pub client_message_id: Option<&'a str>,
+}
+
+/// Fields an edit may change. `None` keeps the stored value; `Some(None)` clears an optional.
+#[derive(Debug, Clone)]
+pub struct PendingUserMessagePatch<'a> {
+    pub content: Option<&'a str>,
+    pub reply_to: Option<Option<&'a Value>>,
+    pub recipe_id: Option<Option<&'a str>>,
+    pub recipe_values: Option<Option<&'a Value>>,
+    pub skill_id: Option<Option<&'a str>>,
+}
+
+/// Create against a client message id: return the live row, or refuse to resurrect a drained one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnqueueResult {
+    Created(PendingUserMessageRow),
+    Existing(PendingUserMessageRow),
+    AlreadyConsumed(PendingUserMessageRow),
+}
+
+/// Take a pending row for a turn. `AlreadyThisRun` is a retried `POST /ag-ui` with the same
+/// run id: the first request already consumed it, and starting the turn again is the existing
+/// AG-UI retry, not a second fire of the queue.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrainResult {
+    Drained(PendingUserMessageRow),
+    AlreadyThisRun(PendingUserMessageRow),
+    AlreadyConsumed(PendingUserMessageRow),
+    Missing,
+}
+
+fn drain_of(row: PendingUserMessageRow, run_id: &str) -> DrainResult {
+    if row.status == "pending" {
+        // The UPDATE did not take it; a concurrent writer did. Re-read as consumed.
+        return DrainResult::AlreadyConsumed(row);
+    }
+    if row.drained_run_id.as_deref() == Some(run_id) {
+        DrainResult::AlreadyThisRun(row)
+    } else {
+        DrainResult::AlreadyConsumed(row)
+    }
+}
+
+impl PgStore {
+    /// Whether this account has ever owned a run on this thread — including hidden ones.
+    ///
+    /// Hidden is still ownership: a person who deleted every turn still owns the conversation,
+    /// and must still be able to cancel a follow-up they queued before they hid it. A thread
+    /// they have never run is "no such thread", the same answer `GET /ag-ui/threads/{id}` gives.
+    pub async fn account_owns_thread(
+        &self,
+        thread_id: &str,
+        account: &AccountId,
+    ) -> StoreResult<bool> {
+        let found: Option<i32> = sqlx::query_scalar(
+            "select 1 from run_view where thread_id = $1 and account_id = $2 limit 1",
+        )
+        .bind(thread_id)
+        .bind(account.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(found.is_some())
+    }
+
+    /// Live follow-ups for this account on this thread, oldest first — queue order.
+    pub async fn pending_user_messages(
+        &self,
+        thread_id: &str,
+        account: &AccountId,
+    ) -> StoreResult<Vec<PendingUserMessageRow>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where thread_id = $1 and account_id = $2 and status = 'pending'
+              order by created_at_ms, id"
+        )))
+        .bind(thread_id)
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(pending_row).collect()
+    }
+
+    /// One row this account owns, whatever its status. `None` for another account's id.
+    pub async fn pending_user_message(
+        &self,
+        id: &str,
+        account: &AccountId,
+    ) -> StoreResult<Option<PendingUserMessageRow>> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where id = $1 and account_id = $2"
+        )))
+        .bind(id)
+        .bind(account.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        row.as_ref().map(pending_row).transpose()
+    }
+
+    /// Insert, or return the row the client message id already names.
+    ///
+    /// THE UNIQUE INDEX IS THE IDEMPOTENCY. Two replicas posting the same bubble both insert;
+    /// one lands and the other reads it. A drained row is not updated: resurrecting it would
+    /// be a second fire of a send that already became a run.
+    pub async fn enqueue_pending_user_message(
+        &self,
+        new: NewPendingUserMessage<'_>,
+        at_ms: i64,
+    ) -> StoreResult<EnqueueResult> {
+        let inserted = sqlx::query(
+            "insert into pending_user_message (
+                id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
+                skill_id, client_message_id, status, created_at_ms, updated_at_ms
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $10)
+             on conflict (account_id, thread_id, client_message_id)
+                where client_message_id is not null
+             do nothing
+             returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
+                       skill_id, client_message_id, status, created_at_ms, updated_at_ms,
+                       drained_at_ms, drained_run_id",
+        )
+        .bind(new.id)
+        .bind(new.thread_id)
+        .bind(new.account_id)
+        .bind(new.content)
+        .bind(new.reply_to.cloned())
+        .bind(new.recipe_id)
+        .bind(new.recipe_values.cloned())
+        .bind(new.skill_id)
+        .bind(new.client_message_id)
+        .bind(at_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        if let Some(row) = inserted.as_ref() {
+            return Ok(EnqueueResult::Created(pending_row(row)?));
+        }
+        let Some(client_message_id) = new.client_message_id else {
+            // No client id, so the partial unique index did not apply: this is a primary-key
+            // collision on an id we minted, which is a lost race, not an idempotent retry.
+            return Err(crate::StoreError::Conflict);
+        };
+        let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where account_id = $1 and thread_id = $2 and client_message_id = $3"
+        )))
+        .bind(new.account_id)
+        .bind(new.thread_id)
+        .bind(client_message_id)
+        .fetch_optional(self.pool())
+        .await?;
+        match existing.as_ref().map(pending_row).transpose()? {
+            Some(row) if row.status == "pending" => Ok(EnqueueResult::Existing(row)),
+            Some(row) => Ok(EnqueueResult::AlreadyConsumed(row)),
+            None => {
+                // Conflict then gone: the winner cancelled between our insert and this read.
+                // Retry once as a fresh insert of a new id would be a different bubble; tell
+                // the caller to POST again by surfacing conflict.
+                Err(crate::StoreError::Conflict)
+            }
+        }
+    }
+
+    /// Edit a live follow-up. `None` when it is not this account's pending row — drained,
+    /// cancelled, or somebody else's, which must all read as no such message.
+    pub async fn update_pending_user_message(
+        &self,
+        id: &str,
+        account: &AccountId,
+        thread_id: &str,
+        patch: PendingUserMessagePatch<'_>,
+        at_ms: i64,
+    ) -> StoreResult<Option<PendingUserMessageRow>> {
+        let current = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where id = $1 and account_id = $2 and thread_id = $3
+              and status = 'pending'"
+        )))
+        .bind(id)
+        .bind(account.as_str())
+        .bind(thread_id)
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(current) = current.as_ref().map(pending_row).transpose()? else {
+            return Ok(None);
+        };
+        let content = patch.content.unwrap_or(&current.content);
+        let reply_to = match patch.reply_to {
+            Some(value) => value.cloned(),
+            None => current.reply_to.clone(),
+        };
+        let recipe_id = match patch.recipe_id {
+            Some(value) => value.map(str::to_string),
+            None => current.recipe_id.clone(),
+        };
+        let recipe_values = match patch.recipe_values {
+            Some(value) => value.cloned(),
+            None => current.recipe_values.clone(),
+        };
+        let skill_id = match patch.skill_id {
+            Some(value) => value.map(str::to_string),
+            None => current.skill_id.clone(),
+        };
+        let updated = sqlx::query(
+            "update pending_user_message
+                set content = $4, reply_to = $5, recipe_id = $6, recipe_values = $7,
+                    skill_id = $8, updated_at_ms = $9
+              where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'
+              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
+                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
+                        drained_at_ms, drained_run_id",
+        )
+        .bind(id)
+        .bind(account.as_str())
+        .bind(thread_id)
+        .bind(content)
+        .bind(reply_to)
+        .bind(recipe_id)
+        .bind(recipe_values)
+        .bind(skill_id)
+        .bind(at_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        updated.as_ref().map(pending_row).transpose()
+    }
+
+    /// Cancel. `true` when a pending row was deleted. Drained and missing both return `false`,
+    /// which the HTTP layer maps to the same 200 + `op: canceled` — cancel is idempotent.
+    pub async fn delete_pending_user_message(
+        &self,
+        id: &str,
+        account: &AccountId,
+        thread_id: &str,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "delete from pending_user_message
+              where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'",
+        )
+        .bind(id)
+        .bind(account.as_str())
+        .bind(thread_id)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Consume one follow-up as this turn. The UPDATE is the race: two `POST /ag-ui` with the
+    /// same pending id cannot both see `pending`.
+    pub async fn drain_pending_user_message(
+        &self,
+        id: &str,
+        account: &AccountId,
+        thread_id: &str,
+        run_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<DrainResult> {
+        let taken = sqlx::query(
+            "update pending_user_message
+                set status = 'drained', updated_at_ms = $5, drained_at_ms = $5,
+                    drained_run_id = $4
+              where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'
+              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
+                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
+                        drained_at_ms, drained_run_id",
+        )
+        .bind(id)
+        .bind(account.as_str())
+        .bind(thread_id)
+        .bind(run_id)
+        .bind(at_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        if let Some(row) = taken.as_ref() {
+            return Ok(DrainResult::Drained(pending_row(row)?));
+        }
+        match self.pending_user_message(id, account).await? {
+            Some(row) if row.thread_id == thread_id => Ok(drain_of(row, run_id)),
+            Some(_) | None => Ok(DrainResult::Missing),
+        }
+    }
+
+    /// Consume by the client's bubble id, for a `POST /ag-ui` that did not name `pendingId`.
+    /// `Missing` means this turn is not a queued send — ordinary AG-UI, leave it alone.
+    pub async fn drain_pending_user_message_by_client_id(
+        &self,
+        client_message_id: &str,
+        account: &AccountId,
+        thread_id: &str,
+        run_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<DrainResult> {
+        let taken = sqlx::query(
+            "update pending_user_message
+                set status = 'drained', updated_at_ms = $5, drained_at_ms = $5,
+                    drained_run_id = $4
+              where account_id = $1 and thread_id = $2 and client_message_id = $3
+                and status = 'pending'
+              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
+                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
+                        drained_at_ms, drained_run_id",
+        )
+        .bind(account.as_str())
+        .bind(thread_id)
+        .bind(client_message_id)
+        .bind(run_id)
+        .bind(at_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        if let Some(row) = taken.as_ref() {
+            return Ok(DrainResult::Drained(pending_row(row)?));
+        }
+        let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where account_id = $1 and thread_id = $2 and client_message_id = $3"
+        )))
+        .bind(account.as_str())
+        .bind(thread_id)
+        .bind(client_message_id)
+        .fetch_optional(self.pool())
+        .await?;
+        match existing.as_ref().map(pending_row).transpose()? {
+            Some(row) => Ok(drain_of(row, run_id)),
+            None => Ok(DrainResult::Missing),
+        }
+    }
+}

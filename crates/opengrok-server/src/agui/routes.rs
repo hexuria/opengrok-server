@@ -857,7 +857,10 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/computer/reset",
             post(computer_reset),
         )
-        .with_state(state)
+        .with_state(state.clone())
+        // Pending user messages: NativeChat's follow-up queue. Nested under the thread they
+        // belong to, because `GET /ag-ui/threads/{id}` is already how other clients hydrate.
+        .merge(super::pending::router(state))
 }
 
 /// `GET /models` — the routes this deployment's gateway advertises.
@@ -2551,6 +2554,16 @@ pub async fn run(
         system,
     };
 
+    // Consume the queued send this turn is firing, before the harness starts, so two machines
+    // cannot both POST /ag-ui for the same pending id. After this the only early return is the
+    // SSE itself — a 403 above must not have taken the row. Anonymous turns have no queue.
+    if let Some(account) = &account_id
+        && let Err(refusal) =
+            crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
+    {
+        return refusal;
+    }
+
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
     // an abandoned run. Released when the spawned turn drops — including when the process dies,
     // which is exactly the case the lease exists for.
@@ -3026,6 +3039,15 @@ pub async fn replay_thread(
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
         }
     };
+    let pending =
+        match crate::agui::pending::thread_pending_json(&state.auth.store, &thread_id, &account_id)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+            }
+        };
     if newest_first.is_empty() && hidden.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
@@ -3094,8 +3116,23 @@ pub async fn replay_thread(
         });
     }
 
-    Json(serde_json::json!({ "threadId": thread_id, "runs": runs, "hiddenRunIds": hidden }))
-        .into_response()
+    let mut body = serde_json::json!({
+        "threadId": thread_id,
+        "runs": runs,
+        "hiddenRunIds": hidden,
+    });
+    // Sibling of `runs`, never mixed into a run's frames: a queued send is not a turn yet, and
+    // dropping it into `events` would make NativeChat paint a bubble as if the coworker had
+    // already seen it. `pendingEvents` are CUSTOM `pending-user-message` snapshots for clients
+    // that already walk CUSTOM; `pendingUserMessages` is the array to replace a local queue with.
+    if let Some(object) = body.as_object_mut()
+        && let Some(pending) = pending.as_object()
+    {
+        for (key, value) in pending {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    Json(body).into_response()
 }
 
 /// Hide a turn from every client of the account that owns it.

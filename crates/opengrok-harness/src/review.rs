@@ -12,12 +12,35 @@
 //! card. Never `Allow`, never an error.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use opengrok_tools::{ReviewAsk, ReviewJudge, ReviewVerdict};
 
 use crate::model::{ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelRequest};
+use crate::timing::elapsed_ms;
+
+tokio::task_local! {
+    static AUTO_REVIEW_MS: Arc<AtomicU64>;
+}
+
+/// Run `fut` with a slot the judge can add to. Same task as `ToolRunner::run_all`
+/// (executor does not spawn), so a concurrent turn on another task cannot mix in.
+pub(crate) async fn time_auto_review<F, T>(fut: F) -> (T, u64)
+where
+    F: std::future::Future<Output = T>,
+{
+    let slot = Arc::new(AtomicU64::new(0));
+    let out = AUTO_REVIEW_MS.scope(Arc::clone(&slot), fut).await;
+    (out, slot.load(Ordering::Relaxed))
+}
+
+fn add_judge_ms(ms: u64) {
+    let _ = AUTO_REVIEW_MS.try_with(|slot| {
+        slot.fetch_add(ms, Ordering::Relaxed);
+    });
+}
 
 /// The first line of the judge's system prompt. The mock door keys off it to answer with a canned
 /// verdict, so a test — or a peer driving the real app with no provider — can reach every rung.
@@ -172,10 +195,13 @@ impl ReviewJudge for ModelJudge {
             // plain completion that cannot call anything.
             tools: Vec::new(),
         };
-        match tokio::time::timeout(self.timeout, self.collect_text(request)).await {
+        let started = Instant::now();
+        let verdict = match tokio::time::timeout(self.timeout, self.collect_text(request)).await {
             Ok(Some(text)) => parse_verdict(&text),
             Ok(None) | Err(_) => ReviewVerdict::Unavailable,
-        }
+        };
+        add_judge_ms(elapsed_ms(started));
+        verdict
     }
 }
 

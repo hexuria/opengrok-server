@@ -1097,6 +1097,40 @@ do $do$ begin
     end if;
 end $do$;
 
+-- A NativeChat follow-up that has not yet become a run. Mutable on purpose: the product is
+-- cancel and edit *before* drain, and an append-only stream would make those two writes a
+-- tombstone dance for a row that should simply go away. Identity is (thread, account) — a
+-- shared coworker does not share this queue (CLAUDE.md #5, one transcript per person).
+--
+-- `status` is a word, not an enum type, for the same reason as `skill_version.kind`: adding a
+-- third value must not take an ACCESS EXCLUSIVE lock on every boot. The only writers are the
+-- functions in `pending.rs`; they spell `pending` and `drained`.
+create table if not exists pending_user_message (
+    id                 text        primary key,
+    thread_id          text        not null,
+    account_id         text        not null,
+    content            text        not null,
+    reply_to           jsonb,
+    recipe_id          text,
+    recipe_values      jsonb,
+    skill_id           text,
+    client_message_id  text,
+    status             text        not null,
+    created_at_ms      bigint      not null,
+    updated_at_ms      bigint      not null,
+    drained_at_ms      bigint,
+    drained_run_id     text
+);
+create index if not exists pending_user_message_thread_idx
+    on pending_user_message (account_id, thread_id, created_at_ms)
+    where status = 'pending';
+-- Idempotent enqueue: the client's bubble id is the natural key. Drained rows KEEP the key so
+-- a second POST cannot re-queue a send that already became a run. Cancelled rows are deleted,
+-- so the same bubble can be queued again after the person takes it back.
+create unique index if not exists pending_user_message_client_idx
+    on pending_user_message (account_id, thread_id, client_message_id)
+    where client_message_id is not null;
+
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (

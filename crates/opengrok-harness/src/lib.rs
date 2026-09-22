@@ -11,11 +11,13 @@
 
 pub mod cloaked_door;
 pub mod gateway;
+mod intent;
 pub mod journal;
 pub mod mock;
 pub mod model;
 pub mod projection;
 pub mod review;
+mod timing;
 pub mod tools;
 
 pub use gateway::GatewayDoor;
@@ -27,6 +29,7 @@ pub use model::{
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
+pub use timing::RUN_TIMING_NAME;
 pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
 use futures::StreamExt;
@@ -72,6 +75,11 @@ pub const SAME_SCREEN_LIMIT: usize = 4;
 /// "I'll look that up" plus a real answer, not enough for a repeated plan of unused tools.
 /// The same lesson is a sentence in `computer_system_prompt`; this is the stop that
 /// prompt text alone did not provide.
+///
+/// Short intent *before* a tool (`I'll probe…`) is a different bug: NativeChat paints
+/// every `TEXT_MESSAGE` as chat. Work-tool rounds drop that prose; a text-only round
+/// still drops it when it is intent/status/diary, and only flushes leftover facts.
+/// This bound still fires on the withheld bytes — a flood with no call is still a flood.
 pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
 
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
@@ -106,6 +114,153 @@ fn work_tools_offered(schemas: &[serde_json::Value]) -> bool {
             .as_str()
             .is_some_and(|name| !is_client_render_tool(name))
     })
+}
+
+fn shell_command(arguments: &serde_json::Value) -> &str {
+    arguments
+        .get("command")
+        .or_else(|| arguments.get("cmd"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+fn looks_like_write(command: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "rm ",
+        "rm\t",
+        "mkdir",
+        " mv ",
+        "\tmv ",
+        " cp ",
+        "\tcp ",
+        ">",
+        "tee ",
+        "chmod",
+        "chown",
+        "shutdown",
+        "kill ",
+        "profile.save",
+        "profile.ensure",
+        "profile.set",
+        "nav.go",
+        " unlink",
+        "truncate",
+        "bir-headless serve",
+    ];
+    MARKERS.iter().any(|marker| command.contains(marker))
+}
+
+fn looks_like_listing_or_show(command: &str) -> bool {
+    let first = command.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "ls" | "cat"
+            | "head"
+            | "tail"
+            | "pwd"
+            | "whoami"
+            | "date"
+            | "file"
+            | "stat"
+            | "echo"
+            | "printf"
+            | "gpui-agent"
+            | "type"
+    ) || command.contains("profile.list")
+        || command.contains("profile.search")
+        || command.contains("dues.list")
+        || command.contains("forms_set.get")
+        || command.contains(".list")
+        || command.contains(" invoke ")
+}
+
+/// `find ~` and `find /Users/<name>` exited 0 after about 90s on the demo machine.
+/// That success cleared the work-fail streak and the turn kept going. A deeper
+/// path is one directory and still runs.
+fn is_broad_filesystem_walk(command: &str) -> bool {
+    command
+        .replace("&&", ";")
+        .replace("||", ";")
+        .split(['\n', ';', '|'])
+        .any(segment_is_broad_find)
+}
+
+fn segment_is_broad_find(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    let mut index = 0;
+    while index < tokens.len()
+        && (tokens[index].contains('=')
+            || tokens[index] == "export"
+            || tokens[index] == "command"
+            || tokens[index] == "sudo")
+    {
+        index += 1;
+    }
+    if tokens.get(index) != Some(&"find") {
+        return false;
+    }
+    index += 1;
+    while index < tokens.len() {
+        let token = tokens[index].trim_matches(|ch| ch == '"' || ch == '\'');
+        if token.starts_with('-') || token == "(" || token == "!" {
+            break;
+        }
+        if is_broad_find_root(token) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_broad_find_root(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    if path == "~"
+        || path.starts_with("~/")
+        || path == "$HOME"
+        || path.starts_with("$HOME/")
+        || path == "${HOME}"
+        || path.starts_with("${HOME}/")
+    {
+        return true;
+    }
+    if path == "/Users" || path == "/Volumes" {
+        return true;
+    }
+    if let Some(rest) = path.strip_prefix("/Users/") {
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    if let Some(rest) = path.strip_prefix("/Volumes/") {
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    false
+}
+
+fn is_broad_walk_call(call: &opengrok_tools::ToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "shell" | opengrok_tools::USER_MACHINE_SHELL
+    ) && is_broad_filesystem_walk(shell_command(&call.arguments))
+}
+
+fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolResult {
+    opengrok_tools::ToolResult::refused(
+        &call.id,
+        "do not search the disk for AGENT.md or this skill. The invoke names already in the skill are the catalog.",
+    )
+}
+
+/// First work tool is a read-only shell/invoke for listing or showing — the
+/// NativeChat BIR `profile.list` / `dues.list` / `gpui-agent hello` case.
+fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "shell" | opengrok_tools::USER_MACHINE_SHELL
+    ) && {
+        let command = shell_command(&call.arguments).to_ascii_lowercase();
+        let trimmed = command.trim();
+        !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
+    }
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -395,13 +550,14 @@ pub async fn resume_conversation(
     all
 }
 
-/// End a run because a person stopped it, from wherever in the round the loop noticed.
+/// End a run because a person stopped it, from wherever in the loop noticed.
 ///
 /// ONE JOURNAL WRITE, CARRYING BOTH. `round_events` is whatever the turn had produced in the round
 /// it was in the middle of — the model's words, the tool call it was about to make — and it has not
 /// been recorded yet, because the loop records a whole round at a time. Writing it together with
 /// the ending is what makes the transcript end at the moment the button was pressed instead of one
 /// step before it.
+#[allow(clippy::too_many_arguments)]
 async fn stop_here(
     journal: &dyn RunJournal,
     projection: &mut Projection,
@@ -409,6 +565,8 @@ async fn stop_here(
     run_id: &str,
     mut round_events: Vec<Event>,
     last_agent_shot: &mut Option<Event>,
+    timing: &timing::TurnTiming,
+    verbose_timing: bool,
 ) -> Vec<Event> {
     pin_last_agent_shot(
         sink,
@@ -418,10 +576,94 @@ async fn stop_here(
     )
     .await;
     let ending = projection.stopped();
+    finish_round(
+        journal,
+        sink,
+        run_id,
+        projection,
+        timing,
+        verbose_timing,
+        round_events,
+        ending,
+    )
+    .await
+}
+
+async fn flush_withheld_text(
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    withheld: &mut String,
+    round_events: &mut Vec<Event>,
+    last_failure: Option<&str>,
+) {
+    let Some(visible) = intent::visible_chat(&std::mem::take(withheld), last_failure) else {
+        return;
+    };
+    let produced = projection.push(ModelDelta::Text(visible));
+    emit_live(sink, &produced).await;
+    round_events.extend(produced);
+}
+
+async fn emit_visible_text(
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    round_events: &mut Vec<Event>,
+    text: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let produced = projection.push(ModelDelta::Text(text));
+    emit_live(sink, &produced).await;
+    round_events.extend(produced);
+}
+
+fn round_has_assistant_text(events: &[Event]) -> bool {
+    events
+        .iter()
+        .any(|event| event.event_type == opengrok_wire::agui::EventType::TextMessageContent)
+}
+
+/// Attach `run-timing`, show it live, journal the round+ending as one or two writes
+/// depending on what the caller already recorded. Always one CUSTOM then the closer.
+#[allow(clippy::too_many_arguments)]
+async fn finish_round(
+    journal: &dyn RunJournal,
+    sink: Option<&dyn EventSink>,
+    run_id: &str,
+    projection: &Projection,
+    timing: &timing::TurnTiming,
+    verbose_timing: bool,
+    mut round_events: Vec<Event>,
+    mut ending: Vec<Event>,
+) -> Vec<Event> {
+    if !ending.is_empty() {
+        timing::splice_before_run_end(&mut ending, timing.event(projection));
+    }
     emit_live(sink, &ending).await;
     round_events.extend(ending);
     let _ = record_round(journal, run_id, &round_events).await;
+    timing.log(run_id, verbose_timing);
     round_events
+}
+
+/// When the round is already journaled, only the ending (with timing) is a new write.
+async fn finish_ending(
+    journal: &dyn RunJournal,
+    sink: Option<&dyn EventSink>,
+    run_id: &str,
+    projection: &Projection,
+    timing: &timing::TurnTiming,
+    verbose_timing: bool,
+    mut ending: Vec<Event>,
+) -> Vec<Event> {
+    if !ending.is_empty() {
+        timing::splice_before_run_end(&mut ending, timing.event(projection));
+    }
+    emit_live(sink, &ending).await;
+    let _ = record_round(journal, run_id, &ending).await;
+    timing.log(run_id, verbose_timing);
+    ending
 }
 
 /// Forward a batch to a live watcher. Empty batches are skipped so a no-op `finish` after
@@ -546,6 +788,12 @@ async fn converse_raw(
     // Whether the model has produced anything at all this run — a word, a tool call, a thought.
     // A run that ends having produced nothing is a failure with a sentence, not a silent finish.
     let mut any_delta = false;
+    let mut last_failure: Option<String> = None;
+    let mut work_fail_streak: u32 = 0;
+    let mut had_successful_listing = false;
+    let mut skipped_redundant_listing = false;
+    let mut timing = timing::TurnTiming::new();
+    let verbose_timing = timing::verbose_from_env();
 
     for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
         let mut round_events = Vec::new();
@@ -561,6 +809,8 @@ async fn converse_raw(
                     run_id,
                     round_events,
                     &mut last_agent_shot,
+                    &timing,
+                    verbose_timing,
                 )
                 .await,
             );
@@ -568,9 +818,11 @@ async fn converse_raw(
         }
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
+        let model_started = std::time::Instant::now();
         let stream = match door.stream(request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
+                timing.record_model(timing::elapsed_ms(model_started));
                 pin_last_agent_shot(
                     sink,
                     &mut last_agent_shot,
@@ -579,43 +831,74 @@ async fn converse_raw(
                 )
                 .await;
                 let failed = projection.fail(error.to_string());
-                emit_live(sink, &failed).await;
-                round_events.extend(failed);
-                None
+                all.extend(
+                    finish_round(
+                        journal,
+                        sink,
+                        run_id,
+                        &projection,
+                        &timing,
+                        verbose_timing,
+                        round_events,
+                        failed,
+                    )
+                    .await,
+                );
+                return all;
             }
         };
 
         let mut said = String::new();
+        let mut withheld = String::new();
+        let mut round_work_tool = false;
         if let Some(mut stream) = stream {
-            let mut broke = false;
             while let Some(delta) = stream.next().await {
                 match delta {
                     Ok(delta) => {
                         any_delta = true;
                         if let ModelDelta::Text(text) = &delta {
-                            said.push_str(text);
+                            // F8: discarded intent must not land on `said`. The next
+                            // hop would append it as an assistant message and re-bill
+                            // the diary. Count plan-only from the bytes; keep them off
+                            // the next request.
+                            if !tools_offered {
+                                said.push_str(text);
+                            }
                             if tools_offered && !started_a_tool {
                                 plan_only_chars =
                                     plan_only_chars.saturating_add(text.chars().count());
                             }
+                            if tools_offered {
+                                withheld.push_str(text);
+                            }
                         }
-                        if matches!(delta, ModelDelta::ToolCallStart { .. }) {
+                        if let ModelDelta::ToolCallStart { name, .. } = &delta {
                             started_a_tool = true;
+                            if !is_client_render_tool(name) {
+                                round_work_tool = true;
+                            }
                         }
-                        let produced = projection.push(delta);
-                        // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
-                        // adds a second reader that does not have to wait for the run to end.
-                        // Through `emit_live`, never `sink.emit` directly, so the live
-                        // delta path meets `scrub_event_secrets` like every other path.
-                        // Without it a model that smuggled a `values.password` into its
-                        // own tool args reached NativeChat verbatim.
-                        emit_live(sink, &produced).await;
-                        round_events.extend(produced);
+                        // Work-tool rounds withhold TEXT until ToolCallStart / finalization
+                        // so NativeChat does not paint "I'll probe…" as chat. Reasoning and
+                        // tool frames still stream. A text-only round flushes below.
+                        let withhold_text = tools_offered && matches!(delta, ModelDelta::Text(_));
+                        if !withhold_text {
+                            let produced = projection.push(delta);
+                            // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
+                            // adds a second reader that does not have to wait for the run to end.
+                            // Through `emit_live`, never `sink.emit` directly, so the live
+                            // delta path meets `scrub_event_secrets` like every other path.
+                            // Without it a model that smuggled a `values.password` into its
+                            // own tool args reached NativeChat verbatim.
+                            emit_live(sink, &produced).await;
+                            round_events.extend(produced);
+                        }
                         if tools_offered
                             && !started_a_tool
                             && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
                         {
-                            let mut ending = projection.fail(format!(
+                            timing.record_model(timing::elapsed_ms(model_started));
+                            let ending = projection.fail(format!(
                                 "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
                             ));
                             pin_last_agent_shot(
@@ -626,14 +909,34 @@ async fn converse_raw(
                             )
                             .await;
                             let _ = record_round(journal, run_id, &round_events).await;
-                            let _ = record_round(journal, run_id, &ending).await;
-                            emit_live(sink, &ending).await;
                             all.append(&mut round_events);
-                            all.append(&mut ending);
+                            all.extend(
+                                finish_ending(
+                                    journal,
+                                    sink,
+                                    run_id,
+                                    &projection,
+                                    &timing,
+                                    verbose_timing,
+                                    ending,
+                                )
+                                .await,
+                            );
                             return all;
                         }
                     }
                     Err(error) => {
+                        timing.record_model(timing::elapsed_ms(model_started));
+                        if !round_work_tool {
+                            flush_withheld_text(
+                                &mut projection,
+                                sink,
+                                &mut withheld,
+                                &mut round_events,
+                                last_failure.as_deref(),
+                            )
+                            .await;
+                        }
                         pin_last_agent_shot(
                             sink,
                             &mut last_agent_shot,
@@ -642,261 +945,503 @@ async fn converse_raw(
                         )
                         .await;
                         let failed = projection.fail(error.to_string());
-                        emit_live(sink, &failed).await;
-                        round_events.extend(failed);
-                        broke = true;
-                        break;
-                    }
-                }
-            }
-            if !broke {
-                // Tools for this round, run on the coworker's own computer.
-                let mut calls = collect_tool_calls(&round_events);
-                // One chart/form per round. Extra bar_chart calls in the same
-                // completion are what turned "generate another" into 2, then 4.
-                if let Some(ui) = calls
-                    .iter()
-                    .rev()
-                    .find(|call| is_client_render_tool(&call.name))
-                    .cloned()
-                {
-                    calls.retain(|call| !is_client_render_tool(&call.name));
-                    calls.push(ui);
-                }
-                if let (Some(runner), false) = (tools, calls.is_empty()) {
-                    // WHERE A STOP LANDS, THE SECOND AND MORE USEFUL PLACE. The model has just
-                    // asked to do something to the world — play the recipe again, type into the
-                    // search field again — and this is the last moment before it happens. Checking
-                    // only at the top of the round would let one more of them through, which is one
-                    // more than the person who pressed the button asked for.
-                    //
-                    // WHAT THIS DOES NOT DO, SAID PLAINLY: a call already in flight is not reached
-                    // from here. `run_all` is one await, a recipe playing on the box is a single
-                    // request inside it, and neither this loop nor the box's API on the pinned
-                    // revision can take it back. So a recipe that has started finishes, and the
-                    // stop takes hold before the next one.
-                    if journal.stopped(run_id).await {
                         all.extend(
-                            stop_here(
+                            finish_round(
                                 journal,
-                                &mut projection,
                                 sink,
                                 run_id,
+                                &projection,
+                                &timing,
+                                verbose_timing,
                                 round_events,
-                                &mut last_agent_shot,
+                                failed,
                             )
                             .await,
                         );
                         return all;
                     }
-                    let waking = box_wake_frame(runner, &mut projection, &calls).await;
-                    emit_live(sink, &waking).await;
-                    round_events.extend(waking);
-                    let results = runner.run_all(&calls).await;
-
-                    for result in &results {
-                        let produced = projection.push_tool_result(result);
-                        emit_live(sink, &produced).await;
-                        remember_agent_shot(&produced, &mut last_agent_shot);
-                        round_events.extend(produced);
-                        // The model needs to see what its tool said, in its own transcript.
-                        request.messages.push(tool_result_message(result));
-                    }
-
-                    let waiting: Vec<(
-                        &opengrok_tools::ToolCall,
-                        opengrok_tools::AwaitingReason,
-                        &str,
-                    )> = results
+                }
+            }
+            timing.record_model(timing::elapsed_ms(model_started));
+            if round_work_tool {
+                withheld.clear();
+            } else {
+                flush_withheld_text(
+                    &mut projection,
+                    sink,
+                    &mut withheld,
+                    &mut round_events,
+                    last_failure.as_deref(),
+                )
+                .await;
+            }
+            // Tools for this round, run on the coworker's own computer.
+            let mut calls = collect_tool_calls(&round_events);
+            // One chart/form per round. Extra bar_chart calls in the same
+            // completion are what turned "generate another" into 2, then 4.
+            if let Some(ui) = calls
+                .iter()
+                .rev()
+                .find(|call| is_client_render_tool(&call.name))
+                .cloned()
+            {
+                calls.retain(|call| !is_client_render_tool(&call.name));
+                calls.push(ui);
+            }
+            if let (Some(runner), false) = (tools, calls.is_empty()) {
+                // WHERE A STOP LANDS, THE SECOND AND MORE USEFUL PLACE. The model has just
+                // asked to do something to the world — play the recipe again, type into the
+                // search field again — and this is the last moment before it happens. Checking
+                // only at the top of the round would let one more of them through, which is one
+                // more than the person who pressed the button asked for.
+                //
+                // WHAT THIS DOES NOT DO, SAID PLAINLY: a call already in flight is not reached
+                // from here. `run_all` is one await, a recipe playing on the box is a single
+                // request inside it, and neither this loop nor the box's API on the pinned
+                // revision can take it back. So a recipe that has started finishes, and the
+                // stop takes hold before the next one.
+                if journal.stopped(run_id).await {
+                    all.extend(
+                        stop_here(
+                            journal,
+                            &mut projection,
+                            sink,
+                            run_id,
+                            round_events,
+                            &mut last_agent_shot,
+                            &timing,
+                            verbose_timing,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                let listing_only = calls.iter().any(is_readonly_listing_shell)
+                    && calls.iter().all(|call| {
+                        is_client_render_tool(&call.name) || is_readonly_listing_shell(call)
+                    });
+                if had_successful_listing && listing_only && skipped_redundant_listing {
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::End,
+                        &mut round_events,
+                    )
+                    .await;
+                    let ending = projection.finish();
+                    all.extend(
+                        finish_round(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            round_events,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                let waking = box_wake_frame(runner, &mut projection, &calls).await;
+                emit_live(sink, &waking).await;
+                round_events.extend(waking);
+                let skip_listing = had_successful_listing && listing_only;
+                let tool_started = std::time::Instant::now();
+                let ((results, per_tool), auto_review_ms) = if skip_listing {
+                    skipped_redundant_listing = true;
+                    let results: Vec<_> = calls
                         .iter()
-                        .zip(calls.iter())
-                        .filter(|(result, _)| result.awaiting_approval)
-                        .map(|(result, call)| {
-                            (
-                                call,
-                                result
-                                    .awaiting_reason
-                                    .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent),
-                                result.content.as_str(),
+                        .map(|call| {
+                            opengrok_tools::ToolResult::ok(
+                                &call.id,
+                                "A listing already succeeded this turn. Answer from that result; do not list again.",
                             )
                         })
                         .collect();
-                    if !waiting.is_empty() {
-                        // One CUSTOM per awaiting call in this completion — NativeChat paints a
-                        // Website login card per TOOL_CALL. Live SSE must not forward those
-                        // TOOL_CALLs until the matching CUSTOM has a gateway `e_*` (AgUiSink
-                        // holds them). Parking on the first leftover left stacked cards with
-                        // only a raw `call-*` id.
-                        //
-                        // Then `RUN_FINISHED`: AG-UI/NativeChat hold Waiting on that closer.
-                        // The HTTP stream used to drop after CUSTOM with no ending, which is a
-                        // forever spinner. The aggregate stays `awaiting-approval` (the journal
-                        // does not Finish a suspended run) so Continue can still resume. A new
-                        // user message interrupts instead of leaving a zombie parked run.
-                        let mut waiting_events = park_awaiting(&mut projection, &waiting);
-                        let _ = record_round(journal, run_id, &round_events).await;
-                        let _ = record_round(journal, run_id, &waiting_events).await;
-                        emit_live(sink, &waiting_events).await;
-                        all.append(&mut round_events);
-                        all.append(&mut waiting_events);
-                        return all;
-                    }
-
-                    let refused: Vec<(String, serde_json::Value)> = calls
+                    let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
+                    ((results, times), 0)
+                } else if calls.iter().any(is_broad_walk_call) {
+                    let runnable: Vec<_> = calls
                         .iter()
-                        .zip(&results)
-                        .filter(|(_, result)| !result.ok)
-                        // A person's no on their own machine was about the machine, not one
-                        // spelling of the command: a reworded retry is the same ask.
-                        .map(|(call, _)| {
-                            let arguments = if call.name == opengrok_tools::USER_MACHINE_SHELL {
-                                serde_json::Value::Null
+                        .filter(|call| !is_broad_walk_call(call))
+                        .cloned()
+                        .collect();
+                    let (ran, ran_times, review_ms) = if runnable.is_empty() {
+                        (Vec::new(), Vec::new(), 0)
+                    } else {
+                        let ((ran, times), ms) =
+                            review::time_auto_review(runner.run_all_timed(&runnable)).await;
+                        (ran, times, ms)
+                    };
+                    let mut ran = ran.into_iter();
+                    let mut ran_times = ran_times.into_iter();
+                    let results = calls
+                        .iter()
+                        .map(|call| {
+                            if is_broad_walk_call(call) {
+                                refused_broad_walk(call)
                             } else {
-                                call.arguments.clone()
-                            };
-                            (call.name.clone(), arguments)
+                                ran.next().unwrap_or_else(|| {
+                                    opengrok_tools::ToolResult::refused(
+                                        &call.id,
+                                        "the tool did not run",
+                                    )
+                                })
+                            }
                         })
                         .collect();
-                    let every_call_refused = !results.is_empty() && refused.len() == results.len();
-                    if every_call_refused && last_refused.as_ref() == Some(&refused) {
-                        let names: Vec<&str> =
-                            refused.iter().map(|(name, _)| name.as_str()).collect();
-                        let why = results
-                            .first()
-                            .map(|result| result.content.as_str())
-                            .unwrap_or("refused");
-                        let mut ending = projection.fail(format!(
-                            "`{}` was refused the same way twice ({why}); stopping instead of retrying",
-                            names.join("`, `")
-                        ));
-                        pin_last_agent_shot(
-                            sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::Failure,
-                            &mut round_events,
-                        )
-                        .await;
-                        let _ = record_round(journal, run_id, &round_events).await;
-                        let _ = record_round(journal, run_id, &ending).await;
-                        emit_live(sink, &ending).await;
-                        all.append(&mut round_events);
-                        all.append(&mut ending);
-                        return all;
-                    }
-                    last_refused = every_call_refused.then_some(refused);
-
-                    // Screens: the same picture four times running means waiting, not working.
-                    for result in results.iter().filter(|result| result.ok) {
-                        if let Some(image) = &result.image {
-                            let hash = screen_hash(&image.base64);
-                            if last_screen == Some(hash) {
-                                same_screen += 1;
+                    let times = calls
+                        .iter()
+                        .map(|call| {
+                            if is_broad_walk_call(call) {
+                                (call.name.clone(), 0)
                             } else {
-                                last_screen = Some(hash);
-                                same_screen = 0;
+                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
                             }
+                        })
+                        .collect();
+                    ((results, times), review_ms)
+                } else {
+                    review::time_auto_review(runner.run_all_timed(&calls)).await
+                };
+                timing.record_tools(
+                    per_tool
+                        .into_iter()
+                        .map(|(name, ms)| timing::ToolPhase { name, ms })
+                        .collect(),
+                    timing::elapsed_ms(tool_started),
+                    auto_review_ms,
+                );
+
+                for (result, call) in results.iter().zip(calls.iter()) {
+                    let produced = projection.push_tool_result(result);
+                    emit_live(sink, &produced).await;
+                    remember_agent_shot(&produced, &mut last_agent_shot);
+                    round_events.extend(produced);
+                    let mut message = tool_result_message(result);
+                    let shell_failed = intent::counts_as_work_failure(result.ok, &result.content);
+                    if result.ok && !shell_failed && is_readonly_listing_shell(call) {
+                        had_successful_listing = true;
+                        message.content.push_str("\n\n");
+                        message.content.push_str(intent::READONLY_SHELL_NUDGE);
+                    } else if shell_failed && !result.awaiting_approval {
+                        last_failure = Some(intent::short_failure_fact(&result.content));
+                        if work_fail_streak == 0
+                            && !intent::is_unrecoverable_command_miss(&result.content)
+                            && !is_broad_walk_call(call)
+                        {
+                            message.content.push_str("\n\n");
+                            message.content.push_str(intent::FAILED_TOOL_NUDGE);
                         }
                     }
-                    if same_screen + 1 >= SAME_SCREEN_LIMIT {
-                        let mut ending = projection.fail(format!(
+                    request.messages.push(message);
+                }
+                let work_failed = results.iter().zip(calls.iter()).any(|(result, call)| {
+                    !is_client_render_tool(&call.name)
+                        && !result.awaiting_approval
+                        && intent::counts_as_work_failure(result.ok, &result.content)
+                });
+                let work_ok = results.iter().zip(calls.iter()).any(|(result, call)| {
+                    !is_client_render_tool(&call.name)
+                        && result.ok
+                        && !intent::counts_as_work_failure(true, &result.content)
+                });
+                if work_failed {
+                    // A missing binary, or a find of the home directory, is not fixed by
+                    // rewording the same command. Stop this round.
+                    if results.iter().zip(calls.iter()).any(|(result, call)| {
+                        intent::is_unrecoverable_command_miss(&result.content)
+                            || is_broad_walk_call(call)
+                    }) {
+                        work_fail_streak = intent::MAX_FAILED_WORK_ROUNDS;
+                    } else {
+                        work_fail_streak = work_fail_streak.saturating_add(1);
+                    }
+                } else if work_ok {
+                    work_fail_streak = 0;
+                    last_failure = None;
+                }
+
+                let waiting: Vec<(
+                    &opengrok_tools::ToolCall,
+                    opengrok_tools::AwaitingReason,
+                    &str,
+                )> = results
+                    .iter()
+                    .zip(calls.iter())
+                    .filter(|(result, _)| result.awaiting_approval)
+                    .map(|(result, call)| {
+                        (
+                            call,
+                            result
+                                .awaiting_reason
+                                .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent),
+                            result.content.as_str(),
+                        )
+                    })
+                    .collect();
+                if !waiting.is_empty() {
+                    // One CUSTOM per awaiting call in this completion — NativeChat paints a
+                    // Website login card per TOOL_CALL. Live SSE must not forward those
+                    // TOOL_CALLs until the matching CUSTOM has a gateway `e_*` (AgUiSink
+                    // holds them). Parking on the first leftover left stacked cards with
+                    // only a raw `call-*` id.
+                    //
+                    // Then `RUN_FINISHED`: AG-UI/NativeChat hold Waiting on that closer.
+                    // The HTTP stream used to drop after CUSTOM with no ending, which is a
+                    // forever spinner. The aggregate stays `awaiting-approval` (the journal
+                    // does not Finish a suspended run) so Continue can still resume. A new
+                    // user message interrupts instead of leaving a zombie parked run.
+                    let waiting_events = park_awaiting(&mut projection, &waiting);
+                    let _ = record_round(journal, run_id, &round_events).await;
+                    all.append(&mut round_events);
+                    all.extend(
+                        finish_ending(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            waiting_events,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+
+                let refused: Vec<(String, serde_json::Value)> = calls
+                    .iter()
+                    .zip(&results)
+                    .filter(|(_, result)| !result.ok)
+                    // A person's no on their own machine was about the machine, not one
+                    // spelling of the command: a reworded retry is the same ask.
+                    .map(|(call, _)| {
+                        let arguments = if call.name == opengrok_tools::USER_MACHINE_SHELL {
+                            serde_json::Value::Null
+                        } else {
+                            call.arguments.clone()
+                        };
+                        (call.name.clone(), arguments)
+                    })
+                    .collect();
+                let every_call_refused = !results.is_empty() && refused.len() == results.len();
+                if every_call_refused && last_refused.as_ref() == Some(&refused) {
+                    let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
+                    let why = results
+                        .first()
+                        .map(|result| result.content.as_str())
+                        .unwrap_or("refused");
+                    let ending = projection.fail(format!(
+                        "`{}` was refused the same way twice ({why}); stopping instead of retrying",
+                        names.join("`, `")
+                    ));
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::Failure,
+                        &mut round_events,
+                    )
+                    .await;
+                    let _ = record_round(journal, run_id, &round_events).await;
+                    all.append(&mut round_events);
+                    all.extend(
+                        finish_ending(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                last_refused = every_call_refused.then_some(refused);
+
+                // Screens: the same picture four times running means waiting, not working.
+                for result in results.iter().filter(|result| result.ok) {
+                    if let Some(image) = &result.image {
+                        let hash = screen_hash(&image.base64);
+                        if last_screen == Some(hash) {
+                            same_screen += 1;
+                        } else {
+                            last_screen = Some(hash);
+                            same_screen = 0;
+                        }
+                    }
+                }
+                if same_screen + 1 >= SAME_SCREEN_LIMIT {
+                    let ending = projection.fail(format!(
                             "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
                         ));
-                        pin_last_agent_shot(
-                            sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::Failure,
-                            &mut round_events,
-                        )
-                        .await;
-                        let _ = record_round(journal, run_id, &round_events).await;
-                        let _ = record_round(journal, run_id, &ending).await;
-                        emit_live(sink, &ending).await;
-                        all.append(&mut round_events);
-                        all.append(&mut ending);
-                        return all;
-                    }
-
-                    if !said.is_empty() {
-                        request.messages.push(ChatMessage {
-                            images: Vec::new(),
-                            role: "assistant".to_string(),
-                            content: said,
-                        });
-                    }
-
-                    // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
-                    // dependency chain, so a crash after this point can be picked up.
-                    if let Err(error) = record_round(journal, run_id, &round_events).await {
-                        let failed =
-                            projection.fail(format!("the run could not be recorded: {error}"));
-                        emit_live(sink, &failed).await;
-                        round_events.extend(failed);
-                        all.append(&mut round_events);
-                        return all;
-                    }
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::Failure,
+                        &mut round_events,
+                    )
+                    .await;
+                    let _ = record_round(journal, run_id, &round_events).await;
                     all.append(&mut round_events);
-
-                    // bar_chart/form already painted from TOOL_CALL frames. Another model
-                    // round in this HTTP request is what doubled charts on "generate another".
-                    if calls.iter().any(|call| is_client_render_tool(&call.name)) {
-                        let mut pin_events = Vec::new();
-                        pin_last_agent_shot(
+                    all.extend(
+                        finish_ending(
+                            journal,
                             sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::End,
-                            &mut pin_events,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            ending,
                         )
-                        .await;
-                        let _ = record_round(journal, run_id, &pin_events).await;
-                        all.append(&mut pin_events);
-                        let mut ending = projection.finish();
-                        emit_live(sink, &ending).await;
-                        let _ = record_round(journal, run_id, &ending).await;
-                        all.append(&mut ending);
-                        return all;
-                    }
-
-                    // Which budget this round drew on: every call a successful screen action, or anything
-                    // else. The screen budget is wider because looking is the work there.
-                    let on_screen = calls
-                        .iter()
-                        .zip(&results)
-                        .all(|(call, result)| call.name == "computer" && result.ok);
-                    if on_screen {
-                        computer_rounds += 1;
-                    } else {
-                        spoken_rounds += 1;
-                    }
-                    let over = if spoken_rounds >= MAX_ROUNDS {
-                        Some(format!(
-                            "this run reached its limit of {MAX_ROUNDS} model calls"
-                        ))
-                    } else if computer_rounds >= MAX_COMPUTER_ROUNDS {
-                        Some(format!(
-                            "this run reached its limit of {MAX_COMPUTER_ROUNDS} looks and actions on its computer"
-                        ))
-                    } else {
-                        None
-                    };
-                    if let Some(why) = over {
-                        let mut pin_events = Vec::new();
-                        pin_last_agent_shot(
-                            sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::Failure,
-                            &mut pin_events,
-                        )
-                        .await;
-                        let _ = record_round(journal, run_id, &pin_events).await;
-                        all.append(&mut pin_events);
-                        let mut ending = projection.fail(why);
-                        let _ = record_round(journal, run_id, &ending).await;
-                        emit_live(sink, &ending).await;
-                        all.append(&mut ending);
-                        return all;
-                    }
-                    continue;
+                        .await,
+                    );
+                    return all;
                 }
+
+                // Work-tool preamble was withheld from chat AND from `said` (F8).
+                // Replaying it as an assistant message is how rounds got slower.
+                if !said.is_empty() && !round_work_tool {
+                    request.messages.push(ChatMessage {
+                        images: Vec::new(),
+                        role: "assistant".to_string(),
+                        content: said,
+                    });
+                }
+
+                if work_fail_streak >= intent::MAX_FAILED_WORK_ROUNDS {
+                    if !round_has_assistant_text(&round_events)
+                        && let Some(fact) = last_failure.clone()
+                    {
+                        emit_visible_text(&mut projection, sink, &mut round_events, fact).await;
+                    }
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::End,
+                        &mut round_events,
+                    )
+                    .await;
+                    let ending = projection.finish();
+                    all.extend(
+                        finish_round(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            round_events,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+
+                // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
+                // dependency chain, so a crash after this point can be picked up.
+                if let Err(error) = record_round(journal, run_id, &round_events).await {
+                    let failed = projection.fail(format!("the run could not be recorded: {error}"));
+                    all.extend(
+                        finish_round(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            round_events,
+                            failed,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                all.append(&mut round_events);
+
+                // bar_chart/form already painted from TOOL_CALL frames. Another model
+                // round in this HTTP request is what doubled charts on "generate another".
+                if calls.iter().any(|call| is_client_render_tool(&call.name)) {
+                    let mut pin_events = Vec::new();
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::End,
+                        &mut pin_events,
+                    )
+                    .await;
+                    let _ = record_round(journal, run_id, &pin_events).await;
+                    all.append(&mut pin_events);
+                    let ending = projection.finish();
+                    all.extend(
+                        finish_ending(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+
+                // Which budget this round drew on: every call a successful screen action, or anything
+                // else. The screen budget is wider because looking is the work there.
+                let on_screen = calls
+                    .iter()
+                    .zip(&results)
+                    .all(|(call, result)| call.name == "computer" && result.ok);
+                if on_screen {
+                    computer_rounds += 1;
+                } else {
+                    spoken_rounds += 1;
+                }
+                let over = if spoken_rounds >= MAX_ROUNDS {
+                    Some(format!(
+                        "this run reached its limit of {MAX_ROUNDS} model calls"
+                    ))
+                } else if computer_rounds >= MAX_COMPUTER_ROUNDS {
+                    Some(format!(
+                        "this run reached its limit of {MAX_COMPUTER_ROUNDS} looks and actions on its computer"
+                    ))
+                } else {
+                    None
+                };
+                if let Some(why) = over {
+                    let mut pin_events = Vec::new();
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::Failure,
+                        &mut pin_events,
+                    )
+                    .await;
+                    let _ = record_round(journal, run_id, &pin_events).await;
+                    all.append(&mut pin_events);
+                    let ending = projection.fail(why);
+                    all.extend(
+                        finish_ending(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                continue;
             }
         }
 
@@ -913,15 +1458,24 @@ async fn converse_raw(
             opengrok_tools::ImageVisibility::Failure
         };
         pin_last_agent_shot(sink, &mut last_agent_shot, pin, &mut round_events).await;
-        let mut ending = if any_delta {
+        let ending = if any_delta {
             projection.finish()
         } else {
             projection.fail("the model returned no text")
         };
-        emit_live(sink, &ending).await;
-        round_events.append(&mut ending);
-        let _ = record_round(journal, run_id, &round_events).await;
-        all.append(&mut round_events);
+        all.extend(
+            finish_round(
+                journal,
+                sink,
+                run_id,
+                &projection,
+                &timing,
+                verbose_timing,
+                round_events,
+                ending,
+            )
+            .await,
+        );
         return all;
     }
 
@@ -1141,7 +1695,11 @@ fn screen_hash(base64: &str) -> u64 {
 fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
     ChatMessage {
         role: "user".to_string(),
-        content: format!("[tool {} result] {}", result.call_id, result.content),
+        content: format!(
+            "[tool {} result] {}",
+            result.call_id,
+            intent::annotate_empty_result(&result.content)
+        ),
         images: result
             .image
             .iter()
@@ -1198,1699 +1756,5 @@ fn awaiting_why(content: &str) -> Option<&str> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use opengrok_tools::Executor;
-    use opengrok_wire::agui::EventType;
-    use std::sync::{Arc, Mutex};
-
-    fn tool_runner() -> ToolRunner {
-        tool_runner_on(
-            Arc::new(crate::tools::tests_support::RecordingComputer::default()),
-            |executor| executor,
-        )
-    }
-
-    fn tool_runner_with(shape: impl FnOnce(Executor) -> Executor) -> ToolRunner {
-        tool_runner_on(
-            Arc::new(crate::tools::tests_support::RecordingComputer::default()),
-            shape,
-        )
-    }
-
-    /// Ada's runner on any computer, with the executor shaped by the caller (a screen, a sink).
-    fn tool_runner_on(
-        computer: Arc<dyn opengrok_box::Computer>,
-        shape: impl FnOnce(Executor) -> Executor,
-    ) -> ToolRunner {
-        use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
-        use opengrok_core::id::{BoxId, CoworkerId};
-        use opengrok_tools::{Executor, ToolContext};
-
-        let mut coworker = Coworker::default();
-        for command in [
-            CoworkerCommand::Hire {
-                name: "Ada".to_string(),
-                model: "m".to_string(),
-                at_ms: 1,
-            },
-            CoworkerCommand::AssignComputer {
-                box_id: BoxId::from_stored("box_ada"),
-                mode: BoxMode::Dedicated,
-                at_ms: 2,
-            },
-        ] {
-            for event in coworker.decide(command).unwrap() {
-                coworker.apply(&event);
-            }
-        }
-        // A permissive policy: these tests are about the loop, not about policy, and an executor
-        // built without one now refuses everything by design.
-        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
-        let policy = opengrok_policy::Context {
-            grant: Some(opengrok_policy::Grant {
-                principal: account.clone(),
-                coworker: CoworkerId::from_stored("cw_ada"),
-                profile: opengrok_policy::ToolSet::All,
-                needs_approval: opengrok_policy::ToolSet::None,
-                revoked: false,
-            }),
-            ceiling: Some(opengrok_policy::Ceiling {
-                coworker: CoworkerId::from_stored("cw_ada"),
-                tools: opengrok_policy::ToolSet::All,
-            }),
-        };
-        ToolRunner::new(
-            shape(Executor::with_policy(computer, policy)),
-            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
-        )
-    }
-
-    fn request(text: &str) -> ModelRequest {
-        ModelRequest {
-            gateway_key: None,
-            spend_scope: None,
-            spend_actor: None,
-            model: "mock".to_string(),
-            system: None,
-            tools: Vec::new(),
-            messages: vec![ChatMessage {
-                images: Vec::new(),
-                role: "user".to_string(),
-                content: text.to_string(),
-            }],
-        }
-    }
-
-    #[tokio::test]
-    async fn a_mock_run_is_a_well_formed_agui_run() {
-        let events = run_turn(&MockDoor::echoing(), request("hello"), "t1", "r1", 1).await;
-        assert_eq!(events.first().unwrap().event_type, EventType::RunStarted);
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-        let text: String = events
-            .iter()
-            .filter(|event| event.event_type == EventType::TextMessageContent)
-            .filter_map(|event| event.extra.get("delta").and_then(|d| d.as_str()))
-            .collect();
-        assert!(text.contains("hello"), "{text}");
-    }
-
-    /// The failure that matters: the client still gets an ending, so its spinner stops.
-    #[tokio::test]
-    async fn a_broken_stream_still_ends_the_run() {
-        let door = MockDoor::failing_with("upstream hung up");
-        let events = run_turn(&door, request("hello"), "t1", "r1", 1).await;
-        assert_eq!(events.last().unwrap().event_type, EventType::RunError);
-        assert!(
-            events
-                .last()
-                .unwrap()
-                .extra
-                .get("message")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .contains("upstream hung up")
-        );
-    }
-
-    /// AN EMPTY SUCCESS IS THE DANGEROUS REPLY (CLAUDE.md, three facts №3). A round that produced
-    /// nothing — no words, no tool calls — used to end the run with `RUN_FINISHED` and an empty
-    /// transcript, which every client had to invent a reason for. It says the reason itself now.
-    #[tokio::test]
-    async fn a_run_that_produced_nothing_ends_as_an_error_that_says_so() {
-        let events = run_conversation(
-            &MockDoor::silent(),
-            None,
-            &MemoryJournal::new(),
-            request("hello"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        assert_eq!(events.first().unwrap().event_type, EventType::RunStarted);
-        let ending = events.last().unwrap();
-        assert_eq!(ending.event_type, EventType::RunError);
-        assert_eq!(
-            ending.extra.get("message").unwrap(),
-            "the model returned no text"
-        );
-    }
-
-    /// And a run that did produce something still ends cleanly: the new ending must not turn a
-    /// working turn into a failure.
-    #[tokio::test]
-    async fn a_run_that_said_something_still_finishes() {
-        let events = run_conversation(
-            &MockDoor::echoing(),
-            None,
-            &MemoryJournal::new(),
-            request("hello"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    /// THE WHOLE CHAIN, JOINED. A model asks for a tool, the tool runs on the coworker's own
-    /// computer, and the result comes back as an event the client can render — all in one turn.
-    #[tokio::test]
-    async fn a_models_tool_call_runs_on_the_coworkers_computer() {
-        use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
-        use opengrok_core::id::{BoxId, CoworkerId};
-        use opengrok_tools::{Executor, ToolContext};
-        use opengrok_wire::agui::EventType;
-        use std::sync::Arc;
-
-        // A coworker with a computer of its own.
-        let mut coworker = Coworker::default();
-        for command in [
-            CoworkerCommand::Hire {
-                name: "Ada".to_string(),
-                model: "m".to_string(),
-                at_ms: 1,
-            },
-            CoworkerCommand::AssignComputer {
-                box_id: BoxId::from_stored("box_ada"),
-                mode: BoxMode::Dedicated,
-                at_ms: 2,
-            },
-        ] {
-            for event in coworker.decide(command).unwrap() {
-                coworker.apply(&event);
-            }
-        }
-
-        let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
-        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
-        let policy = opengrok_policy::Context {
-            grant: Some(opengrok_policy::Grant {
-                principal: account.clone(),
-                coworker: CoworkerId::from_stored("cw_ada"),
-                profile: opengrok_policy::ToolSet::All,
-                needs_approval: opengrok_policy::ToolSet::None,
-                revoked: false,
-            }),
-            ceiling: Some(opengrok_policy::Ceiling {
-                coworker: CoworkerId::from_stored("cw_ada"),
-                tools: opengrok_policy::ToolSet::All,
-            }),
-        };
-        let runner = ToolRunner::new(
-            Executor::with_policy(computer.clone(), policy),
-            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
-        );
-
-        // A model that asks to run a command — on somebody else's box, for good measure.
-        let door = MockDoor::with_script(vec![
-            ModelDelta::Text("let me check".to_string()),
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: r#"{"command":"whoami","box_id":"box_of_someone_else"}"#.to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-        ]);
-
-        let events = run_turn_with_tools(&door, Some(&runner), request("go"), "t1", "r1", 1).await;
-
-        let result = events
-            .iter()
-            .find(|event| event.event_type == EventType::ToolCallResult)
-            .expect("the tool result should reach the client");
-        assert_eq!(result.extra.get("toolCallId").unwrap(), "c1");
-        assert_eq!(result.extra.get("ok").unwrap(), true);
-
-        // The identity rule, end to end: the model named another box and got its own.
-        assert_eq!(computer.last_box().as_deref(), Some("box_ada"));
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|v| v.as_str()) == Some("box-waking")),
-            "a running box is not announced as waking"
-        );
-    }
-
-    /// Without tools wired in, a tool call is still well-formed — it simply produces no result.
-    /// A sleeping box is woken by the first tool of the turn that needs it, and the stream says
-    /// so with one `box-waking` frame before that tool's result — once, even when the round has
-    /// two box-bound calls. A box already running gets no frame (the test above).
-    #[tokio::test]
-    async fn a_turn_says_it_is_waking_the_box_once_before_the_first_tool_that_needs_it() {
-        use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
-        use opengrok_core::id::{BoxId, CoworkerId};
-        use opengrok_tools::{Executor, ToolContext};
-        use opengrok_wire::agui::EventType;
-        use std::sync::Arc;
-
-        let mut coworker = Coworker::default();
-        for command in [
-            CoworkerCommand::Hire {
-                name: "Ada".to_string(),
-                model: "m".to_string(),
-                at_ms: 1,
-            },
-            CoworkerCommand::AssignComputer {
-                box_id: BoxId::from_stored("box_ada"),
-                mode: BoxMode::Dedicated,
-                at_ms: 2,
-            },
-        ] {
-            for event in coworker.decide(command).unwrap() {
-                coworker.apply(&event);
-            }
-        }
-
-        // The probe, the executor and the wake each read the state once before the start lands.
-        let computer = Arc::new(crate::tools::tests_support::RecordingComputer::sleeping(&[
-            "exited", "exited", "exited", "running",
-        ]));
-        let account = opengrok_core::id::AccountId::from_stored("acct_ada");
-        let policy = opengrok_policy::Context {
-            grant: Some(opengrok_policy::Grant {
-                principal: account.clone(),
-                coworker: CoworkerId::from_stored("cw_ada"),
-                profile: opengrok_policy::ToolSet::All,
-                needs_approval: opengrok_policy::ToolSet::None,
-                revoked: false,
-            }),
-            ceiling: Some(opengrok_policy::Ceiling {
-                coworker: CoworkerId::from_stored("cw_ada"),
-                tools: opengrok_policy::ToolSet::All,
-            }),
-        };
-        let runner = ToolRunner::new(
-            Executor::with_policy(computer.clone(), policy),
-            ToolContext::from_coworker(account, CoworkerId::from_stored("cw_ada"), &coworker),
-        );
-
-        let door = MockDoor::with_script(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: r#"{"command":"whoami"}"#.to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-            ModelDelta::ToolCallStart {
-                id: "c2".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c2".to_string(),
-                delta: r#"{"command":"uptime"}"#.to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c2".to_string(),
-            },
-        ]);
-
-        let events = run_turn_with_tools(&door, Some(&runner), request("go"), "t1", "r1", 1).await;
-
-        let waking: Vec<usize> = events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| {
-                event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|v| v.as_str()) == Some("box-waking")
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let first_result = events
-            .iter()
-            .position(|event| event.event_type == EventType::ToolCallResult)
-            .expect("a tool result");
-        assert_eq!(waking.len(), 1, "one waking frame per turn: {events:?}");
-        assert!(
-            waking[0] < first_result,
-            "the frame comes before the first tool result"
-        );
-        assert_eq!(
-            events[waking[0]]
-                .extra
-                .get("coworkerId")
-                .and_then(|v| v.as_str()),
-            Some("cw_ada")
-        );
-        assert_eq!(computer.resumes(), 1, "the box was started once");
-        let results = events
-            .iter()
-            .filter(|event| event.event_type == EventType::ToolCallResult)
-            .count();
-        assert_eq!(results, 2, "both commands ran after the one wake");
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    #[tokio::test]
-    async fn a_run_without_a_tool_runner_still_ends_cleanly() {
-        use opengrok_wire::agui::EventType;
-        let door = MockDoor::with_script(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-        ]);
-        let events = run_turn(&door, request("go"), "t1", "r1", 1).await;
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type == EventType::ToolCallResult)
-        );
-    }
-
-    /// THE ORDERING RULE, ASSERTED. A journal that records when the model was called proves the
-    /// tool results were durable BEFORE the next call — the property a crash between rounds
-    /// depends on, and one that no test about client-visible events would ever notice breaking.
-    #[tokio::test]
-    async fn each_rounds_results_are_recorded_before_the_next_model_call() {
-        use std::sync::{Arc, Mutex};
-
-        /// Records journal writes and model calls on one timeline.
-        #[derive(Default)]
-        struct Timeline {
-            entries: Mutex<Vec<String>>,
-        }
-        impl Timeline {
-            fn note(&self, what: &str) {
-                if let Ok(mut entries) = self.entries.lock() {
-                    entries.push(what.to_string());
-                }
-            }
-            fn entries(&self) -> Vec<String> {
-                self.entries.lock().map(|e| e.clone()).unwrap_or_default()
-            }
-        }
-
-        struct WatchingJournal(Arc<Timeline>);
-        #[async_trait::async_trait]
-        impl RunJournal for WatchingJournal {
-            async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
-                self.0.note(&format!("journal({})", events.len()));
-                Ok(())
-            }
-        }
-
-        /// Asks for a tool on the first call and simply answers on the second.
-        struct TwoRoundDoor(Arc<Timeline>, Mutex<usize>);
-        #[async_trait::async_trait]
-        impl ModelDoor for TwoRoundDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let round = {
-                    let mut calls = self.1.lock().map_err(|_| {
-                        ModelError::Stream("the door's lock was poisoned".to_string())
-                    })?;
-                    *calls += 1;
-                    *calls
-                };
-                self.0.note(&format!("model call {round}"));
-                let script = if round == 1 {
-                    vec![
-                        ModelDelta::ToolCallStart {
-                            id: "c1".to_string(),
-                            name: "shell".to_string(),
-                        },
-                        ModelDelta::ToolCallArgs {
-                            id: "c1".to_string(),
-                            delta: r#"{"command":"ls"}"#.to_string(),
-                        },
-                        ModelDelta::ToolCallEnd {
-                            id: "c1".to_string(),
-                        },
-                    ]
-                } else {
-                    vec![ModelDelta::Text("all done".to_string())]
-                };
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-
-        let timeline = Arc::new(Timeline::default());
-        let door = TwoRoundDoor(timeline.clone(), Mutex::new(0));
-        let journal = WatchingJournal(timeline.clone());
-        let runner = tool_runner();
-
-        let events =
-            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
-
-        let entries = timeline.entries();
-        let second_call = entries
-            .iter()
-            .position(|entry| entry == "model call 2")
-            .expect("the model should have been called a second time");
-        // At least one journal write must sit between the two calls: that is the tool results
-        // reaching durable storage before the call that depends on them.
-        let journals_before_second = entries[..second_call]
-            .iter()
-            .filter(|entry| entry.starts_with("journal("))
-            .count();
-        assert!(
-            journals_before_second >= 2,
-            "results must be durable before the next call; timeline was {entries:?}"
-        );
-
-        assert_eq!(
-            events.last().unwrap().event_type,
-            opengrok_wire::agui::EventType::RunFinished
-        );
-    }
-
-    /// A journal that reports the run stopped from the `stop_after`-th question onwards, and keeps
-    /// what it was asked to record so the ordering can be asserted.
-    struct StoppingJournal {
-        stop_after: usize,
-        asked: Mutex<usize>,
-        batches: Mutex<Vec<Vec<Event>>>,
-    }
-
-    impl StoppingJournal {
-        fn saying_stop_after(questions: usize) -> Self {
-            Self {
-                stop_after: questions,
-                asked: Mutex::new(0),
-                batches: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn batches(&self) -> Vec<Vec<Event>> {
-            self.batches.lock().map(|b| b.clone()).unwrap_or_default()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl RunJournal for StoppingJournal {
-        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
-            if let Ok(mut batches) = self.batches.lock() {
-                batches.push(events.to_vec());
-            }
-            Ok(())
-        }
-
-        async fn stopped(&self, _run_id: &str) -> bool {
-            let Ok(mut asked) = self.asked.lock() else {
-                return false;
-            };
-            *asked += 1;
-            *asked > self.stop_after
-        }
-    }
-
-    /// Asks for a tool on every call, and counts how many times it was called.
-    struct CountingToolDoor(Arc<Mutex<usize>>);
-
-    #[async_trait::async_trait]
-    impl ModelDoor for CountingToolDoor {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            if let Ok(mut calls) = self.0.lock() {
-                *calls += 1;
-            }
-            let script = vec![
-                ModelDelta::Text("playing it again".to_string()),
-                ModelDelta::ToolCallStart {
-                    id: "c1".to_string(),
-                    name: "shell".to_string(),
-                },
-                ModelDelta::ToolCallArgs {
-                    id: "c1".to_string(),
-                    delta: r#"{"command":"play the recipe"}"#.to_string(),
-                },
-                ModelDelta::ToolCallEnd {
-                    id: "c1".to_string(),
-                },
-            ];
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-        }
-    }
-
-    /// A STOP IS THE ONLY WAY OUT OF A BOT IN A LOOP, so the first thing it has to buy is that the
-    /// model is not asked again. The run ends as a stop — `run-stopped` and then `RUN_FINISHED`,
-    /// never `RUN_ERROR` — because a person changing their mind is not a coworker failing.
-    #[tokio::test]
-    async fn a_stopped_run_asks_the_model_nothing_further_and_ends_as_a_stop() {
-        let calls = Arc::new(Mutex::new(0usize));
-        let door = CountingToolDoor(calls.clone());
-        let journal = StoppingJournal::saying_stop_after(0);
-        let runner = tool_runner();
-
-        let events =
-            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
-
-        assert_eq!(
-            *calls.lock().unwrap(),
-            0,
-            "a run stopped before its first round must not spend a model call"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|name| name.as_str())
-                        == Some("run-stopped")),
-            "the reason travels as its own frame, or a client cannot tell a stop from a finish: \
-             {events:?}"
-        );
-        assert_eq!(
-            events.last().unwrap().event_type,
-            EventType::RunFinished,
-            "the stream still closes, or the client holds its spinner open forever"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type == EventType::RunError),
-            "a stop is not a failure: {events:?}"
-        );
-    }
-
-    /// THE PLACE THAT ACTUALLY STOPS THE YOUTUBE SEARCH HAPPENING ONE MORE TIME. The model has
-    /// answered and asked to play the recipe again; the check sits between that ask and the doing,
-    /// so the tool never runs. And the frames of the round it was in the middle of are journaled
-    /// WITH the ending, so the transcript shows what the coworker was about to do rather than
-    /// ending a step short of it.
-    #[tokio::test]
-    async fn a_stop_lands_between_the_model_asking_for_a_tool_and_the_tool_running() {
-        let calls = Arc::new(Mutex::new(0usize));
-        let door = CountingToolDoor(calls.clone());
-        // Not stopped when the round opens; stopped by the time the tool is about to run.
-        let journal = StoppingJournal::saying_stop_after(1);
-        let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
-        let runner = tool_runner_on(computer.clone(), |executor| executor);
-
-        let events =
-            run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
-
-        assert_eq!(
-            *calls.lock().unwrap(),
-            1,
-            "the round that was already open still gets its answer; nothing after it is asked"
-        );
-        assert_eq!(
-            computer.last_box(),
-            None,
-            "the tool the model asked for must not run: that is the repetition the person pressed \
-             stop to end"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type == EventType::ToolCallResult),
-            "and no result is invented for a call that never happened: {events:?}"
-        );
-
-        // WHAT WAS SPENT IS ACCOUNTED FOR, AND THIS IS WHERE THAT IS VISIBLE. The model call that
-        // was already open is read to its last delta rather than dropped — `TOOL_CALL_END` is the
-        // final thing the door yields, so seeing it means the stream was drained. The gateway
-        // records a call's usage when the call completes; abandoning a half-read stream would
-        // leave tokens spent at the provider and missing from the meter, which is exactly the
-        // spend landing on the floor.
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == EventType::ToolCallEnd),
-            "the model call already in flight is drained, not abandoned: {events:?}"
-        );
-
-        // The round's own frames and the ending in one write: the transcript keeps what the model
-        // said and the call it asked for, then the stop.
-        let last = journal.batches().pop().expect("a final journal batch");
-        assert!(
-            last.iter()
-                .any(|event| event.event_type == EventType::TextMessageContent),
-            "the words of the round in progress go down with the stop: {last:?}"
-        );
-        assert!(
-            last.iter()
-                .any(|event| event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|name| name.as_str())
-                        == Some("run-stopped")),
-            "{last:?}"
-        );
-    }
-
-    /// A model that never stops asking would otherwise run until the money ran out. The bound ends
-    /// the run as a result the client can see, not a silent stop.
-    #[tokio::test]
-    async fn a_model_that_never_stops_is_bounded_and_told_why() {
-        struct AlwaysToolDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for AlwaysToolDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let script = vec![
-                    ModelDelta::ToolCallStart {
-                        id: "c1".to_string(),
-                        name: "shell".to_string(),
-                    },
-                    ModelDelta::ToolCallArgs {
-                        id: "c1".to_string(),
-                        delta: r#"{"command":"again"}"#.to_string(),
-                    },
-                    ModelDelta::ToolCallEnd {
-                        id: "c1".to_string(),
-                    },
-                ];
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-
-        let journal = MemoryJournal::new();
-        let runner = tool_runner();
-        let events = run_conversation(
-            &AlwaysToolDoor,
-            Some(&runner),
-            &journal,
-            request("go"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, opengrok_wire::agui::EventType::RunError);
-        assert!(
-            last.extra
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_default()
-                .contains("limit"),
-            "{last:?}"
-        );
-    }
-
-    /// Seen live: a cheap model asked for `user_machine_shell` with no arguments, was refused,
-    /// and asked again identically until the round cap. The second identical refusal ends the
-    /// run with a reason, instead of six more model calls that change nothing.
-    #[tokio::test]
-    async fn a_call_refused_the_same_way_twice_ends_the_run() {
-        struct ArgumentLessDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for ArgumentLessDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let script = vec![
-                    ModelDelta::ToolCallStart {
-                        id: "c1".to_string(),
-                        name: "user_machine_shell".to_string(),
-                    },
-                    ModelDelta::ToolCallEnd {
-                        id: "c1".to_string(),
-                    },
-                ];
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-
-        let journal = MemoryJournal::new();
-        let runner = tool_runner();
-        let events = run_conversation(
-            &ArgumentLessDoor,
-            Some(&runner),
-            &journal,
-            request("run date on my computer"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        let starts = events
-            .iter()
-            .filter(|event| event.event_type == opengrok_wire::agui::EventType::ToolCallStart)
-            .count();
-        assert_eq!(starts, 2, "two identical refusals, then stop: {events:?}");
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, opengrok_wire::agui::EventType::RunError);
-        let message = last
-            .extra
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default();
-        assert!(
-            message.contains("user_machine_shell") && message.contains("twice"),
-            "{message}"
-        );
-    }
-
-    /// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
-    /// as text, and never started a call. Crossing the character bound ends the run with a
-    /// reason, instead of streaming the rest of the flood — including a tool call that
-    /// arrives only after it.
-    #[tokio::test]
-    async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
-        struct PlanDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for PlanDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-                let script = vec![
-                    ModelDelta::Text(flood),
-                    ModelDelta::Text(" and then I will call the tool.".to_string()),
-                    ModelDelta::ToolCallStart {
-                        id: "late".to_string(),
-                        name: "shell".to_string(),
-                    },
-                    ModelDelta::ToolCallEnd {
-                        id: "late".to_string(),
-                    },
-                ];
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-
-        let journal = MemoryJournal::new();
-        let runner = tool_runner();
-        assert!(
-            !runner.tool_schemas().is_empty(),
-            "this test is the tools-offered case"
-        );
-        let events = run_conversation(
-            &PlanDoor,
-            Some(&runner),
-            &journal,
-            request("list the forms"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type == EventType::ToolCallStart),
-            "must stop before a tool call that arrives only after the flood: {events:?}"
-        );
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunError);
-        let message = last
-            .extra
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default();
-        assert!(message.contains("plan-only text"), "{message}");
-    }
-
-    /// The bound is "tools offered and unused", not "the model wrote a lot". A coworker
-    /// with an empty toolbox may still answer at length.
-    #[tokio::test]
-    async fn plan_only_text_does_not_stop_when_no_tools_are_offered() {
-        struct PlanDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for PlanDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-                Ok(Box::pin(futures::stream::iter(
-                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
-                )))
-            }
-        }
-
-        let events = run_conversation(
-            &PlanDoor,
-            None,
-            &MemoryJournal::new(),
-            request("explain at length"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    /// Production AG-UI always attaches `bar_chart` and `form` (`chat_ui::attach`),
-    /// even when there is no computer. Those paint widgets must not trip the
-    /// plan-only stop: a long chat answer is still a chat answer.
-    #[tokio::test]
-    async fn plan_only_text_does_not_stop_when_only_paint_tools_are_offered() {
-        struct PlanDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for PlanDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-                Ok(Box::pin(futures::stream::iter(
-                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
-                )))
-            }
-        }
-
-        let painted: LocalTool =
-            Arc::new(|call| opengrok_tools::ToolResult::ok(&call.id, "painted"));
-        let runner = ToolRunner::local_only()
-            .with_local(
-                serde_json::json!({
-                    "type": "function",
-                    "function": { "name": "bar_chart" }
-                }),
-                painted.clone(),
-            )
-            .with_local(
-                serde_json::json!({
-                    "type": "function",
-                    "function": { "name": "form" }
-                }),
-                painted,
-            );
-        assert!(
-            !work_tools_offered(&runner.tool_schemas()),
-            "bar_chart/form are paint widgets, not work tools: {:?}",
-            runner.tool_schemas()
-        );
-
-        let events = run_conversation(
-            &PlanDoor,
-            Some(&runner),
-            &MemoryJournal::new(),
-            request("explain at length"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
-    }
-
-    /// A tool call, then a long answer, is work. The character bound must not fire on
-    /// the summary just because this round had no second ToolCallStart.
-    #[tokio::test]
-    async fn a_tool_call_then_text_is_not_plan_only() {
-        struct ToolThenTextDoor(Mutex<usize>);
-        #[async_trait::async_trait]
-        impl ModelDoor for ToolThenTextDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let round = {
-                    let mut count = self.0.lock().unwrap();
-                    *count += 1;
-                    *count
-                };
-                let script = if round == 1 {
-                    vec![
-                        ModelDelta::ToolCallStart {
-                            id: "c1".to_string(),
-                            name: "shell".to_string(),
-                        },
-                        ModelDelta::ToolCallArgs {
-                            id: "c1".to_string(),
-                            delta: r#"{"command":"ls"}"#.to_string(),
-                        },
-                        ModelDelta::ToolCallEnd {
-                            id: "c1".to_string(),
-                        },
-                    ]
-                } else {
-                    vec![ModelDelta::Text("x".repeat(PLAN_ONLY_TEXT_LIMIT + 1))]
-                };
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-
-        let events = run_conversation(
-            &ToolThenTextDoor(Mutex::new(0)),
-            Some(&tool_runner()),
-            &MemoryJournal::new(),
-            request("list files"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == EventType::ToolCallStart),
-            "{events:?}"
-        );
-    }
-
-    /// Resume starts a fresh converse_raw. The first half already ran a tool;
-    /// a long summary after HITL is work, not a plan-only flood.
-    #[tokio::test]
-    async fn a_resumed_run_does_not_treat_a_long_summary_as_plan_only() {
-        struct SummaryDoor;
-        #[async_trait::async_trait]
-        impl ModelDoor for SummaryDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-                Ok(Box::pin(futures::stream::iter(
-                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
-                )))
-            }
-        }
-
-        let call = opengrok_tools::ToolCall {
-            id: "c1".to_string(),
-            name: "shell".to_string(),
-            arguments: serde_json::json!({"command": "ls"}),
-        };
-        let events = resume_conversation(
-            &SummaryDoor,
-            &tool_runner(),
-            &MemoryJournal::new(),
-            request("list files"),
-            RunContext::new("t1", "r1", 1),
-            Resumption::approved(call, 1),
-        )
-        .await;
-
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
-        assert!(
-            !events.iter().any(|event| {
-                event.event_type == EventType::RunError
-                    && event
-                        .extra
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .is_some_and(|m| m.contains("plan-only text"))
-            }),
-            "{events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_short_reply_with_tools_offered_still_finishes() {
-        let events = run_conversation(
-            &MockDoor::echoing(),
-            Some(&tool_runner()),
-            &MemoryJournal::new(),
-            request("hello"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    /// A run that cannot be recorded must not proceed: it would produce work a reconnect can never
-    /// reproduce, which is the failure this design exists to prevent.
-    #[tokio::test]
-    async fn a_run_that_cannot_be_recorded_does_not_run() {
-        struct BrokenJournal;
-        #[async_trait::async_trait]
-        impl RunJournal for BrokenJournal {
-            async fn record(&self, _run_id: &str, _events: &[Event]) -> Result<(), JournalError> {
-                Err(JournalError::Unwritable("the disk is gone".to_string()))
-            }
-        }
-
-        let events = run_conversation(
-            &MockDoor::echoing(),
-            None,
-            &BrokenJournal,
-            request("go"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        assert_eq!(
-            events.last().unwrap().event_type,
-            opengrok_wire::agui::EventType::RunError
-        );
-        // Nothing was said: the model was never called.
-        assert!(
-            !events
-                .iter()
-                .any(|event| event.event_type
-                    == opengrok_wire::agui::EventType::TextMessageContent)
-        );
-    }
-
-    /// Everything a client saw is in the journal — that is what makes a replay complete.
-    #[tokio::test]
-    async fn every_event_a_client_saw_reached_the_journal() {
-        let journal = MemoryJournal::new();
-        let events = run_conversation(
-            &MockDoor::echoing(),
-            None,
-            &journal,
-            request("hello"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        assert_eq!(journal.event_count(), events.len());
-    }
-
-    /// Exactly one ending, however the run went — two would double-render in a consumer.
-    #[tokio::test]
-    async fn a_run_has_exactly_one_ending() {
-        for door in [MockDoor::echoing(), MockDoor::failing_with("nope")] {
-            let events = run_turn(&door, request("hello"), "t1", "r1", 1).await;
-            let endings = events
-                .iter()
-                .filter(|event| {
-                    matches!(
-                        event.event_type,
-                        EventType::RunFinished | EventType::RunError
-                    )
-                })
-                .count();
-            assert_eq!(endings, 1, "{:?}", events.last());
-        }
-    }
-
-    /// NativeChat paints POST /ag-ui from this sink. If the sink is a subset of the Vec, the
-    /// HTTP body is missing the opening, the close, or both — which looks like a client that
-    /// never streamed.
-    #[tokio::test]
-    async fn a_streaming_sink_sees_every_event_the_run_produced() {
-        struct Collect(std::sync::Mutex<Vec<Event>>);
-        #[async_trait::async_trait]
-        impl EventSink for Collect {
-            async fn emit(&self, events: &[Event]) {
-                if let Ok(mut seen) = self.0.lock() {
-                    seen.extend(events.iter().cloned());
-                }
-            }
-        }
-
-        let sink = Collect(std::sync::Mutex::new(Vec::new()));
-        let events = run_conversation_streaming(
-            &MockDoor::echoing(),
-            None,
-            &MemoryJournal::new(),
-            request("hello"),
-            "t1",
-            "r1",
-            1,
-            &sink,
-        )
-        .await;
-        let sunk = sink.0.lock().unwrap().clone();
-        let produced: Vec<_> = events.iter().map(|event| event.event_type).collect();
-        let live: Vec<_> = sunk.iter().map(|event| event.event_type).collect();
-        assert_eq!(live, produced, "sink={live:?} vec={produced:?}");
-    }
-
-    /// A paced door must deliver the first word while the run is still in flight. If this
-    /// fires only after `run_conversation_streaming` joins, POST /ag-ui would still look
-    /// like a buffered JSON response.
-    #[tokio::test]
-    async fn a_paced_sink_receives_text_while_the_model_is_still_talking() {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        struct FirstText(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
-        #[async_trait::async_trait]
-        impl EventSink for FirstText {
-            async fn emit(&self, events: &[Event]) {
-                if events
-                    .iter()
-                    .any(|event| event.event_type == EventType::TextMessageContent)
-                    && let Some(tx) = self.0.lock().ok().and_then(|mut slot| slot.take())
-                {
-                    let _ = tx.send(());
-                }
-            }
-        }
-
-        let sink = FirstText(std::sync::Mutex::new(Some(tx)));
-        let handle = tokio::spawn(async move {
-            run_conversation_streaming(
-                &MockDoor::echoing().paced_by_ms(40),
-                None,
-                &MemoryJournal::new(),
-                request("hello from a paced mock door"),
-                "t1",
-                "r1",
-                1,
-                &sink,
-            )
-            .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx)
-            .await
-            .expect("first text should arrive before the run ends")
-            .unwrap();
-        assert!(
-            !handle.is_finished(),
-            "text arrived only after the turn finished — the HTTP body would dump at the end"
-        );
-        let events = handle.await.unwrap();
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    fn shot(call_id: &str) -> opengrok_tools::ToolResult {
-        opengrok_tools::ToolResult::ok(call_id, "screenshot of the 1280x800 screen attached")
-            .with_image(opengrok_tools::ToolImage {
-                mime: "image/png".into(),
-                base64: "iVBORw0KGgo=".into(),
-                width: 1280,
-                height: 800,
-                visibility: opengrok_tools::ImageVisibility::Agent,
-            })
-    }
-
-    #[test]
-    fn a_tool_result_with_a_picture_becomes_a_message_with_an_image() {
-        let message = tool_result_message(&shot("c1"));
-        assert_eq!(message.role, "user");
-        assert!(message.content.starts_with("[tool c1 result] screenshot"));
-        assert_eq!(message.images.len(), 1);
-        assert_eq!(message.images[0].mime, "image/png");
-
-        let plain = tool_result_message(&opengrok_tools::ToolResult::ok("c2", "done"));
-        assert!(plain.images.is_empty());
-    }
-
-    /// Screenshots are the widest thing in a request; only the last two say where the screen is.
-    #[test]
-    fn only_the_two_most_recent_screenshots_travel() {
-        let mut messages: Vec<ChatMessage> = (1..=4)
-            .map(|n| tool_result_message(&shot(&format!("c{n}"))))
-            .collect();
-        messages.insert(
-            2,
-            ChatMessage {
-                role: "assistant".into(),
-                content: "clicking".into(),
-                images: Vec::new(),
-            },
-        );
-
-        keep_recent_images(&mut messages, RECENT_IMAGES);
-
-        let carried: Vec<bool> = messages.iter().map(|m| !m.images.is_empty()).collect();
-        assert_eq!(carried, vec![false, false, false, true, true]);
-        // The words stay even where the picture went.
-        assert!(messages[0].content.contains("[tool c1 result]"));
-    }
-
-    /// A person's no is about their machine, not about one spelling of the command. Seen live:
-    /// the model reworded the command eight times after a deny and the round cap was what
-    /// stopped it.
-    #[tokio::test]
-    async fn a_denied_machine_ends_the_run_even_when_the_command_is_reworded() {
-        struct RewordingDoor(Mutex<usize>);
-        #[async_trait::async_trait]
-        impl ModelDoor for RewordingDoor {
-            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-                let n = {
-                    let mut count = self.0.lock().unwrap();
-                    *count += 1;
-                    *count
-                };
-                let script = vec![
-                    ModelDelta::ToolCallStart {
-                        id: format!("c{n}"),
-                        name: "user_machine_shell".to_string(),
-                    },
-                    ModelDelta::ToolCallArgs {
-                        id: format!("c{n}"),
-                        delta: format!(
-                            r#"{{"command":"open -a Safari https://facebook.com/{n}"}}"#
-                        ),
-                    },
-                    ModelDelta::ToolCallEnd {
-                        id: format!("c{n}"),
-                    },
-                ];
-                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-            }
-        }
-        struct DenyingSink;
-        #[async_trait::async_trait]
-        impl opengrok_tools::UserMachineSink for DenyingSink {
-            async fn decide(
-                &self,
-                _account_id: &opengrok_core::id::AccountId,
-                _command: &str,
-            ) -> opengrok_tools::UserMachineVerdict {
-                opengrok_tools::UserMachineVerdict::Deny("the machine's owner said no".into())
-            }
-            async fn run(
-                &self,
-                _account_id: &opengrok_core::id::AccountId,
-                _command: &str,
-                _call_id: &str,
-                _approved: bool,
-            ) -> opengrok_tools::UserMachineReply {
-                opengrok_tools::UserMachineReply::Refused("the machine's owner said no".into())
-            }
-        }
-
-        let journal = MemoryJournal::new();
-        let runner = tool_runner_with(|executor| executor.with_user_machine(Arc::new(DenyingSink)));
-        let events = run_conversation(
-            &RewordingDoor(Mutex::new(0)),
-            Some(&runner),
-            &journal,
-            request("visit facebook.com"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-
-        let starts = events
-            .iter()
-            .filter(|event| event.event_type == EventType::ToolCallStart)
-            .count();
-        assert_eq!(starts, 2, "a no, one more ask, then stop: {events:?}");
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunError);
-        assert!(
-            last.extra
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_default()
-                .contains("twice"),
-            "{last:?}"
-        );
-    }
-
-    /// A computer whose screen changes on every look (or not), for the screen budgets.
-    struct ScreenComputer {
-        changing: bool,
-        looks: Mutex<usize>,
-    }
-    #[async_trait::async_trait]
-    impl opengrok_box::Computer for ScreenComputer {
-        async fn create(&self, _ttl: Option<u64>) -> opengrok_box::BoxResult<String> {
-            Ok("box_screen".into())
-        }
-        async fn run(
-            &self,
-            _b: &str,
-            _c: &str,
-            _t: u32,
-        ) -> opengrok_box::BoxResult<opengrok_box::CommandOutput> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn start(
-            &self,
-            _b: &str,
-            _c: &str,
-        ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn watch(
-            &self,
-            _b: &str,
-            _p: &str,
-        ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn read_file(&self, _b: &str, _p: &str) -> opengrok_box::BoxResult<String> {
-            Ok(String::new())
-        }
-        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> opengrok_box::BoxResult<()> {
-            Ok(())
-        }
-        async fn expose_port(
-            &self,
-            _b: &str,
-            _p: u16,
-            _t: &str,
-        ) -> opengrok_box::BoxResult<String> {
-            Ok(String::new())
-        }
-        async fn stop(&self, _b: &str) -> opengrok_box::BoxResult<()> {
-            Ok(())
-        }
-        async fn resume(&self, _b: &str) -> opengrok_box::BoxResult<()> {
-            Ok(())
-        }
-        async fn destroy(&self, _b: &str) -> opengrok_box::BoxResult<()> {
-            Ok(())
-        }
-        async fn state(&self, _b: &str) -> opengrok_box::BoxResult<String> {
-            Ok("running".into())
-        }
-        async fn offers_a_screen(&self, _box_id: &str) -> bool {
-            true
-        }
-        async fn screen_url(&self, _b: &str) -> opengrok_box::BoxResult<Option<String>> {
-            Ok(Some("http://127.0.0.1:1/vnc.html".into()))
-        }
-        async fn screenshot(&self, _b: &str) -> opengrok_box::BoxResult<opengrok_box::Screenshot> {
-            let n = {
-                let mut looks = self.looks.lock().unwrap();
-                *looks += 1;
-                *looks
-            };
-            Ok(opengrok_box::Screenshot {
-                mime: "image/png".into(),
-                png_base64: if self.changing {
-                    format!("frame-{n}")
-                } else {
-                    "frame-same".into()
-                },
-                width: 1280,
-                height: 800,
-            })
-        }
-        async fn act(&self, _b: &str, _a: &opengrok_box::CuaAction) -> opengrok_box::BoxResult<()> {
-            Ok(())
-        }
-    }
-
-    /// A model that only ever takes screenshots.
-    struct LookingDoor(Mutex<usize>, usize);
-    #[async_trait::async_trait]
-    impl ModelDoor for LookingDoor {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let n = {
-                let mut count = self.0.lock().unwrap();
-                *count += 1;
-                *count
-            };
-            let script = if n > self.1 {
-                vec![ModelDelta::Text("done looking".to_string())]
-            } else {
-                vec![
-                    ModelDelta::ToolCallStart {
-                        id: format!("c{n}"),
-                        name: "computer".to_string(),
-                    },
-                    ModelDelta::ToolCallArgs {
-                        id: format!("c{n}"),
-                        delta: r#"{"action":"screenshot"}"#.to_string(),
-                    },
-                    ModelDelta::ToolCallEnd {
-                        id: format!("c{n}"),
-                    },
-                ]
-            };
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-        }
-    }
-
-    fn screen_runner(changing: bool) -> ToolRunner {
-        tool_runner_on(
-            Arc::new(ScreenComputer {
-                changing,
-                looks: Mutex::new(0),
-            }),
-            |executor| executor.with_screen(true),
-        )
-    }
-
-    /// Looking is the work on a desktop: twelve screenshots must not trip the eight-call cap
-    /// meant for chatter.
-    #[tokio::test]
-    async fn looking_at_a_changing_screen_is_not_chatter() {
-        let journal = MemoryJournal::new();
-        let runner = screen_runner(true);
-        let events = run_conversation(
-            &LookingDoor(Mutex::new(0), 12),
-            Some(&runner),
-            &journal,
-            request("find the terminal"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let looks = events
-            .iter()
-            .filter(|event| event.event_type == EventType::ToolCallStart)
-            .count();
-        assert_eq!(looks, 12, "{events:?}");
-        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    }
-
-    /// Step PNGs are `agent` and the journal drops their bytes. The run-end pin keeps one PNG.
-    #[tokio::test]
-    async fn computer_step_shots_are_agent_and_the_journal_keeps_the_end_pin() {
-        let journal = MemoryJournal::new();
-        let runner = screen_runner(true);
-        let events = run_conversation(
-            &LookingDoor(Mutex::new(0), 3),
-            Some(&runner),
-            &journal,
-            request("find the terminal"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let live_shots: Vec<_> = events
-            .iter()
-            .filter(|event| event.event_type == EventType::ToolCallResult)
-            .filter_map(|event| event.extra.get("image"))
-            .collect();
-        assert_eq!(
-            live_shots.len(),
-            4,
-            "three steps plus the end pin: {live_shots:?}"
-        );
-        assert!(
-            live_shots.iter().take(3).all(|image| {
-                image["visibility"] == "agent"
-                    && image.get("base64").and_then(|v| v.as_str()).is_some()
-            }),
-            "live SSE still carries step PNGs for the Computer pane: {live_shots:?}"
-        );
-        assert_eq!(live_shots.last().unwrap()["visibility"], "end");
-        assert!(
-            live_shots
-                .last()
-                .unwrap()
-                .get("base64")
-                .and_then(|v| v.as_str())
-                .is_some_and(|b| !b.is_empty()),
-            "the end pin keeps the PNG: {live_shots:?}"
-        );
-
-        let journaled: Vec<_> = journal
-            .batches()
-            .into_iter()
-            .flatten()
-            .filter(|event| event.event_type == EventType::ToolCallResult)
-            .filter_map(|event| event.extra.get("image").cloned())
-            .collect();
-        let agent_without_bytes = journaled
-            .iter()
-            .filter(|image| image["visibility"] == "agent" && image.get("base64").is_none())
-            .count();
-        let end_with_bytes = journaled
-            .iter()
-            .filter(|image| {
-                image["visibility"] == "end"
-                    && image
-                        .get("base64")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|b| !b.is_empty())
-            })
-            .count();
-        assert_eq!(
-            agent_without_bytes, 3,
-            "journal must drop step PNG bytes: {journaled:?}"
-        );
-        assert_eq!(
-            end_with_bytes, 1,
-            "journal keeps the end pin PNG: {journaled:?}"
-        );
-    }
-
-    /// The case the earlier test could not fail: a real streaming model sends the
-    /// arguments in pieces, and a per-fragment scrub sees no JSON to scrub.
-    #[test]
-    fn streamed_fragments_of_a_smuggled_password_are_assembled_and_scrubbed() {
-        use opengrok_wire::agui::EventType;
-        let ev = |kind: EventType| Event::new(kind, 0);
-        let events = vec![
-            ev(EventType::ToolCallStart)
-                .with("toolCallId", "call-1")
-                .with("toolCallName", opengrok_tools::REQUEST_USER_FORM),
-            ev(EventType::ToolCallArgs)
-                .with("toolCallId", "call-1")
-                .with(
-                    "delta",
-                    "{\"title\":\"Log in\",\"values\":{\"password\":\"s3",
-                ),
-            ev(EventType::ToolCallArgs)
-                .with("toolCallId", "call-1")
-                .with("delta", "cret\"}}"),
-            ev(EventType::ToolCallEnd).with("toolCallId", "call-1"),
-            // A tool that carries no secrets keeps its fragments exactly as they were.
-            ev(EventType::ToolCallStart)
-                .with("toolCallId", "call-2")
-                .with("toolCallName", "shell"),
-            ev(EventType::ToolCallArgs)
-                .with("toolCallId", "call-2")
-                .with("delta", "{\"cmd\":\"ls"),
-            ev(EventType::ToolCallArgs)
-                .with("toolCallId", "call-2")
-                .with("delta", " -la\"}"),
-        ];
-        let out = scrub_streamed_tool_args(events);
-        let text = serde_json::to_string(&out).expect("serialise");
-        assert!(
-            !text.contains("s3cret"),
-            "the smuggled password must not survive: {text}"
-        );
-        assert!(!text.contains("s3"), "not even a fragment of it: {text}");
-        let form_args: Vec<&Event> = out
-            .iter()
-            .filter(|e| {
-                e.event_type == opengrok_wire::agui::EventType::ToolCallArgs
-                    && e.extra
-                        .get("toolCallId")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("call-1")
-            })
-            .collect();
-        assert_eq!(
-            form_args.len(),
-            1,
-            "one assembled fragment stands in for the pieces"
-        );
-        let delta = form_args[0]
-            .extra
-            .get("delta")
-            .and_then(serde_json::Value::as_str)
-            .unwrap();
-        assert!(
-            delta.contains("Log in"),
-            "non-secret fields are kept: {delta}"
-        );
-        let shell_args: Vec<&Event> = out
-            .iter()
-            .filter(|e| {
-                e.extra
-                    .get("toolCallId")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("call-2")
-            })
-            .collect();
-        assert_eq!(shell_args.len(), 3, "an ordinary tool is untouched");
-        assert!(text.contains("ls"), "{text}");
-    }
-
-    #[tokio::test]
-    async fn each_user_form_in_one_completion_gets_an_awaiting_custom_and_the_stream_closes() {
-        let journal = MemoryJournal::new();
-        let events = run_conversation(
-            &MockDoor::asking_for_stacked_user_forms(),
-            Some(&tool_runner()),
-            &journal,
-            request("sign in"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let forms: Vec<_> = events
-            .iter()
-            .filter(|event| {
-                event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|v| v.as_str())
-                        == Some("run-awaiting-approval")
-                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
-            })
-            .collect();
-        assert_eq!(
-            forms.len(),
-            3,
-            "one CUSTOM per stacked request_user_form: {events:?}"
-        );
-        let call_ids: Vec<_> = forms
-            .iter()
-            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
-            .collect();
-        assert_eq!(
-            call_ids,
-            vec!["mock-form-1", "mock-form-2", "mock-form-3"],
-            "{call_ids:?}"
-        );
-        assert_eq!(
-            events.last().map(|event| event.event_type),
-            Some(EventType::RunFinished),
-            "HITL park must close the SSE or Waiting spins forever: {events:?}"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == EventType::RunStarted),
-            "{events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn two_website_logins_keep_provider_call_ids_on_each_awaiting_custom() {
-        let journal = MemoryJournal::new();
-        let events = run_conversation(
-            &MockDoor::asking_for_two_website_logins(),
-            Some(&tool_runner()),
-            &journal,
-            request("sign in"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let call_ids: Vec<_> = events
-            .iter()
-            .filter(|event| {
-                event.event_type == EventType::Custom
-                    && event.extra.get("name").and_then(|v| v.as_str())
-                        == Some("run-awaiting-approval")
-                    && event.extra.get("reason").and_then(|v| v.as_str()) == Some("user-form")
-            })
-            .filter_map(|event| event.extra.get("callId").and_then(|v| v.as_str()))
-            .collect();
-        assert_eq!(
-            call_ids,
-            vec!["call-42628be6", "call-42628be6-1"],
-            "provider-style parallel ids must each get a CUSTOM: {events:?}"
-        );
-    }
-
-    /// The same picture four times running is waiting, not working; the run says so.
-    #[tokio::test]
-    async fn the_same_screen_four_times_ends_the_run() {
-        let journal = MemoryJournal::new();
-        let runner = screen_runner(false);
-        let events = run_conversation(
-            &LookingDoor(Mutex::new(0), 40),
-            Some(&runner),
-            &journal,
-            request("wait for the page"),
-            "t1",
-            "r1",
-            1,
-        )
-        .await;
-        let looks = events
-            .iter()
-            .filter(|event| event.event_type == EventType::ToolCallStart)
-            .count();
-        assert_eq!(looks, SAME_SCREEN_LIMIT, "{events:?}");
-        let last = events.last().unwrap();
-        assert_eq!(last.event_type, EventType::RunError);
-        assert!(
-            last.extra
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_default()
-                .contains("has not changed"),
-            "{last:?}"
-        );
-    }
-}
+#[path = "../tests/unit/loop_tests.rs"]
+mod tests;

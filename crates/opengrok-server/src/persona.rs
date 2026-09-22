@@ -461,7 +461,10 @@ pub fn computer_system_prompt(
          button once the holder is ready. You never see a key. Captcha or a page outside this box \
          is not another password form: the person finishes on the computer (Open the screen). If they \
          dismiss or decline, continue without those credentials and do not loop. When tools are \
-         offered, call one; do not narrate a plan of the work instead of starting a tool."
+         offered, call one; do not narrate a plan of the work instead of starting a tool. \
+         Never chat I'll / First I'll / The X isn't answering. After a listing, answer with facts. \
+         After a failed tool, retry once silently or say one short failure fact — never a diary. \
+         Never claim create or save until the call that writes has returned ok."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -740,7 +743,10 @@ mod tests {
         let box_only = computer_system_prompt(true, false, false, false, None);
         assert!(
             box_only.contains("You have your OWN computer")
-                && box_only.contains("do not narrate a plan"),
+                && box_only.contains("do not narrate a plan")
+                && box_only.contains("I'll")
+                && box_only.contains("never a diary")
+                && box_only.contains("returned ok"),
             "{box_only}"
         );
         assert!(

@@ -89,3 +89,8 @@ id!(
     "sess",
     "One signed-in session: an access/refresh token pair the client holds."
 );
+id!(
+    PendingUserMessageId,
+    "pum",
+    "One queued user send that has not yet become a run — NativeChat's follow-up while a turn is in flight."
+);
