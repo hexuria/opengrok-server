@@ -119,5 +119,6 @@ throwaway signup addresses.
 |---|---|
 | `RUST_LOG` | tracing filter, e.g. `opengrok=debug,opengrok_server=debug,opengrok_harness=debug` |
 | `OG_TRACE_REQUESTS` | **on by default**: one INFO line per request (method, path, status, ms, request id, Origin presence, bearer *length*, never its value). `0` turns it off. Every request carries an `X-Request-Id` — the client's if it sent one, a UUID otherwise — echoed on the response and stamped on every log line the handler writes |
+| `OG_TURN_TIMING` | unset (compact always) | Compact AG-UI CUSTOM `run-timing` is **always** emitted on `RUN_FINISHED` / `RUN_ERROR` (model_ms, tools, tool_wait_ms, auto_review_ms, total_ms, tool_rounds) plus one INFO line. `1` / `true` also logs the JSON body. NativeChat can hang the compact frame in a debug drawer |
 
 Retired, read by nothing: `SAND_GATEWAY_TOKEN`, and — since the seam A/B deletion of 20 Sep 2026 — `OG_GATEWAY_BEARER`, `OG_GATEWAY_EMAIL`, `OG_GATEWAY_IDENTITY_FALLBACK` and `OG_GRPC_BIND`.
