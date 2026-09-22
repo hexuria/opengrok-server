@@ -219,11 +219,15 @@ impl PgStore {
     /// Rename, re-describe, and turn a skill on or off. There is no owner argument on purpose:
     /// an update may never move a row to another account.
     ///
-    /// SWITCHING ONE ON IS WHAT APPROVAL IS. `approved_at_ms` is stamped the first time this
-    /// makes a skill live and never moved afterwards — switching a reviewed skill off and on
-    /// again is not a second review, and `coalesce` is what says so. There is no way to UNsay it:
-    /// a person who has read a body has read it, and a route that could clear the stamp would be
-    /// a route that makes a read body look unread.
+    /// SWITCHING ONE ON IS WHAT APPROVAL IS, and the stamp is taken on the TRANSITION rather than
+    /// on the value. `and not enabled` reads the row's old value, so only a call that turns a
+    /// skill on stamps it: without that, a `PUT` that merely renames — which passes the existing
+    /// `enabled` straight through — recorded a rename as the moment somebody reviewed the body.
+    ///
+    /// Never moved afterwards, either: switching a reviewed skill off and on again is not a
+    /// second review, which is what `coalesce` says. And there is no way to UNsay it — a person
+    /// who has read a body has read it, and a route that could clear the stamp would be a route
+    /// that makes a read body look unread.
     pub async fn update_skill(
         &self,
         id: &str,
@@ -234,7 +238,10 @@ impl PgStore {
     ) -> StoreResult<()> {
         sqlx::query(
             "update skill set name = $2, description = $3, enabled = $4, updated_at_ms = $5,
-                    approved_at_ms = coalesce(approved_at_ms, case when $4 then $5 else null end)
+                    approved_at_ms = coalesce(
+                        approved_at_ms,
+                        case when $4 and not enabled then $5 else null end
+                    )
               where id = $1",
         )
         .bind(id)

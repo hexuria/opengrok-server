@@ -1017,16 +1017,29 @@ create index if not exists skill_org_idx on skill (org_id);
 -- `add_skill_version` the first time the gate ran it. Guarded, the steady state reads one
 -- catalogue row and takes no lock at all.
 --
--- The backfill sits inside the same guard and therefore runs exactly once: every skill that
--- existed before this column was written or uploaded by its owner, and writing one is reading it.
--- It deliberately does not touch `taught` rows — those are the ones whose review is the point.
+-- The backfill sits inside the same guard and therefore runs exactly once. `or enabled` is the
+-- half that is easy to leave out and wrong to: a taught skill that is already switched on was
+-- approved by somebody — that is the only way it can be on — and leaving it null would make an
+-- already-reviewed skill look unreviewed, which is the exact state this column exists to tell
+-- apart. The dev database is the one most likely to hold such rows.
+--
+-- AND IT HOLDS THE LOCK FOR THE REST OF THE FILE. The schema is executed as one batch, so the
+-- ACCESS EXCLUSIVE this ALTER takes is held until the last statement below commits — once, on the
+-- boot that adds the column, on a table with no long transactions against it. Worth knowing
+-- before adding anything slow after this point.
+--
+-- `table_schema` is named because `skill` is a common word: a stale row in another schema on the
+-- search path would otherwise answer this question for us and leave the column unmade.
 do $do$ begin
     if not exists (
         select 1 from information_schema.columns
-         where table_name = 'skill' and column_name = 'approved_at_ms'
+         where table_schema = current_schema()
+           and table_name = 'skill'
+           and column_name = 'approved_at_ms'
     ) then
         alter table skill add column approved_at_ms bigint;
-        update skill set approved_at_ms = created_at_ms where source <> 'taught';
+        update skill set approved_at_ms = created_at_ms
+         where source <> 'taught' or enabled;
     end if;
 end $do$;
 -- ONE `/name` MEANS ONE SKILL. Two live skills called `review` under one account make the

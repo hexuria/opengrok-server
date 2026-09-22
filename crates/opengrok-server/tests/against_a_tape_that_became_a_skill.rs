@@ -602,6 +602,50 @@ async fn the_person_approves_before_a_turn_can_have_it() {
         assert_eq!(status, 200, "{text}");
         assert_eq!(again["approvedAtMs"], json!(approved), "{text}");
     }
+    // Nor is a rename. A `PUT` that changes only the name passes the existing switch straight
+    // back in, and the stamp is taken on the TRANSITION rather than on the value — so the row is
+    // put back into the state that tells the two apart (on, unapproved) to prove it. Nothing in
+    // the API can produce that state, which is the point: the semantics hold by construction
+    // rather than by the absence of a path to break them.
+    sqlx::query("update skill set approved_at_ms = null where id = $1")
+        .bind(&id)
+        .execute(h.store.pool())
+        .await
+        .expect("unstamp");
+    let (status, renamed, text) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "name": "invoice-lookup-renamed" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        renamed["approvedAtMs"],
+        json!(null),
+        "a rename is not a review: approved-at is when somebody read it, not when it was last \
+         touched: {text}"
+    );
+    // And the switch still stamps it, because that is the moment somebody says it is fit to use.
+    let (_, on_again, text) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(on_again["approvedAtMs"], json!(null), "{text}");
+    let (_, on_again, text) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+    assert!(on_again["approvedAtMs"].as_i64().is_some(), "{text}");
 
     h.turn(&ada, &bot, &id).await;
     let after = h.door.turn_systems();
