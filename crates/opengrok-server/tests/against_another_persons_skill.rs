@@ -496,6 +496,8 @@ async fn an_uploaded_bundle_round_trips_with_its_supporting_file() {
     assert_eq!(back, sheet, "the bytes survive the round trip");
 
     // A path that climbs out is refused rather than cleaned up: these files land on a computer.
+    // 400, not 413 — "payload too large" would tell the caller to send less of a path it must
+    // never send at all.
     let (status, _, text) = h
         .call(
             &ada,
@@ -507,8 +509,57 @@ async fn an_uploaded_bundle_round_trips_with_its_supporting_file() {
             })),
         )
         .await;
-    assert_eq!(status, 413, "{text}");
+    assert_eq!(status, 400, "{text}");
     assert!(text.contains("climbs out"), "{text}");
+
+    // A home-directory path and a trailing slash past the SKILL.md guard, through the route.
+    for path in ["~/.ssh/authorized_keys", "SKILL.md/", "a//b", "-rf"] {
+        let (status, _, text) = h
+            .call(
+                &ada,
+                "POST",
+                &format!("/skills/{id}/versions"),
+                Some(json!({
+                    "body": "still fine",
+                    "files": [{ "path": path, "bytes": encoded }],
+                })),
+            )
+            .await;
+        assert_eq!(status, 400, "{path} should be refused: {text}");
+    }
+
+    // The same file twice is a bundle that means two different things on a case-folding disk.
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            &format!("/skills/{id}/versions"),
+            Some(json!({
+                "body": "still fine",
+                "files": [
+                    { "path": "Notes.md", "bytes": encoded },
+                    { "path": "notes.md", "bytes": encoded },
+                ],
+            })),
+        )
+        .await;
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains("twice"), "{text}");
+
+    // One file past the count cap.
+    let many: Vec<_> = (0..=32)
+        .map(|n| json!({ "path": format!("f{n}.md"), "bytes": encoded }))
+        .collect();
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            &format!("/skills/{id}/versions"),
+            Some(json!({ "body": "still fine", "files": many })),
+        )
+        .await;
+    assert_eq!(status, 413, "{text}");
+    assert!(text.contains("32"), "the cap is named: {text}");
 
     // A bundle past the cap is refused, and the refusal names the cap.
     let fat = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 300 * 1024]);
@@ -660,4 +711,244 @@ async fn a_deleted_skill_leaves_the_list_and_stops_taking_writes() {
         .await;
     assert_eq!(status, 200, "{text}");
     assert_ne!(again["id"], made["id"], "a new row, not a resurrection");
+}
+
+/// TWO PEOPLE IN NO ORG ARE NOT COLLEAGUES.
+///
+/// `Register` carries `org_id` as a plain `String`, so an account made without one used to replay
+/// to `Some("")` — and `Some("") == Some("")`, so `relation_to` made every orgless person an
+/// `OrgMember` of every other orgless person's skills. Both accounts here are deliberately in NO
+/// org, which is the condition the bug needed; the earlier tests pass only because 404 happens to
+/// be the answer either way for a skill they never look at twice.
+#[tokio::test]
+async fn two_people_in_no_org_are_not_colleagues() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person(None).await;
+    let bob = h.person(None).await;
+
+    let (status, made, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills",
+            Some(json!({ "name": a_name("orgless"), "body": "nobody else's business" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    let id = made["id"].as_str().expect("id").to_string();
+
+    let (status, _, text) = h.call(&bob, "GET", &format!("/skills/{id}"), None).await;
+    assert_eq!(status, 404, "no org is not a shared org: {text}");
+    assert!(!text.contains("nobody else's business"), "{text}");
+
+    // And it is in none of their listings, under any filter.
+    for filter in ["org", "shared", "mine"] {
+        let (status, list, text) = h
+            .call(&bob, "GET", &format!("/skills?filter={filter}"), None)
+            .await;
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(list, json!([]), "filter={filter} leaked a stranger's skill");
+    }
+    let (_, everything, text) = h.call(&bob, "GET", "/skills", None).await;
+    assert_eq!(
+        everything,
+        json!([]),
+        "no filter is not every skill: {text}"
+    );
+}
+
+/// The gaps between the relations: a colleague may read but not write, cannot see a deleted one,
+/// and the owner's own switch never hides a skill from the owner.
+#[tokio::test]
+async fn a_colleague_may_add_no_version_and_sees_no_deleted_skill() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let org = format!("org_{}", uuid::Uuid::now_v7().simple());
+    let ada = h.person(Some(&org)).await;
+    let bob = h.person(Some(&org)).await;
+
+    let (status, made, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills",
+            Some(json!({ "name": a_name("shared-style"), "body": "ours" })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    let id = made["id"].as_str().expect("id").to_string();
+
+    // Readable, and 403 rather than 404 on a write: a colleague already knows it is there.
+    let (status, _, text) = h
+        .call(
+            &bob,
+            "POST",
+            &format!("/skills/{id}/versions"),
+            Some(json!({ "body": "a body that is not theirs to write" })),
+        )
+        .await;
+    assert_eq!(status, 403, "{text}");
+    assert!(text.contains("only the skill's owner"), "{text}");
+    let (_, read, _) = h.call(&ada, "GET", &format!("/skills/{id}"), None).await;
+    assert_eq!(read["version"], 1, "nothing was written");
+
+    // Whose skill it is, on every row: a colleague's `review` lists beside your own.
+    let (_, org_list, text) = h.call(&bob, "GET", "/skills?filter=org", None).await;
+    let rows = org_list.as_array().expect("a list");
+    assert_eq!(rows.len(), 1, "{text}");
+    assert!(
+        rows[0]["ownerId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("acct_")),
+        "a listing says whose each row is: {text}"
+    );
+
+    // The owner's own switch does not hide the skill from the owner.
+    let (status, off, text) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(off["enabled"], false);
+    let (status, mine, text) = h.call(&ada, "GET", &format!("/skills/{id}"), None).await;
+    assert_eq!(status, 200, "switching it off is not hiding it: {text}");
+    assert_eq!(mine["body"], "ours");
+    let (_, my_list, _) = h.call(&ada, "GET", "/skills?filter=mine", None).await;
+    assert_eq!(ids(&my_list), vec![id.clone()], "still in the owner's list");
+
+    // Deleted, it is gone for the colleague entirely — not 403, which would confirm it existed.
+    let (_, _, _) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+    let (status, _, text) = h.call(&ada, "DELETE", &format!("/skills/{id}"), None).await;
+    assert_eq!(status, 204, "{text}");
+    let (status, _, text) = h.call(&bob, "GET", &format!("/skills/{id}"), None).await;
+    assert_eq!(
+        status, 404,
+        "a deleted skill is nobody's but its owner's: {text}"
+    );
+    let (_, org_list, _) = h.call(&bob, "GET", "/skills?filter=org", None).await;
+    assert_eq!(org_list, json!([]));
+}
+
+/// A mistyped fence and a Windows line ending are the two ways a real SKILL.md arrives broken.
+/// Neither may be answered with a 200.
+#[tokio::test]
+async fn an_uploaded_skill_md_survives_crlf_and_refuses_an_unclosed_fence() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person(None).await;
+    let name = a_name("windows-written");
+
+    // CRLF: the offsets used to be rebuilt a byte short per line, so the body began inside the
+    // closing fence and the error grew with every frontmatter line.
+    let uploaded = format!(
+        "---\r\nname: {name}\r\nversion: 2\r\nauthor: someone\r\n\
+         description: written on Windows\r\n---\r\nOpen the changelog.\r\n"
+    );
+    let (status, made, text) = h
+        .call(&ada, "POST", "/skills", Some(json!({ "body": uploaded })))
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(made["name"], name.as_str());
+    assert_eq!(made["description"], "written on Windows");
+    assert_eq!(
+        made["body"], "Open the changelog.",
+        "no fence and no frontmatter leaked into the body: {made}"
+    );
+
+    // An unclosed fence used to answer 200 with an empty body and `draft: true` — a real skill
+    // uploaded, named, described, and silently thrown away.
+    let broken = "---\nname: half-written\ndescription: d\nThe instructions, with no fence.\n";
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills",
+            Some(json!({ "name": a_name("half"), "body": broken })),
+        )
+        .await;
+    assert_eq!(status, 400, "{text}");
+    assert!(text.contains("closing `---`"), "it says what to do: {text}");
+
+    // And nothing was written, so the name is not squatted by a failed upload.
+    let (_, mine, _) = h.call(&ada, "GET", "/skills?filter=mine", None).await;
+    assert_eq!(ids(&mine).len(), 1, "only the good one landed");
+
+    // The same refusal on a new version of a skill that already exists.
+    let id = made["id"].as_str().expect("id");
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            &format!("/skills/{id}/versions"),
+            Some(json!({ "body": broken })),
+        )
+        .await;
+    assert_eq!(status, 400, "{text}");
+}
+
+/// Two replies that are easy to get wrong because they look like success: a filter nobody
+/// implements, and a caller with no token at all.
+#[tokio::test]
+async fn an_unknown_filter_is_refused_and_no_token_is_a_401() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person(None).await;
+
+    let (status, _, text) = h.call(&ada, "GET", "/skills?filter=everything", None).await;
+    assert_eq!(status, 400, "a typo is not an empty account: {text}");
+    assert!(
+        text.contains("mine"),
+        "the refusal names the real ones: {text}"
+    );
+
+    // Absent and blank both mean "everything visible", which is not the same as unknown.
+    for path in ["/skills", "/skills?filter="] {
+        let (status, list, text) = h.call(&ada, "GET", path, None).await;
+        assert_eq!(status, 200, "{path}: {text}");
+        assert_eq!(list, json!([]));
+    }
+
+    // Every other test in this file carries a bearer, so nothing here proved the door was shut.
+    let no_token = h.client.get(format!("{}/skills", h.base));
+    let response = no_token.send().await.expect("send");
+    assert_eq!(response.status().as_u16(), 401, "no token, no skills");
+
+    let (status, made, _) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills",
+            Some(json!({ "name": a_name("guarded"), "body": "mine" })),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let id = made["id"].as_str().expect("id");
+    for (method, path) in [
+        ("GET", format!("/skills/{id}")),
+        ("PUT", format!("/skills/{id}")),
+        ("DELETE", format!("/skills/{id}")),
+        ("POST", format!("/skills/{id}/versions")),
+    ] {
+        let url = format!("{}{path}", h.base);
+        let request = match method {
+            "GET" => h.client.get(url),
+            "PUT" => h.client.put(url).json(&json!({ "name": "x" })),
+            "DELETE" => h.client.delete(url),
+            _ => h.client.post(url).json(&json!({ "body": "x" })),
+        };
+        let status = request.send().await.expect("send").status().as_u16();
+        assert_eq!(status, 401, "{method} {path} answered an unsigned caller");
+    }
 }

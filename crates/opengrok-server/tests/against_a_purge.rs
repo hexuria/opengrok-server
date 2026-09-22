@@ -39,6 +39,9 @@ struct Seeded {
     coworker: CoworkerId,
     run: RunId,
     schedule: ScheduleId,
+    /// A skill with a body and a bundled file: three tables the purge has to reach, and the
+    /// reason this field exists is that it did not, and nothing here would have noticed.
+    skill: String,
 }
 
 /// One account with everything the purge has to reach: its org, a coworker, a run with frames
@@ -202,12 +205,41 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         .await
         .expect("site login");
 
+    // A skill, its body and a file beside it — the three skill tables, all keyed off the
+    // account or its org.
+    let skill = format!("skl_purge_{}", uuid::Uuid::now_v7());
+    store
+        .create_skill(
+            opengrok_store::NewSkill {
+                id: &skill,
+                owner_id: account.as_str(),
+                org_id: Some(org.as_str()),
+                name: "purge-fixture",
+                description: "",
+                source: "authored",
+            },
+            Some(opengrok_store::NewSkillVersion {
+                kind: "authored",
+                body: "instructions",
+                note: "",
+                files: &[opengrok_store::SkillFileRow {
+                    path: "sheet.md".to_string(),
+                    bytes: b"beside it".to_vec(),
+                }],
+                created_by: account.as_str(),
+            }),
+            at_ms,
+        )
+        .await
+        .expect("skill");
+
     Seeded {
         account,
         org,
         coworker,
         run,
         schedule,
+        skill,
     }
 }
 
@@ -218,6 +250,7 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
     let coworker = seeded.coworker.to_string();
     let run = seeded.run.to_string();
     let schedule = seeded.schedule.to_string();
+    let skill = seeded.skill.clone();
     let streams = vec![
         format!("account/{account}"),
         format!("org/{org}"),
@@ -261,6 +294,17 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
             "site_login",
             "select count(*) from site_login where account_id = $1",
             &account,
+        ),
+        ("skill", "select count(*) from skill where id = $1", &skill),
+        (
+            "skill_version",
+            "select count(*) from skill_version where skill_id = $1",
+            &skill,
+        ),
+        (
+            "skill_file",
+            "select count(*) from skill_file where skill_id = $1",
+            &skill,
         ),
         (
             "secret_store (site logins)",
