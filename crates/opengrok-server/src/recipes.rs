@@ -430,6 +430,44 @@ struct CreateRequest {
     raw: Vec<TapeEvent>,
 }
 
+/// A raw tape, bounded, filtered and linted: the tape as it was taped, and the steps read off
+/// it. The one road from a tape to steps.
+///
+/// `pub(crate)` AND SHARED WITH `skills::from_tape`, which takes the same tape off the same
+/// desktop recorder and makes prose of it instead of a recipe. Two copies of this would be two
+/// answers to "is this tape usable" — and the copy that drifted would be the one that fed a
+/// model, which is the reader least able to complain about a malformed tape.
+///
+/// The serialised tape is handed back rather than re-derived, because `create` stores it as the
+/// `raw` version and serialising a 5 MB tape twice is the kind of waste nothing downstream sees.
+///
+/// The refusal is a status and a sentence rather than a built `Response`, so a caller can add to
+/// it — and so this stays a function about tapes rather than about HTTP.
+pub(crate) fn tape_into_steps(
+    raw: &[TapeEvent],
+    screen: Screen,
+) -> Result<(Value, Vec<Step>), (StatusCode, String)> {
+    let value =
+        serde_json::to_value(raw).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    if value.to_string().len() > MAX_RAW_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the tape is over 5 MB; teach a shorter task".to_string(),
+        ));
+    }
+    let steps = opengrok_recipes::filter(raw, screen);
+    if let Err(why) = opengrok_recipes::lint(&steps, screen) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            // NOT "did not filter into a recipe": the same sentence now reaches somebody who
+            // asked for a skill, and naming the other outcome would send them looking at the
+            // recipe they never asked for.
+            format!("the tape did not filter into usable steps: {why}"),
+        ));
+    }
+    Ok((value, steps))
+}
+
 /// `POST /recipes` — the tape in, v1 and v2 written, the recipe out.
 async fn create(
     State(state): State<AgUiState>,
@@ -443,26 +481,11 @@ async fn create(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "a recipe needs a name").into_response();
     }
-    let raw = match serde_json::to_value(&request.raw) {
-        Ok(raw) => raw,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    if raw.to_string().len() > MAX_RAW_BYTES {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "the tape is over 5 MB; teach a shorter task",
-        )
-            .into_response();
-    }
     let screen = request.screen.unwrap_or_default();
-    let steps = opengrok_recipes::filter(&request.raw, screen);
-    if let Err(why) = opengrok_recipes::lint(&steps, screen) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("the tape did not filter into a recipe: {why}"),
-        )
-            .into_response();
-    }
+    let (raw, steps) = match tape_into_steps(&request.raw, screen) {
+        Ok(both) => both,
+        Err(refusal) => return refusal.into_response(),
+    };
     let org = org_of(&state, &account).await;
     let id = format!("rcp_{}", uuid::Uuid::now_v7());
     let at_ms = now_ms();
