@@ -203,7 +203,10 @@ pub async fn run_conversation(
     at_ms: i64,
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
-    converse(door, tools, journal, request, projection, run_id, None).await
+    converse(
+        door, tools, journal, request, projection, run_id, None, false,
+    )
+    .await
 }
 
 /// `run_conversation`, with a sink that sees each event as it is produced.
@@ -230,6 +233,7 @@ pub async fn run_conversation_streaming(
         projection,
         run_id,
         Some(sink),
+        false,
     )
     .await
 }
@@ -373,6 +377,9 @@ pub async fn resume_conversation(
         return all;
     }
 
+    // The first half already recorded ToolCallStart (that is why this run is
+    // resuming). converse_raw would otherwise start with started_a_tool = false
+    // and treat a long post-HITL summary as a plan-only flood.
     let mut rest = converse(
         door,
         Some(tools),
@@ -381,6 +388,7 @@ pub async fn resume_conversation(
         projection,
         &run_id,
         None,
+        true,
     )
     .await;
     all.append(&mut rest);
@@ -457,12 +465,24 @@ async fn converse(
     projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
+    already_started_a_tool: bool,
 ) -> Vec<Event> {
     scrub_streamed_tool_args(
-        converse_raw(door, tools, journal, request, projection, run_id, sink).await,
+        converse_raw(
+            door,
+            tools,
+            journal,
+            request,
+            projection,
+            run_id,
+            sink,
+            already_started_a_tool,
+        )
+        .await,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn converse_raw(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -471,6 +491,7 @@ async fn converse_raw(
     mut projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
+    already_started_a_tool: bool,
 ) -> Vec<Event> {
     let mut all = Vec::new();
 
@@ -509,8 +530,9 @@ async fn converse_raw(
     // burning the remaining rounds on it only delays telling the person.
     let mut last_refused: Option<Vec<(String, serde_json::Value)>> = None;
     // Across the whole run, not the round: a tool call then a long summary is work,
-    // not a plan. Resetting this each round would fail that summary as plan-only text.
-    let mut started_a_tool = false;
+    // not a plan. Resetting this each round — or on resume, which is a new
+    // converse_raw — would fail that summary as plan-only text.
+    let mut started_a_tool = already_started_a_tool;
     let mut plan_only_chars = 0usize;
     // Rounds that ended in words or box tools, and rounds spent on the screen: two budgets.
     let mut spoken_rounds = 0usize;
@@ -2118,6 +2140,51 @@ mod tests {
             events
                 .iter()
                 .any(|event| event.event_type == EventType::ToolCallStart),
+            "{events:?}"
+        );
+    }
+
+    /// Resume starts a fresh converse_raw. The first half already ran a tool;
+    /// a long summary after HITL is work, not a plan-only flood.
+    #[tokio::test]
+    async fn a_resumed_run_does_not_treat_a_long_summary_as_plan_only() {
+        struct SummaryDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for SummaryDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                Ok(Box::pin(futures::stream::iter(
+                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
+                )))
+            }
+        }
+
+        let call = opengrok_tools::ToolCall {
+            id: "c1".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "ls"}),
+        };
+        let events = resume_conversation(
+            &SummaryDoor,
+            &tool_runner(),
+            &MemoryJournal::new(),
+            request("list files"),
+            RunContext::new("t1", "r1", 1),
+            Resumption::approved(call, 1),
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+        assert!(
+            !events.iter().any(|event| {
+                event.event_type == EventType::RunError
+                    && event
+                        .extra
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .is_some_and(|m| m.contains("plan-only text"))
+            }),
             "{events:?}"
         );
     }
