@@ -156,6 +156,12 @@ impl PgStore {
         .bind(&orgs)
         .fetch_all(&mut *tx)
         .await?;
+        let skills: Vec<String> =
+            sqlx::query_scalar("select id from skill where owner_id = any($1) or org_id = any($2)")
+                .bind(&accounts)
+                .bind(&orgs)
+                .fetch_all(&mut *tx)
+                .await?;
         // A run belongs to a doomed account, or sits on a doomed thread: a coworker's chat, a
         // schedule's firings, or the MCP door's audit thread for that coworker.
         let mcp_threads: Vec<String> = coworkers.iter().map(|id| format!("mcp-{id}")).collect();
@@ -256,6 +262,17 @@ impl PgStore {
             &recipes
         );
         delete!("recipe", "delete from recipe where id = any($1)", &recipes);
+        delete!(
+            "skill_file",
+            "delete from skill_file where skill_id = any($1)",
+            &skills
+        );
+        delete!(
+            "skill_version",
+            "delete from skill_version where skill_id = any($1)",
+            &skills
+        );
+        delete!("skill", "delete from skill where id = any($1)", &skills);
         delete!("run_view", "delete from run_view where id = any($1)", &runs);
         delete!(
             "schedule_view",

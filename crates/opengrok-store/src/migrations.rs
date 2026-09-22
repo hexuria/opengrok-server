@@ -972,6 +972,66 @@ alter table site_login drop constraint if exists site_login_account_id_origin_us
 create unique index if not exists site_login_owner_site_name_kind
     on site_login (account_id, origin, username, kind);
 
+-- SKILLS. A named, versioned bundle of instructions a person invokes for one turn by typing
+-- `/name`: a SKILL.md body, plus whatever small files sit beside it. Owned by an account, visible
+-- to the owner's org, soft-deleted so a run that cited one can still say what it cited.
+--
+-- MODELLED ON `recipe` DELIBERATELY. Ownership, versioning, soft delete and org visibility are
+-- the same problem there, and the shapes that solved it are worth repeating rather than
+-- re-inventing a second time to be got wrong once.
+create table if not exists skill (
+    id            text    primary key,
+    owner_id      text    not null,
+    org_id        text,
+    name          text    not null,
+    description   text    not null default '',
+    -- Where this skill came from: 'authored', 'uploaded', or 'taught'. Descriptive, written by
+    -- the server from how the row was made, and never a permission.
+    source        text    not null default 'authored',
+    -- The owner's switch. A disabled skill still lists and still reads; it is simply not offered
+    -- for a turn. The turn path is a later PR, and it reads this column rather than a request.
+    enabled       boolean not null default true,
+    created_at_ms bigint  not null,
+    updated_at_ms bigint  not null,
+    deleted_at_ms bigint
+);
+create index if not exists skill_owner_idx on skill (owner_id);
+create index if not exists skill_org_idx on skill (org_id);
+-- ONE `/name` MEANS ONE SKILL. Two live skills called `review` under one account make the
+-- invocation ambiguous, and the ambiguity would be resolved by whichever row sorted first.
+-- Partial, so a deleted row never blocks the name it used to hold.
+create unique index if not exists skill_owner_name_idx
+    on skill (owner_id, name) where deleted_at_ms is null;
+
+create table if not exists skill_version (
+    skill_id      text   not null references skill (id),
+    version       int    not null,
+    -- 'authored' (a person wrote it here), 'uploaded' (a SKILL.md came in) or 'taught' (a turn
+    -- wrote it down). Read by name in Rust, and deliberately NOT a check constraint or an enum
+    -- type, for the reason spelled out on `recipe_version.kind` above: adding the fourth value
+    -- would be a lock on a table several replicas migrate at once, for no protection the code
+    -- does not already give.
+    kind          text   not null,
+    -- Text, not jsonb: a skill body is Markdown a model reads, and jsonb would re-order and
+    -- re-escape it. Capped in the server (`skills::MAX_SKILL_BODY_CHARS`) rather than here,
+    -- because a refusal has to be able to say what the limit was and what arrived.
+    body          text   not null,
+    note          text   not null default '',
+    created_by    text   not null,
+    created_at_ms bigint not null,
+    primary key (skill_id, version)
+);
+
+-- The small files that came with a version. Per VERSION, not per skill: a new body that drops a
+-- reference file must not leave the old body reading a file that is no longer beside it.
+create table if not exists skill_file (
+    skill_id text  not null references skill (id),
+    version  int   not null,
+    path     text  not null,
+    bytes    bytea not null,
+    primary key (skill_id, version, path)
+);
+
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (

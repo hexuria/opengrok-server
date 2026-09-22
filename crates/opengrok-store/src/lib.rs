@@ -29,6 +29,7 @@ pub mod points;
 pub mod postgres;
 pub mod purge;
 pub mod replica;
+pub mod skills;
 pub mod spend;
 pub mod templates;
 pub mod vault;
@@ -46,6 +47,7 @@ pub use postgres::{
 };
 pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
+pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
