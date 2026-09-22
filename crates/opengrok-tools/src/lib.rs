@@ -289,6 +289,31 @@ fn default_timeout() -> u32 {
     30
 }
 
+/// `grok-box:local` ships a desktop and Chromium. It does not ship these binaries,
+/// and the box has no Rust toolchain to build them. Checked by running the image.
+const BIR_NOT_ON_THE_BOX: &str =
+    "gpui-agent and bir-headless are not on this computer. Use user_machine_shell.";
+
+/// A box `shell` token that would execute a BIR binary, including a path
+/// (`/usr/local/bin/gpui-agent`) and a download whose last segment is that name.
+/// An env assignment (`GPUI_AGENT_ADDR=...`) is not a command.
+fn command_targets_absent_bir_binary(command: &str) -> bool {
+    command
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&'))
+        .any(token_is_absent_bir_binary)
+}
+
+fn token_is_absent_bir_binary(token: &str) -> bool {
+    let token = token.trim_matches(|ch| matches!(ch, '"' | '\'' | '(' | ')'));
+    if token.is_empty() || token.contains('=') {
+        return false;
+    }
+    match token.rsplit('/').next() {
+        Some("gpui-agent" | "bir-headless") => true,
+        _ => false,
+    }
+}
+
 /// The arguments the file tools accept.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadFileArgs {
@@ -1398,6 +1423,15 @@ impl Executor {
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
         let tool_name = self.internal_tool_name(&call.name);
+        // grok-box:local has neither binary (checked 22 Sep 2026). A box shell that names
+        // them wakes the desktop, misses PATH, and then tries to fetch one. Refuse before
+        // the egress card and before the box is started. The user machine is the other tool.
+        if tool_name == "shell"
+            && let Ok(args) = serde_json::from_value::<ShellArgs>(arguments.clone())
+            && command_targets_absent_bir_binary(&args.command)
+        {
+            return ToolResult::refused(&call.id, BIR_NOT_ON_THE_BOX);
+        }
         // Two different yeses. The gate's approval (the machine owner's or the policy's card)
         // releases the gate's ask AND skips the judge; a review approval skips only the judge.
         let gate_approved = self.approved_calls.contains(&call.id);
@@ -2403,6 +2437,52 @@ mod tests {
                 .box_needs_wake(&context, &call("shell", json!({"command": "ls"})))
                 .await,
             "a box seen running is not asked about again"
+        );
+    }
+
+    /// The desktop image has no BIR binary. A box shell that names one must not wake the
+    /// box or raise an egress card. The same command on the user machine is a different tool.
+    #[tokio::test]
+    async fn a_box_shell_that_names_gpui_agent_is_refused_before_the_box_starts() {
+        let sleepy = Arc::new(SleepyComputer::new(&["exited"]));
+        let executor = allowing(sleepy.clone());
+        let context = context_with_box("box_mine");
+        for command in [
+            "gpui-agent hello",
+            "bir-headless serve --wait",
+            "GPUI_AGENT_ADDR=127.0.0.1:17423 gpui-agent invoke nav.go --arg page=settings",
+            "/usr/local/bin/gpui-agent invoke profile.list",
+        ] {
+            let result = executor
+                .execute(&context, &call("shell", json!({"command": command})))
+                .await;
+            assert!(!result.ok, "{command}: {result:?}");
+            assert!(
+                result.content.contains("not on this computer"),
+                "{command}: {result:?}"
+            );
+            assert!(!result.awaiting_approval, "{command}: {result:?}");
+        }
+        assert_eq!(sleepy.ran(), 0, "the box must not run the command");
+        assert_eq!(sleepy.resumes(), 0, "the box must not be woken");
+
+        let awake = Arc::new(SleepyComputer::new(&["running"]));
+        let listed = allowing(awake.clone())
+            .execute(&context, &call("shell", json!({"command": "ls"})))
+            .await;
+        assert!(listed.ok, "{listed:?}");
+        assert_eq!(awake.ran(), 1, "a normal shell still reaches the box");
+
+        let on_the_mac = executor
+            .execute(
+                &context,
+                &call(USER_MACHINE_SHELL, json!({"command": "gpui-agent hello"})),
+            )
+            .await;
+        assert!(!on_the_mac.ok, "{on_the_mac:?}");
+        assert!(
+            !on_the_mac.content.contains("not on this computer"),
+            "the user machine is not the box image: {on_the_mac:?}"
         );
     }
 
