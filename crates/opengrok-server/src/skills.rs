@@ -1261,13 +1261,32 @@ async fn from_tape(
     {
         Ok(lesson) => lesson,
         Err(why) => {
-            tracing::warn!(coworker = %coworker, %why, "a recording did not become a skill");
-            // A TIMEOUT IS ITS OWN STATUS because it is the one of these worth retrying: the
-            // recording was fine and the model was slow. The rest are 502 — the far side
-            // answered, and what it answered with cannot be stored.
+            // `?why` rather than `%why`: `DoorShut` keeps the door's own words for this line and
+            // does not print them to the person (`NotWritten`).
+            tracing::warn!(coworker = %coworker, why = ?why, "a recording did not become a skill");
+            // EACH CASE WEARS THE STATUS IT MEANS, spelled out rather than defaulted, because
+            // three of these read as "the far side broke" when they are nothing of the kind and
+            // a client retrying on 5xx would retry the two that will never succeed. Exhaustive on
+            // purpose: a new way for a lesson not to be written has to be given a status here.
+            use crate::tape_lesson::NotWritten;
             let status = match why {
-                crate::tape_lesson::NotWritten::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-                _ => StatusCode::BAD_GATEWAY,
+                // Not a fault. Nothing is broken and the recording is fine; the answer is about
+                // this account's own limit, and 5xx invited a retry that cannot work.
+                NotWritten::SpendCap(_) => StatusCode::PAYMENT_REQUIRED,
+                // The model was slow, which is the one of these worth retrying as it stands.
+                NotWritten::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+                // THE MODEL OBEYING US. The prompt asks for an empty answer when a recording
+                // shows too little to write from, so this is a judgement about the tape and
+                // belongs beside the other "this tape is unusable" answer, not among the faults.
+                NotWritten::Nothing => StatusCode::UNPROCESSABLE_ENTITY,
+                // Ours: four mints of a marker all landed inside the rendered tape. Nothing
+                // upstream was contacted, so blaming a gateway would send an operator to read
+                // the wrong log.
+                NotWritten::Unfenceable => StatusCode::INTERNAL_SERVER_ERROR,
+                // The far side answered, and what it answered with cannot be stored.
+                NotWritten::DoorShut(_) | NotWritten::NoLesson | NotWritten::Overrun(_) => {
+                    StatusCode::BAD_GATEWAY
+                }
             };
             return not_from_this_tape(status, why);
         }

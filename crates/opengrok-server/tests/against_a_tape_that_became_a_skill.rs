@@ -55,6 +55,9 @@ enum Answer {
     Broken(String),
     /// The door opens and says nothing at all.
     Silent,
+    /// The spend guard refusing before the door opens, in the sentence it writes about this
+    /// account's own limit.
+    Capped(String),
 }
 
 /// A door that answers a lesson request from a script and every other request with its own system
@@ -147,6 +150,8 @@ impl ModelDoor for ScriptedDoor {
                 return Ok(Box::pin(futures::stream::once(async move { Err(error) })));
             }
             Answer::Silent => return Ok(Box::pin(futures::stream::empty())),
+            // The shape `spend::GuardedDoor` refuses with: the door never opens.
+            Answer::Capped(why) => return Err(ModelError::SpendCap(why)),
         };
         // Word by word, so nothing here depends on a lesson arriving in one piece.
         let deltas: Vec<_> = said
@@ -569,10 +574,16 @@ async fn a_model_that_refuses_leaves_no_skill_and_says_why() {
     assert!(h.skills_of(&ada).await.is_empty(), "nothing was written");
 
     // A stream that breaks mid-lesson. Half a lesson reads exactly like a whole one once stored.
+    // The door's own words stay in the log: a `ModelError::Refused` carries the gateway's body,
+    // and a provider's prose must not arrive as ours in a reply about a recording.
     h.door.will(Answer::Broken("upstream hung up".to_string()));
     let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
     assert_eq!(status, 502, "{text}");
-    assert!(text.contains("upstream hung up"), "{text}");
+    assert!(
+        !text.contains("upstream hung up"),
+        "the provider's words are not ours to repeat: {text}"
+    );
+    assert!(text.contains("could not be asked"), "{text}");
     assert!(h.skills_of(&ada).await.is_empty(), "nothing was written");
 
     // A door that opens and says nothing: the call succeeded and there is still no lesson.
@@ -581,17 +592,61 @@ async fn a_model_that_refuses_leaves_no_skill_and_says_why() {
     assert_eq!(status, 502, "{text}");
     assert!(h.skills_of(&ada).await.is_empty(), "nothing was written");
 
-    // The prompt asks for an empty fence when a recording shows too little to write from.
+    // The prompt asks for an empty fence when a recording shows too little to write from, so a
+    // model answering that way is OBEYING: it is a judgement about the tape, and 422 is where the
+    // other "this tape is unusable" answer lives — not 502, which blames a working gateway.
     let marker_led = "=== BEGIN LESSON ";
     h.door.will(Answer::Lesson(String::new()));
     let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
-    assert_eq!(status, 502, "{text}");
+    assert_eq!(status, 422, "{text}");
     assert!(text.contains("could not tell"), "{text}");
     assert!(
         !text.contains(marker_led),
         "the refusal does not read the marker out: {text}"
     );
     assert!(h.skills_of(&ada).await.is_empty(), "nothing was written");
+    // And every one of them says the recording survived, or a client cannot know to retry.
+    assert!(text.contains("the same tape can be sent again"), "{text}");
+}
+
+/// A spend cap is not an outage. The person is over a limit they set, the recording is fine, and
+/// nothing is broken — so it cannot arrive as 5xx, which invites a retry that can never work.
+#[tokio::test]
+async fn a_spend_cap_is_the_accounts_answer_not_the_gateways() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    let sentence = "Ada has spent its $5.00 daily limit; raise it or wait for tomorrow.";
+    h.door.will(Answer::Capped(sentence.to_string()));
+
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 402, "{text}");
+    assert!(
+        text.contains(sentence),
+        "the guard's own sentence reaches the person: {text}"
+    );
+    assert!(text.contains("the same tape can be sent again"), "{text}");
+    assert!(h.skills_of(&ada).await.is_empty());
+}
+
+/// A recording made on a page that talks the reader into writing a novel costs output tokens and
+/// memory and then fails the body cap anyway. The stream is dropped instead.
+#[tokio::test]
+async fn an_answer_that_runs_away_is_stopped_rather_than_bought() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    // Comfortably past any ceiling this route would hold: eight times what a skill may be.
+    h.door.will(Answer::Lesson(
+        "y".repeat(opengrok_server::skills::MAX_SKILL_BODY_CHARS * 8),
+    ));
+
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 502, "{text}");
+    assert!(text.contains("was stopped"), "{text}");
+    assert!(h.skills_of(&ada).await.is_empty());
 }
 
 /// The cap is the same cap an uploaded body is held to, and it refuses rather than cuts.

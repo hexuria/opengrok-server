@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use opengrok_core::id::{AccountId, CoworkerId};
-use opengrok_harness::{ChatMessage, ModelDelta, ModelRequest};
+use opengrok_harness::{ChatMessage, ModelDelta, ModelError, ModelRequest};
 use opengrok_recipes::{Screen, Step};
 
 use crate::agui::AgUiState;
@@ -52,6 +52,20 @@ const ASKED_CHARS_SLOT: &str = "{asked}";
 /// types a line; a person pasting a document types a page, and that page is the part of a tape an
 /// attacker controls most directly. Cut here so one step cannot be most of the prompt.
 const TYPED_CHARS: usize = 200;
+
+/// The most of an ANSWER this route will hold, in characters.
+///
+/// The prompt was bounded with some care and the completion was left unbounded, which is a
+/// strange pair: the only thing stopping a model that had been talked into writing a novel was
+/// the timeout, and the bytes were paid for, buffered, and then refused by the body cap anyway.
+/// A recording made on a hostile page that steers the reader into writing at length would have
+/// failed to store anything and succeeded at costing money.
+///
+/// Four times the body cap, so an honest model that overshot what it was asked still reaches the
+/// cap check and gets that refusal, with its numbers, rather than this one. Past this the stream
+/// is DROPPED rather than read to the end — closing the response body is as far as this side can
+/// go towards not paying for the rest.
+const MAX_ANSWER_CHARS: usize = 4 * crate::skills::MAX_SKILL_BODY_CHARS;
 
 /// The most the whole rendered tape may be, in characters. `opengrok_recipes::lint` already
 /// refuses more than 256 steps, so this only bites on tapes full of long typed strings — and it
@@ -145,10 +159,20 @@ fn end_tape(marker: &str) -> String {
 /// has passed the same checks an uploaded body passes.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum NotWritten {
-    /// The door would not open, refused, or broke mid-stream. Carries the door's own sentence —
-    /// a spend cap is a `ModelError::SpendCap` the person can act on, and swallowing it would
-    /// leave them retrying a recording that will never work until they raise a limit.
-    #[error("the model could not be asked: {0}")]
+    /// THE PERSON'S OWN SPEND LIMIT, in the sentence the guard wrote (`spend::GuardedDoor`).
+    /// Carried verbatim and kept apart from every other door failure, because it is the one that
+    /// is not a fault: nothing is broken, the recording is fine, and the answer is about their
+    /// account. Folded into `DoorShut` it left them reading 502 Bad Gateway about their own
+    /// billing, and any retry keyed on 5xx treating a cap as a passing outage.
+    #[error("{0}")]
+    SpendCap(String),
+    /// The door would not open, refused, or broke mid-stream.
+    ///
+    /// THE DETAIL IS FOR THE LOG, NOT FOR THE PERSON, which is why `Display` does not print the
+    /// field and `Debug` does. A `ModelError::Refused` carries the gateway's body, and the body
+    /// carries whatever the provider felt like saying — sent on, it is a provider's prose
+    /// arriving as ours, in a reply to a request about a recording.
+    #[error("the model could not be asked for this recording")]
     DoorShut(String),
     #[error("the model did not answer within {0} seconds")]
     Timeout(u64),
@@ -167,6 +191,11 @@ pub(crate) enum NotWritten {
     /// chance at 64 bits; reachable only by a tape built against this code.
     #[error("no marker could be minted that this recording does not already contain")]
     Unfenceable,
+    /// The answer ran past what this route will hold. See `MAX_ANSWER_CHARS`.
+    #[error(
+        "the model wrote more than {0} characters without closing the lesson, and was stopped"
+    )]
+    Overrun(usize),
 }
 
 /// One bounded completion: the tape in as data, a lesson out as prose.
@@ -214,7 +243,7 @@ pub(crate) async fn lesson_from_tape(
     };
     let text = match tokio::time::timeout(LESSON_TIMEOUT, collect_text(state, request)).await {
         Ok(Ok(text)) => text,
-        Ok(Err(why)) => return Err(NotWritten::DoorShut(why)),
+        Ok(Err(why)) => return Err(why),
         Err(_) => return Err(NotWritten::Timeout(LESSON_TIMEOUT.as_secs())),
     };
     let Some(lesson) = between(&text, &marker) else {
@@ -226,27 +255,41 @@ pub(crate) async fn lesson_from_tape(
     Ok(lesson)
 }
 
-/// Everything the door said, or the first reason it stopped saying it.
+/// Everything the door said, up to `MAX_ANSWER_CHARS`, or the first reason it stopped saying it.
 ///
 /// A BROKEN STREAM IS AN UNANSWERED QUESTION, NOT A PARTIAL ANSWER — the judge's rule
 /// (`opengrok_harness::review`), and it matters more here: half a lesson ends mid-sentence and
 /// there is nothing downstream that could tell it from a short one once it is a stored body.
 /// Reasoning deltas are dropped; a model's thinking is not the lesson and was never fenced.
-async fn collect_text(state: &AgUiState, request: ModelRequest) -> Result<String, String> {
-    let mut stream = state
-        .door
-        .stream(request)
-        .await
-        .map_err(|error| error.to_string())?;
+async fn collect_text(state: &AgUiState, request: ModelRequest) -> Result<String, NotWritten> {
+    let mut stream = state.door.stream(request).await.map_err(door_shut)?;
     let mut text = String::new();
+    let mut seen = 0usize;
     while let Some(delta) = stream.next().await {
         match delta {
-            Ok(ModelDelta::Text(piece)) => text.push_str(&piece),
+            Ok(ModelDelta::Text(piece)) => {
+                seen += piece.chars().count();
+                if seen > MAX_ANSWER_CHARS {
+                    // Returning DROPS the stream, which closes the response body. Reading to the
+                    // end to be tidy would be paying for every token of the runaway answer.
+                    return Err(NotWritten::Overrun(MAX_ANSWER_CHARS));
+                }
+                text.push_str(&piece);
+            }
             Ok(_) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(door_shut(error)),
         }
     }
     Ok(text)
+}
+
+/// A door failure as one of ours. The spend cap keeps its sentence; everything else keeps its
+/// detail for the log and says one plain thing to the person.
+fn door_shut(error: ModelError) -> NotWritten {
+    match error {
+        ModelError::SpendCap(sentence) => NotWritten::SpendCap(sentence),
+        other => NotWritten::DoorShut(other.to_string()),
+    }
 }
 
 /// What sits between the two marker lines, or `None`.
