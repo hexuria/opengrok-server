@@ -428,6 +428,28 @@ async fn a_tape_becomes_a_skill_whose_first_version_is_taught() {
     assert!(sent.contains("press \"Return\""), "{sent}");
 }
 
+/// Two recordings in the same minute are the ordinary way this feature is used, and the minted
+/// name used to be the top bits of a millisecond clock — which change once every 65 seconds.
+#[tokio::test]
+async fn two_unnamed_recordings_in_a_row_do_not_collide() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    h.door
+        .will(Answer::Lesson("Look the invoice up by number.".to_string()));
+
+    let (first_status, first, first_text) = h.stop_recording(&ada, &bot, a_tape("one")).await;
+    let (second_status, second, second_text) = h.stop_recording(&ada, &bot, a_tape("two")).await;
+    assert_eq!(first_status, 200, "{first_text}");
+    assert_eq!(
+        second_status, 200,
+        "the second recording of the minute: {second_text}"
+    );
+    assert_ne!(first["name"], second["name"], "two names, not one");
+    assert_eq!(h.skills_of(&ada).await.len(), 2);
+}
+
 /// The review gate: the person reads what the model wrote, and only then can a turn have it.
 #[tokio::test]
 async fn the_person_approves_before_a_turn_can_have_it() {

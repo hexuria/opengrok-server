@@ -1115,9 +1115,17 @@ struct FromTapeRequest {
 
 /// A name for a skill nobody has named yet. Short, valid by `check_name`, and obviously
 /// provisional, because the person is about to read the body and rename it.
+///
+/// THE TAIL OF THE UUID, NOT THE HEAD, and the difference was a bug a person would have hit on
+/// their second recording. A v7 uuid begins with the millisecond clock, so its first eight hex
+/// characters change once every 65 seconds and carry no randomness at all: two recordings stopped
+/// in the same minute minted the same name, and the second was refused with "you already have a
+/// skill called that" for a name nobody had typed — with no retry that helped until the clock
+/// rolled over. Recording two short tasks back to back is the ordinary way this feature is used.
 fn minted_name() -> String {
     let id = uuid::Uuid::now_v7().simple().to_string();
-    format!("taught-{}", &id[..8.min(id.len())])
+    let tail = id.get(id.len().saturating_sub(8)..).unwrap_or(id.as_str());
+    format!("taught-{tail}")
 }
 
 /// `POST /skills/from-tape` — a recording in, a skill a model wrote out, switched off.
