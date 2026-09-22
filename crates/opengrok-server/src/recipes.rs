@@ -349,6 +349,10 @@ async fn list(
         }
     }
     if matches!(filter, "shared" | "org" | "all") {
+        // NOT gated on the caller having an org, deliberately: this call answers BOTH the shares
+        // made to them by name and the ones made to their org, and a person in no org can still
+        // hold the first kind. The org arm is gated inside the query instead, where a NULL org
+        // matches no row — see `recipes_shared_with`.
         match store
             .recipes_shared_with(account.as_str(), org.as_deref())
             .await

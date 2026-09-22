@@ -489,3 +489,135 @@ async fn recipe_parameters_declare_and_bind() {
         .expect("steps array");
     assert_eq!(stored_steps.len(), 2, "both steps are stored");
 }
+
+/// TWO PEOPLE IN NO ORG ARE NOT COLLEAGUES.
+///
+/// `Register` carries `org_id` as a plain `String`, so an account made without one used to replay
+/// to `Some("")`. The share handler's `Some` arm then accepted `{"scope":"org"}` from an orgless
+/// owner and wrote `recipe_share(scope='org', scope_id='')` — and every other orgless account
+/// matched it, became `Invited`, could accept, and could then run a recipe carrying somebody
+/// else's taped screens and keystrokes.
+///
+/// The fix is in three places and this test stands on the last of them: the aggregate no longer
+/// produces `Some("")` (`opengrok-core`), `org_of` filters it (`server/recipes.rs`), and the
+/// queries here refuse an absent or empty org outright — which is what still has to hold for a
+/// row an older build already wrote.
+#[tokio::test]
+async fn two_people_in_no_org_are_not_colleagues() {
+    let Some(store) = connect().await else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let stamp = now_ms();
+    let owner = format!("acct_orgless_owner_{stamp}");
+    let stranger = format!("acct_orgless_stranger_{stamp}");
+    let id = format!("rcp_orgless_{stamp}");
+
+    store
+        .create_recipe(&id, &owner, None, "Open the bank", "", (1280, 800), stamp)
+        .await
+        .expect("create");
+    store
+        .add_recipe_version(
+            &id,
+            "filtered",
+            &json!({"steps": [{"op": "click", "x": 1, "y": 1}]}),
+            "",
+            &owner,
+            stamp,
+        )
+        .await
+        .expect("version");
+
+    // The row an older build would have written: an org share whose org is the empty string.
+    store
+        .share_recipe(&id, "org", "", &owner, stamp)
+        .await
+        .expect("share");
+
+    // No org at all sees nothing...
+    assert!(
+        store
+            .recipes_shared_with(&stranger, None)
+            .await
+            .expect("read")
+            .iter()
+            .all(|(row, _)| row.id != id),
+        "a person in no org is not in everyone's org"
+    );
+    // ...and neither does one whose org somehow still arrives as the empty string.
+    assert!(
+        store
+            .recipes_shared_with(&stranger, Some(""))
+            .await
+            .expect("read")
+            .iter()
+            .all(|(row, _)| row.id != id),
+        "an empty org id must match no share row, including one already stored"
+    );
+    // The owner's own listing is not what this is about, and must be untouched.
+    assert!(
+        store
+            .recipes_owned_by(&owner)
+            .await
+            .expect("read")
+            .iter()
+            .any(|row| row.id == id),
+        "the owner still owns it"
+    );
+
+    // And accepting is refused, so the stranger cannot become a Recipient either.
+    for org in [None, Some("")] {
+        assert!(
+            !store
+                .answer_recipe_share(&id, &stranger, org, true, stamp)
+                .await
+                .expect("answer"),
+            "there is no share here to accept (org {org:?})"
+        );
+    }
+    assert!(
+        !store
+            .recipe_accepted_by(&id, &stranger)
+            .await
+            .expect("read"),
+        "nothing was accepted, so nothing may run"
+    );
+
+    // A REAL org still works: the fix must refuse the empty string, not org sharing.
+    let org = format!("org_real_{stamp}");
+    let colleague = format!("acct_colleague_{stamp}");
+    let real = format!("rcp_real_{stamp}");
+    store
+        .create_recipe(
+            &real,
+            &owner,
+            Some(&org),
+            "Open Gmail",
+            "",
+            (1280, 800),
+            stamp,
+        )
+        .await
+        .expect("create");
+    store
+        .share_recipe(&real, "org", &org, &owner, stamp)
+        .await
+        .expect("share");
+    assert!(
+        store
+            .recipes_shared_with(&colleague, Some(&org))
+            .await
+            .expect("read")
+            .iter()
+            .any(|(row, _)| row.id == real),
+        "a real org share still reaches a real colleague"
+    );
+    assert!(
+        store
+            .answer_recipe_share(&real, &colleague, Some(&org), true, stamp)
+            .await
+            .expect("answer"),
+        "and can still be accepted"
+    );
+}

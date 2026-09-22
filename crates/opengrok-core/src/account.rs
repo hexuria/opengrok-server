@@ -339,7 +339,16 @@ impl Account {
                 self.password_hash = Some(password_hash.clone());
                 self.first_name = first_name.clone();
                 self.last_name = last_name.clone();
-                self.org_id = Some(org_id.clone());
+                // AN EMPTY ORG IS NO ORG, and this is the line that has to say so.
+                //
+                // `CredentialsSet.org_id` is a plain `String` because every caller had one to
+                // hand; an account registered without one carried `""`, and this used to replay
+                // it to `Some("")`. Two such accounts then had EQUAL orgs, so anything deciding
+                // "same org, therefore may read" made every person in no org a colleague of
+                // every other. That is a bug class rather than a bug — each reader that forgot
+                // the empty string grew its own copy of it — so it is closed where the value is
+                // born rather than at each reader in turn.
+                self.org_id = Some(org_id.clone()).filter(|org| !org.is_empty());
             }
             AccountEvent::EmailVerified { .. } => self.verified = true,
             AccountEvent::Enabled { .. } => self.enabled = true,
@@ -621,6 +630,37 @@ impl AccountView {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// AN EMPTY ORG IS NO ORG. `Register` carries `org_id` as a plain `String`, and an account
+    /// made without one used to replay to `Some("")` — which compares EQUAL to the next orgless
+    /// account's, so every "are we in the same org" check said yes. Fixed here rather than in
+    /// each reader, and pinned here so it cannot come back.
+    #[test]
+    fn registering_without_an_org_leaves_no_org_rather_than_an_empty_one() {
+        let register = |org_id: &str| AccountCommand::Register {
+            email: "ada@og.local".to_string(),
+            password_hash: "x".to_string(),
+            first_name: "Ada".to_string(),
+            last_name: String::new(),
+            org_id: org_id.to_string(),
+            plan: Plan::Pro,
+            verified: true,
+            enabled: true,
+            at_ms: 1,
+        };
+        let none = Account::replay(&Account::default().decide(register("")).unwrap());
+        assert_eq!(none.org_id, None, "an empty org is no org");
+
+        let some = Account::replay(&Account::default().decide(register("org_1")).unwrap());
+        assert_eq!(some.org_id.as_deref(), Some("org_1"));
+
+        // The point of the fix, stated as the thing that was wrong: two people in no org.
+        let other = Account::replay(&Account::default().decide(register("")).unwrap());
+        assert!(
+            none.org_id.is_none() && other.org_id.is_none(),
+            "two people in no org must not share an org id"
+        );
+    }
 
     fn sign_in(email: &str, plan: Plan, trial: bool, at_ms: i64) -> AccountCommand {
         AccountCommand::SignIn {
