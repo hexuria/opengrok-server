@@ -3,7 +3,13 @@
 //!
 //! CRUD, plus the one read a turn makes. `for_turn` is how a chosen skill reaches the model, and
 //! it goes through the same `may()` table as every route here rather than re-deciding who may use
-//! what — the checks drift, the table cannot. Nothing else in this module knows the model exists.
+//! what — the checks drift, the table cannot.
+//!
+//! `from_tape` is the one route that asks a model for something rather than serving what a person
+//! wrote: a recording becomes a lesson (`crate::tape_lesson`) and that lesson becomes the first
+//! version of a skill. The prose comes back UNTRUSTED and goes through exactly the checks an
+//! uploaded `SKILL.md` goes through, and the skill it makes is born switched off so a person reads
+//! it before a turn does.
 //!
 //! Who may do what (`may`), in one place, so every route refuses alike:
 //! - the OWNER reads, renames, enables, adds versions, deletes;
@@ -21,14 +27,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_recipes::{Screen, TapeEvent};
 use opengrok_store::{NewSkill, NewSkillVersion, PgStore, SkillFileRow, SkillRow};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
-use crate::agui::routes::account_from_bearer;
-use crate::recipes::org_of;
+use crate::agui::routes::{account_from_bearer, owned_coworker};
+use crate::recipes::{org_of, tape_into_steps};
 
 /// The most a skill body may be. See the module note: the body shares one system message with the
 /// coworker's identity and its standing role, and 8000 characters is already eight times the role.
@@ -81,6 +88,14 @@ pub fn router(state: AgUiState) -> Router {
                 .post(create)
                 .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
+        // A STATIC SEGMENT BESIDE `{id}`, which axum resolves in favour of the static one, the
+        // way `/admin/computers/docker` already sits beside `/admin/computers/{kind}`.
+        //
+        // AND NO LOWERED BODY LIMIT, unlike the two routes above it: what this carries is a raw
+        // tape, not a bundle of reference files, and it is the same shape `POST /recipes` already
+        // takes from the same recorder under axum's own default. `MAX_UPLOAD_BYTES` here would
+        // refuse a minute of somebody's screen for being too big to be a skill's cheat sheet.
+        .route("/skills/from-tape", post(from_tape))
         .route("/skills/{id}", get(detail).put(update).delete(remove))
         .route(
             "/skills/{id}/versions",
@@ -346,6 +361,24 @@ pub(crate) async fn for_turn(
 /// `taught` is missing on purpose: it is the server's word for a body a turn wrote down, and a
 /// client that could claim it would be putting a sentence in the page that is not true.
 const CLIENT_KINDS: [&str; 2] = ["authored", "uploaded"];
+
+/// The word for a body a MODEL wrote. `from_tape` is the only place that writes it, and
+/// `kind_or_refusal` refuses it from a client — the two halves of one claim: a row that says
+/// `taught` was taught, and a page may say so.
+const TAUGHT: &str = "taught";
+
+/// What the version says about where the body came from. On the version rather than only the
+/// row, because a later version a person writes by hand sits on the same skill and the history
+/// has to be able to say which of them the model wrote.
+const TAUGHT_NOTE: &str = "written from a screen recording";
+
+/// What a taught skill's listing says when the person did not write a description.
+///
+/// OURS, NOT THE MODEL'S. A description rides in every row of every listing and reaches the
+/// coworker that reads it to decide whether a skill is relevant; a second piece of model-written
+/// prose there would be a second untrusted string to defend, for the sake of a subtitle. The
+/// person renames and re-describes with `PUT /skills/{id}` once they have read the body.
+const TAUGHT_DESCRIPTION: &str = "written from a screen recording; read it before you use it";
 
 /// The word to record, or the sentence to refuse with. `None` means "work it out from whether
 /// files came with it", which is what a client that says nothing gets.
@@ -775,6 +808,7 @@ async fn create(
                 description: &description,
                 source: kind,
                 // A skill a person wrote or uploaded is theirs and read: it works at once.
+                // `from_tape`'s does not, and says why there.
                 enabled: true,
             },
             first,
@@ -1055,6 +1089,219 @@ async fn add_version(
         "note": note,
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FromTapeRequest {
+    /// Whose screen was recorded. The one field here that is not about the tape, and it is not
+    /// decoration: the lesson is written by a model, and this says whose pin writes it, whose
+    /// key the gateway bills and whose cap the spend guard checks (`tape_lesson`). It is also
+    /// the thing this route authorises — see `from_tape`.
+    coworker_id: String,
+    /// Optional. Absent mints one, because a name is what a person types after a slash and the
+    /// recording does not carry one. NEVER the model's: see `from_tape`.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    screen: Option<Screen>,
+    /// The raw tape (v1) — the same field, the same shape and the same recorder as
+    /// `POST /recipes`, so the desktop app posts what it has already built when the person picks
+    /// SKILL instead of RECIPE at the end of a recording.
+    raw: Vec<TapeEvent>,
+}
+
+/// A name for a skill nobody has named yet. Short, valid by `check_name`, and obviously
+/// provisional, because the person is about to read the body and rename it.
+fn minted_name() -> String {
+    let id = uuid::Uuid::now_v7().simple().to_string();
+    format!("taught-{}", &id[..8.min(id.len())])
+}
+
+/// `POST /skills/from-tape` — a recording in, a skill a model wrote out, switched off.
+///
+/// THE THREE THINGS THIS ROUTE IS CAREFUL ABOUT, in the order they bite:
+///
+/// 1. WHOSE RECORDING IT IS. The account is the bearer's and never the body's (CLAUDE.md #7), and
+///    the coworker named in the body has to be one of that account's — `owned_coworker`, the same
+///    check `POST /recipes/{id}/run` makes before it plays a tape on a bot. A tape posted against
+///    somebody else's coworker is refused as "no such coworker", not as "not yours": which
+///    coworkers another account has is an answer about that account.
+///
+/// 2. WHAT THE MODEL WROTE IS UNTRUSTED. It is stored, and a later turn quotes it inside a
+///    system message, so it goes through the SAME checks an uploaded `SKILL.md` goes through —
+///    the one frontmatter parser, the body cap, the description cap — and its frontmatter's
+///    `name` and `description` are DISCARDED, as they are on `POST /skills/{id}/versions`. The
+///    model writes the lesson; it does not name the skill, does not describe it in every listing,
+///    and does not decide whether it is on.
+///
+/// 3. NOTHING HALF-WRITTEN SURVIVES A FAILURE. Every refusal below happens before the row exists,
+///    and the row and its first body are written in one transaction (`create_skill`), so a person
+///    whose model refused is left with what they had: their recording, and no skill.
+async fn from_tape(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Json(request): Json<FromTapeRequest>,
+) -> Response {
+    let Some(account) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let coworker = CoworkerId::from_stored(request.coworker_id.clone());
+    match owned_coworker(&state, &account, &coworker).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
+
+    let name = request
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(minted_name, str::to_string);
+    if let Err(why) = check_name(&name) {
+        return (StatusCode::BAD_REQUEST, why).into_response();
+    }
+    let description = request
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(TAUGHT_DESCRIPTION)
+        .to_string();
+    if let Err(why) = check_description(&description) {
+        return why.into_response();
+    }
+
+    // ASKED BEFORE THE MODEL IS, not after. The name is refused either way, and asking afterwards
+    // would bill the person for prose that was always going to be thrown away.
+    let store = &state.auth.store;
+    match store.skill_named(account.as_str(), &name).await {
+        Ok(Some(_)) => return (StatusCode::CONFLICT, taken(&name)).into_response(),
+        Ok(None) => {}
+        Err(error) => return unavailable(error),
+    }
+
+    // The tape becomes steps through the recipe route's own road (`recipes::tape_into_steps`):
+    // the same 5 MB ceiling, the same filter, the same lint, the same sentences. The serialised
+    // tape it hands back is dropped here — a skill is the lesson, and storing the tape beside it
+    // would be a recipe nobody asked for, under a row with no way to run it.
+    let screen = request.screen.unwrap_or_default();
+    let steps = match tape_into_steps(&request.raw, screen) {
+        Ok((_tape, steps)) => steps,
+        Err(refusal) => return refusal.into_response(),
+    };
+
+    // The coworker's own pin writes the lesson. Loaded rather than taken from the request: a
+    // client that could name the model would be choosing what this account is billed for.
+    let Ok((bot, _)) = state.auth.store.load_coworker(&coworker).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "that coworker could not be read",
+        )
+            .into_response();
+    };
+    let lesson = match crate::tape_lesson::lesson_from_tape(
+        &state, &account, &coworker, &bot.model, &steps, screen,
+    )
+    .await
+    {
+        Ok(lesson) => lesson,
+        Err(why) => {
+            tracing::warn!(coworker = %coworker, %why, "a recording did not become a skill");
+            // A TIMEOUT IS ITS OWN STATUS because it is the one of these worth retrying: the
+            // recording was fine and the model was slow. The rest are 502 — the far side
+            // answered, and what it answered with cannot be stored.
+            let status = match why {
+                crate::tape_lesson::NotWritten::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            return (status, why.to_string()).into_response();
+        }
+    };
+
+    // ONE PARSER, the same one an upload goes through. A lesson that opens with `---` is read as
+    // frontmatter by everything downstream, so it is read as frontmatter HERE too — otherwise a
+    // model that wrote a title block would have that block stored as instructions and quoted into
+    // a system message. Its `name` and `description` are dropped on the floor: what a model wrote
+    // does not get to be what a person types after a slash, nor what every listing says.
+    let parsed = opengrok_plugins::split_frontmatter(&lesson);
+    if !parsed.closed {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "the model opened a `---` fence and never closed it, so where its frontmatter \
+             ends and its instructions begin cannot be told apart",
+        )
+            .into_response();
+    }
+    let body = parsed.body.trim();
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "the model answered with frontmatter and no instructions",
+        )
+            .into_response();
+    }
+    // REFUSED, NOT CUT, and for `for_turn`'s reason: a body cut at 8000 characters ends
+    // mid-sentence and nothing downstream can tell it from a whole one. The prompt asks for a
+    // quarter of this, so a body that arrives over it is a model that ignored a plain
+    // instruction — the last thing to paper over on the way into a system message.
+    if let Err((_, why)) = check_body(body) {
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("the model wrote more than a skill can hold: {why}"),
+        )
+            .into_response();
+    }
+
+    let org = org_of(&state, &account).await;
+    let id = format!("skl_{}", uuid::Uuid::now_v7());
+    let at_ms = now_ms();
+    if let Err(error) = store
+        .create_skill(
+            NewSkill {
+                id: &id,
+                owner_id: account.as_str(),
+                org_id: org.as_deref(),
+                name: &name,
+                description: &description,
+                source: TAUGHT,
+                // SWITCHED OFF IS THE REVIEW GATE, and it is the existing switch rather than a
+                // second idea of "draft". A draft is `versionCount == 0` — a skill with nothing
+                // written yet — and this one HAS a body: that is the whole point of the route,
+                // and saying it was empty would be false on the one screen the person reads it
+                // on. What is true is that nobody has read it: `for_turn` refuses a switched-off
+                // skill even to its owner, and `skills_in_org` hides it from colleagues, so an
+                // unread body cannot reach any turn. Approving it is `PUT /skills/{id}` with
+                // `enabled: true` — a route that already exists and is already owner-only.
+                enabled: false,
+            },
+            Some(NewSkillVersion {
+                kind: TAUGHT,
+                body,
+                note: TAUGHT_NOTE,
+                // No bundle. A model writing prose from a recording has no files to send, and a
+                // route that accepted some here would be accepting them from the model.
+                files: &[],
+                created_by: account.as_str(),
+            }),
+            at_ms,
+        )
+        .await
+    {
+        return created_or_refused(error, &name);
+    }
+
+    match store.skill(&id).await {
+        Ok(Some(row)) => match detail_of(store, &row).await {
+            Ok(detail) => Json(detail).into_response(),
+            Err(response) => response,
+        },
+        Ok(None) => (StatusCode::SERVICE_UNAVAILABLE, "the skill did not stick").into_response(),
+        Err(error) => unavailable(error),
+    }
 }
 
 #[cfg(test)]

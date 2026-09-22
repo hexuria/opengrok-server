@@ -42,6 +42,7 @@ pub mod recipes;
 pub mod recovery;
 pub mod skills;
 pub mod spend;
+pub(crate) mod tape_lesson;
 pub mod templates;
 pub mod workflows;
 
