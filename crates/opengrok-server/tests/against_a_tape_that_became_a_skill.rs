@@ -1096,9 +1096,7 @@ async fn even_a_refusal_the_handler_never_saw_says_the_tape_survived() {
     assert!(text.contains("the same tape can be sent again"), "{text}");
 
     // And the promise is made once, not twice, when the handler already made it.
-    let (_, _, text) = h
-        .stop_recording(&ada, &"cw_nobody".to_string(), a_tape("x"))
-        .await;
+    let (_, _, text) = h.stop_recording(&ada, "cw_nobody", a_tape("x")).await;
     assert_eq!(
         text.matches("the same tape can be sent again").count(),
         1,

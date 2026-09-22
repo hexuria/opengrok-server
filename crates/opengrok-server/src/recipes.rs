@@ -45,6 +45,13 @@ pub(crate) const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
 ///
 /// The slack is for the JSON around `raw` — the field names, the name, the description — because
 /// `MAX_RAW_BYTES` is measured on the re-serialised tape alone.
+///
+/// IT RAISES WHAT `POST /recipes` ACCEPTS, from axum's 2 MiB to this, which is a real change to a
+/// route that was not the point of the work that made it: tapes between two and five megabytes
+/// used to be refused at the door and are now stored as a `raw` recipe version. That is the
+/// behaviour `MAX_RAW_BYTES` always described, and a tape is bounded jsonb in a table that
+/// already holds one per teach — but it is worth knowing that the largest row this table can take
+/// grew by two and a half times on the day this constant landed.
 pub(crate) const MAX_TAPE_UPLOAD_BYTES: usize = MAX_RAW_BYTES + 64 * 1024;
 
 /// How much of a raw tape a detail response carries. Enough to read what was taped, few
