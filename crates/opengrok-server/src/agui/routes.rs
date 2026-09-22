@@ -2388,10 +2388,23 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
+    }
+
+    // Refuse stale sends before interrupting a parked turn or preparing any model work.
+    if let Some(account) = &account_id {
+        if let Err(refusal) =
+            crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
+        {
+            return refusal;
+        }
+    } else if crate::agui::pending::pending_id_from(&input).is_some() {
+        return (StatusCode::UNAUTHORIZED, "sign in to send a queued message").into_response();
+    }
+    if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
         crate::agui::resume::interrupt_parked_hitl(
             &gateway,
             account_id,
-            &coworker_id,
+            coworker_id,
             account_id.as_str(),
         )
         .await;
@@ -2553,16 +2566,6 @@ pub async fn run(
         model: Some(request.model.clone()),
         system,
     };
-
-    // Consume the queued send this turn is firing, before the harness starts, so two machines
-    // cannot both POST /ag-ui for the same pending id. After this the only early return is the
-    // SSE itself — a 403 above must not have taken the row. Anonymous turns have no queue.
-    if let Some(account) = &account_id
-        && let Err(refusal) =
-            crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
-    {
-        return refusal;
-    }
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
     // an abandoned run. Released when the spawned turn drops — including when the process dies,
@@ -4024,7 +4027,7 @@ fn reply_quote(
 /// IDEMPOTENT ON PURPOSE. A client that cannot rely on this field spells the quote into `content`
 /// itself — NativeChat does, so a reply works against a server that predates `replyTo` — and
 /// saying it twice is worse than not reading the field at all.
-fn with_reply_context(
+pub(super) fn with_reply_context(
     content: &str,
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],

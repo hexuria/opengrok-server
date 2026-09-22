@@ -98,19 +98,8 @@ pub enum DrainResult {
     Drained(PendingUserMessageRow),
     AlreadyThisRun(PendingUserMessageRow),
     AlreadyConsumed(PendingUserMessageRow),
+    Stale(PendingUserMessageRow),
     Missing,
-}
-
-fn drain_of(row: PendingUserMessageRow, run_id: &str) -> DrainResult {
-    if row.status == "pending" {
-        // The UPDATE did not take it; a concurrent writer did. Re-read as consumed.
-        return DrainResult::AlreadyConsumed(row);
-    }
-    if row.drained_run_id.as_deref() == Some(run_id) {
-        DrainResult::AlreadyThisRun(row)
-    } else {
-        DrainResult::AlreadyConsumed(row)
-    }
 }
 
 impl PgStore {
@@ -311,8 +300,7 @@ impl PgStore {
         Ok(done.rows_affected() == 1)
     }
 
-    /// Consume one follow-up as this turn. The UPDATE is the race: two `POST /ag-ui` with the
-    /// same pending id cannot both see `pending`.
+    /// Compare and consume under the same row lock; stale clients cannot fire edited sends.
     pub async fn drain_pending_user_message(
         &self,
         id: &str,
@@ -320,34 +308,13 @@ impl PgStore {
         thread_id: &str,
         run_id: &str,
         at_ms: i64,
+        matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
-        let taken = sqlx::query(
-            "update pending_user_message
-                set status = 'drained', updated_at_ms = $5, drained_at_ms = $5,
-                    drained_run_id = $4
-              where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'
-              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
-                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
-                        drained_at_ms, drained_run_id",
-        )
-        .bind(id)
-        .bind(account.as_str())
-        .bind(thread_id)
-        .bind(run_id)
-        .bind(at_ms)
-        .fetch_optional(self.pool())
-        .await?;
-        if let Some(row) = taken.as_ref() {
-            return Ok(DrainResult::Drained(pending_row(row)?));
-        }
-        match self.pending_user_message(id, account).await? {
-            Some(row) if row.thread_id == thread_id => Ok(drain_of(row, run_id)),
-            Some(_) | None => Ok(DrainResult::Missing),
-        }
+        self.checked_drain(("id", id), account, thread_id, run_id, at_ms, matches)
+            .await
     }
 
-    /// Consume by the client's bubble id, for a `POST /ag-ui` that did not name `pendingId`.
-    /// `Missing` means this turn is not a queued send — ordinary AG-UI, leave it alone.
+    /// A missing client bubble is an ordinary, unqueued turn.
     pub async fn drain_pending_user_message_by_client_id(
         &self,
         client_message_id: &str,
@@ -355,38 +322,59 @@ impl PgStore {
         thread_id: &str,
         run_id: &str,
         at_ms: i64,
+        matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
-        let taken = sqlx::query(
-            "update pending_user_message
-                set status = 'drained', updated_at_ms = $5, drained_at_ms = $5,
-                    drained_run_id = $4
-              where account_id = $1 and thread_id = $2 and client_message_id = $3
-                and status = 'pending'
-              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
-                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
-                        drained_at_ms, drained_run_id",
+        self.checked_drain(
+            ("client_message_id", client_message_id),
+            account,
+            thread_id,
+            run_id,
+            at_ms,
+            matches,
         )
-        .bind(account.as_str())
-        .bind(thread_id)
-        .bind(client_message_id)
-        .bind(run_id)
-        .bind(at_ms)
-        .fetch_optional(self.pool())
-        .await?;
-        if let Some(row) = taken.as_ref() {
-            return Ok(DrainResult::Drained(pending_row(row)?));
-        }
-        let existing = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{PENDING_SELECT} where account_id = $1 and thread_id = $2 and client_message_id = $3"
+        .await
+    }
+
+    async fn checked_drain(
+        &self,
+        key: (&str, &str),
+        account: &AccountId,
+        thread_id: &str,
+        run_id: &str,
+        at_ms: i64,
+        matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
+    ) -> StoreResult<DrainResult> {
+        let mut tx = self.pool().begin().await?;
+        // The column is selected only by the two wrappers above, never by a request.
+        let current = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where {} = $1 and account_id = $2 and thread_id = $3 for update",
+            key.0
         )))
+        .bind(key.1)
         .bind(account.as_str())
         .bind(thread_id)
-        .bind(client_message_id)
-        .fetch_optional(self.pool())
+        .fetch_optional(&mut *tx)
         .await?;
-        match existing.as_ref().map(pending_row).transpose()? {
-            Some(row) => Ok(drain_of(row, run_id)),
-            None => Ok(DrainResult::Missing),
-        }
+        let outcome = match current.as_ref().map(pending_row).transpose()? {
+            None => DrainResult::Missing,
+            Some(row)
+                if row.status != "pending" && row.drained_run_id.as_deref() != Some(run_id) =>
+            {
+                DrainResult::AlreadyConsumed(row)
+            }
+            Some(row) if !matches(&row) => DrainResult::Stale(row),
+            Some(row) if row.status != "pending" => DrainResult::AlreadyThisRun(row),
+            Some(mut row) => {
+                sqlx::query("update pending_user_message set status = 'drained', updated_at_ms = $2, drained_at_ms = $2, drained_run_id = $3 where id = $1")
+                    .bind(&row.id).bind(at_ms).bind(run_id).execute(&mut *tx).await?;
+                row.status = "drained".to_string();
+                row.updated_at_ms = at_ms;
+                row.drained_at_ms = Some(at_ms);
+                row.drained_run_id = Some(run_id.to_string());
+                DrainResult::Drained(row)
+            }
+        };
+        tx.commit().await?;
+        Ok(outcome)
     }
 }

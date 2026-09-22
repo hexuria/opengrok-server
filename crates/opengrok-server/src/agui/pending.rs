@@ -519,6 +519,71 @@ pub fn last_user_message_id(input: &RunAgentInput) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// Compare what will actually be sent, allowing only the exact legacy reply rendering.
+fn matches_turn(row: &PendingUserMessageRow, input: &RunAgentInput) -> bool {
+    let Some(message) = input
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+    else {
+        return false;
+    };
+    let reply = message
+        .extra
+        .get("replyTo")
+        .filter(|value| !value.is_null());
+    if reply != row.reply_to.as_ref().filter(|value| !value.is_null()) {
+        return false;
+    }
+    let mut stored = message.clone();
+    stored.content = Some(row.content.clone());
+    let rendered = super::routes::with_reply_context(&row.content, &stored, &input.messages);
+    if !message
+        .content
+        .as_deref()
+        .is_some_and(|text| text == row.content || text == rendered)
+    {
+        return false;
+    }
+    let selection = |value: Option<&Value>| -> Result<Option<String>, ()> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(id)) => Ok((!id.trim().is_empty()).then(|| id.trim().to_string())),
+            _ => Err(()),
+        }
+    };
+    for (key, saved) in [
+        ("recipe", row.recipe_id.as_deref()),
+        ("skill", row.skill_id.as_deref()),
+    ] {
+        let saved = saved
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
+        if selection(input.forwarded_props.get(key)) != Ok(saved) {
+            return false;
+        }
+    }
+    // Recipe inputs use scalar text when bound to a tool, including numeric and boolean values.
+    let values = |value: Option<&Value>| -> std::collections::BTreeMap<String, String> {
+        value
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    Value::Number(_) | Value::Bool(_) => value.to_string(),
+                    _ => return None,
+                };
+                Some((key.clone(), text))
+            })
+            .collect()
+    };
+    values(input.forwarded_props.get("recipeValues")) == values(row.recipe_values.as_ref())
+}
+
 /// Consume a queued send as this turn, or refuse so two machines cannot both fire it.
 ///
 /// `Ok(())` means this turn may start: we drained a row, this run already drained it (retry),
@@ -528,12 +593,23 @@ pub async fn consume_for_turn(
     account: &AccountId,
     input: &RunAgentInput,
 ) -> Result<(), Response> {
+    if pending_id_from(input).is_some()
+        && !input.messages.iter().any(|message| message.role == "user")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "a queued send needs a user message",
+        )
+            .into_response());
+    }
     let thread_id = input.thread_id.as_str();
     let run_id = input.run_id.as_str();
     let at_ms = now_ms();
     let result = if let Some(pending_id) = pending_id_from(input) {
         store
-            .drain_pending_user_message(&pending_id, account, thread_id, run_id, at_ms)
+            .drain_pending_user_message(&pending_id, account, thread_id, run_id, at_ms, |row| {
+                matches_turn(row, input)
+            })
             .await
     } else if let Some(client_message_id) = last_user_message_id(input) {
         store
@@ -543,6 +619,7 @@ pub async fn consume_for_turn(
                 thread_id,
                 run_id,
                 at_ms,
+                |row| matches_turn(row, input),
             )
             .await
     } else {
@@ -550,6 +627,13 @@ pub async fn consume_for_turn(
     };
     match result {
         Ok(DrainResult::Drained(_) | DrainResult::AlreadyThisRun(_)) => Ok(()),
+        Ok(DrainResult::Stale(row)) => Err((StatusCode::CONFLICT, Json(json!({
+            "v": PAYLOAD_V,
+            "error": "stale-pending-message",
+            "id": row.id,
+            "message": "This queued message changed. Refresh it before sending again.",
+            "event": custom_event(if row.status == "pending" { "edited" } else { "drained" }, thread_id, Some(&row)),
+        }))).into_response()),
         Ok(DrainResult::Missing) if pending_id_from(input).is_none() => Ok(()),
         Ok(DrainResult::Missing) => Err((
             StatusCode::CONFLICT,
