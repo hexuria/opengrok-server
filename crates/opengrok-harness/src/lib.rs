@@ -77,6 +77,9 @@ pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
 /// bar_chart again in the same request.
+///
+/// THESE ARE THE `chat_ui::attach` LOCALS (`bar_chart`, `form`, and the name
+/// spellings a model actually emits). They are paint widgets, not work tools.
 pub fn is_client_render_tool(name: &str) -> bool {
     matches!(
         name.trim()
@@ -91,6 +94,18 @@ pub fn is_client_render_tool(name: &str) -> bool {
             | "show-form"
             | "render-form"
     )
+}
+
+/// Shot A is unused *work* tools (shell, `user_machine_shell`, computer). A
+/// schema list that is only `bar_chart` / `form` is still chat: production
+/// AG-UI always runs `chat_ui::attach`, which adds those two even when there
+/// is no computer.
+fn work_tools_offered(schemas: &[serde_json::Value]) -> bool {
+    schemas.iter().any(|schema| {
+        schema["function"]["name"]
+            .as_str()
+            .is_some_and(|name| !is_client_render_tool(name))
+    })
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -465,9 +480,15 @@ async fn converse_raw(
     if let Some(runner) = tools {
         request.tools = runner.tool_schemas();
     }
-    // Empty offering is chat: a long answer is a long answer. A non-empty one that
-    // never produces ToolCallStart is Shot A's plan-only flood — counted below.
-    let tools_offered = !request.tools.is_empty();
+    // Not `!request.tools.is_empty()`. Production AG-UI always runs
+    // `chat_ui::attach` (opengrok-server `agui/chat_ui.rs`, offered from
+    // `agui/routes.rs` on every turn, including coworkers with no computer),
+    // which adds `bar_chart` and `form`. Those are paint widgets NativeChat
+    // draws from TOOL_CALL frames. A long prose answer that never calls them
+    // is normal chat, not Shot A — Shot A is unused shell / user_machine_shell
+    // / computer. Count the plan-only flood only when a non-paint tool is on
+    // the schema list.
+    let tools_offered = work_tools_offered(&request.tools);
 
     let mut opening = projection.start();
     if let Err(error) = journal.record(run_id, &opening).await {
@@ -1990,6 +2011,60 @@ mod tests {
         .await;
 
         assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    /// Production AG-UI always attaches `bar_chart` and `form` (`chat_ui::attach`),
+    /// even when there is no computer. Those paint widgets must not trip the
+    /// plan-only stop: a long chat answer is still a chat answer.
+    #[tokio::test]
+    async fn plan_only_text_does_not_stop_when_only_paint_tools_are_offered() {
+        struct PlanDoor;
+        #[async_trait::async_trait]
+        impl ModelDoor for PlanDoor {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+                Ok(Box::pin(futures::stream::iter(
+                    vec![Ok(ModelDelta::Text(flood))].into_iter(),
+                )))
+            }
+        }
+
+        let painted: LocalTool =
+            Arc::new(|call| opengrok_tools::ToolResult::ok(&call.id, "painted"));
+        let runner = ToolRunner::local_only()
+            .with_local(
+                serde_json::json!({
+                    "type": "function",
+                    "function": { "name": "bar_chart" }
+                }),
+                painted.clone(),
+            )
+            .with_local(
+                serde_json::json!({
+                    "type": "function",
+                    "function": { "name": "form" }
+                }),
+                painted,
+            );
+        assert!(
+            !work_tools_offered(&runner.tool_schemas()),
+            "bar_chart/form are paint widgets, not work tools: {:?}",
+            runner.tool_schemas()
+        );
+
+        let events = run_conversation(
+            &PlanDoor,
+            Some(&runner),
+            &MemoryJournal::new(),
+            request("explain at length"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+
+        let last = events.last().unwrap();
+        assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
     }
 
     /// A tool call, then a long answer, is work. The character bound must not fire on
