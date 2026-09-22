@@ -1246,7 +1246,16 @@ async fn from_tape(
     match owned_coworker(&state, &account, &coworker).await {
         Ok(true) => {}
         Ok(false) => return not_from_this_tape(StatusCode::NOT_FOUND, "no such coworker"),
-        Err(refusal) => return refusal,
+        // Re-said rather than forwarded. `owned_coworker` hands back a finished response for its
+        // other callers, and a finished response cannot be given the standing promise about the
+        // tape — this would have been the one refusal on the route that left a person guessing
+        // whether their recording was spent.
+        Err(_) => {
+            return not_from_this_tape(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "your coworkers could not be listed, so whose screen this was cannot be checked",
+            );
+        }
     }
     // Bound BELOW the ownership check so a caller guessing at coworker ids still gets its
     // refusals, and ABOVE everything that costs. `_guard`, never `_`: bound to `_` it would drop
