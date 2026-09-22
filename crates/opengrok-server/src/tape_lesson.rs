@@ -48,9 +48,14 @@ const ASKED_LESSON_CHARS: usize = 2000;
 /// a length nothing asked it to respect.
 const ASKED_CHARS_SLOT: &str = "{asked}";
 
-/// The most of one typed string that reaches the model, in characters. A person filling a form
-/// types a line; a person pasting a document types a page, and that page is the part of a tape an
-/// attacker controls most directly. Cut here so one step cannot be most of the prompt.
+/// The most of one typed string that reaches the model, in RENDERED characters. A person filling
+/// a form types a line; a person pasting a document types a page, and that page is the part of a
+/// tape an attacker controls most directly. Cut here so one step cannot be most of the prompt.
+///
+/// RENDERED, NOT SOURCE, and the difference was worth about ten times its own size. `{:?}` turns
+/// one character into as many as ten (`\u{202e}` for a right-to-left override, six for a zero
+/// width space), so a budget counted on the source let escape-heavy text buy that multiple of the
+/// prompt — and the actions the lesson is supposed to describe were the ones pushed out of it.
 const TYPED_CHARS: usize = 200;
 
 /// The most of an ANSWER this route will hold, in characters.
@@ -366,14 +371,26 @@ fn render(steps: &[Step], screen: Screen) -> String {
     out
 }
 
-/// One typed string, cut to `TYPED_CHARS` and escaped onto one line.
+/// One typed string, escaped onto one line and cut to `TYPED_CHARS` of THAT.
+///
+/// The escaping happens first because the escaping is what costs: see `TYPED_CHARS`. Cutting
+/// afterwards can land on a backslash that was escaping something, and a lone trailing backslash
+/// would escape the closing quote and run the next step into this one — so an odd tail of them
+/// loses its last member.
 fn cut(text: &str) -> String {
-    let kept: String = text.chars().take(TYPED_CHARS).collect();
-    if kept.chars().count() < text.chars().count() {
-        format!("{kept:?} (cut)")
-    } else {
-        format!("{kept:?}")
+    let escaped = format!("{text:?}");
+    // `{:?}` on a `str` always wraps in ASCII quotes, so these two slices are on char boundaries.
+    let inner = escaped
+        .get(1..escaped.len().saturating_sub(1))
+        .unwrap_or_default();
+    if inner.chars().count() <= TYPED_CHARS {
+        return escaped;
     }
+    let mut kept: String = inner.chars().take(TYPED_CHARS).collect();
+    if kept.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1 {
+        kept.pop();
+    }
+    format!("\"{kept}\" (cut)")
 }
 
 #[cfg(test)]
@@ -476,6 +493,30 @@ mod tests {
         let rendered = render(&[Step::Type { text: long }], Screen::default());
         assert!(rendered.contains("(cut)"), "{rendered}");
         assert!(rendered.chars().count() < TYPED_CHARS + 120, "{rendered}");
+    }
+
+    /// THE BUDGET IS SPENT IN RENDERED CHARACTERS. Escape-heavy text used to be measured before
+    /// escaping, so 200 right-to-left overrides became 1,200 characters of prompt — the leverage
+    /// an attacker wants, because what it buys is the room the real actions needed.
+    #[test]
+    fn escape_heavy_text_gets_no_more_of_the_prompt_than_plain_text() {
+        let plain = cut(&"x".repeat(TYPED_CHARS * 2));
+        let sneaky = cut(&"\u{202e}".repeat(TYPED_CHARS * 2));
+        assert!(plain.contains("(cut)") && sneaky.contains("(cut)"));
+        assert!(
+            sneaky.chars().count() <= plain.chars().count(),
+            "{} vs {}",
+            sneaky.chars().count(),
+            plain.chars().count()
+        );
+        // And a cut that lands on an escape does not leave a backslash eating the closing quote.
+        let ends_escaped = cut(&"\u{202e}".repeat(TYPED_CHARS));
+        assert!(
+            ends_escaped.ends_with("\" (cut)") || ends_escaped.ends_with('"'),
+            "{ends_escaped}"
+        );
+        let quotes = ends_escaped.matches('"').count();
+        assert_eq!(quotes, 2, "one pair of quotes, closed: {ends_escaped}");
     }
 
     /// A tape of long typed strings must not decide how big the prompt is.
