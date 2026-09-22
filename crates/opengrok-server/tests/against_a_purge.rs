@@ -217,6 +217,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
                 name: "purge-fixture",
                 description: "",
                 source: "authored",
+                enabled: true,
             },
             Some(opengrok_store::NewSkillVersion {
                 kind: "authored",

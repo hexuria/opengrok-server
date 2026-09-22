@@ -774,6 +774,8 @@ async fn create(
                 name: &name,
                 description: &description,
                 source: kind,
+                // A skill a person wrote or uploaded is theirs and read: it works at once.
+                enabled: true,
             },
             first,
             at_ms,

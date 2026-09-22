@@ -106,6 +106,16 @@ pub struct NewSkill<'a> {
     pub name: &'a str,
     pub description: &'a str,
     pub source: &'a str,
+    /// Whether it may be invoked the moment it exists. `true` for a skill a person wrote or
+    /// uploaded: they have read it, because they wrote it.
+    ///
+    /// ON THE INSERT RATHER THAN AN UPDATE AFTERWARDS, which is the whole reason the field
+    /// exists. A body a MODEL wrote (`server/skills.rs`, `from_tape`) is born switched off so a
+    /// person reads it before any turn does; written as a second call, the insert could succeed
+    /// and the switch-off fail, and what that leaves behind is a live skill nobody has read —
+    /// the one state the review gate exists to prevent. The column defaults to `true`, so the
+    /// safe value is the one a caller has to ask for.
+    pub enabled: bool,
 }
 
 /// One body to write, with what came beside it. A struct for the same reason as `NewSkill`:
@@ -177,9 +187,9 @@ impl PgStore {
     ) -> StoreResult<()> {
         let mut tx = self.pool().begin().await?;
         sqlx::query(
-            "insert into skill (id, owner_id, org_id, name, description, source,
+            "insert into skill (id, owner_id, org_id, name, description, source, enabled,
                                 created_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $7)",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
         )
         .bind(new.id)
         .bind(new.owner_id)
@@ -187,6 +197,7 @@ impl PgStore {
         .bind(new.name)
         .bind(new.description)
         .bind(new.source)
+        .bind(new.enabled)
         .bind(at_ms)
         .execute(&mut *tx)
         .await?;
