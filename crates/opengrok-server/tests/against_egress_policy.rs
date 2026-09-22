@@ -672,8 +672,15 @@ async fn never_withholds_the_browser_tools_only_while_the_tunnel_is_on() {
     h.route_traffic(&token, true).await;
     let offered = h.tool_names(&token, &agent).await;
     for tool in BROWSER_TOOLS {
+        if tool == "request_user_form" {
+            continue;
+        }
         assert!(!has(&offered, tool), "{tool} must be withheld: {offered:?}");
     }
+    assert!(
+        has(&offered, "request_user_form"),
+        "collection remains available without browser access: {offered:?}"
+    );
     assert!(
         has(&offered, "shell"),
         "the box's own shell is not the person's network: {offered:?}"
