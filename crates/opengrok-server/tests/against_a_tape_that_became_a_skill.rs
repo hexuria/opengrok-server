@@ -53,6 +53,8 @@ enum Answer {
     Loose(String),
     /// The door opens and the stream breaks.
     Broken(String),
+    /// A fenced lesson, and then a great deal more talking after the closing line.
+    LessonThenChatter(String, usize),
     /// The door opens and says nothing at all.
     Silent,
     /// The spend guard refusing before the door opens, in the sentence it writes about this
@@ -168,6 +170,13 @@ impl ModelDoor for ScriptedDoor {
                     "Sure — here is the skill you asked for:\n\
                      === BEGIN LESSON {marker} ===\n{text}\n=== END LESSON {marker} ===\n\
                      Let me know if you want it shorter."
+                )
+            }
+            Answer::LessonThenChatter(text, after) => {
+                let marker = marker_of(&system);
+                format!(
+                    "=== BEGIN LESSON {marker} ===\n{text}\n=== END LESSON {marker} ===\n{}",
+                    "and here is a great deal more. ".repeat(after)
                 )
             }
             Answer::Loose(text) => text,
@@ -701,6 +710,28 @@ async fn an_answer_that_runs_away_is_stopped_rather_than_bought() {
     assert_eq!(status, 502, "{text}");
     assert!(text.contains("was stopped"), "{text}");
     assert!(h.skills_of(&ada).await.is_empty());
+}
+
+/// A model that closes its fence and then keeps talking has written a lesson. The reading stops
+/// at the closing line, so the chatter is neither bought nor counted — it used to be both, and
+/// past the ceiling it threw away a storable body with "the model never closed it", which was not
+/// true of that answer.
+#[tokio::test]
+async fn chatter_after_the_closing_line_is_not_an_overrun() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    let lesson = "Open the billing search and look the invoice up by number.";
+    // Enough afterwards to pass any ceiling this route would hold.
+    h.door.will(Answer::LessonThenChatter(
+        lesson.to_string(),
+        opengrok_server::skills::MAX_SKILL_BODY_CHARS * 8 / 30,
+    ));
+
+    let (status, made, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(body_of(&made), lesson, "{text}");
 }
 
 /// The cap is the same cap an uploaded body is held to, and it refuses rather than cuts.

@@ -205,7 +205,9 @@ pub(crate) enum NotWritten {
     /// chance at 64 bits; reachable only by a tape built against this code.
     #[error("no marker could be minted that this recording does not already contain")]
     Unfenceable,
-    /// The answer ran past what this route will hold. See `MAX_ANSWER_CHARS`.
+    /// The answer ran past what this route will hold WITHOUT ever closing the lesson. A model
+    /// that closes its fence and then chatters is not this: the reading stops at the closing
+    /// line, so the chatter is never bought and never counted. See `MAX_ANSWER_CHARS`.
     #[error("the model wrote more than {0} characters without closing the lesson, and was stopped")]
     Overrun(usize),
 }
@@ -265,7 +267,9 @@ pub(crate) async fn lesson_from_tape(
             ),
         }],
     };
-    let text = match tokio::time::timeout(LESSON_TIMEOUT, collect_text(state, request)).await {
+    let end = end_lesson(&lesson_marker);
+    let text = match tokio::time::timeout(LESSON_TIMEOUT, collect_text(state, request, &end)).await
+    {
         Ok(Ok(text)) => text,
         Ok(Err(why)) => return Err(why),
         Err(_) => return Err(NotWritten::Timeout(LESSON_TIMEOUT.as_secs())),
@@ -285,7 +289,11 @@ pub(crate) async fn lesson_from_tape(
 /// (`opengrok_harness::review`), and it matters more here: half a lesson ends mid-sentence and
 /// there is nothing downstream that could tell it from a short one once it is a stored body.
 /// Reasoning deltas are dropped; a model's thinking is not the lesson and was never fenced.
-async fn collect_text(state: &AgUiState, request: ModelRequest) -> Result<String, NotWritten> {
+async fn collect_text(
+    state: &AgUiState,
+    request: ModelRequest,
+    end: &str,
+) -> Result<String, NotWritten> {
     let mut stream = state.door.stream(request).await.map_err(door_shut)?;
     let mut text = String::new();
     let mut seen = 0usize;
@@ -293,18 +301,46 @@ async fn collect_text(state: &AgUiState, request: ModelRequest) -> Result<String
         match delta {
             Ok(ModelDelta::Text(piece)) => {
                 seen += piece.chars().count();
-                if seen > MAX_ANSWER_CHARS {
-                    // Returning DROPS the stream, which closes the response body. Reading to the
-                    // end to be tidy would be paying for every token of the runaway answer.
-                    return Err(NotWritten::Overrun(MAX_ANSWER_CHARS));
-                }
+                let before = text.len();
                 text.push_str(&piece);
+                // THE ANSWER IS OVER AT THE CLOSING LINE. Reading on would buy chatter that
+                // `between` throws away — and, past the ceiling, would refuse a perfectly good
+                // lesson with "the model never closed it", which would have been a lie about a
+                // body we were holding. Dropping the stream here is also the cheapest the normal
+                // path can be: a model that adds "hope that helps" is not paid for it.
+                if closed(&text, before, end) {
+                    break;
+                }
             }
+            // COUNTED, NOT KEPT. Reasoning deltas are billed like any other output and a provider
+            // that thinks at length streams as much of it as it likes; leaving them out of the
+            // count left the one thing the ceiling exists to bound unbounded. None of it can
+            // become a lesson — it was never inside the fence — so none of it is kept.
+            Ok(ModelDelta::Reasoning(piece)) => seen += piece.chars().count(),
             Ok(_) => {}
             Err(error) => return Err(door_shut(error)),
         }
+        if seen > MAX_ANSWER_CHARS {
+            // Returning DROPS the stream, which closes the response body. Reading to the end to
+            // be tidy would be paying for every token of the runaway answer.
+            return Err(NotWritten::Overrun(MAX_ANSWER_CHARS));
+        }
     }
     Ok(text)
+}
+
+/// Has the closing line arrived in what was just appended?
+///
+/// ONLY THE NEW PART IS SCANNED, plus the unfinished line it landed on: the fence is a whole
+/// line, and re-reading the whole answer after every delta is quadratic in the length of an
+/// answer an attacker chooses.
+fn closed(text: &str, before: usize, end: &str) -> bool {
+    let from = text
+        .get(..before)
+        .and_then(|head| head.rfind('\n'))
+        .map_or(0, |at| at + 1);
+    text.get(from..)
+        .is_some_and(|tail| tail.lines().any(|line| line.trim() == end))
 }
 
 /// A door failure as one of ours. A cap keeps its sentence, because it is about the person's own
@@ -508,6 +544,27 @@ mod tests {
             format!("Say {} out loud.", end_lesson(marker)),
             "a marker mentioned inside a line closes nothing"
         );
+    }
+
+    /// The closing line ends the reading, and only a whole line does. Scanned incrementally, so
+    /// the case that matters is a fence split across two deltas.
+    #[test]
+    fn the_reading_stops_at_the_closing_line_however_it_arrives() {
+        let end = end_lesson("0123456789abcdef");
+        let mut text = String::from("Open the inbox.\n=== END LESSON 0123456");
+        let before = text.len();
+        text.push_str("789abcdef ===\n");
+        assert!(closed(&text, before, &end), "split across two deltas");
+
+        // A mention inside a line is not a close, and neither is a prefix of one.
+        let mut text = String::from("Say ");
+        let before = text.len();
+        text.push_str(&format!("{end} out loud.\n"));
+        assert!(!closed(&text, before, &end));
+        let mut text = String::new();
+        let before = text.len();
+        text.push_str("=== END LESSON 0123456789abcde ===\n");
+        assert!(!closed(&text, before, &end));
     }
 
     /// The one property everything else rests on: nothing a person types can become a line of
