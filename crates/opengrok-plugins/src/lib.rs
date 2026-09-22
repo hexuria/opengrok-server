@@ -133,25 +133,12 @@ impl McpServer {
     }
 }
 
-/// One skill: `skills/<name>/SKILL.md`, plus whatever sits beside it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Skill {
-    pub name: String,
-    /// The frontmatter `description`, when present. It is what a coworker reads to decide whether
-    /// a skill is relevant, so it is worth surfacing separately from the body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// The instructions themselves, frontmatter stripped.
-    pub body: String,
-}
-
 /// A loaded bundle.
 #[derive(Debug, Clone)]
 pub struct Plugin {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub mcp: McpConfig,
-    pub skills: Vec<Skill>,
     /// Whether anybody here has read this. Decided at install by the catalogue, carried with the
     /// plugin, and read by the policy layer — an unverified plugin's tools ask before each use.
     pub trust: Trust,
@@ -183,7 +170,6 @@ impl Plugin {
         };
 
         Ok(Self {
-            skills: load_skills(&root.join("skills"))?,
             root,
             manifest,
             mcp,
@@ -262,45 +248,6 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, PluginError
         .map_err(|error| PluginError::Unreadable(path.to_path_buf(), error.to_string()))?;
     serde_json::from_str(&text)
         .map_err(|error| PluginError::Malformed(path.to_path_buf(), error.to_string()))
-}
-
-fn load_skills(dir: &Path) -> Result<Vec<Skill>, PluginError> {
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|error| PluginError::Unreadable(dir.to_path_buf(), error.to_string()))?;
-
-    let mut skills = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_file = path.join("SKILL.md");
-        if !skill_file.is_file() {
-            // A directory without SKILL.md is not a skill. Skipped rather than refused: a stray
-            // folder must not stop a plugin's other skills from loading.
-            continue;
-        }
-        let text = std::fs::read_to_string(&skill_file)
-            .map_err(|error| PluginError::Unreadable(skill_file.clone(), error.to_string()))?;
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let parsed = split_frontmatter(&text);
-        skills.push(Skill {
-            name,
-            description: parsed.description,
-            body: parsed.body,
-        });
-    }
-    // Sorted, so a coworker is given its skills in the same order every time — an unstable prompt
-    // is an unreproducible run.
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(skills)
 }
 
 /// A `SKILL.md` taken apart: what its frontmatter claimed, and the instructions under it.
@@ -472,14 +419,13 @@ mod tests {
 
     /// A plugin is a BUNDLE: identity, words and tools together.
     #[test]
-    fn a_bundle_loads_its_manifest_skills_and_servers() {
+    fn a_bundle_loads_its_manifest_and_its_servers() {
         let dir = a_plugin();
         let plugin = Plugin::load(dir.path()).expect("should load");
 
         assert_eq!(plugin.manifest.name, "gmail");
         assert_eq!(plugin.manifest.version.as_deref(), Some("1.2.0"));
         assert_eq!(plugin.mcp.servers.len(), 2, "two servers");
-        assert_eq!(plugin.skills.len(), 2, "two skills");
     }
 
     /// The three transports, exactly as the schema declares them.
@@ -525,20 +471,15 @@ mod tests {
 
     #[test]
     fn frontmatter_becomes_a_description_and_leaves_the_body() {
-        let dir = a_plugin();
-        let plugin = Plugin::load(dir.path()).unwrap();
-        let skill = plugin
-            .skills
-            .iter()
-            .find(|skill| skill.name == "writing-replies")
-            .unwrap();
+        let parsed =
+            split_frontmatter("---\ndescription: \"How to draft a good reply\"\n---\nBe brief.\n");
         assert_eq!(
-            skill.description.as_deref(),
+            parsed.description.as_deref(),
             Some("How to draft a good reply")
         );
-        assert_eq!(skill.body.trim(), "Be brief.");
+        assert_eq!(parsed.body.trim(), "Be brief.");
         assert!(
-            !skill.body.contains("---"),
+            !parsed.body.contains("---"),
             "frontmatter should be stripped"
         );
     }
@@ -625,28 +566,10 @@ mod tests {
     /// A skill without frontmatter is still a skill; its body must survive whole.
     #[test]
     fn a_skill_without_frontmatter_keeps_all_of_its_text() {
-        let dir = a_plugin();
-        let plugin = Plugin::load(dir.path()).unwrap();
-        let skill = plugin
-            .skills
-            .iter()
-            .find(|skill| skill.name == "triage")
-            .unwrap();
-        assert_eq!(skill.description, None);
-        assert!(skill.body.contains("just instructions"));
-    }
-
-    /// Skills arrive in a stable order: an unstable prompt is an unreproducible run.
-    #[test]
-    fn skills_are_ordered_the_same_way_every_time() {
-        let dir = a_plugin();
-        let names: Vec<_> = Plugin::load(dir.path())
-            .unwrap()
-            .skills
-            .into_iter()
-            .map(|skill| skill.name)
-            .collect();
-        assert_eq!(names, vec!["triage", "writing-replies"]);
+        let parsed = split_frontmatter("No frontmatter here, just instructions.\n");
+        assert_eq!(parsed.description, None);
+        assert_eq!(parsed.name, None);
+        assert!(parsed.body.contains("just instructions"));
     }
 
     /// Client-specific data belongs to somebody else and must pass through untouched.
@@ -661,26 +584,15 @@ mod tests {
         );
     }
 
-    /// Both halves are optional, because plugins exist that are only one of them.
+    /// A manifest alone is a plugin: `mcp.json` is optional, and a bundle that declares no server
+    /// still loads rather than being refused for what it does not have.
     #[test]
-    fn a_plugin_may_be_only_skills_or_only_servers() {
+    fn a_plugin_without_servers_still_loads() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"name":"words-only"}"#);
-        write(dir.path(), "skills/a/SKILL.md", "just words");
+        write(dir.path(), "plugin.json", r#"{"name":"nothing-much"}"#);
         let plugin = Plugin::load(dir.path()).unwrap();
         assert!(plugin.mcp.servers.is_empty());
-        assert_eq!(plugin.skills.len(), 1);
-
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"name":"tools-only"}"#);
-        write(
-            dir.path(),
-            "mcp.json",
-            r#"{"mcpServers":{"a":{"type":"stdio","command":"x"}}}"#,
-        );
-        let plugin = Plugin::load(dir.path()).unwrap();
-        assert!(plugin.skills.is_empty());
-        assert_eq!(plugin.mcp.servers.len(), 1);
+        assert_eq!(plugin.manifest.name, "nothing-much");
     }
 
     #[test]
@@ -750,13 +662,5 @@ mod tests {
             .unwrap()
             .with_trust(Trust::Verified);
         assert!(plugin.tools_needing_approval().is_empty());
-    }
-
-    /// A stray folder must not stop the rest of a plugin's skills from loading.
-    #[test]
-    fn a_directory_without_a_skill_file_is_skipped_quietly() {
-        let dir = a_plugin();
-        fs::create_dir_all(dir.path().join("skills/not-a-skill")).unwrap();
-        assert_eq!(Plugin::load(dir.path()).unwrap().skills.len(), 2);
     }
 }
