@@ -939,11 +939,6 @@ async fn converse_raw(
                         is_client_render_tool(&call.name) || is_readonly_listing_shell(call)
                     });
                 if had_successful_listing && listing_only && skipped_redundant_listing {
-                    if !round_has_assistant_text(&round_events)
-                        && let Some(fact) = last_failure.clone()
-                    {
-                        emit_visible_text(&mut projection, sink, &mut round_events, fact).await;
-                    }
                     pin_last_agent_shot(
                         sink,
                         &mut last_agent_shot,
@@ -1027,6 +1022,7 @@ async fn converse_raw(
                     work_fail_streak = work_fail_streak.saturating_add(1);
                 } else if work_ok {
                     work_fail_streak = 0;
+                    last_failure = None;
                 }
 
                 let waiting: Vec<(
@@ -3027,6 +3023,10 @@ mod tests {
             opengrok_tools::USER_MACHINE_SHELL,
             "gpui-agent invoke profile.list"
         )));
+        assert!(is_readonly_listing_shell(&call(
+            opengrok_tools::USER_MACHINE_SHELL,
+            "gpui-agent invoke profile.search --q buwiz"
+        )));
         assert!(is_readonly_listing_shell(&call("shell", "ls -la")));
         assert!(!is_readonly_listing_shell(&call(
             "shell",
@@ -3037,6 +3037,142 @@ mod tests {
             "gpui-agent invoke profile.save"
         )));
         assert!(!is_readonly_listing_shell(&call("computer", "ls")));
+    }
+
+    fn ums_deltas(id: &str, command: &str, text: &str) -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::Text(text.to_string()),
+            ModelDelta::ToolCallStart {
+                id: id.to_string(),
+                name: opengrok_tools::USER_MACHINE_SHELL.to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: id.to_string(),
+                delta: format!(r#"{{"command":"{command}"}}"#),
+            },
+            ModelDelta::ToolCallEnd { id: id.to_string() },
+        ]
+    }
+
+    fn ums_runner(tool: LocalTool) -> ToolRunner {
+        ToolRunner::local_only().with_local(
+            serde_json::json!({
+                "type": "function",
+                "function": { "name": opengrok_tools::USER_MACHINE_SHELL }
+            }),
+            tool,
+        )
+    }
+
+    /// profile.list then profile.search: one real read, then a facts hop — not a second invoke.
+    #[tokio::test]
+    async fn a_second_profile_search_after_list_is_not_executed() {
+        struct Door(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for Door {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                let script = match round {
+                    1 => ums_deltas("c1", "gpui-agent invoke profile.list", "I'll pull profiles"),
+                    2 => ums_deltas(
+                        "c2",
+                        "gpui-agent invoke profile.search --q buwiz",
+                        "I'll look up Buwiz",
+                    ),
+                    _ => vec![ModelDelta::Text(
+                        "TIN 123-456-789. Forms: 1701.".to_string(),
+                    )],
+                };
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+        let n = Arc::new(Mutex::new(0usize));
+        let n_run = n.clone();
+        let events = run_conversation(
+            &Door(Mutex::new(0)),
+            Some(&ums_runner(Arc::new(move |call| {
+                *n_run.lock().unwrap() += 1;
+                opengrok_tools::ToolResult::ok(&call.id, "profiles: Buwiz")
+            }))),
+            &MemoryJournal::new(),
+            request("list profiles"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(*n.lock().unwrap(), 1, "second listing must be skipped");
+        let text = assistant_text(&events);
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("i'll pull"), "{text:?}");
+        assert!(!lower.contains("i'll look"), "{text:?}");
+        assert!(text.contains("TIN 123-456-789"), "{text:?}");
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    }
+
+    /// Wrong port then a listing that works: the old error must not become the answer.
+    #[tokio::test]
+    async fn a_successful_listing_does_not_paint_a_prior_failure() {
+        struct Door(Mutex<usize>);
+        #[async_trait::async_trait]
+        impl ModelDoor for Door {
+            async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.0.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                let script = if round == 1 {
+                    ums_deltas("c1", "gpui-agent hello", "I'll pull the BIR host")
+                } else if round == 2 {
+                    ums_deltas(
+                        "c2",
+                        "gpui-agent invoke profile.list",
+                        "The BIR agent isn't answering",
+                    )
+                } else {
+                    vec![ModelDelta::Text("I'll look up the profiles.".to_string())]
+                };
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+        let n = Arc::new(Mutex::new(0usize));
+        let n_run = n.clone();
+        let events = run_conversation(
+            &Door(Mutex::new(0)),
+            Some(&ums_runner(Arc::new(move |call| {
+                let i = {
+                    let mut count = n_run.lock().unwrap();
+                    let i = *count;
+                    *count += 1;
+                    i
+                };
+                if i == 0 {
+                    opengrok_tools::ToolResult::refused(&call.id, "connection refused on 17421")
+                } else {
+                    opengrok_tools::ToolResult::ok(&call.id, "profiles: Buwiz")
+                }
+            }))),
+            &MemoryJournal::new(),
+            request("list profiles"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let text = assistant_text(&events);
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains("i'll"), "{text:?}");
+        assert!(!lower.contains("isn't answering"), "{text:?}");
+        assert!(
+            !lower.contains("connection refused"),
+            "stale fail must not become chat after a listing: {text:?}"
+        );
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     }
 
     /// A run that cannot be recorded must not proceed: it would produce work a reconnect can never
