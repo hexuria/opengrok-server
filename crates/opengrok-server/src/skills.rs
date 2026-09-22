@@ -84,6 +84,9 @@ fn now_ms() -> i64 {
 }
 
 pub fn router(state: AgUiState) -> Router {
+    // For the from-tape layer, which needs the bearer to know whose slot to take — see
+    // `while_the_tape_is_read`. Cloned here because `with_state` below consumes the original.
+    let for_the_layer = state.clone();
     Router::new()
         .route(
             "/skills",
@@ -99,9 +102,19 @@ pub fn router(state: AgUiState) -> Router {
         // refuse a minute of somebody's screen for being too big to be a skill's cheat sheet;
         // `MAX_TAPE_UPLOAD_BYTES` is the recipe route's ceiling, which is the ceiling the tape
         // check inside `tape_into_steps` is written against.
+        //
+        // TWO LAYERS, AND THE ORDER IS THE POINT. `.layer` wraps what came before, so the body
+        // limit is innermost and `while_the_tape_is_read` is outermost: it therefore takes the
+        // per-account slot BEFORE the body is buffered, and sees the limit's own 413 on the way
+        // out, which is the only way either promise this route makes can cover an extractor.
         .route(
             "/skills/from-tape",
-            post(from_tape).layer(axum::extract::DefaultBodyLimit::max(MAX_TAPE_UPLOAD_BYTES)),
+            post(from_tape)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_TAPE_UPLOAD_BYTES))
+                .layer(axum::middleware::from_fn_with_state(
+                    for_the_layer,
+                    while_the_tape_is_read,
+                )),
         )
         .route("/skills/{id}", get(detail).put(update).delete(remove))
         .route(
@@ -1142,6 +1155,83 @@ fn minted_name() -> String {
     format!("taught-{tail}")
 }
 
+/// Everything `from_tape` promises that the handler alone cannot keep.
+///
+/// TWO PROMISES, ONE LAYER, because both of them are about the requests the handler never sees.
+///
+/// 1. THE SLOT IS TAKEN BEFORE THE BODY IS READ. `one_at_a_time` was acquired inside the handler,
+///    which meant the `Json` extractor had already buffered and deserialised up to five megabytes
+///    of tape before anything counted the request — so a hundred concurrent recordings still cost
+///    a hundred buffered tapes and only then got their 429, which is the exact cost the guard was
+///    written to bound. Out here it is taken before a byte of body is read.
+///
+/// 2. EVERY REFUSAL SAYS THE RECORDING SURVIVED. `not_from_this_tape` can only speak for
+///    refusals the handler body makes, and a body over the limit, a malformed JSON document, a
+///    missing `coworkerId` and a wrong content type are all decided by an extractor before the
+///    handler runs. The route's own doc says "every refusal says as much", and a client that
+///    believes it and drops a tape on a bare 413 loses somebody's work. So any non-2xx that does
+///    not already carry the line gets it here.
+///
+/// A REQUEST WITH NO BEARER TAKES NO SLOT: there is nobody to charge it to, and the handler is
+/// about to answer 401 anyway.
+async fn while_the_tape_is_read(
+    State(state): State<AgUiState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // Bound to `_guard`, never `_`: bound to `_` it would drop here and guard nothing. Held
+    // across `next.run`, so it covers the buffering, the parse, the model call and the write —
+    // and is released on every path out, including the client hanging up mid-request.
+    let _guard = match account_from_bearer(&state, request.headers()) {
+        Some(account) => match one_at_a_time(&account) {
+            Some(guard) => Some(guard),
+            None => {
+                return not_from_this_tape(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "a recording of yours is already being read; wait for it to finish",
+                );
+            }
+        },
+        None => None,
+    };
+    say_the_tape_survived(next.run(request).await).await
+}
+
+/// The most of a refusal's body this layer will read back in order to add a sentence to it.
+///
+/// Refusals here are one or two sentences; the ceiling exists because the body being rewritten is
+/// whatever the inner service produced, and reading an unbounded one into memory to append to it
+/// would be a second copy of exactly the problem the tape limits exist for.
+const MAX_REFUSAL_BYTES: usize = 64 * 1024;
+
+/// Any non-2xx leaves this route saying the recording is still good.
+async fn say_the_tape_survived(response: Response) -> Response {
+    if response.status().is_success() {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let said = match axum::body::to_bytes(body, MAX_REFUSAL_BYTES).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        // Unreadable or over the ceiling: the promise still has to be made, and it is the part of
+        // the reply that matters most to a client deciding whether to keep the tape.
+        Err(_) => String::new(),
+    };
+    if said.contains(TAPE_KEPT_LINE) {
+        return Response::from_parts(parts, axum::body::Body::from(said));
+    }
+    let said = and_the_promise(&said);
+    // The length changed, and a stale `content-length` is a truncated reply. Removed rather than
+    // recomputed: hyper writes the right one from a body whose size it knows.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    // An extractor's refusal is `text/plain`; a JSON one would now be malformed, so say what this
+    // actually is rather than inheriting a type that stopped being true.
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    Response::from_parts(parts, axum::body::Body::from(said))
+}
+
 /// Said at the end of every refusal `from_tape` makes.
 ///
 /// THE RECORDING IS THE CLIENT'S TO KEEP, AND THIS SENTENCE IS THE SERVER'S HALF OF THAT.
@@ -1165,6 +1255,10 @@ const TAPE_KEPT_LINE: &str =
 /// that, and it is enforced inside the door on every call. Per process rather than per
 /// deployment, so two replicas allow two at a time; a distributed limit here would be a lease
 /// table for a cost the cap already bounds.
+///
+/// TAKEN IN A LAYER, NOT IN THE HANDLER (`while_the_tape_is_read`), because the handler runs
+/// after the `Json` extractor has already buffered and parsed the tape — which is the memory the
+/// guard exists to bound, so acquiring it there bounded nothing that mattered.
 static WRITING_A_LESSON: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 /// Held for the length of one `from_tape`, released on drop — which includes every early return
@@ -1204,7 +1298,25 @@ fn one_at_a_time(account: &AccountId) -> Option<OneAtATime> {
 /// leaves a person wondering whether their recording is spent. The single exception is named in
 /// `from_tape`, and it is the case where a skill DOES exist.
 fn not_from_this_tape(status: StatusCode, why: impl std::fmt::Display) -> Response {
-    (status, format!("{why} {TAPE_KEPT_LINE}")).into_response()
+    (status, and_the_promise(&why.to_string())).into_response()
+}
+
+/// One reason and the standing promise, as two sentences rather than one run-on.
+///
+/// The terminator is added here rather than written into forty refusals, because forty refusals
+/// is forty chances to forget one — and every one of them is read by somebody who has just lost
+/// a recording, on the round whose whole point was the wording.
+fn and_the_promise(why: &str) -> String {
+    let why = why.trim();
+    if why.is_empty() {
+        return TAPE_KEPT_LINE.to_string();
+    }
+    let stop = if why.ends_with(['.', '!', '?', ':', ';']) {
+        ""
+    } else {
+        "."
+    };
+    format!("{why}{stop} {TAPE_KEPT_LINE}")
 }
 
 /// `POST /skills/from-tape` — a recording in, a skill a model wrote out, switched off.
@@ -1257,15 +1369,6 @@ async fn from_tape(
             );
         }
     }
-    // Bound BELOW the ownership check so a caller guessing at coworker ids still gets its
-    // refusals, and ABOVE everything that costs. `_guard`, never `_`: bound to `_` it would drop
-    // here and guard nothing.
-    let Some(_guard) = one_at_a_time(&account) else {
-        return not_from_this_tape(
-            StatusCode::TOO_MANY_REQUESTS,
-            "a recording of yours is already being read; wait for it to finish",
-        );
-    };
 
     let name = request
         .name
@@ -1318,10 +1421,12 @@ async fn from_tape(
         );
     };
     // A GROUP IS NOT A WRITER. `owned_coworker` answers "is this yours", which a group is; what it
-    // cannot answer is "does this take a model call", and a group does not — its `model` is the
-    // literal string `group`, a sentinel `opengrok_core::coworker` says in as many words is never
-    // a route. Sent anyway it reaches the gateway as a model id nobody serves, and comes back as a
-    // 502 about a provider when the truth is that a group has no screen of its own to record.
+    // cannot answer is "does this take a model call", and a group does not. The test is
+    // MEMBERSHIP — `is_group()`, the predicate `opengrok_core::coworker` says everything a group
+    // cannot do follows from — rather than the `model == "group"` sentinel that membership
+    // causes: one is the fact, the other is a string a future refactor could spell differently.
+    // Sent anyway it reaches the gateway as a model id nobody serves and comes back as a 502
+    // about a provider, when the truth is that a group has no screen of its own to record.
     // `spend::mint_late` already refuses exactly this, one layer further in.
     if bot.is_group() {
         return not_from_this_tape(
@@ -1339,7 +1444,15 @@ async fn from_tape(
         Err(why) => {
             // `?why` rather than `%why`: `DoorShut` keeps the door's own words for this line and
             // does not print them to the person (`NotWritten`).
-            tracing::warn!(coworker = %coworker, why = ?why, "a recording did not become a skill");
+            // The account is on the line because two of these are OUR faults (`Unfenceable`,
+            // and a `Held` that is a bad request we built), and an operator reading one needs to
+            // be able to find the person to say so to.
+            tracing::warn!(
+                account = %account.as_str(),
+                coworker = %coworker,
+                why = ?why,
+                "a recording did not become a skill"
+            );
             // EACH CASE WEARS THE STATUS IT MEANS, spelled out rather than defaulted, because
             // three of these read as "the far side broke" when they are nothing of the kind and
             // a client retrying on 5xx would retry the two that will never succeed. Exhaustive on
@@ -1349,6 +1462,11 @@ async fn from_tape(
                 // Not a fault. Nothing is broken and the recording is fine; the answer is about
                 // this account's own limit, and 5xx invited a retry that cannot work.
                 NotWritten::SpendCap(_) => StatusCode::PAYMENT_REQUIRED,
+                // The OPPOSITE of a cap, and it used to wear the same variant: the guard could
+                // not count the call — a meter timing out, a row that would not read — so nobody
+                // spent anything and nothing is over a limit. Transient and usually ours: 503,
+                // which is also the one status here a client should retry unchanged.
+                NotWritten::Held(_) => StatusCode::SERVICE_UNAVAILABLE,
                 // The model was slow, which is the one of these worth retrying as it stands.
                 NotWritten::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
                 // THE MODEL OBEYING US. The prompt asks for an empty answer when a recording
@@ -1447,19 +1565,37 @@ async fn from_tape(
     // to send the tape again would get a 409 for a skill they have not been shown. The id is
     // named instead — it is what makes the row findable when the read that would have listed it
     // is the thing that just failed.
-    match store.skill(&id).await {
-        Ok(Some(row)) => match detail_of(store, &row).await {
-            Ok(detail) => Json(detail).into_response(),
-            Err(response) => response,
-        },
-        Ok(None) | Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "the skill was written as {id} under the name {name:?} but could not be read \
-                 back; it is in your list, switched off, and the recording is spent"
-            ),
-        )
-            .into_response(),
+    //
+    // ONE ARM FOR EVERY WAY THE READ-BACK CAN FAIL. `detail_of`'s own 503 used to be forwarded
+    // bare, which said none of that: a client following the contract above resent the tape and
+    // got a 409 for a skill it had never been shown — precisely the failure the contract exists
+    // to close.
+    let written = match store.skill(&id).await {
+        Ok(Some(row)) => detail_of(store, &row)
+            .await
+            .map_err(|_| "its body and files could not be read back".to_string()),
+        Ok(None) => Err("it could not be found again".to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match written {
+        Ok(detail) => Json(detail).into_response(),
+        Err(why) => {
+            // The id, because the reply names it and an operator has to be able to follow it.
+            tracing::error!(
+                skill = %id,
+                account = %account.as_str(),
+                %why,
+                "a skill was written from a recording and could not be read back"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "the skill was written as {id} under the name {name:?} but could not be read \
+                     back; it is in your list, switched off, and the recording is spent."
+                ),
+            )
+                .into_response()
+        }
     }
 }
 

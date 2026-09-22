@@ -72,6 +72,10 @@ struct ScriptedDoor {
     /// How long a lesson takes to write. Only the concurrency test sets it: a model call that
     /// returns inside a microsecond cannot be caught in flight.
     slow_by: Mutex<Option<std::time::Duration>>,
+    /// Signalled when a lesson request ARRIVES, before any of the waiting. A test that slept
+    /// instead was asserting that 80 ms is less than 600 ms on a loaded machine, which is the
+    /// kind of assumption that fails once a month in CI and never on a desk.
+    arrived: tokio::sync::Notify,
 }
 
 impl ScriptedDoor {
@@ -80,6 +84,7 @@ impl ScriptedDoor {
             answer: Mutex::new(Answer::Lesson("a lesson nobody wrote yet".to_string())),
             asked: Mutex::new(Vec::new()),
             slow_by: Mutex::new(None),
+            arrived: tokio::sync::Notify::new(),
         }
     }
 
@@ -150,6 +155,7 @@ impl ModelDoor for ScriptedDoor {
                 system,
             ))])));
         }
+        self.arrived.notify_one();
         let slow_by = *self.slow_by.lock().expect("slow lock");
         if let Some(slow_by) = slow_by {
             tokio::time::sleep(slow_by).await;
@@ -907,8 +913,8 @@ async fn one_recording_at_a_time_per_account() {
             .status()
             .as_u16()
     });
-    // Far inside the 600 ms the door is holding the first call for.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    // The door says when the first call has reached it — no clock, no margin to get wrong.
+    h.door.arrived.notified().await;
 
     let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("second one")).await;
     assert_eq!(status, 429, "{text}");
@@ -954,6 +960,76 @@ async fn a_tape_over_the_ceiling_is_refused_in_words() {
         "a refusal a person can act on, not a bare 413: {text}"
     );
     assert!(h.door.lesson_asks().is_empty(), "nothing was asked");
+}
+
+/// The refusals an EXTRACTOR makes, which the handler never sees: a body over the limit, a
+/// document that is not JSON, a request with no `coworkerId`. The route promises that a refusal
+/// means the recording survived, and a client that believes that promise and drops its tape on a
+/// bare 413 loses somebody's work.
+#[tokio::test]
+async fn even_a_refusal_the_handler_never_saw_says_the_tape_survived() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+
+    // Past the route's own body limit, so the extractor answers before anything of ours runs.
+    let too_big = json!({
+        "coworkerId": bot,
+        "description": "x".repeat(6 * 1024 * 1024),
+        "raw": [],
+    });
+    let response = h
+        .client
+        .post(format!("{}/skills/from-tape", h.base))
+        .header("authorization", format!("Bearer {ada}"))
+        .json(&too_big)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status().as_u16(), 413);
+    let text = response.text().await.expect("text");
+    assert!(
+        text.contains("the same tape can be sent again"),
+        "a bare 413 tells a client nothing about its tape: {text}"
+    );
+
+    // Not JSON at all.
+    let response = h
+        .client
+        .post(format!("{}/skills/from-tape", h.base))
+        .header("authorization", format!("Bearer {ada}"))
+        .header("content-type", "application/json")
+        .body("this is not a tape")
+        .send()
+        .await
+        .expect("send");
+    assert!(response.status().is_client_error());
+    let text = response.text().await.expect("text");
+    assert!(text.contains("the same tape can be sent again"), "{text}");
+
+    // Valid JSON, no `coworkerId`: also the extractor's refusal, not ours.
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills/from-tape",
+            Some(json!({ "raw": [] })),
+        )
+        .await;
+    assert!((400..500).contains(&status), "{status}: {text}");
+    assert!(text.contains("the same tape can be sent again"), "{text}");
+
+    // And the promise is made once, not twice, when the handler already made it.
+    let (_, _, text) = h
+        .stop_recording(&ada, &"cw_nobody".to_string(), a_tape("x"))
+        .await;
+    assert_eq!(
+        text.matches("the same tape can be sent again").count(),
+        1,
+        "{text}"
+    );
+    assert!(h.door.lesson_asks().is_empty());
 }
 
 /// A tape with nothing on it is refused where every other malformed tape is, and before a model

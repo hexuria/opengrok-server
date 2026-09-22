@@ -164,13 +164,22 @@ fn end_tape(marker: &str) -> String {
 /// has passed the same checks an uploaded body passes.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum NotWritten {
-    /// THE PERSON'S OWN SPEND LIMIT, in the sentence the guard wrote (`spend::GuardedDoor`).
-    /// Carried verbatim and kept apart from every other door failure, because it is the one that
-    /// is not a fault: nothing is broken, the recording is fine, and the answer is about their
-    /// account. Folded into `DoorShut` it left them reading 502 Bad Gateway about their own
-    /// billing, and any retry keyed on 5xx treating a cap as a passing outage.
+    /// A LIMIT SOMEBODY SET, in the sentence the guard or the gateway wrote
+    /// (`ModelError::SpendCap`). Carried verbatim — bounded at its source — and kept apart from
+    /// every other door failure, because it is the one that is not a fault: nothing is broken,
+    /// the recording is fine, and the answer is about their account. Folded into `DoorShut` it
+    /// left them reading 502 Bad Gateway about their own billing, and any retry keyed on 5xx
+    /// treating a cap as a passing outage.
     #[error("{0}")]
     SpendCap(String),
+    /// THE GUARD COULD NOT COUNT THE CALL (`ModelError::Held`): a meter that would not answer,
+    /// limits that could not be read, a key that could not be produced. Nothing was spent and
+    /// nothing is over a limit — it is usually transient and usually ours — so it is neither a
+    /// 402 nor a fault of the far side. Its detail goes to the log for `DoorShut`'s reason: those
+    /// sentences carry store errors, and a person reading a reply about their recording should
+    /// not be handed one.
+    #[error("the model could not be asked for this recording just now")]
+    Held(String),
     /// The door would not open, refused, or broke mid-stream.
     ///
     /// THE DETAIL IS FOR THE LOG, NOT FOR THE PERSON, which is why `Display` does not print the
@@ -298,11 +307,13 @@ async fn collect_text(state: &AgUiState, request: ModelRequest) -> Result<String
     Ok(text)
 }
 
-/// A door failure as one of ours. The spend cap keeps its sentence; everything else keeps its
-/// detail for the log and says one plain thing to the person.
+/// A door failure as one of ours. A cap keeps its sentence, because it is about the person's own
+/// account and there is nothing else to say; everything else keeps its detail for the log and
+/// says one plain thing.
 fn door_shut(error: ModelError) -> NotWritten {
     match error {
         ModelError::SpendCap(sentence) => NotWritten::SpendCap(sentence),
+        ModelError::Held(why) => NotWritten::Held(why),
         other => NotWritten::DoorShut(other.to_string()),
     }
 }
