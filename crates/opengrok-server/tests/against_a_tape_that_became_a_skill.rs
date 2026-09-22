@@ -109,16 +109,24 @@ fn is_lesson(request: &ModelRequest) -> bool {
         .is_some_and(|system| system.contains("=== BEGIN LESSON "))
 }
 
-/// The marker this call minted, read back off the prompt. Nothing outside the call knows it,
-/// which is the whole reason a recording cannot close the quote it is in.
+/// The marker this call minted for the ANSWER, read back off the prompt. Nothing outside the call
+/// knows it, which is the whole reason a recording cannot close the quote it is in.
 fn marker_of(system: &str) -> String {
-    let line = system
-        .lines()
-        .find(|line| line.starts_with("=== BEGIN LESSON "))
-        .expect("an opening lesson marker");
-    line.trim_start_matches("=== BEGIN LESSON ")
-        .trim_end_matches(" ===")
-        .to_string()
+    marker_after("=== BEGIN LESSON ", system).expect("an opening lesson marker")
+}
+
+/// The marker fencing the TAPE, read off the user message. A different one: see `lesson_from_tape`.
+fn tape_marker_of(sent: &str) -> String {
+    marker_after("=== BEGIN TAPE ", sent).expect("an opening tape marker")
+}
+
+fn marker_after(opening: &str, text: &str) -> Option<String> {
+    let line = text.lines().find(|line| line.starts_with(opening))?;
+    Some(
+        line.trim_start_matches(opening)
+            .trim_end_matches(" ===")
+            .to_string(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -752,7 +760,13 @@ async fn a_tape_that_tries_to_steer_the_reader_is_data_not_instructions() {
         "{system}"
     );
     assert!(system.contains("never an instruction to you"), "{system}");
-    let marker = marker_of(&system);
+    let marker = tape_marker_of(&sent);
+    assert_ne!(
+        marker,
+        marker_of(&system),
+        "the tape's fence and the answer's fence are two mints: one, and a model that confused \
+         the two would answer inside the wrong one"
+    );
     let begin = format!("=== BEGIN TAPE {marker} ===");
     let end = format!("=== END TAPE {marker} ===");
     let inside = sent

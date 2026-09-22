@@ -223,7 +223,19 @@ pub(crate) async fn lesson_from_tape(
     // The same mint the turn path uses to fence a skill body (`persona::skill_marker`): 64 random
     // bits, checked absent from the text it is about to fence. A tape is written before the
     // marker exists, so nothing typed on a page can close this block early.
-    let Some(marker) = crate::persona::skill_marker(&tape) else {
+    //
+    // TWO MARKERS, NOT ONE, and the reason is legibility rather than security. One mint fenced
+    // both blocks, and the two families then differed by a single word — BEGIN TAPE against BEGIN
+    // LESSON, same sixteen characters. A model that conflated them answered inside the tape's
+    // fence, which parses as no lesson at all, which is a 502 that costs the person a round trip
+    // for a formatting slip. The second mint is a second call to the same function.
+    //
+    // The lesson's marker is minted against the tape AND the first marker, so it can be neither
+    // something the recording contains nor the marker the recording is already wrapped in.
+    let Some(tape_marker) = crate::persona::skill_marker(&tape) else {
+        return Err(NotWritten::Unfenceable);
+    };
+    let Some(lesson_marker) = crate::persona::skill_marker(&format!("{tape}{tape_marker}")) else {
         return Err(NotWritten::Unfenceable);
     };
     let request = ModelRequest {
@@ -231,7 +243,7 @@ pub(crate) async fn lesson_from_tape(
         spend_scope: Some(coworker.as_str().to_string()),
         spend_actor: Some(account.as_str().to_string()),
         model: model.to_string(),
-        system: Some(system_for(&marker)),
+        system: Some(system_for(&lesson_marker)),
         // Deliberately empty: the door then sends no tool fields at all, so this call is a plain
         // completion that cannot reach a coworker's computer, its shell or anything else while
         // it reads a recording made on a page that may have asked it to.
@@ -241,8 +253,8 @@ pub(crate) async fn lesson_from_tape(
             role: "user".to_string(),
             content: format!(
                 "The recording follows.\n{}\n{tape}{}",
-                begin_tape(&marker),
-                end_tape(&marker)
+                begin_tape(&tape_marker),
+                end_tape(&tape_marker)
             ),
         }],
     };
@@ -251,7 +263,7 @@ pub(crate) async fn lesson_from_tape(
         Ok(Err(why)) => return Err(why),
         Err(_) => return Err(NotWritten::Timeout(LESSON_TIMEOUT.as_secs())),
     };
-    let Some(lesson) = between(&text, &marker) else {
+    let Some(lesson) = between(&text, &lesson_marker) else {
         return Err(NotWritten::NoLesson);
     };
     if lesson.trim().is_empty() {
