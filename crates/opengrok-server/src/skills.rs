@@ -1217,9 +1217,9 @@ async fn while_the_tape_is_read(
 /// would be a second copy of exactly the problem the tape limits exist for.
 const MAX_REFUSAL_BYTES: usize = 64 * 1024;
 
-/// Any non-2xx leaves this route saying the recording is still good.
+/// Any non-2xx leaves this route saying the recording is still good, unless it is `TapeSpent`.
 async fn say_the_tape_survived(response: Response) -> Response {
-    if response.status().is_success() {
+    if response.status().is_success() || response.extensions().get::<TapeSpent>().is_some() {
         return response;
     }
     let (mut parts, body) = response.into_parts();
@@ -1314,16 +1314,25 @@ fn not_from_this_tape(status: StatusCode, why: impl std::fmt::Display) -> Respon
     (status, and_the_promise(&why.to_string())).into_response()
 }
 
+/// Marks the one refusal whose recording WAS consumed, so `say_the_tape_survived` leaves it alone.
+///
+/// A TYPE, NOT A SENTENCE TO LOOK FOR. Private to this module, so no other handler, extractor or
+/// client text can opt out of the promise by happening to say the same words.
+#[derive(Clone, Copy)]
+struct TapeSpent;
+
 /// The skill has committed even though its response detail could not be loaded.
 fn committed_skill_unreadable(id: &str, name: &str) -> Response {
-    (
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         format!(
             "the skill was written as {id} under the name {name:?} but could not be read \
              back; it is in your list, switched off, and the recording is spent."
         ),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(TapeSpent);
+    response
 }
 
 /// One reason and the standing promise, as two sentences rather than one run-on.
