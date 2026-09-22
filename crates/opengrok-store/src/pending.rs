@@ -220,6 +220,10 @@ impl PgStore {
 
     /// Edit a live follow-up. `None` when it is not this account's pending row — drained,
     /// cancelled, or somebody else's, which must all read as no such message.
+    ///
+    /// ONE STATEMENT, AND EACH OMITTED FIELD IS READ FROM THE ROW INSIDE IT. A read in Rust and a
+    /// write of every field put back whatever the read saw, so two edits to different fields
+    /// lost one of them. Here a waiting writer re-reads the row the winner committed.
     pub async fn update_pending_user_message(
         &self,
         id: &str,
@@ -228,39 +232,14 @@ impl PgStore {
         patch: PendingUserMessagePatch<'_>,
         at_ms: i64,
     ) -> StoreResult<Option<PendingUserMessageRow>> {
-        let current = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{PENDING_SELECT} where id = $1 and account_id = $2 and thread_id = $3
-              and status = 'pending'"
-        )))
-        .bind(id)
-        .bind(account.as_str())
-        .bind(thread_id)
-        .fetch_optional(self.pool())
-        .await?;
-        let Some(current) = current.as_ref().map(pending_row).transpose()? else {
-            return Ok(None);
-        };
-        let content = patch.content.unwrap_or(&current.content);
-        let reply_to = match patch.reply_to {
-            Some(value) => value.cloned(),
-            None => current.reply_to.clone(),
-        };
-        let recipe_id = match patch.recipe_id {
-            Some(value) => value.map(str::to_string),
-            None => current.recipe_id.clone(),
-        };
-        let recipe_values = match patch.recipe_values {
-            Some(value) => value.cloned(),
-            None => current.recipe_values.clone(),
-        };
-        let skill_id = match patch.skill_id {
-            Some(value) => value.map(str::to_string),
-            None => current.skill_id.clone(),
-        };
         let updated = sqlx::query(
             "update pending_user_message
-                set content = $4, reply_to = $5, recipe_id = $6, recipe_values = $7,
-                    skill_id = $8, updated_at_ms = $9
+                set content = coalesce($4, content),
+                    reply_to = case when $5 then $6 else reply_to end,
+                    recipe_id = case when $7 then $8 else recipe_id end,
+                    recipe_values = case when $9 then $10 else recipe_values end,
+                    skill_id = case when $11 then $12 else skill_id end,
+                    updated_at_ms = $13
               where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'
               returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
                         skill_id, client_message_id, status, created_at_ms, updated_at_ms,
@@ -269,11 +248,15 @@ impl PgStore {
         .bind(id)
         .bind(account.as_str())
         .bind(thread_id)
-        .bind(content)
-        .bind(reply_to)
-        .bind(recipe_id)
-        .bind(recipe_values)
-        .bind(skill_id)
+        .bind(patch.content)
+        .bind(patch.reply_to.is_some())
+        .bind(patch.reply_to.flatten().cloned())
+        .bind(patch.recipe_id.is_some())
+        .bind(patch.recipe_id.flatten())
+        .bind(patch.recipe_values.is_some())
+        .bind(patch.recipe_values.flatten().cloned())
+        .bind(patch.skill_id.is_some())
+        .bind(patch.skill_id.flatten())
         .bind(at_ms)
         .fetch_optional(self.pool())
         .await?;

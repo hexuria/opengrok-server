@@ -134,10 +134,16 @@ struct WriteBody {
     /// 1 is refused.
     v: Option<u32>,
     content: Option<String>,
+    /// PRESENCE-AWARE, so PATCH can tell omit (keep) from `null` (clear): absent is `None` and
+    /// `null` is `Some(Value::Null)`. Plain `Option<Value>` reads both as `None`, and a clear
+    /// silently kept the old option. POST treats `Some(Value::Null)` as absent.
+    #[serde(default, deserialize_with = "present")]
     reply_to: Option<Value>,
-    /// `Value` so PATCH can tell omit from `null` (clear). POST treats null as absent.
+    #[serde(default, deserialize_with = "present")]
     recipe_id: Option<Value>,
+    #[serde(default, deserialize_with = "present")]
     recipe_values: Option<Value>,
+    #[serde(default, deserialize_with = "present")]
     skill_id: Option<Value>,
     client_message_id: Option<String>,
     /// Ignored. The path names the thread; a body that disagrees is a client bug we refuse.
@@ -146,6 +152,10 @@ struct WriteBody {
     #[allow(dead_code)]
     #[serde(default)]
     account_id: Option<String>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 fn optional_string_id<'a>(
