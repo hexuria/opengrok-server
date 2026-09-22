@@ -311,8 +311,16 @@ pub struct Frontmatter {
     /// have arrived with.
     pub name: Option<String>,
     pub description: Option<String>,
-    /// The instructions themselves, frontmatter stripped.
+    /// The instructions themselves, frontmatter stripped. On an unclosed fence this is the WHOLE
+    /// text, fence and all: nothing is dropped on the floor.
     pub body: String,
+    /// Whether the opening `---` was matched by a closing one. `true` when there was no
+    /// frontmatter at all — there was nothing to close.
+    ///
+    /// A caller that accepts text from a person MUST check this. An unclosed fence means the
+    /// whole document was read as body, and a route that ignored the flag would answer 200 to an
+    /// upload it had in fact failed to understand.
+    pub closed: bool,
 }
 
 /// Pull `name` and `description` out of YAML-ish frontmatter and return the body without it.
@@ -331,30 +339,53 @@ pub fn split_frontmatter(text: &str) -> Frontmatter {
             name: None,
             description: None,
             body: trimmed.to_string(),
+            closed: true,
         };
     }
-    let mut lines = trimmed.lines();
-    lines.next(); // the opening ---
 
     let mut name = None;
     let mut description = None;
-    let mut consumed = trimmed.len();
-    let mut seen = trimmed.lines().next().map_or(0, |l| l.len() + 1);
-
-    for line in lines {
-        let line_len = line.len() + 1;
-        if line.trim_end() == "---" {
-            consumed = seen + line_len;
+    let mut consumed = None;
+    let mut seen = 0usize;
+    // OFFSETS COME OFF THE SLICES THEMSELVES, never rebuilt as `line.len() + 1`.
+    //
+    // `str::lines()` strips `\r\n` as one, so the rebuilt offset was a byte short for every CRLF
+    // line and the body slice started INSIDE the closing fence: `---\r\nname: a\r\n---\r\nBody`
+    // came back as a body of `-\r\nBody`, and the error grew a byte per frontmatter line until
+    // the tail of the last `key: value` line landed in the body — which is then stored as
+    // version 1 and read out into a system message. A file written on Windows, or checked out
+    // with `core.autocrlf=true`, is all it takes.
+    for (index, line) in trimmed.split_inclusive('\n').enumerate() {
+        seen += line.len();
+        if index == 0 {
+            continue; // the opening ---
+        }
+        let content = line.trim_end();
+        if content == "---" {
+            consumed = Some(seen);
             break;
         }
-        if let Some(value) = line.strip_prefix("name:") {
+        if let Some(value) = content.strip_prefix("name:") {
             name = Some(unquote(value));
         }
-        if let Some(value) = line.strip_prefix("description:") {
+        if let Some(value) = content.strip_prefix("description:") {
             description = Some(unquote(value));
         }
-        seen += line_len;
     }
+
+    let Some(consumed) = consumed else {
+        // NO CLOSING FENCE. Everything is returned as body — the doc comment above promises that
+        // what cannot be read is left in the body rather than lost — and `closed` is false so a
+        // caller can refuse instead of storing a document it only half understood. Returning an
+        // empty body here (which is what this used to do) made a mistyped fence look like a
+        // successful upload of a skill with nothing in it.
+        return Frontmatter {
+            name: None,
+            description: None,
+            body: trimmed.to_string(),
+            closed: false,
+        };
+    };
 
     let body = trimmed
         .get(consumed..)
@@ -365,6 +396,7 @@ pub fn split_frontmatter(text: &str) -> Frontmatter {
         name: name.filter(|value| !value.is_empty()),
         description: description.filter(|value| !value.is_empty()),
         body,
+        closed: true,
     }
 }
 
@@ -509,6 +541,49 @@ mod tests {
             Some("How to draft a good reply")
         );
         assert_eq!(parsed.body.trim(), "Be brief.");
+    }
+
+    /// A file written on Windows parses to the same body as one written on a Mac. The offsets
+    /// used to be rebuilt as `line.len() + 1`, one byte short per CRLF line, so the body started
+    /// inside the closing fence and the error grew with every frontmatter line.
+    #[test]
+    fn a_crlf_skill_parses_exactly_like_an_lf_one() {
+        let lf = split_frontmatter("---\nname: a\ndescription: d\n---\nBody\n");
+        let crlf = split_frontmatter("---\r\nname: a\r\ndescription: d\r\n---\r\nBody\r\n");
+        assert_eq!(crlf.name, lf.name);
+        assert_eq!(crlf.description, lf.description);
+        assert_eq!(crlf.body.trim_end(), "Body");
+        assert!(crlf.closed);
+
+        // The error used to compound, so a long frontmatter is the case that proves the fix:
+        // with eight lines the tail of the last one landed in the body.
+        let many = "---\r\n".to_string()
+            + &(1..=8)
+                .map(|n| format!("key{n}: value{n}\r\n"))
+                .collect::<String>()
+            + "description: kept\r\n---\r\nThe body, whole.\r\n";
+        let parsed = split_frontmatter(&many);
+        assert_eq!(parsed.description.as_deref(), Some("kept"));
+        assert_eq!(parsed.body.trim_end(), "The body, whole.");
+        assert!(
+            !parsed.body.contains("value8") && !parsed.body.contains('-'),
+            "no frontmatter leaked into the body: {:?}",
+            parsed.body
+        );
+    }
+
+    /// A mistyped closing fence must not look like a successful parse of an empty skill.
+    #[test]
+    fn an_unclosed_fence_keeps_every_byte_and_says_it_is_unclosed() {
+        let text = "---\nname: a\ndescription: d\nBody with no closing fence.\n";
+        let parsed = split_frontmatter(text);
+        assert!(!parsed.closed, "the fence was never closed");
+        assert_eq!(parsed.body, text, "nothing is dropped on the floor");
+        assert_eq!(parsed.name, None, "an unread block claims nothing");
+        assert_eq!(parsed.description, None);
+
+        // A document with no frontmatter at all has nothing to close, so it is not "unclosed".
+        assert!(split_frontmatter("Just instructions.\n").closed);
     }
 
     /// A skill without frontmatter is still a skill; its body must survive whole.
