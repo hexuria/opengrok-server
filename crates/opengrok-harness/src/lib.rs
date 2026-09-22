@@ -781,7 +781,13 @@ async fn converse_raw(
                     Ok(delta) => {
                         any_delta = true;
                         if let ModelDelta::Text(text) = &delta {
-                            said.push_str(text);
+                            // F8: discarded intent must not land on `said`. The next
+                            // hop would append it as an assistant message and re-bill
+                            // the diary. Count plan-only from the bytes; keep them off
+                            // the next request.
+                            if !tools_offered {
+                                said.push_str(text);
+                            }
                             if tools_offered && !started_a_tool {
                                 plan_only_chars =
                                     plan_only_chars.saturating_add(text.chars().count());
@@ -1164,7 +1170,9 @@ async fn converse_raw(
                     return all;
                 }
 
-                if !said.is_empty() {
+                // Work-tool preamble was withheld from chat AND from `said` (F8).
+                // Replaying it as an assistant message is how rounds got slower.
+                if !said.is_empty() && !round_work_tool {
                     request.messages.push(ChatMessage {
                         images: Vec::new(),
                         role: "assistant".to_string(),
@@ -1554,7 +1562,11 @@ fn screen_hash(base64: &str) -> u64 {
 fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
     ChatMessage {
         role: "user".to_string(),
-        content: format!("[tool {} result] {}", result.call_id, result.content),
+        content: format!(
+            "[tool {} result] {}",
+            result.call_id,
+            intent::annotate_empty_result(&result.content)
+        ),
         images: result
             .image
             .iter()
@@ -2716,6 +2728,78 @@ mod tests {
         assert_eq!(timing["auto_review_ms"], 0);
     }
 
+    /// F8: withheld preamble must not grow the next hop as an assistant message.
+    #[tokio::test]
+    async fn withheld_preamble_is_not_appended_to_the_next_request() {
+        struct SpyDoor {
+            round: Mutex<usize>,
+            assistant: Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl ModelDoor for SpyDoor {
+            async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+                let round = {
+                    let mut count = self.round.lock().unwrap();
+                    *count += 1;
+                    *count
+                };
+                if round == 2 {
+                    self.assistant.lock().unwrap().extend(
+                        request
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == "assistant")
+                            .map(|message| message.content.clone()),
+                    );
+                }
+                let script = if round == 1 {
+                    vec![
+                        ModelDelta::Text("I'll probe the BIR host".to_string()),
+                        ModelDelta::ToolCallStart {
+                            id: "c1".to_string(),
+                            name: "shell".to_string(),
+                        },
+                        ModelDelta::ToolCallArgs {
+                            id: "c1".to_string(),
+                            delta: r#"{"command":"gpui-agent hello"}"#.to_string(),
+                        },
+                        ModelDelta::ToolCallEnd {
+                            id: "c1".to_string(),
+                        },
+                    ]
+                } else {
+                    vec![ModelDelta::Text(
+                        "TIN 123-456-789. Forms: 1701, 2550M.".to_string(),
+                    )]
+                };
+                Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            }
+        }
+
+        let door = SpyDoor {
+            round: Mutex::new(0),
+            assistant: Mutex::new(Vec::new()),
+        };
+        let events = run_conversation(
+            &door,
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("list my BIR profile"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        let assistant = door.assistant.lock().unwrap();
+        assert!(
+            assistant
+                .iter()
+                .all(|message| !message.contains("I'll probe")),
+            "withheld preamble must not be replayed: {assistant:?}"
+        );
+    }
+
     /// Between-tool narration is the same bug one hop later.
     #[tokio::test]
     async fn between_tool_intent_text_is_not_chat() {
@@ -3346,6 +3430,30 @@ mod tests {
 
         let plain = tool_result_message(&opengrok_tools::ToolResult::ok("c2", "done"));
         assert!(plain.images.is_empty());
+    }
+
+    #[test]
+    fn an_empty_result_array_carries_the_dead_end_sentence() {
+        let empty = tool_result_message(&opengrok_tools::ToolResult::ok(
+            "c1",
+            r#"{"ok":true,"result":[]}"#,
+        ));
+        assert!(
+            empty.content.contains(intent::EMPTY_RESULT_NUDGE),
+            "{:?}",
+            empty.content
+        );
+        let full = tool_result_message(&opengrok_tools::ToolResult::ok(
+            "c1",
+            r#"{"ok":true,"result":[{"name":"Juan"}]}"#,
+        ));
+        assert!(
+            !full.content.contains(intent::EMPTY_RESULT_NUDGE),
+            "{:?}",
+            full.content
+        );
+        let garbage = tool_result_message(&opengrok_tools::ToolResult::ok("c1", "not-json"));
+        assert_eq!(garbage.content, "[tool c1 result] not-json");
     }
 
     /// Screenshots are the widest thing in a request; only the last two say where the screen is.

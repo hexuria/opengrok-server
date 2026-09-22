@@ -10,8 +10,13 @@
 
 /// After a successful listing/show, the next hop should answer from that result.
 pub const READONLY_SHELL_NUDGE: &str = "[harness] The listing or show result is above. \
-Answer the user with the facts from it. Do not announce another probe or run another listing \
-unless this result is empty or an error. Do not narrate I'll / let me / isn't answering.";
+Answer the user with the facts from it. An empty result is the answer: say what was not found. \
+Do not announce another probe or run the same listing again. Do not narrate I'll / let me / isn't answering.";
+
+/// Empty `result: []` / `not_found` is a success on the wire (F5). Without this
+/// sentence the loop searches until `MAX_ROUNDS`.
+pub const EMPTY_RESULT_NUDGE: &str = "[harness] No matches. Do not repeat the same query. \
+Answer with what was not found.";
 
 /// After the first failed work tool: one silent fix, not a diary.
 pub const FAILED_TOOL_NUDGE: &str = "[harness] That call failed. If a one-step fix is obvious \
@@ -203,6 +208,46 @@ pub fn short_failure_fact(content: &str) -> String {
     }
 }
 
+/// Dead-end search body: empty `result` array or explicit `not_found`.
+/// Malformed JSON is not a dead end — pass it through unchanged.
+pub fn is_empty_or_not_found(content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content.trim()) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .get("result")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        return true;
+    }
+    match object.get("not_found") {
+        Some(serde_json::Value::Bool(true)) => true,
+        Some(serde_json::Value::String(flag)) if !flag.is_empty() => true,
+        Some(serde_json::Value::Number(n)) if n.as_i64() == Some(1) => true,
+        _ => object
+            .values()
+            .any(|value| value.as_str() == Some("not_found")),
+    }
+}
+
+/// Append the dead-end sentence, or return `content` untouched.
+pub fn annotate_empty_result(content: &str) -> String {
+    if !is_empty_or_not_found(content) {
+        return content.to_string();
+    }
+    let mut out = content.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    out.push_str(EMPTY_RESULT_NUDGE);
+    out
+}
+
 /// What NativeChat may paint from withheld model text this round.
 pub fn visible_chat(withheld: &str, last_failure: Option<&str>) -> Option<String> {
     if let Some(facts) = strip_intent_keep_facts(withheld) {
@@ -266,5 +311,18 @@ mod tests {
         );
         assert_eq!(fact, "connection refused on 17421");
         assert!(short_failure_fact("").contains("failed"));
+    }
+
+    #[test]
+    fn empty_result_array_is_annotated_and_a_full_one_is_not() {
+        let empty = annotate_empty_result(r#"{"ok":true,"result":[]}"#);
+        assert!(empty.contains(EMPTY_RESULT_NUDGE), "{empty}");
+        assert!(empty.contains(r#""result":[]"#), "{empty}");
+        let full = annotate_empty_result(r#"{"ok":true,"result":[{"tin":"00000000000000"}]}"#);
+        assert_eq!(full, r#"{"ok":true,"result":[{"tin":"00000000000000"}]}"#);
+        let not_found = annotate_empty_result(r#"{"ok":true,"not_found":true}"#);
+        assert!(not_found.contains(EMPTY_RESULT_NUDGE), "{not_found}");
+        let garbage = annotate_empty_result("not json at all");
+        assert_eq!(garbage, "not json at all");
     }
 }
