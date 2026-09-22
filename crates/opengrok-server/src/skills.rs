@@ -1128,6 +1128,27 @@ fn minted_name() -> String {
     format!("taught-{tail}")
 }
 
+/// Said at the end of every refusal `from_tape` makes.
+///
+/// THE RECORDING IS THE CLIENT'S TO KEEP, AND THIS SENTENCE IS THE SERVER'S HALF OF THAT.
+/// No tape is stored here — a skill is the lesson, and keeping the tape beside it would be a
+/// recipe nobody asked for on a row with no way to run it — so every way this route fails leaves
+/// the bytes only in the hand that sent them. That is only safe because it is SAID: the desktop
+/// app keeps a local copy when a recording stops and offers a retry, and any other client has to
+/// be told that retrying is the right thing to do and that nothing was half-written here while it
+/// decides. A model that refuses is common; a person losing a recording to one must not be.
+const TAPE_KEPT_LINE: &str =
+    "The recording was not consumed: nothing was stored, and the same tape can be sent again.";
+
+/// A refusal from `from_tape`: the status, the reason, and the standing promise about the tape.
+///
+/// EVERY refusal this route makes goes through here — one that did not would be the one that
+/// leaves a person wondering whether their recording is spent. The single exception is named in
+/// `from_tape`, and it is the case where a skill DOES exist.
+fn not_from_this_tape(status: StatusCode, why: impl std::fmt::Display) -> Response {
+    (status, format!("{why} {TAPE_KEPT_LINE}")).into_response()
+}
+
 /// `POST /skills/from-tape` — a recording in, a skill a model wrote out, switched off.
 ///
 /// THE THREE THINGS THIS ROUTE IS CAREFUL ABOUT, in the order they bite:
@@ -1147,19 +1168,26 @@ fn minted_name() -> String {
 ///
 /// 3. NOTHING HALF-WRITTEN SURVIVES A FAILURE. Every refusal below happens before the row exists,
 ///    and the row and its first body are written in one transaction (`create_skill`), so a person
-///    whose model refused is left with what they had: their recording, and no skill.
+///    whose model refused is left with what they had: their recording, and no skill. The one
+///    failure AFTER the commit — a skill written and then not readable back — says so and names
+///    the id, because there the skill does exist and is holding its name.
+///
+/// AND THE CONTRACT ABOUT THE TAPE: it is the client's to keep. Nothing here stores a recording,
+/// so a refusal means the bytes exist only where they were sent from; every refusal says as much
+/// (`TAPE_KEPT_LINE`) and the same tape may be posted again unchanged. A client that discards a
+/// tape when this route answers anything but 200 is a client that loses somebody's work.
 async fn from_tape(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Json(request): Json<FromTapeRequest>,
 ) -> Response {
     let Some(account) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return not_from_this_tape(StatusCode::UNAUTHORIZED, "sign in first");
     };
     let coworker = CoworkerId::from_stored(request.coworker_id.clone());
     match owned_coworker(&state, &account, &coworker).await {
         Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Ok(false) => return not_from_this_tape(StatusCode::NOT_FOUND, "no such coworker"),
         Err(refusal) => return refusal,
     }
 
@@ -1170,7 +1198,7 @@ async fn from_tape(
         .filter(|name| !name.is_empty())
         .map_or_else(minted_name, str::to_string);
     if let Err(why) = check_name(&name) {
-        return (StatusCode::BAD_REQUEST, why).into_response();
+        return not_from_this_tape(StatusCode::BAD_REQUEST, why);
     }
     let description = request
         .description
@@ -1179,17 +1207,20 @@ async fn from_tape(
         .filter(|text| !text.is_empty())
         .unwrap_or(TAUGHT_DESCRIPTION)
         .to_string();
-    if let Err(why) = check_description(&description) {
-        return why.into_response();
+    if let Err((status, why)) = check_description(&description) {
+        return not_from_this_tape(status, why);
     }
 
-    // ASKED BEFORE THE MODEL IS, not after. The name is refused either way, and asking afterwards
-    // would bill the person for prose that was always going to be thrown away.
+    // ASKED BEFORE THE MODEL IS, not after. The name is refused either way, so asking afterwards
+    // would bill the person for prose that was always going to be thrown away. It NARROWS that
+    // window rather than closing it: two recordings racing for one name both pass this read, both
+    // pay for a lesson, and the unique index decides which is kept. The common case — a name the
+    // person has already used — is what it is for.
     let store = &state.auth.store;
     match store.skill_named(account.as_str(), &name).await {
-        Ok(Some(_)) => return (StatusCode::CONFLICT, taken(&name)).into_response(),
+        Ok(Some(_)) => return not_from_this_tape(StatusCode::CONFLICT, taken(&name)),
         Ok(None) => {}
-        Err(error) => return unavailable(error),
+        Err(error) => return not_from_this_tape(StatusCode::SERVICE_UNAVAILABLE, error),
     }
 
     // The tape becomes steps through the recipe route's own road (`recipes::tape_into_steps`):
@@ -1199,17 +1230,16 @@ async fn from_tape(
     let screen = request.screen.unwrap_or_default();
     let steps = match tape_into_steps(&request.raw, screen) {
         Ok((_tape, steps)) => steps,
-        Err(refusal) => return refusal.into_response(),
+        Err((status, why)) => return not_from_this_tape(status, why),
     };
 
     // The coworker's own pin writes the lesson. Loaded rather than taken from the request: a
     // client that could name the model would be choosing what this account is billed for.
     let Ok((bot, _)) = state.auth.store.load_coworker(&coworker).await else {
-        return (
+        return not_from_this_tape(
             StatusCode::SERVICE_UNAVAILABLE,
             "that coworker could not be read",
-        )
-            .into_response();
+        );
     };
     let lesson = match crate::tape_lesson::lesson_from_tape(
         &state, &account, &coworker, &bot.model, &steps, screen,
@@ -1226,7 +1256,7 @@ async fn from_tape(
                 crate::tape_lesson::NotWritten::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
                 _ => StatusCode::BAD_GATEWAY,
             };
-            return (status, why.to_string()).into_response();
+            return not_from_this_tape(status, why);
         }
     };
 
@@ -1237,31 +1267,28 @@ async fn from_tape(
     // does not get to be what a person types after a slash, nor what every listing says.
     let parsed = opengrok_plugins::split_frontmatter(&lesson);
     if !parsed.closed {
-        return (
+        return not_from_this_tape(
             StatusCode::BAD_GATEWAY,
             "the model opened a `---` fence and never closed it, so where its frontmatter \
              ends and its instructions begin cannot be told apart",
-        )
-            .into_response();
+        );
     }
     let body = parsed.body.trim();
     if body.is_empty() {
-        return (
+        return not_from_this_tape(
             StatusCode::BAD_GATEWAY,
             "the model answered with frontmatter and no instructions",
-        )
-            .into_response();
+        );
     }
     // REFUSED, NOT CUT, and for `for_turn`'s reason: a body cut at 8000 characters ends
     // mid-sentence and nothing downstream can tell it from a whole one. The prompt asks for a
     // quarter of this, so a body that arrives over it is a model that ignored a plain
     // instruction — the last thing to paper over on the way into a system message.
     if let Err((_, why)) = check_body(body) {
-        return (
+        return not_from_this_tape(
             StatusCode::BAD_GATEWAY,
             format!("the model wrote more than a skill can hold: {why}"),
-        )
-            .into_response();
+        );
     }
 
     let org = org_of(&state, &account).await;
@@ -1299,16 +1326,32 @@ async fn from_tape(
         )
         .await
     {
-        return created_or_refused(error, &name);
+        return match error {
+            opengrok_store::StoreError::Conflict => {
+                not_from_this_tape(StatusCode::CONFLICT, taken(&name))
+            }
+            error => not_from_this_tape(StatusCode::SERVICE_UNAVAILABLE, error),
+        };
     }
 
+    // PAST THIS LINE THE TAPE HAS BEEN CONSUMED, and this is the one refusal here that does not
+    // carry `TAPE_KEPT_LINE`: the skill exists, switched off, holding its name, so a person told
+    // to send the tape again would get a 409 for a skill they have not been shown. The id is
+    // named instead — it is what makes the row findable when the read that would have listed it
+    // is the thing that just failed.
     match store.skill(&id).await {
         Ok(Some(row)) => match detail_of(store, &row).await {
             Ok(detail) => Json(detail).into_response(),
             Err(response) => response,
         },
-        Ok(None) => (StatusCode::SERVICE_UNAVAILABLE, "the skill did not stick").into_response(),
-        Err(error) => unavailable(error),
+        Ok(None) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the skill was written as {id} under the name {name:?} but could not be read \
+                 back; it is in your list, switched off, and the recording is spent"
+            ),
+        )
+            .into_response(),
     }
 }
 
