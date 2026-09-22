@@ -1193,7 +1193,7 @@ async fn between_tool_intent_text_is_not_chat() {
                     },
                     ModelDelta::ToolCallArgs {
                         id: "c1".to_string(),
-                        delta: r#"{"command":"gpui-agent hello"}"#.to_string(),
+                        delta: r#"{"command":"echo hello"}"#.to_string(),
                     },
                     ModelDelta::ToolCallEnd {
                         id: "c1".to_string(),
@@ -1207,7 +1207,7 @@ async fn between_tool_intent_text_is_not_chat() {
                     },
                     ModelDelta::ToolCallArgs {
                         id: "c2".to_string(),
-                        delta: r#"{"command":"gpui-agent invoke profile.list"}"#.to_string(),
+                        delta: r#"{"command":"echo profiles"}"#.to_string(),
                     },
                     ModelDelta::ToolCallEnd {
                         id: "c2".to_string(),
