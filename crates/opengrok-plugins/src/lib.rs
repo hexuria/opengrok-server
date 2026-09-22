@@ -332,6 +332,14 @@ pub struct Frontmatter {
 /// THE ONE PARSER. The server's `/skills` upload path reads the same bytes this does, and a second
 /// implementation there would mean an uploaded skill and an installed one disagreeing about where
 /// a body starts — the disagreement would show up as frontmatter leaking into a system message.
+///
+/// NOT EVERY CALLER CHECKS `closed`, AND ONE OF THEM IS THE BOOT-TIME LOADER. `skills_in` above
+/// takes `parsed.body` and never looks at the flag, so a `SKILL.md` on disk that opens with a
+/// `---` it never closes is installed with its whole text as the body rather than refused the way
+/// an upload would be. Since leading whitespace is stripped here, that now includes a file whose
+/// first non-blank line is a `---` used as a horizontal rule: everything up to the next `---`
+/// becomes frontmatter and is dropped. Both are consequences of the loader ignoring the flag, not
+/// of the parse — a caller that accepts text from a person or a disk MUST read `closed`.
 pub fn split_frontmatter(text: &str) -> Frontmatter {
     // LEADING WHITESPACE GOES BEFORE THE FENCE IS LOOKED FOR, and it is not tidiness. The test
     // below is `starts_with("---")`, so ONE blank line in front of the fence made the whole

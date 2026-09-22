@@ -34,7 +34,10 @@ use crate::agui::AgUiState;
 /// coworker work, so a needless wait multiplies. This one happens once per recording, a person is
 /// watching one spinner for it, and what a premature timeout costs them is the whole recording —
 /// the desktop app offers the choice when the tape is stopped and may not still be holding it.
-const LESSON_TIMEOUT: Duration = Duration::from_secs(60);
+/// `pub(crate)` because `skills::while_the_tape_is_read` answers a busy account's 429 with this
+/// number as `Retry-After`: it is the bound on the call holding the slot, so it is the honest
+/// worst case, and a number written twice is a number that drifts.
+pub(crate) const LESSON_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a lesson is ASKED to be. The cap it is HELD to is `skills::MAX_SKILL_BODY_CHARS`,
 /// four times this, and the gap is deliberate: a model that overshoots what it was asked by half

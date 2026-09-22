@@ -991,8 +991,25 @@ async fn one_recording_at_a_time_per_account() {
     // The door says when the first call has reached it — no clock, no margin to get wrong.
     h.door.arrived.notified().await;
 
-    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("second one")).await;
-    assert_eq!(status, 429, "{text}");
+    let response = h
+        .client
+        .post(format!("{}/skills/from-tape", h.base))
+        .header("authorization", format!("Bearer {ada}"))
+        .json(&json!({ "coworkerId": bot, "raw": a_tape("second one") }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status().as_u16(), 429);
+    // "Wait for it to finish" without a number is a person retrying three times in ten seconds.
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("60"),
+        "the 429 says roughly how long, bounded by the lesson timeout"
+    );
+    let text = response.text().await.expect("text");
     assert!(text.contains("already being read"), "{text}");
     assert!(text.contains("the same tape can be sent again"), "{text}");
 

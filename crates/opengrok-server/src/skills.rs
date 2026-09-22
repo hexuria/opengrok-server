@@ -1186,10 +1186,23 @@ async fn while_the_tape_is_read(
         Some(account) => match one_at_a_time(&account) {
             Some(guard) => Some(guard),
             None => {
-                return not_from_this_tape(
+                let mut refusal = not_from_this_tape(
                     StatusCode::TOO_MANY_REQUESTS,
                     "a recording of yours is already being read; wait for it to finish",
                 );
+                // HOW LONG "wait for it to finish" IS, because a 429 that does not say turns into
+                // three retries in ten seconds. `LESSON_TIMEOUT` bounds the call holding the slot,
+                // so it is the honest worst case; read from there rather than written again here,
+                // because a number in two places is a number that drifts. A header that cannot be
+                // built is simply not sent — the sentence is the part that matters.
+                if let Ok(seconds) = axum::http::HeaderValue::from_str(
+                    &crate::tape_lesson::LESSON_TIMEOUT.as_secs().to_string(),
+                ) {
+                    refusal
+                        .headers_mut()
+                        .insert(axum::http::header::RETRY_AFTER, seconds);
+                }
+                return refusal;
             }
         },
         None => None,
