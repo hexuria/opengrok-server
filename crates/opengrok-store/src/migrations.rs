@@ -988,8 +988,11 @@ create table if not exists skill (
     -- Where this skill came from: 'authored', 'uploaded', or 'taught'. Descriptive, written by
     -- the server from how the row was made, and never a permission.
     source        text    not null default 'authored',
-    -- The owner's switch. A disabled skill still lists and still reads; it is simply not offered
-    -- for a turn. The turn path is a later PR, and it reads this column rather than a request.
+    -- The owner's switch, and it is not only about turns: a disabled skill leaves the ORG's
+    -- listing and stops reading for a colleague (`server/skills.rs`, `relation_to`), because a
+    -- colleague seeing one would be seeing something they cannot use. Its OWNER still lists and
+    -- reads it — switching a skill off is not hiding it from yourself. The turn path is a later
+    -- PR and reads this column rather than a request.
     enabled       boolean not null default true,
     created_at_ms bigint  not null,
     updated_at_ms bigint  not null,
@@ -1031,6 +1034,26 @@ create table if not exists skill_file (
     bytes    bytea not null,
     primary key (skill_id, version, path)
 );
+-- A file belongs to a VERSION that exists. `add_skill_version` writes both in one transaction so
+-- it cannot be otherwise today, but the invariant belongs in the schema: a file row naming a
+-- version nobody can open is bytes with no page, and it would be invisible until somebody read
+-- the table by hand.
+--
+-- THE CATALOGUE IS CHECKED FIRST, and that guard is the whole point of the block rather than
+-- tidiness. Postgres has no `add constraint if not exists`, and the obvious spelling —
+-- `drop constraint if exists` followed by `add constraint` — is wrong HERE, where the file is
+-- replayed on every boot: `alter table ... add constraint` takes an ACCESS EXCLUSIVE lock on the
+-- table before it does anything else, so every restart would fight the writes already in flight.
+-- It does not merely slow things down; written that way it deadlocked against a concurrent
+-- insert the first time the gate ran it. Guarded, the steady-state path issues no ALTER and takes
+-- no lock at all.
+do $do$ begin
+    if not exists (select 1 from pg_constraint where conname = 'skill_file_version_fk') then
+        alter table skill_file add constraint skill_file_version_fk
+            foreign key (skill_id, version) references skill_version (skill_id, version)
+            on delete cascade;
+    end if;
+end $do$;
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

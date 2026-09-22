@@ -120,8 +120,62 @@ pub struct NewSkillVersion<'a> {
     pub created_by: &'a str,
 }
 
+/// One version row, its files, and the parent's timestamp — the three writes that are always
+/// made together. Shared by `create_skill` and `add_skill_version` so a body written at creation
+/// and one written later cannot come to mean different things.
+async fn write_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    skill_id: &str,
+    version: i32,
+    new: &NewSkillVersion<'_>,
+    at_ms: i64,
+) -> StoreResult<()> {
+    sqlx::query(
+        "insert into skill_version (skill_id, version, kind, body, note, created_by, created_at_ms)
+         values ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(skill_id)
+    .bind(version)
+    .bind(new.kind)
+    .bind(new.body)
+    .bind(new.note)
+    .bind(new.created_by)
+    .bind(at_ms)
+    .execute(&mut **tx)
+    .await?;
+    for file in new.files {
+        sqlx::query(
+            "insert into skill_file (skill_id, version, path, bytes) values ($1, $2, $3, $4)",
+        )
+        .bind(skill_id)
+        .bind(version)
+        .bind(&file.path)
+        .bind(&file.bytes)
+        .execute(&mut **tx)
+        .await?;
+    }
+    sqlx::query("update skill set updated_at_ms = $2 where id = $1")
+        .bind(skill_id)
+        .bind(at_ms)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 impl PgStore {
-    pub async fn create_skill(&self, new: NewSkill<'_>, at_ms: i64) -> StoreResult<()> {
+    /// Write the row and, when there is one, its first body — in ONE transaction.
+    ///
+    /// The body is not a second call for a reason that cost a person their skill's name: a
+    /// failure between the two left a named, bodiless row holding the unique `(owner_id, name)`,
+    /// and the retry was then refused as a duplicate of a skill that had never been made and
+    /// whose id nobody had been told.
+    pub async fn create_skill(
+        &self,
+        new: NewSkill<'_>,
+        first: Option<NewSkillVersion<'_>>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        let mut tx = self.pool().begin().await?;
         sqlx::query(
             "insert into skill (id, owner_id, org_id, name, description, source,
                                 created_at_ms, updated_at_ms)
@@ -134,8 +188,12 @@ impl PgStore {
         .bind(new.description)
         .bind(new.source)
         .bind(at_ms)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await?;
+        if let Some(first) = first {
+            write_version(&mut tx, new.id, 1, &first, at_ms).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -226,9 +284,12 @@ impl PgStore {
 
     /// Write a body as the next version, with the files that came with it, and touch the skill.
     ///
-    /// ONE TRANSACTION for the number, the row, the files and the timestamp. Reading
-    /// `max(version) + 1` and then inserting in a second statement races two writers into the
-    /// same number, and the primary key would turn that into a 500 on whoever lost.
+    /// THE SKILL ROW IS LOCKED FIRST, and that is what makes the number safe. A transaction alone
+    /// does not: at READ COMMITTED, `max(version) + 1` takes no lock on rows that do not exist
+    /// yet, so two writers both read 3 and both try to write 4. The primary key means only one
+    /// lands — nothing wrong is ever stored — but the loser gets a constraint violation for a
+    /// request that was perfectly valid. `for update` on the parent serialises them instead, and
+    /// the second one reads 4 and writes 5.
     pub async fn add_skill_version(
         &self,
         skill_id: &str,
@@ -236,41 +297,17 @@ impl PgStore {
         at_ms: i64,
     ) -> StoreResult<i32> {
         let mut tx = self.pool().begin().await?;
+        sqlx::query("select 1 from skill where id = $1 for update")
+            .bind(skill_id)
+            .fetch_optional(&mut *tx)
+            .await?;
         let next: i32 = sqlx::query_scalar(
             "select coalesce(max(version), 0) + 1 from skill_version where skill_id = $1",
         )
         .bind(skill_id)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query(
-            "insert into skill_version (skill_id, version, kind, body, note, created_by, created_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(skill_id)
-        .bind(next)
-        .bind(new.kind)
-        .bind(new.body)
-        .bind(new.note)
-        .bind(new.created_by)
-        .bind(at_ms)
-        .execute(&mut *tx)
-        .await?;
-        for file in new.files {
-            sqlx::query(
-                "insert into skill_file (skill_id, version, path, bytes) values ($1, $2, $3, $4)",
-            )
-            .bind(skill_id)
-            .bind(next)
-            .bind(&file.path)
-            .bind(&file.bytes)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query("update skill set updated_at_ms = $2 where id = $1")
-            .bind(skill_id)
-            .bind(at_ms)
-            .execute(&mut *tx)
-            .await?;
+        write_version(&mut tx, skill_id, next, &new, at_ms).await?;
         tx.commit().await?;
         Ok(next)
     }
