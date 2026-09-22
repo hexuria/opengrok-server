@@ -142,12 +142,23 @@ pub fn is_retry_diary(text: &str) -> bool {
         || (trimmed.chars().count() > 400 && intent_sentences >= 1 && !has_fact_signal(trimmed))
 }
 
+fn is_sentence_end(ch: char, next: Option<char>) -> bool {
+    match ch {
+        '!' | '?' | '\n' => true,
+        // `xai/grok-4.6` and `3.14` are not sentence ends. Slice 5 greps the
+        // mock door's model pin; splitting on the version dot made it `4. 6`.
+        '.' => !next.is_some_and(|n| n.is_ascii_digit()),
+        _ => false,
+    }
+}
+
 fn split_sentences(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = Vec::new();
     let mut current = String::new();
-    for ch in text.chars() {
+    for (i, ch) in chars.iter().copied().enumerate() {
         current.push(ch);
-        if matches!(ch, '.' | '!' | '?' | '\n') {
+        if is_sentence_end(ch, chars.get(i + 1).copied()) {
             let piece = current.trim();
             if !piece.is_empty() {
                 out.push(piece.to_string());
@@ -163,10 +174,25 @@ fn split_sentences(text: &str) -> Vec<String> {
 }
 
 /// Drop leading (and leftover) intent sentences. `None` if nothing factual remains.
+/// A reply with no intent sentences is returned unchanged — version pins and
+/// decimals must not be rewritten.
 pub fn strip_intent_keep_facts(text: &str) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
     let sentences = split_sentences(text);
     if sentences.is_empty() {
         return None;
+    }
+    if !sentences
+        .iter()
+        .any(|sentence| sentence_is_intent(sentence))
+    {
+        return if is_retry_diary(text) {
+            None
+        } else {
+            Some(text.to_string())
+        };
     }
     let kept: Vec<&str> = sentences
         .iter()
@@ -290,6 +316,17 @@ mod tests {
                 .unwrap();
         assert!(!visible.to_ascii_lowercase().contains("i'll look"));
         assert!(visible.contains("TIN 123-456-789"));
+    }
+
+    #[test]
+    fn a_real_answer_with_a_version_pin_is_not_rewritten() {
+        let reply = "You said: hello. This is the mock door standing in for xai/grok-4.6 — no model was called.";
+        assert_eq!(strip_intent_keep_facts(reply).as_deref(), Some(reply));
+        assert_eq!(visible_chat(reply, None).as_deref(), Some(reply));
+        assert!(
+            !visible_chat(reply, None).unwrap().contains("grok-4. 6"),
+            "sentence-split must not break a model pin"
+        );
     }
 
     #[test]
