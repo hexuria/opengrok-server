@@ -54,8 +54,10 @@ ok "$frames content frames"
 
 echo "3. the message is bracketed and its pieces share one id"
 sequence=$(echo "$events" | jq -r '.type' | tr '\n' ' ')
+# Compact CUSTOM `run-timing` is spliced before RUN_FINISHED on every run.
 case "$sequence" in
   "RUN_STARTED TEXT_MESSAGE_START "*"TEXT_MESSAGE_END RUN_FINISHED ") ;;
+  "RUN_STARTED TEXT_MESSAGE_START "*"TEXT_MESSAGE_END CUSTOM RUN_FINISHED ") ;;
   *) fail "unexpected sequence: $sequence" ;;
 esac
 ids=$(echo "$events" | jq -r 'select(.messageId != null) | .messageId' | sort -u | wc -l | tr -d ' ')
