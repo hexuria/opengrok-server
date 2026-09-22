@@ -130,10 +130,24 @@ pub enum ModelError {
     Refused { status: u16, body: String },
     #[error("the stream broke: {0}")]
     Stream(String),
-    /// The coworker's spend cap, or the credential that carries it, stopped the turn. Already a
-    /// sentence a person can act on — it is what the transcript shows.
+    /// A LIMIT SOMEBODY SET was reached: the gateway answered 402, or the points guard counted
+    /// this coworker over its cap. Already a sentence a person can act on — it is what the
+    /// transcript shows, and what `skills::from_tape` answers 402 with.
     #[error("{0}")]
     SpendCap(String),
+    /// The guard could not COUNT this call, so it held it rather than let it through unmetered:
+    /// a meter that would not answer, a key that could not be read, limits that could not be
+    /// loaded, a deployment with no admin connection, a request our own code built without a
+    /// payer.
+    ///
+    /// SEPARATE FROM `SpendCap`, AND THE DIFFERENCE IS NOT COSMETIC. Nobody has spent anything,
+    /// the condition is usually transient, and it is frequently OUR fault rather than the
+    /// person's — so a route turning one into an HTTP status must not tell somebody to check
+    /// their billing because Postgres blinked for two seconds. These sentences also carry store
+    /// errors, which belong in a log rather than in a reply. Both print the same way, so a
+    /// transcript reads exactly as it did when there was one variant.
+    #[error("{0}")]
+    Held(String),
 }
 
 pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<ModelDelta, ModelError>> + Send>>;
