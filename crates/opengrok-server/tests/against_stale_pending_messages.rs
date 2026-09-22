@@ -342,13 +342,16 @@ async fn stale_options_and_changed_same_run_retries_are_refused() {
             reqwest::Method::POST,
             Some(&access),
             &path,
-            Some(&json!({"content":"current", "clientMessageId":"bubble"})),
+            Some(&json!({"content":"current", "clientMessageId":"bubble",
+                "recipeId":"rec_current", "recipeValues":{"x":"new"}, "skillId":"skl_current"})),
         )
         .await;
     let id = created["pendingUserMessage"]["id"].as_str().unwrap();
     let run = format!("options-run-{stamp}");
     let base = json!({"threadId":thread,"runId":run,
-        "messages":[{"id":"bubble","role":"user","content":"current"}],"forwardedProps":{"pendingId":id}});
+        "messages":[{"id":"bubble","role":"user","content":"current"}],
+        "forwardedProps":{"pendingId":id, "recipe":"rec_current", "recipeValues":{"x":"new"},
+            "skill":"skl_current"}});
     for (key, value) in [
         ("recipe", json!("old-recipe")),
         ("recipeValues", json!({"x":"old"})),
@@ -365,6 +368,8 @@ async fn stale_options_and_changed_same_run_retries_are_refused() {
             .pending(reqwest::Method::POST, Some(&access), "/ag-ui", Some(&body))
             .await;
         assert_eq!(status, 409, "{key}: {result}");
+        assert_eq!(result["error"], "stale-pending-message", "{key}: {result}");
+        assert_eq!(result["event"]["value"]["op"], "edited", "{key}: {result}");
     }
     assert!(h.door.0.lock().unwrap().is_empty());
     let mut absent = base.clone();
@@ -393,7 +398,7 @@ async fn stale_options_and_changed_same_run_retries_are_refused() {
     assert_eq!(status, 200);
     let mut changed = base.clone();
     changed["messages"][0]["content"] = json!("retry different text");
-    let (status, _) = h
+    let (status, retried) = h
         .pending(
             reqwest::Method::POST,
             Some(&access),
@@ -401,8 +406,78 @@ async fn stale_options_and_changed_same_run_retries_are_refused() {
             Some(&changed),
         )
         .await;
-    assert_eq!(status, 409);
+    assert_eq!(status, 409, "{retried}");
+    assert_eq!(retried["error"], "stale-pending-message");
+    assert_eq!(retried["runId"], run.as_str());
+    assert_eq!(retried["event"]["value"]["op"], "drained");
     assert_eq!(h.door.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_legitimate_send_matches_however_its_options_are_spelled() {
+    let database_url = database_or_skip!();
+    let stamp = stamp();
+    let h = harness(&database_url, &format!("spelled-{stamp}@og.local")).await;
+    let (account, access) = h.person(&format!("spelled-{stamp}@og.local")).await;
+    let thread = format!("spelled-{stamp}");
+    seed_run(&h.store, &account, &thread, now_ms()).await;
+    let cases = [
+        (
+            json!({"recipeId": "rec_1", "recipeValues": {"n": 5, "on": true, "q": "x"},
+                   "skillId": "skl_1", "replyTo": "m1"}),
+            json!({"recipe": " rec_1 ", "recipeValues": {"n": "5", "on": "true", "q": "x"},
+                   "skill": " skl_1 "}),
+            Some(json!("m1")),
+        ),
+        (
+            json!({"recipeValues": {"q": "rides along with no recipe"}}),
+            json!({"recipe": "", "skill": null}),
+            None,
+        ),
+        (json!({}), json!({"recipe": 7, "skill": ""}), None),
+    ];
+    for (index, (saved, props, reply)) in cases.into_iter().enumerate() {
+        let bubble = format!("bubble-{index}");
+        let mut body = saved.clone();
+        body["content"] = json!("same words");
+        body["clientMessageId"] = json!(bubble);
+        let (status, created) = h
+            .pending(
+                reqwest::Method::POST,
+                Some(&access),
+                &format!("/ag-ui/threads/{thread}/pending"),
+                Some(&body),
+            )
+            .await;
+        assert_eq!(status, 201, "{created}");
+        let id = created["pendingUserMessage"]["id"].as_str().unwrap();
+        let mut props = props;
+        props["pendingUserMessageId"] = json!(id);
+        let mut message = json!({"id": bubble, "role": "user", "content": "same words"});
+        if let Some(reply) = reply {
+            message["replyTo"] = reply;
+        }
+        let (status, result) = h
+            .pending(
+                reqwest::Method::POST,
+                Some(&access),
+                "/ag-ui",
+                Some(&json!({
+                    "threadId": thread, "runId": format!("spelled-{stamp}-{index}"),
+                    "messages": [message], "forwardedProps": props,
+                })),
+            )
+            .await;
+        assert_eq!(status, 200, "case {index}: {result}");
+        let row = h
+            .store
+            .pending_user_message(id, &account)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, "drained", "case {index}");
+    }
+    assert_eq!(h.door.0.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
