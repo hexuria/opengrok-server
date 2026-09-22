@@ -37,8 +37,8 @@ use opengrok_core::run::{RunCommand, RunView};
 use opengrok_tools::user_form::{
     FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
     HOLD_TIMED_OUT_TOOL_RESULT, audit_lengths, fill_into_focus, form_request_from,
-    handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, overall_resolution,
-    shared_values, submitted_values, tool_result_content,
+    handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, model_facing_result,
+    overall_resolution, shared_values, submitted_values, tool_result_content,
 };
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
@@ -130,6 +130,7 @@ pub async fn submit_user_form(
     }
 
     let form = form_request_from(&entry);
+    let collect = opengrok_tools::user_form::is_chat_collection(&entry);
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
     let saved_login = is_saved_login(args);
@@ -145,6 +146,13 @@ pub async fn submit_user_form(
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
         );
     }
+    // A saved login is secret whatever the model called its fields. The initial result
+    // and persisted answers must use the same suppression, including on collect cards.
+    let shared = if saved_login || passkey_card {
+        BTreeMap::new()
+    } else {
+        shared_values(&form, &values)
+    };
     let (outcomes, resolution, content) = if passkey_card {
         let told = if form.passkey_mode.as_deref() == Some("register") {
             let hint = args
@@ -173,23 +181,14 @@ pub async fn submit_user_form(
                 ),
             ),
         }
+    } else if collect {
+        let content = opengrok_tools::user_form::collection_tool_result(&form, &shared);
+        (Vec::new(), FormResolution::Submitted, content)
     } else {
         let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
         let resolution = overall_resolution(&outcomes);
-        // A saved login is secret whatever the model called its fields: nothing of it is
-        // shared back to the model or the journal.
-        let shared = if saved_login {
-            BTreeMap::new()
-        } else {
-            shared_values(&form, &values)
-        };
         let content = tool_result_content(&form, resolution, &shared, false);
         (outcomes, resolution, content)
-    };
-    let shared: BTreeMap<String, String> = if saved_login || passkey_card {
-        BTreeMap::new()
-    } else {
-        shared_values(&form, &values)
     };
 
     let settled = settle_entry(entry, resolution, &shared, false, &outcomes, false);
@@ -220,7 +219,7 @@ pub async fn submit_user_form(
     }
     // A login that came from the vault is not offered to the vault again, and a passkey card
     // typed nothing worth saving.
-    if resolution == FormResolution::Submitted && !saved_login && !passkey_card {
+    if resolution == FormResolution::Submitted && !saved_login && !passkey_card && !collect {
         super::credential::offer_save_after_submit(
             state,
             account_id,
@@ -312,7 +311,7 @@ pub async fn dismiss_user_form(
         return (200, response);
     }
 
-    let content = tool_result_content(&form, resolution, &BTreeMap::new(), false);
+    let content = model_facing_result(&settled, &form, resolution, &BTreeMap::new(), false);
     resume_user_form(
         state,
         account_id,
@@ -443,7 +442,7 @@ pub async fn timeout_unresolved_form(
         return false;
     };
     let mut settled_any = false;
-    let mut form_for_result: Option<FormRequest> = None;
+    let mut settled_for_result: Option<Value> = None;
     for entry in entries {
         if !is_unresolved(&entry) {
             continue;
@@ -463,7 +462,6 @@ pub async fn timeout_unresolved_form(
         if !is_unresolved(&current) {
             continue;
         }
-        let form = form_request_from(&current);
         let settled = settle_entry(
             current,
             FormResolution::Dismissed,
@@ -483,13 +481,20 @@ pub async fn timeout_unresolved_form(
             continue;
         }
         journal_settled_form(state, account_id, coworker_id, &settled).await;
-        form_for_result = Some(form);
+        settled_for_result = Some(settled);
         settled_any = true;
     }
     if settled_any {
-        let content = match form_for_result {
-            Some(form) => {
-                tool_result_content(&form, FormResolution::Dismissed, &BTreeMap::new(), true)
+        let content = match settled_for_result {
+            Some(entry) => {
+                let form = form_request_from(&entry);
+                model_facing_result(
+                    &entry,
+                    &form,
+                    FormResolution::Dismissed,
+                    &BTreeMap::new(),
+                    true,
+                )
             }
             None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
         };
@@ -936,7 +941,7 @@ async fn heal_or_already(
         return (200, entry.clone());
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
-    let content = tool_result_content(&form, resolution, &shared, timed_out);
+    let content = model_facing_result(entry, &form, resolution, &shared, timed_out);
     if resume_user_form(
         state,
         account_id,

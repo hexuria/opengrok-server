@@ -1151,7 +1151,9 @@ impl Executor {
             .iter()
             .copied()
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
-            .filter(move |name| !self.network_off() || !BROWSER_TOOLS.contains(name))
+            .filter(move |name| {
+                !self.network_off() || !BROWSER_TOOLS.contains(name) || *name == REQUEST_USER_FORM
+            })
             // Offered by `tool_names` / `tool_schemas` on its own terms: a screen AND a grant.
             .filter(|name| *name != RUN_RECIPE)
     }
@@ -1500,7 +1502,13 @@ impl Executor {
         // hand-off cards below: a login card raised for a box that cannot browse would have
         // the person type a password that is then thrown away.
         if self.network_off() && BROWSER_TOOLS.contains(&tool_name.as_str()) {
-            return ToolResult::refused(&call.id, NETWORK_OFF);
+            // A collect card never touches the box. A login card on a machine that
+            // cannot browse would take a password and throw it away.
+            let collect =
+                tool_name == REQUEST_USER_FORM && user_form::is_chat_collection(&call.arguments);
+            if !collect {
+                return ToolResult::refused(&call.id, NETWORK_OFF);
+            }
         }
 
         // HITL wait, not approve-then-run — and BEFORE the judge. A form is not a tool that
@@ -1515,6 +1523,9 @@ impl Executor {
                     &call.id,
                     "a form or computer handoff is already open on this conversation; wait for the person to finish it",
                 );
+            }
+            if let Err(why) = user_form::validate_field_ids(&call.arguments) {
+                return ToolResult::refused(&call.id, why);
             }
             return ToolResult::awaiting(&call.id, AwaitingReason::UserForm, "Waiting for you");
         }
@@ -1996,7 +2007,14 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         REQUEST_USER_FORM => Some((
-            "Ask the person to fill a form in chat — a sign-in, an OTP, a field they must type. \
+            "Ask the person to fill a form in chat. Two uses. \
+             A collect form (collect true) is how you ask for fields you do not have yet: a new \
+             profile, a missing name, a TIN they must confirm. Put what they already told you \
+             on each field as value, so the card is prefilled, and leave value off the fields \
+             that are still missing. Mark those required. Wait. The answers come back as \
+             Shared fields and nothing is typed into a page. Do not invent a shell command \
+             for the form. \
+             A sign-in is the other use: an OTP or a field they must type into a page. \
              NativeChat offers the person their saved logins for that site on the card; they \
              confirm with Touch ID, and the values are typed into the page out of your view. \
              Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
@@ -2026,6 +2044,10 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "properties": {
                     "title": { "type": "string", "description": "Short title shown on the card." },
                     "instruction": { "type": "string", "description": "What the person should do." },
+                    "collect": {
+                        "type": "boolean",
+                        "description": "Ask in chat and return the answers. Nothing is typed into a page. Set this when you need fields the person must supply or confirm. Prefill fields they already answered with value."
+                    },
                     "passkeyMode": {
                         "type": "string",
                         "description": "With challengeKind passkey: use (sign in with the person's passkey) or register (the site offers to add one)."
@@ -2050,6 +2072,7 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                                 "id": { "type": "string" },
                                 "label": { "type": "string" },
                                 "type": { "type": "string", "description": "text, email, password, otp, …" },
+                                "value": { "type": "string", "description": "Prefill for a collect form. The person can edit it. Never set this on a secret field. Dropped unless collect is true." },
                                 "required": { "type": "boolean" },
                                 "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." },
                                 "at": {
@@ -3639,8 +3662,15 @@ mod tests {
         assert!(!executor.has_screen());
         let offered = executor.tool_names();
         for gone in BROWSER_TOOLS {
+            if *gone == REQUEST_USER_FORM {
+                continue;
+            }
             assert!(!offered.iter().any(|name| name == gone), "{offered:?}");
         }
+        assert!(
+            offered.iter().any(|name| name == REQUEST_USER_FORM),
+            "a collect form does not need the network: {offered:?}"
+        );
         assert!(offered.iter().any(|name| name == "shell"), "{offered:?}");
         let result = executor
             .execute(
@@ -3652,6 +3682,36 @@ mod tests {
         assert!(!result.awaiting_approval, "{result:?}");
         assert!(result.content.contains("switched off"), "{result:?}");
         assert_eq!(spy.last_box(), None, "must not wake or touch the box");
+        let login = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(
+                    REQUEST_USER_FORM,
+                    json!({"title": "Sign in", "fields": [{"id": "p", "label": "Password"}]}),
+                ),
+            )
+            .await;
+        assert!(!login.ok, "{login:?}");
+        assert!(login.content.contains("switched off"), "{login:?}");
+        let collect = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(
+                    REQUEST_USER_FORM,
+                    json!({
+                        "collect": true,
+                        "title": "New tax profile",
+                        "fields": [{"id": "name", "label": "Name", "value": "Juana Jane"}]
+                    }),
+                ),
+            )
+            .await;
+        assert!(collect.awaiting_approval, "{collect:?}");
+        assert_eq!(
+            spy.last_box(),
+            None,
+            "a collect card must not touch the box"
+        );
         // The box's own shell is not the person's network: it still runs.
         let shell = executor
             .execute(&context_with_box("box_mine"), &shell_call("c1"))
@@ -4590,6 +4650,78 @@ mod tests {
             "should mention recipe name"
         );
         assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    }
+
+    #[tokio::test]
+    async fn request_user_form_keeps_id_parsing_and_hold_precedence() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        let result = executor.execute(&context_with_box("box_mine"), &call(REQUEST_USER_FORM, json!({
+            "collect": true,
+            "fields": [{"id": "name"}, {"id": "Name"}, {"id": ""}, {"id": ""}, {"id": 1}, {"id": 1}, {}, {}]
+        }))).await;
+        assert_eq!(
+            result.awaiting_reason,
+            Some(AwaitingReason::UserForm),
+            "{result:?}"
+        );
+        let mut context = context_with_box("box_mine");
+        context.screen_hold = true;
+        let held = executor
+            .execute(
+                &context,
+                &call(
+                    REQUEST_USER_FORM,
+                    json!({
+                        "collect": true, "fields": [{"id": "x"}, {"id": "x"}]
+                    }),
+                ),
+            )
+            .await;
+        assert!(held.content.contains("already open"), "{held:?}");
+        assert!(!held.content.contains("Field IDs"), "{held:?}");
+        assert!(!held.awaiting_approval);
+        assert_eq!(spy.last_box(), None);
+    }
+
+    #[tokio::test]
+    async fn request_user_form_refuses_duplicate_ids_before_waiting() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone());
+        for collect in [false, true] {
+            for first in [
+                json!({"id": "x", "type": "password", "value": "private-value"}),
+                json!({"id": "x", "type": "otp", "value": "private-value"}),
+                json!({"id": "x", "secret": true, "value": "private-value"}),
+                json!({"id": "x", "type": "text", "value": "private-value"}),
+            ] {
+                for reversed in [false, true] {
+                    let mut fields = vec![first.clone(), json!({"id": "x", "type": "text"})];
+                    if reversed {
+                        fields.reverse();
+                    }
+                    let form = json!({"title": "Form", "collect": collect, "fields": fields});
+                    for arguments in [
+                        form.clone(),
+                        json!({"formRequest": form.clone()}),
+                        json!({"message": {"formRequest": form}}),
+                    ] {
+                        let result = executor
+                            .execute(
+                                &context_with_box("box_mine"),
+                                &call(REQUEST_USER_FORM, arguments),
+                            )
+                            .await;
+                        assert!(!result.ok, "{result:?}");
+                        assert!(!result.awaiting_approval, "{result:?}");
+                        assert!(result.awaiting_reason.is_none(), "{result:?}");
+                        assert!(result.content.contains("Field IDs must be unique. Give each field a different id and call request_user_form again."), "{result:?}");
+                        assert!(!result.content.contains("private-value"), "{result:?}");
+                        assert_eq!(spy.last_box(), None);
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

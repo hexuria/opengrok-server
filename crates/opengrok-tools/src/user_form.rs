@@ -17,7 +17,7 @@
 //! clicks it before typing. Without positions the old rules hold: default types only the
 //! first focused field; `samePage: true` allows Tab; `submit: true` allows Return.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use opengrok_box::{Computer, CuaAction};
 use serde::{Deserialize, Serialize};
@@ -176,10 +176,7 @@ pub fn fully_positioned(form: &FormRequest) -> bool {
 /// executor stamps and any values the model must never keep.
 #[must_use]
 pub fn form_request_from(value: &Value) -> FormRequest {
-    let source = value
-        .get("formRequest")
-        .or_else(|| value.pointer("/message/formRequest"))
-        .unwrap_or(value);
+    let source = form_source(value);
     let fields = source
         .get("fields")
         .and_then(Value::as_array)
@@ -288,7 +285,125 @@ pub fn sanitize_arguments(arguments: &Value) -> Value {
     if form.submit {
         body["submit"] = json!(true);
     }
+    // A collect card is a question, not a page fill. Non-secret prefills stay so the
+    // person sees what they already said. A login card still drops every value: a
+    // model-smuggled email or password must not sit on the entry.
+    if is_chat_collection(arguments) {
+        body["collect"] = json!(true);
+        if let (Some(out_fields), Some(in_fields)) = (
+            body.get_mut("fields").and_then(Value::as_array_mut),
+            form_source(arguments)
+                .get("fields")
+                .and_then(Value::as_array),
+        ) {
+            for field in out_fields {
+                let secret = field
+                    .get("secret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || field
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| {
+                            SECRET_TYPES
+                                .iter()
+                                .any(|secret| secret.eq_ignore_ascii_case(kind))
+                        });
+                if secret {
+                    continue;
+                }
+                let id = field.get("id").and_then(Value::as_str);
+                let mut matching = in_fields
+                    .iter()
+                    .filter(|row| row.get("id").and_then(Value::as_str) == id);
+                let Some(source) = matching.next() else {
+                    continue;
+                };
+                // Submit values are keyed by id, so duplicate ids have no safe association.
+                if matching.next().is_some() {
+                    continue;
+                }
+                if let Some(value) = source.get("value").and_then(scalar_text) {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        field["value"] = json!(value);
+                    }
+                }
+            }
+        }
+    }
     body
+}
+
+/// The person is answering in chat. The values come back to the model. Nothing is typed
+/// into a page. A login card leaves this false, so a missing flag cannot skip the fill.
+#[must_use]
+pub fn is_chat_collection(value: &Value) -> bool {
+    form_source(value).get("collect").and_then(Value::as_bool) == Some(true)
+}
+
+// Cards and tool arguments use the same precedence, including a present null wrapper.
+fn form_source(value: &Value) -> &Value {
+    value
+        .get("formRequest")
+        .or_else(|| value.pointer("/message/formRequest"))
+        .unwrap_or(value)
+}
+
+/// Reject ambiguous ids before a card waits: its answers are keyed by id, not by row.
+pub(crate) fn validate_field_ids(arguments: &Value) -> Result<(), &'static str> {
+    let mut seen = BTreeSet::new();
+    if let Some(fields) = form_source(arguments)
+        .get("fields")
+        .and_then(Value::as_array)
+    {
+        for id in fields
+            .iter()
+            .filter_map(|field| field.get("id").and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+        {
+            if !seen.insert(id) {
+                return Err(
+                    "Field IDs must be unique. Give each field a different id and call request_user_form again.",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A string, number, or bool the person or the model wrote. Objects are not field text.
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// What the model reads after a collect card. The answers are the point. A page was not filled.
+#[must_use]
+pub fn collection_tool_result(form: &FormRequest, shared: &BTreeMap<String, String>) -> String {
+    let title = if form.title.is_empty() {
+        "a form"
+    } else {
+        form.title.as_str()
+    };
+    let shared_line = if shared.is_empty() {
+        "No fields were filled.".to_string()
+    } else {
+        let listed = shared
+            .iter()
+            .map(|(id, value)| format!("{id}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Shared fields: {listed}.")
+    };
+    format!(
+        "The person submitted \"{title}\". Nothing was typed into a page. {shared_line} \
+Use these values. Do not ask for a field they already filled."
+    )
 }
 
 #[must_use]
@@ -350,12 +465,7 @@ pub fn submitted_values(form: &FormRequest, raw: &Value) -> BTreeMap<String, Str
         .iter()
         .filter_map(|field| {
             let value = object.get(&field.id)?;
-            let text = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(flag) => flag.to_string(),
-                _ => return None,
-            };
+            let text = scalar_text(value)?;
             Some((field.id.clone(), text))
         })
         .collect()
@@ -370,7 +480,15 @@ pub fn shared_values(
 ) -> BTreeMap<String, String> {
     form.fields
         .iter()
-        .filter(|field| !field.is_secret())
+        .filter(|field| {
+            !field.is_secret()
+                && form
+                    .fields
+                    .iter()
+                    .filter(|other| other.id == field.id)
+                    .count()
+                    == 1
+        })
         .filter_map(|field| {
             let value = values.get(&field.id)?;
             Some((field.id.clone(), value.clone()))
@@ -482,6 +600,57 @@ pub fn handoff_instruction(form: &FormRequest) -> String {
     }
 }
 
+/// The sentence a settled card gives the model. A collect card never claims a page was filled.
+/// A login card still does, because that path types into the page.
+#[must_use]
+pub fn model_facing_result(
+    entry: &Value,
+    form: &FormRequest,
+    resolution: FormResolution,
+    shared: &BTreeMap<String, String>,
+    timed_out: bool,
+) -> String {
+    if is_chat_collection(entry) {
+        // Old settled cards can carry values saved before the current field filtering.
+        let shared = shared_values(form, shared);
+        collection_resolution(form, resolution, &shared, timed_out)
+    } else {
+        tool_result_content(form, resolution, shared, timed_out)
+    }
+}
+
+fn collection_resolution(
+    form: &FormRequest,
+    resolution: FormResolution,
+    shared: &BTreeMap<String, String>,
+    timed_out: bool,
+) -> String {
+    let title = if form.title.is_empty() {
+        "a form"
+    } else {
+        form.title.as_str()
+    };
+    match resolution {
+        FormResolution::Submitted => collection_tool_result(form, shared),
+        FormResolution::FillFailed => format!(
+            "The person submitted \"{title}\" but the answers were not kept. Nothing was typed \
+             into a page. Ask again with request_user_form and collect true."
+        ),
+        FormResolution::Dismissed if timed_out => format!(
+            "The wait for \"{title}\" timed out. Continue without those fields. Do not invent \
+             them, and do not raise the same form again."
+        ),
+        FormResolution::Dismissed => format!(
+            "The person dismissed \"{title}\" without answering. Continue without those fields. \
+             Do not invent them, and do not raise the same form again."
+        ),
+        FormResolution::Escalated => format!(
+            "The person chose to finish \"{title}\" on the computer. Wait for them. Do not invent \
+             the fields."
+        ),
+    }
+}
+
 /// History line for a later turn reading the gateway transcript. None for an unresolved card
 /// (the waiting tool result has not landed yet) and none for a non-form entry.
 #[must_use]
@@ -509,9 +678,10 @@ pub fn history_line(entry: &Value) -> Option<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let line = tool_result_content(&form, resolution, &shared, timed_out);
+    let line = model_facing_result(entry, &form, resolution, &shared, timed_out);
     if contains_secret_value(&line, &form, &shared) {
-        return Some(tool_result_content(
+        return Some(model_facing_result(
+            entry,
             &form,
             resolution,
             &BTreeMap::new(),
@@ -798,6 +968,241 @@ mod tests {
         assert_eq!(cleaned["liveHost"], "accounts.google.com");
         assert_eq!(cleaned["fields"][0]["id"], "email");
         assert!(cleaned["fields"][0].get("value").is_none());
+    }
+
+    #[test]
+    fn collection_requires_boolean_true_in_the_selected_form_source() {
+        for flag in [
+            Value::Null,
+            json!(false),
+            json!("true"),
+            json!(1),
+            json!({}),
+            json!([]),
+        ] {
+            let form = json!({"collect": flag, "fields": [{"id": "name", "value": "Juana Jane"}]});
+            for input in [
+                form.clone(),
+                json!({"formRequest": form.clone()}),
+                json!({"message": {"formRequest": form}}),
+            ] {
+                assert!(!is_chat_collection(&input), "{input}");
+                assert!(
+                    sanitize_arguments(&input)["fields"][0]
+                        .get("value")
+                        .is_none()
+                );
+            }
+        }
+        let login = json!({"fields": [{"id": "name", "value": "Juana Jane"}]});
+        assert!(!is_chat_collection(&login));
+        assert!(
+            sanitize_arguments(&login)["fields"][0]
+                .get("value")
+                .is_none()
+        );
+        let selected = json!({"collect": true, "title": "Selected", "fields": [{"id": "name", "value": "Juana Jane"}]});
+        let shadowed = json!({"collect": false, "title": "Shadowed", "fields": [{"id": "name", "value": "Wrong value"}]});
+        let input = json!({"collect": false, "fields": shadowed["fields"], "formRequest": selected.clone(), "message": {"formRequest": shadowed}});
+        assert!(is_chat_collection(&input));
+        assert_eq!(sanitize_arguments(&input), sanitize_arguments(&selected));
+        let null_wrapper =
+            json!({"collect": true, "formRequest": null, "message": {"formRequest": selected}});
+        assert!(!is_chat_collection(&null_wrapper));
+        assert!(form_request_from(&null_wrapper).fields.is_empty());
+    }
+
+    #[test]
+    fn a_collect_retry_and_history_filter_legacy_shared_answers() {
+        let form = json!({
+            "collect": true,
+            "title": "New tax profile",
+            "fields": [
+                {"id": "x", "type": "password"},
+                {"id": "x", "type": "text"},
+                {"id": "password", "type": "password"},
+                {"id": "name", "type": "text"}
+            ]
+        });
+        let entry = json!({
+            "message": {"type": "user-form", "formRequest": form},
+            "formResolution": "submitted",
+            "sharedValues": {"x": "ambiguous-value", "password": "private-value", "unknown": "extra-value", "name": "Juana Jane"}
+        });
+        let parsed = form_request_from(&entry);
+        let raw_shared = BTreeMap::from([
+            ("x".into(), "ambiguous-value".into()),
+            ("password".into(), "private-value".into()),
+            ("unknown".into(), "extra-value".into()),
+            ("name".into(), "Juana Jane".into()),
+        ]);
+        let retried = model_facing_result(
+            &entry,
+            &parsed,
+            FormResolution::Submitted,
+            &raw_shared,
+            false,
+        );
+        let history = history_line(&entry).expect("settled collect history");
+        for result in [retried, history] {
+            assert!(
+                result.contains("Shared fields: name=Juana Jane."),
+                "{result}"
+            );
+            assert!(result.contains("Nothing was typed into a page"), "{result}");
+            for forbidden in [
+                "ambiguous-value",
+                "private-value",
+                "extra-value",
+                "filled into the page",
+            ] {
+                assert!(!result.contains(forbidden), "{result}");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_answers_exclude_every_ambiguous_or_secret_id() {
+        for secret in [
+            json!({"id": "x", "type": "password"}),
+            json!({"id": "x", "type": "OTP"}),
+            json!({"id": "x", "secret": true}),
+            json!({"id": "x", "type": "text"}),
+        ] {
+            for reversed in [false, true] {
+                let mut fields = vec![secret.clone(), json!({"id": "x", "type": "text"})];
+                if reversed {
+                    fields.reverse();
+                }
+                fields.extend([
+                    json!({"id": "name"}),
+                    json!({"id": "password", "type": "password"}),
+                ]);
+                let form = form_request_from(&json!({"fields": fields}));
+                let values = BTreeMap::from([
+                    ("x".into(), "ambiguous-value".into()),
+                    ("password".into(), "private-value".into()),
+                    ("name".into(), "Juana Jane".into()),
+                    ("unknown".into(), "extra-value".into()),
+                ]);
+                assert_eq!(
+                    shared_values(&form, &values),
+                    BTreeMap::from([("name".into(), "Juana Jane".into())])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_collect_form_preserves_prefills_from_each_supported_wrapper() {
+        let form = json!({
+            "collect": true,
+            "fields": [
+                {"id": "name", "value": " Juana Jane "},
+                {"id": "tin", "value": "00000000000001"},
+                {"id": "zip", "value": 1226},
+                {"id": "confirmed", "value": true},
+                {"id": "password", "type": "PASSWORD", "value": "private-value"},
+                {"id": "otp", "type": "otp", "value": "private-value"},
+                {"id": "masked", "secret": true, "value": "private-value"},
+                {"id": "empty", "value": "  "},
+                {"id": "null", "value": null},
+                {"id": "object", "value": {}},
+                {"id": "array", "value": []}
+            ]
+        });
+        for input in [
+            form.clone(),
+            json!({"formRequest": form.clone()}),
+            json!({"message": {"formRequest": form}}),
+        ] {
+            let cleaned = sanitize_arguments(&input);
+            assert_eq!(cleaned["fields"][0]["value"], "Juana Jane");
+            assert_eq!(cleaned["fields"][1]["value"], "00000000000001");
+            assert_eq!(cleaned["fields"][2]["value"], "1226");
+            assert_eq!(cleaned["fields"][3]["value"], "true");
+            for index in 4..11 {
+                assert!(cleaned["fields"][index].get("value").is_none(), "{cleaned}");
+            }
+            assert_eq!(sanitize_arguments(&cleaned), cleaned);
+        }
+    }
+
+    #[test]
+    fn a_collect_form_never_prefills_an_ambiguous_field_id() {
+        for secret in [
+            json!({"id": "x", "type": "password", "value": "private-value"}),
+            json!({"id": "x", "type": "OTP", "value": "private-value"}),
+            json!({"id": "x", "type": "text", "secret": true, "value": "private-value"}),
+            json!({"id": "x", "type": "text", "value": "private-value"}),
+        ] {
+            for reversed in [false, true] {
+                let mut fields = vec![secret.clone(), json!({"id": "x", "type": "text"})];
+                if reversed {
+                    fields.reverse();
+                }
+                fields.push(json!({"id": "name", "value": "Juana Jane"}));
+                let cleaned = sanitize_arguments(&json!({"collect": true, "fields": fields}));
+                assert!(cleaned["fields"][0].get("value").is_none(), "{cleaned}");
+                assert!(cleaned["fields"][1].get("value").is_none(), "{cleaned}");
+                assert_eq!(cleaned["fields"][2]["value"], "Juana Jane");
+            }
+        }
+    }
+
+    #[test]
+    fn a_collect_form_keeps_a_prefill_and_still_drops_a_secret() {
+        let raw = json!({
+            "collect": true,
+            "title": "New tax profile",
+            "fields": [
+                { "id": "name", "label": "Name", "type": "text", "value": "Juana Jane" },
+                { "id": "tin", "label": "TIN", "type": "text", "value": "000-000-000-00001" },
+                { "id": "zip", "label": "ZIP", "type": "text", "value": 1226 },
+                { "id": "password", "label": "Password", "type": "password", "value": "s3cret" }
+            ]
+        });
+        let cleaned = sanitize_arguments(&raw);
+        assert_eq!(cleaned["collect"], true);
+        assert_eq!(cleaned["fields"][0]["value"], "Juana Jane");
+        assert_eq!(cleaned["fields"][1]["value"], "000-000-000-00001");
+        assert_eq!(cleaned["fields"][2]["value"], "1226");
+        assert!(cleaned["fields"][3].get("value").is_none(), "{cleaned}");
+        assert!(!cleaned.to_string().contains("s3cret"));
+        let shared = shared_values(
+            &form_request_from(&cleaned),
+            &std::collections::BTreeMap::from([
+                ("name".to_string(), "Juana Jane".to_string()),
+                ("tin".to_string(), "00000000000001".to_string()),
+            ]),
+        );
+        let told = collection_tool_result(&form_request_from(&cleaned), &shared);
+        assert!(told.contains("Nothing was typed into a page"), "{told}");
+        assert!(told.contains("name=Juana Jane"), "{told}");
+        assert!(!told.contains("filled into the page"), "{told}");
+        assert!(is_chat_collection(&json!({"formRequest": cleaned.clone()})));
+        assert!(!is_chat_collection(
+            &json!({"title": "Sign in", "fields": []})
+        ));
+        let settled = json!({
+            "kind": "send-message",
+            "id": "e_tax",
+            "formResolution": "submitted",
+            "sharedValues": { "name": "Juana Jane", "tin": "00000000000001" },
+            "message": { "type": "user-form", "formRequest": cleaned }
+        });
+        let again = history_line(&settled).expect("collect history");
+        assert!(again.contains("Nothing was typed into a page"), "{again}");
+        assert!(again.contains("name=Juana Jane"), "{again}");
+        assert!(!again.contains("filled into the page"), "{again}");
+        let retried = model_facing_result(
+            &settled,
+            &form_request_from(&settled),
+            FormResolution::Submitted,
+            &shared,
+            false,
+        );
+        assert_eq!(retried, told);
     }
 
     #[test]
