@@ -32,7 +32,20 @@ use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
 
 /// The raw tape is capped so a runaway teach cannot fill the table.
-const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
+
+/// What a request carrying a tape may weigh, and it exists because the cap above was unreachable.
+///
+/// AXUM'S DEFAULT IS 2 MB AND IT BIT FIRST. A 3 MB tape never reached `tape_into_steps` — the
+/// extractor refused it with a bare 413 and no sentence, so the one refusal written for this case
+/// ("teach a shorter task") could not run, and the comment above reasoned about a ceiling the
+/// server did not have. The limit is raised to the one the code means rather than the constant
+/// lowered to the one axum happened to impose: five megabytes of pointer moves is a long teach,
+/// not an attack, and refusing it needs to say so.
+///
+/// The slack is for the JSON around `raw` — the field names, the name, the description — because
+/// `MAX_RAW_BYTES` is measured on the re-serialised tape alone.
+pub(crate) const MAX_TAPE_UPLOAD_BYTES: usize = MAX_RAW_BYTES + 64 * 1024;
 
 /// How much of a raw tape a detail response carries. Enough to read what was taped, few
 /// enough that a long teach does not push a megabyte of pointer moves through the page.
@@ -48,7 +61,12 @@ fn now_ms() -> i64 {
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
-        .route("/recipes", get(list).post(create))
+        .route(
+            "/recipes",
+            get(list)
+                .post(create)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_TAPE_UPLOAD_BYTES)),
+        )
         .route("/recipes/{id}", get(detail).put(rename).delete(remove))
         .route("/recipes/{id}/versions", post(add_version))
         .route("/recipes/{id}/versions/{version}", delete(remove_version))

@@ -21,6 +21,9 @@
 //! single system message as the standing role, which `persona::MAX_ROLE_CHARS` holds to 1000; an
 //! unbounded skill body would not be an instruction in that message, it would BE that message.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -35,7 +38,7 @@ use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
-use crate::recipes::{org_of, tape_into_steps};
+use crate::recipes::{MAX_TAPE_UPLOAD_BYTES, org_of, tape_into_steps};
 
 /// The most a skill body may be. See the module note: the body shares one system message with the
 /// coworker's identity and its standing role, and 8000 characters is already eight times the role.
@@ -91,11 +94,15 @@ pub fn router(state: AgUiState) -> Router {
         // A STATIC SEGMENT BESIDE `{id}`, which axum resolves in favour of the static one, the
         // way `/admin/computers/docker` already sits beside `/admin/computers/{kind}`.
         //
-        // AND NO LOWERED BODY LIMIT, unlike the two routes above it: what this carries is a raw
-        // tape, not a bundle of reference files, and it is the same shape `POST /recipes` already
-        // takes from the same recorder under axum's own default. `MAX_UPLOAD_BYTES` here would
-        // refuse a minute of somebody's screen for being too big to be a skill's cheat sheet.
-        .route("/skills/from-tape", post(from_tape))
+        // AND A DIFFERENT LIMIT FROM THE TWO ROUTES ABOVE IT, higher rather than lower: what this
+        // carries is a raw tape, not a bundle of reference files. `MAX_UPLOAD_BYTES` here would
+        // refuse a minute of somebody's screen for being too big to be a skill's cheat sheet;
+        // `MAX_TAPE_UPLOAD_BYTES` is the recipe route's ceiling, which is the ceiling the tape
+        // check inside `tape_into_steps` is written against.
+        .route(
+            "/skills/from-tape",
+            post(from_tape).layer(axum::extract::DefaultBodyLimit::max(MAX_TAPE_UPLOAD_BYTES)),
+        )
         .route("/skills/{id}", get(detail).put(update).delete(remove))
         .route(
             "/skills/{id}/versions",
@@ -1140,6 +1147,50 @@ fn minted_name() -> String {
 const TAPE_KEPT_LINE: &str =
     "The recording was not consumed: nothing was stored, and the same tape can be sent again.";
 
+/// The accounts with a recording being read RIGHT NOW, one entry each.
+///
+/// THIS IS THE ONLY ROUTE IN THE SERVICE THAT TURNS ONE HTTP REQUEST STRAIGHT INTO A PAID MODEL
+/// CALL. Everything else that spends is a turn, which is bounded by a run, a lease and a journal;
+/// this is a POST that costs money and holds a tape, a prompt and a completion in memory for as
+/// long as the model takes. Nothing stopped one signed-in caller opening a hundred at once.
+///
+/// IT IS A GUARD ON WHAT THE SERVER HOLDS, NOT ON WHAT AN ACCOUNT MAY SPEND — the spend cap is
+/// that, and it is enforced inside the door on every call. Per process rather than per
+/// deployment, so two replicas allow two at a time; a distributed limit here would be a lease
+/// table for a cost the cap already bounds.
+static WRITING_A_LESSON: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Held for the length of one `from_tape`, released on drop — which includes every early return
+/// below, and the request being cancelled halfway.
+struct OneAtATime(String);
+
+impl Drop for OneAtATime {
+    fn drop(&mut self) {
+        if let Some(writing) = WRITING_A_LESSON.get()
+            && let Ok(mut writing) = writing.lock()
+        {
+            writing.remove(&self.0);
+        }
+    }
+}
+
+/// The slot, or `None` when this account is already reading a recording.
+fn one_at_a_time(account: &AccountId) -> Option<OneAtATime> {
+    let writing = WRITING_A_LESSON.get_or_init(|| Mutex::new(HashSet::new()));
+    match writing.lock() {
+        Ok(mut writing) => writing
+            .insert(account.as_str().to_string())
+            .then(|| OneAtATime(account.as_str().to_string())),
+        // A poisoned lock means a panic while holding it, which is denied workspace-wide. If it
+        // happens anyway this stops counting rather than refusing every recording on the
+        // deployment until a restart: what it guards is memory, and the cap guards the money.
+        Err(_) => {
+            tracing::error!("the from-tape guard is poisoned; recordings are no longer counted");
+            Some(OneAtATime(String::new()))
+        }
+    }
+}
+
 /// A refusal from `from_tape`: the status, the reason, and the standing promise about the tape.
 ///
 /// EVERY refusal this route makes goes through here — one that did not would be the one that
@@ -1190,6 +1241,15 @@ async fn from_tape(
         Ok(false) => return not_from_this_tape(StatusCode::NOT_FOUND, "no such coworker"),
         Err(refusal) => return refusal,
     }
+    // Bound BELOW the ownership check so a caller guessing at coworker ids still gets its
+    // refusals, and ABOVE everything that costs. `_guard`, never `_`: bound to `_` it would drop
+    // here and guard nothing.
+    let Some(_guard) = one_at_a_time(&account) else {
+        return not_from_this_tape(
+            StatusCode::TOO_MANY_REQUESTS,
+            "a recording of yours is already being read; wait for it to finish",
+        );
+    };
 
     let name = request
         .name

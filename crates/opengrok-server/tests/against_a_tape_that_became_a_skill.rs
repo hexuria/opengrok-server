@@ -69,6 +69,9 @@ enum Answer {
 struct ScriptedDoor {
     answer: Mutex<Answer>,
     asked: Mutex<Vec<ModelRequest>>,
+    /// How long a lesson takes to write. Only the concurrency test sets it: a model call that
+    /// returns inside a microsecond cannot be caught in flight.
+    slow_by: Mutex<Option<std::time::Duration>>,
 }
 
 impl ScriptedDoor {
@@ -76,11 +79,16 @@ impl ScriptedDoor {
         Self {
             answer: Mutex::new(Answer::Lesson("a lesson nobody wrote yet".to_string())),
             asked: Mutex::new(Vec::new()),
+            slow_by: Mutex::new(None),
         }
     }
 
     fn will(&self, answer: Answer) {
         *self.answer.lock().expect("answer lock") = answer;
+    }
+
+    fn takes(&self, how_long: std::time::Duration) {
+        *self.slow_by.lock().expect("slow lock") = Some(how_long);
     }
 
     fn asked(&self) -> Vec<ModelRequest> {
@@ -141,6 +149,10 @@ impl ModelDoor for ScriptedDoor {
             return Ok(Box::pin(futures::stream::iter(vec![Ok(ModelDelta::Text(
                 system,
             ))])));
+        }
+        let slow_by = *self.slow_by.lock().expect("slow lock");
+        if let Some(slow_by) = slow_by {
+            tokio::time::sleep(slow_by).await;
         }
         let answer = self.answer.lock().expect("answer lock").clone();
         let said = match answer {
@@ -835,6 +847,79 @@ async fn a_group_has_no_screen_to_record() {
         "`group` is a sentinel, not a route: nothing should have been asked"
     );
     assert!(h.skills_of(&ada).await.is_empty());
+}
+
+/// One recording at a time per account. This is the only route in the service that turns one HTTP
+/// request straight into a paid model call, and nothing stopped a signed-in caller opening a
+/// hundred of them at once, each holding a tape, a prompt and a completion.
+#[tokio::test]
+async fn one_recording_at_a_time_per_account() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bob = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    let bobs_bot = h.hire(&bob, "Bob's bot").await;
+    h.door
+        .will(Answer::Lesson("Look the invoice up by number.".to_string()));
+    h.door.takes(std::time::Duration::from_millis(600));
+
+    let client = h.client.clone();
+    let url = format!("{}/skills/from-tape", h.base);
+    let token = ada.clone();
+    let body = json!({ "coworkerId": bot, "raw": a_tape("invoice 41") });
+    let in_flight = tokio::spawn(async move {
+        client
+            .post(url)
+            .header("authorization", format!("Bearer {token}"))
+            .json(&body)
+            .send()
+            .await
+            .expect("send")
+            .status()
+            .as_u16()
+    });
+    // Far inside the 600 ms the door is holding the first call for.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("second one")).await;
+    assert_eq!(status, 429, "{text}");
+    assert!(text.contains("already being read"), "{text}");
+    assert!(text.contains("the same tape can be sent again"), "{text}");
+
+    // Somebody else's recording is not held up by this account's.
+    let (status, _, text) = h.stop_recording(&bob, &bobs_bot, a_tape("bob's task")).await;
+    assert_eq!(status, 200, "{text}");
+
+    assert_eq!(in_flight.await.expect("join"), 200, "the first one finished");
+    // And the slot came back with it.
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("third one")).await;
+    assert_eq!(status, 200, "{text}");
+}
+
+/// The tape ceiling the code reasons about has to be the one the server has. Axum's 2 MB default
+/// bit first, so a big tape got a bare 413 from the extractor and the sentence written for this
+/// case could never run.
+#[tokio::test]
+async fn a_tape_over_the_ceiling_is_refused_in_words() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+
+    // Compact on the wire and about twice that once re-serialised through `TapeEvent`, which is
+    // what the ceiling is measured on: ~3 MB of body, comfortably over 5 MB as events.
+    let mut events = Vec::with_capacity(90_000);
+    for at in 0..90_000i64 {
+        events.push(json!({ "kind": "keydown", "key": "a", "at": at }));
+    }
+    let (status, _, text) = h.stop_recording(&ada, &bot, json!(events)).await;
+    assert_eq!(status, 413, "{text}");
+    assert!(
+        text.contains("teach a shorter task"),
+        "a refusal a person can act on, not a bare 413: {text}"
+    );
+    assert!(h.door.lesson_asks().is_empty(), "nothing was asked");
 }
 
 /// A tape with nothing on it is refused where every other malformed tape is, and before a model
