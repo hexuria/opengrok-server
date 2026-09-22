@@ -1241,6 +1241,19 @@ async fn from_tape(
             "that coworker could not be read",
         );
     };
+    // A GROUP IS NOT A WRITER. `owned_coworker` answers "is this yours", which a group is; what it
+    // cannot answer is "does this take a model call", and a group does not — its `model` is the
+    // literal string `group`, a sentinel `opengrok_core::coworker` says in as many words is never
+    // a route. Sent anyway it reaches the gateway as a model id nobody serves, and comes back as a
+    // 502 about a provider when the truth is that a group has no screen of its own to record.
+    // `spend::mint_late` already refuses exactly this, one layer further in.
+    if bot.is_group() {
+        return not_from_this_tape(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a group has no screen of its own and takes no model call: send the recording \
+             against the coworker whose screen it was taped on",
+        );
+    }
     let lesson = match crate::tape_lesson::lesson_from_tape(
         &state, &account, &coworker, &bot.model, &steps, screen,
     )

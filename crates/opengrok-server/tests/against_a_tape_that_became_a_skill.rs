@@ -20,7 +20,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::AccountId;
+use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
+use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
@@ -247,9 +248,20 @@ async fn harness(database_url: &str) -> Harness {
 
 impl Harness {
     async fn person(&self) -> String {
+        self.person_in(None).await.0
+    }
+
+    /// The token AND the account behind it, for the one fixture that has to write a row the API
+    /// has no route for.
+    async fn person_and_id(&self) -> (String, AccountId) {
+        self.person_in(None).await
+    }
+
+    async fn person_in(&self, org: Option<&str>) -> (String, AccountId) {
         let email = format!("tape-{}@og.local", uuid::Uuid::now_v7().simple());
-        let account = seed_account(&self.store, &email, None).await;
-        self.minter
+        let account = seed_account(&self.store, &email, org).await;
+        let token = self
+            .minter
             .mint_access(
                 account.as_str(),
                 "sess-tape",
@@ -258,7 +270,39 @@ impl Harness {
                 chrono::Utc::now().timestamp(),
                 3600,
             )
-            .expect("mint access")
+            .expect("mint access");
+        (token, account)
+    }
+
+    /// A group, seeded through the store because no route hires one — and a group is exactly the
+    /// shape this feature has to refuse: it holds no screen and takes no model call.
+    async fn hire_group(&self, account: &AccountId, member: &str) -> String {
+        let id = CoworkerId::new();
+        let at_ms = chrono::Utc::now().timestamp_millis();
+        let events = Coworker::default()
+            .decide(CoworkerCommand::HireGroup {
+                name: "The desk".to_string(),
+                members: vec![CoworkerId::from_stored(member.to_string())],
+                at_ms,
+            })
+            .expect("hire a group");
+        let state = Coworker::replay(&events);
+        let view = CoworkerView {
+            id: id.clone(),
+            name: state.name.clone(),
+            model: state.model.clone(),
+            box_id: None,
+            retired: false,
+            updated_at_ms: at_ms,
+            members: state.members.clone(),
+            role: None,
+            visibility: state.visibility,
+        };
+        self.store
+            .append_coworker(&id, account, 0, &events, &view)
+            .await
+            .expect("append group");
+        id.as_str().to_string()
     }
 
     async fn call(
@@ -700,6 +744,28 @@ async fn a_tape_that_tries_to_steer_the_reader_is_data_not_instructions() {
         "a body nobody has read reached a turn: {}",
         systems[0]
     );
+}
+
+/// A group is somebody's own coworker, so it passes the ownership check — and it has no screen,
+/// no key and no model. Its `model` is the sentinel string `group`, which the gateway would have
+/// answered with a refusal about a route nobody serves.
+#[tokio::test]
+async fn a_group_has_no_screen_to_record() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (ada, account) = h.person_and_id().await;
+    let bot = h.hire(&ada, "Ada").await;
+    let group = h.hire_group(&account, &bot).await;
+
+    let (status, _, text) = h.stop_recording(&ada, &group, a_tape("invoice 41")).await;
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("no screen of its own"), "{text}");
+    assert!(text.contains("can be sent again"), "{text}");
+    assert!(
+        h.door.lesson_asks().is_empty(),
+        "`group` is a sentinel, not a route: nothing should have been asked"
+    );
+    assert!(h.skills_of(&ada).await.is_empty());
 }
 
 /// A tape with nothing on it is refused where every other malformed tape is, and before a model
