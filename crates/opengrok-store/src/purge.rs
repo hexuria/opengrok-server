@@ -273,6 +273,15 @@ impl PgStore {
             &skills
         );
         delete!("skill", "delete from skill where id = any($1)", &skills);
+        delete!(
+            "pending_user_message",
+            "delete from pending_user_message where account_id = any($1) or thread_id = any($2) \
+             or thread_id = any($3) or thread_id = any($4)",
+            &accounts,
+            &coworkers,
+            &schedules,
+            &mcp_threads
+        );
         delete!("run_view", "delete from run_view where id = any($1)", &runs);
         delete!(
             "schedule_view",

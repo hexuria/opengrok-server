@@ -23,8 +23,8 @@ pub use coworker::{
     BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent, CoworkerView,
 };
 pub use id::{
-    AccountId, BoxId, CoworkerId, HookId, MonitorId, OrgId, PrincipalId, RunId, ScheduleId,
-    SessionId, TranscriptEntryId,
+    AccountId, BoxId, CoworkerId, HookId, MonitorId, OrgId, PendingUserMessageId, PrincipalId,
+    RunId, ScheduleId, SessionId, TranscriptEntryId,
 };
 pub use monitor::{Monitor, MonitorCommand, MonitorError, MonitorEvent, MonitorView};
 pub use org::{Org, OrgCommand, OrgError, OrgEvent, OrgView, email_domain, normalize_domain};
