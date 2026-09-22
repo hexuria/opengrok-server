@@ -423,6 +423,15 @@ fn a_tape(typed: &str) -> Value {
     json!(events)
 }
 
+/// A recording made on a screen that is not the default 1280x800: one click that only fits the
+/// bigger one, which would be clamped to the edge if the screen were ignored.
+fn a_wide_tape() -> Value {
+    json!([
+        { "kind": "down", "x": 1400, "y": 850, "button": 1, "at": 0 },
+        { "kind": "up", "x": 1400, "y": 850, "button": 1, "at": 90 },
+    ])
+}
+
 fn body_of(detail: &Value) -> String {
     detail["body"].as_str().expect("a body").to_string()
 }
@@ -907,10 +916,16 @@ async fn one_recording_at_a_time_per_account() {
     assert!(text.contains("the same tape can be sent again"), "{text}");
 
     // Somebody else's recording is not held up by this account's.
-    let (status, _, text) = h.stop_recording(&bob, &bobs_bot, a_tape("bob's task")).await;
+    let (status, _, text) = h
+        .stop_recording(&bob, &bobs_bot, a_tape("bob's task"))
+        .await;
     assert_eq!(status, 200, "{text}");
 
-    assert_eq!(in_flight.await.expect("join"), 200, "the first one finished");
+    assert_eq!(
+        in_flight.await.expect("join"),
+        200,
+        "the first one finished"
+    );
     // And the slot came back with it.
     let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("third one")).await;
     assert_eq!(status, 200, "{text}");
@@ -973,6 +988,132 @@ async fn a_tape_with_no_actions_is_refused_before_a_model_is_asked() {
     assert_eq!(status, 400, "{text}");
     assert!(text.contains("lowercase"), "{text}");
     assert!(h.door.lesson_asks().is_empty(), "nothing was asked");
+}
+
+/// The screen the recording was made on travels with it, and the model is told what it was: a
+/// coordinate means nothing without one, and the filter clamps every step into it.
+#[tokio::test]
+async fn the_screen_the_tape_was_made_on_reaches_the_model() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+    h.door
+        .will(Answer::Lesson("Click the button on the right.".to_string()));
+
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/skills/from-tape",
+            Some(json!({
+                "coworkerId": bot,
+                "screen": { "width": 1600, "height": 900 },
+                "raw": a_wide_tape(),
+            })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+
+    let sent = h.door.lesson_asks()[0].messages[0].content.clone();
+    assert!(sent.contains("1600 by 900"), "{sent}");
+    assert!(
+        sent.contains("click at (1400,850)"),
+        "the click is where it happened, not clamped to a screen nobody used: {sent}"
+    );
+
+    // Without the screen, the same tape is clamped into the default one — which is why sending it
+    // matters rather than being decoration.
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_wide_tape()).await;
+    assert_eq!(status, 200, "{text}");
+    let clamped = h.door.lesson_asks()[1].messages[0].content.clone();
+    assert!(clamped.contains("1280 by 800"), "{clamped}");
+    assert!(clamped.contains("click at (1279,799)"), "{clamped}");
+}
+
+/// What a model writes is read exactly as an uploaded `SKILL.md` is read, and the two ways that
+/// reading can come back empty-handed are refusals rather than stored bodies.
+#[tokio::test]
+async fn a_lesson_that_is_all_frontmatter_is_no_lesson() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let bot = h.hire(&ada, "Ada").await;
+
+    // An opening fence and no closing one: where the frontmatter ends cannot be told, and the
+    // whole document would otherwise be stored as instructions.
+    h.door.will(Answer::Lesson(
+        "---\nname: invoice-lookup\ndescription: never closed".to_string(),
+    ));
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 502, "{text}");
+    assert!(text.contains("never closed it"), "{text}");
+    assert!(h.skills_of(&ada).await.is_empty());
+
+    // A well-formed block with nothing after it: the model named a skill and wrote no lesson.
+    h.door.will(Answer::Lesson(
+        "---\nname: invoice-lookup\ndescription: all title, no lesson\n---\n".to_string(),
+    ));
+    let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 502, "{text}");
+    assert!(text.contains("no instructions"), "{text}");
+    assert!(h.skills_of(&ada).await.is_empty());
+}
+
+/// A colleague cannot be given a body nobody has read. The org listing leaves out switched-off
+/// skills, which is what makes "born switched off" a review gate rather than a label.
+#[tokio::test]
+async fn a_colleague_sees_it_only_after_it_is_approved() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let org = format!("org-{}", uuid::Uuid::now_v7().simple());
+    let (ada, _) = h.person_in(Some(&org)).await;
+    let (bob, _) = h.person_in(Some(&org)).await;
+    let bot = h.hire(&ada, "Ada").await;
+    h.door
+        .will(Answer::Lesson("Look the invoice up by number.".to_string()));
+
+    let (status, made, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
+    assert_eq!(status, 200, "{text}");
+    let id = made["id"].as_str().expect("id").to_string();
+
+    let (status, listed, text) = h.call(&bob, "GET", "/skills?filter=org", None).await;
+    assert_eq!(status, 200, "{text}");
+    let ids: Vec<&str> = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert!(
+        !ids.contains(&id.as_str()),
+        "an unread body must not be offered to a colleague: {text}"
+    );
+    // Nor read directly by id, which is the door a listing filter alone would leave open.
+    let (status, _, text) = h.call(&bob, "GET", &format!("/skills/{id}"), None).await;
+    assert_eq!(status, 404, "{text}");
+
+    let (status, _, text) = h
+        .call(
+            &ada,
+            "PUT",
+            &format!("/skills/{id}"),
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+
+    let (_, listed, text) = h.call(&bob, "GET", "/skills?filter=org", None).await;
+    let ids: Vec<&str> = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&id.as_str()),
+        "approved, and now shared: {text}"
+    );
 }
 
 /// Two recordings under one name are the ambiguity `/name` cannot carry, and the second is
