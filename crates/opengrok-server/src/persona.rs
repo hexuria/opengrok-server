@@ -459,9 +459,9 @@ pub fn computer_system_prompt(
          button and screenshot. When a signed-in page offers to ADD a passkey and the person \
          asked for one, do the same with passkeyMode \"register\", then click the site's create \
          button once the holder is ready. You never see a key. Captcha or a page outside this box \
-         is not another \
-         password form: the person finishes on the computer (Open the screen). If they dismiss or \
-         decline, continue without those credentials and do not loop."
+         is not another password form: the person finishes on the computer (Open the screen). If they \
+         dismiss or decline, continue without those credentials and do not loop. When tools are \
+         offered, call one; do not narrate a plan of the work instead of starting a tool."
             .to_string();
         if has_screen {
             // Says exactly what `open_url` and `computer` are offered as — the prompt and the
@@ -739,7 +739,8 @@ mod tests {
     fn the_computer_prompt_tracks_whether_the_tools_exist() {
         let box_only = computer_system_prompt(true, false, false, false, None);
         assert!(
-            box_only.contains("You have your OWN computer"),
+            box_only.contains("You have your OWN computer")
+                && box_only.contains("do not narrate a plan"),
             "{box_only}"
         );
         assert!(
@@ -772,7 +773,8 @@ mod tests {
 
         let none = computer_system_prompt(false, false, false, true, Some("ignored"));
         assert!(
-            none.contains("You do NOT currently have a computer"),
+            none.contains("You do NOT currently have a computer")
+                && !none.contains("do not narrate a plan"),
             "{none}"
         );
         assert!(
@@ -808,12 +810,9 @@ mod tests {
             "captcha/passkey is handoff, not another password form: {box_only}"
         );
         assert!(
-            !box_only.to_lowercase().contains("take over"),
-            "not OpenGrok Take over chrome: {box_only}"
-        );
-        assert!(
-            !box_only.to_lowercase().contains("i'm done"),
-            "not OpenGrok I'm done chrome: {box_only}"
+            !box_only.to_lowercase().contains("take over")
+                && !box_only.to_lowercase().contains("i'm done"),
+            "not OpenGrok Take over / I'm done chrome: {box_only}"
         );
     }
 
