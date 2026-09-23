@@ -506,6 +506,27 @@ pub async fn resume_conversation(
     );
     let mut all = Vec::new();
 
+    // A STOP PRESSED WHILE THE CARD WAS UP WINS OVER THE ANSWER. The answer and the Stop are two
+    // appends to the same log, and the continuation is spawned after the answer lands — so a
+    // Stop can arrive between the two, and without this check the approved call ran anyway on
+    // a run the person had already stopped: the first `stopped` question in `converse_raw`
+    // comes after it. Asked before anything touches the world, including for a refusal, so a
+    // stopped run is not handed back to the model either (`formal/tla/RunLifecycle.tla`
+    // NoApprovedAfterStop; without this switch TLC finds the trace).
+    if journal.stopped(&run_id).await {
+        return stop_here(
+            journal,
+            &mut projection,
+            None,
+            &run_id,
+            Vec::new(),
+            &mut None,
+            &timing::TurnTiming::new(),
+            timing::verbose_from_env(),
+        )
+        .await;
+    }
+
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
     let results = match outcome {
@@ -653,6 +674,26 @@ async fn finish_round(
     let _ = record_round(journal, run_id, &round_events).await;
     timing.log(run_id, verbose_timing);
     round_events
+}
+
+/// A clean finish — unless a Stop was recorded while the model was talking or a tool was running.
+///
+/// THE STOP CHECK POINTS ARE STEP BOUNDARIES, AND THE CLOSE IS ONE. The loop asks `stopped` at
+/// the top of a round and before tools; a person who pressed Stop during the final answer, or
+/// while the last tool ran, was otherwise told the run "finished". Every clean ending comes
+/// through here so that rule lives in one place (`formal/tla/HarnessLoop.tla` StopIsHonoured,
+/// `formal/lean/Harness.lean` Close.stop_is_honoured). A failure keeps its own sentence and a
+/// park keeps its card: only `finish` yields.
+async fn finish_or_stop(
+    journal: &dyn RunJournal,
+    run_id: &str,
+    projection: &mut Projection,
+) -> Vec<Event> {
+    if journal.stopped(run_id).await {
+        projection.stopped()
+    } else {
+        projection.finish()
+    }
 }
 
 /// When the round is already journaled, only the ending (with timing) is a new write.
@@ -1048,7 +1089,7 @@ async fn converse_raw(
                         &mut round_events,
                     )
                     .await;
-                    let ending = projection.finish();
+                    let ending = finish_or_stop(journal, run_id, &mut projection).await;
                     all.extend(
                         finish_round(
                             journal,
@@ -1085,7 +1126,7 @@ async fn converse_raw(
                         &mut round_events,
                     )
                     .await;
-                    let ending = projection.finish();
+                    let ending = finish_or_stop(journal, run_id, &mut projection).await;
                     all.extend(
                         finish_round(
                             journal,
@@ -1421,7 +1462,7 @@ async fn converse_raw(
                         &mut round_events,
                     )
                     .await;
-                    let ending = projection.finish();
+                    let ending = finish_or_stop(journal, run_id, &mut projection).await;
                     all.extend(
                         finish_round(
                             journal,
@@ -1472,7 +1513,7 @@ async fn converse_raw(
                     .await;
                     let _ = record_round(journal, run_id, &pin_events).await;
                     all.append(&mut pin_events);
-                    let ending = projection.finish();
+                    let ending = finish_or_stop(journal, run_id, &mut projection).await;
                     all.extend(
                         finish_ending(
                             journal,
@@ -1526,7 +1567,7 @@ async fn converse_raw(
                         .await;
                         let _ = record_round(journal, run_id, &pin_events).await;
                         all.append(&mut pin_events);
-                        let ending = projection.finish();
+                        let ending = finish_or_stop(journal, run_id, &mut projection).await;
                         all.extend(
                             finish_ending(
                                 journal,
@@ -1584,7 +1625,7 @@ async fn converse_raw(
         };
         pin_last_agent_shot(sink, &mut last_agent_shot, pin, &mut round_events).await;
         let ending = if any_delta {
-            projection.finish()
+            finish_or_stop(journal, run_id, &mut projection).await
         } else {
             projection.fail("the model returned no text")
         };
@@ -1604,6 +1645,30 @@ async fn converse_raw(
         return all;
     }
 
+    // UNREACHABLE TODAY, AND KEPT AN ENDING ANYWAY. Every `continue` spends one unit of one of
+    // the two budgets and the run ends when either is spent, so at most
+    // MAX_ROUNDS + MAX_COMPUTER_ROUNDS - 2 rounds continue — proved for every budget in
+    // `formal/lean/Harness.lean` (Budget.never_falls_out). This line used to return `all`
+    // with no terminal event: a `continue` added later without spending a budget would have
+    // left the client's spinner up forever. The `for` stays as the spend backstop; leaving it
+    // is a failure that says so.
+    let ending = projection.fail(format!(
+        "this run reached its limit of {} model calls",
+        MAX_ROUNDS + MAX_COMPUTER_ROUNDS
+    ));
+    all.extend(
+        finish_round(
+            journal,
+            sink,
+            run_id,
+            &projection,
+            &timing,
+            verbose_timing,
+            Vec::new(),
+            ending,
+        )
+        .await,
+    );
     all
 }
 

@@ -649,6 +649,129 @@ async fn a_stop_lands_between_the_model_asking_for_a_tool_and_the_tool_running()
     );
 }
 
+fn is_run_stopped(event: &Event) -> bool {
+    event.event_type == EventType::Custom
+        && event.extra.get("name").and_then(|name| name.as_str()) == Some("run-stopped")
+}
+
+/// THE CLOSE IS A STEP BOUNDARY TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured). TLC's
+/// trace: the round opens unstopped, the person presses Stop while the model is answering in
+/// words, the answer ends the run. It used to end as RUN_FINISHED — the person was told the
+/// coworker finished when they had stopped it.
+#[tokio::test]
+async fn a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop() {
+    // Not stopped when the round opens; stopped by the time the answer closes it.
+    let journal = StoppingJournal::saying_stop_after(1);
+
+    let events = run_conversation(
+        &MockDoor::echoing(),
+        None,
+        &journal,
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert!(
+        events.iter().any(is_run_stopped),
+        "a stop recorded before the run ended is how it ends: {events:?}"
+    );
+    assert!(
+        assistant_text(&events).contains("hello"),
+        "what the model already said is kept, not withdrawn: {events:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let endings = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                EventType::RunFinished | EventType::RunError
+            )
+        })
+        .count();
+    assert_eq!(endings, 1, "still exactly one ending: {events:?}");
+}
+
+/// A STOP PRESSED WHILE THE CARD WAS UP WINS OVER THE ANSWER (`formal/tla/RunLifecycle.tla`
+/// NoApprovedAfterStop). The answer is appended, then the Stop, then the continuation starts:
+/// the approved call must not run, and the model must not be asked anything.
+#[tokio::test]
+async fn a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let door = CountingToolDoor(calls.clone());
+    let journal = StoppingJournal::saying_stop_after(0);
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "play the recipe"}),
+    };
+
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &journal,
+        request("go"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "the approved call did not run");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "and the model was not asked again"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult),
+        "no result is invented for a call that never ran: {events:?}"
+    );
+    assert!(events.iter().any(is_run_stopped), "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        journal.batches().concat().iter().any(is_run_stopped),
+        "the stop is journaled, not only shown"
+    );
+}
+
+/// A REFUSAL NEVER REACHES THE EXECUTOR (`formal/lean/Harness.lean` Close.runsApproved): the
+/// person said no, so the model reads the refusal and the box is not touched.
+#[tokio::test]
+async fn a_refused_card_is_read_by_the_model_and_never_runs() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "rm -rf build"}),
+    };
+
+    let events = resume_conversation(
+        &MockDoor::echoing(),
+        &runner,
+        &MemoryJournal::new(),
+        request("clean up"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::refused(call, 1, "the person said no"),
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "a refused call does not run");
+    let result = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCallResult)
+        .expect("the refusal is written where the result would have gone");
+    assert_eq!(result.extra.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
 /// A model that never stops asking would otherwise run until the money ran out. The bound ends
 /// the run as a result the client can see, not a silent stop.
 #[tokio::test]
