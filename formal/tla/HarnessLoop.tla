@@ -1,14 +1,16 @@
 ---------------------------- MODULE HarnessLoop ----------------------------
 (***************************************************************************)
-(* The agent loop `converse_raw` (crates/opengrok-harness/src/lib.rs) AS  *)
-(* IT IS at 4a25af6: one run segment, one process, a person who may press *)
+(* The agent loop `converse_raw` (crates/opengrok-harness/src/lib.rs):   *)
+(* the code at 4a25af6 with its fixes as switches (all FALSE = 4a25af6):  *)
+(* one run segment, one process, a person who may press *)
 (* Stop at any moment, a model that may say anything, tools that may      *)
 (* succeed, fail, refuse or park, and a journal whose every write may     *)
 (* fail.                                                                   *)
 (*                                                                         *)
 (* Deliberately smaller than the code: no events, no HTTP, no images, no  *)
 (* text — only the facts the loop branches on. Each action names the      *)
-(* lines it abstracts so a counterexample reads back onto the source.     *)
+(* lines it abstracts (numbered as at 4a25af6) so a counterexample reads *)
+(* back onto the source.                                                   *)
 (***************************************************************************)
 EXTENDS Naturals
 
@@ -160,7 +162,8 @@ Judge ==
                              co == IF onScreen THEN computer + 1 ELSE computer
                          IN /\ spoken' = sp /\ computer' = co
                             /\ IF sp >= MaxRounds \/ co >= MaxComputer
-                                 THEN EndWith("failed") /\ UNCHANGED round           \* 1502-1568 ("finished" when opened)
+                                 THEN \* 1502-1568: RUN_ERROR, or a clean finish with the "opened" sentence
+                                      (EndWith("failed") \/ Finish) /\ UNCHANGED round
                                  ELSE pc' = "top" /\ round' = round + 1 /\ unjournaled' = FALSE
                                       /\ UNCHANGED <<ending, terminals, journaledEnd>>
     /\ UNCHANGED <<anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
@@ -195,7 +198,7 @@ AtMostOneToolRunAfterStop == toolRunsAfterStop <= 1
 EndingIsDurable       == (pc = "done") => journaledEnd
 \* A Stop that is recorded before the run ends makes the run end as stopped.
 StopIsHonoured        == (pc = "done" /\ stop) => ending /= "finished"
-\* Deliberately small budgets make the `for` bound reachable in a variant (see ForBoundTight).
+
 
 Terminates == <>(pc = "done")
 =============================================================================

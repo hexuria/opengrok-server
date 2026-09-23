@@ -741,7 +741,7 @@ async fn a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_cal
     );
 }
 
-/// A REFUSAL NEVER REACHES THE EXECUTOR (`formal/lean/Harness.lean` Close.runsApproved): the
+/// A REFUSAL NEVER REACHES THE EXECUTOR: the
 /// person said no, so the model reads the refusal and the box is not touched.
 #[tokio::test]
 async fn a_refused_card_is_read_by_the_model_and_never_runs() {

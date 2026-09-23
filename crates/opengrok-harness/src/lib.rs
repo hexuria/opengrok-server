@@ -512,7 +512,8 @@ pub async fn resume_conversation(
     // a run the person had already stopped: the first `stopped` question in `converse_raw`
     // comes after it. Asked before anything touches the world, including for a refusal, so a
     // stopped run is not handed back to the model either (`formal/tla/RunLifecycle.tla`
-    // NoApprovedAfterStop; without this switch TLC finds the trace).
+    // NoApprovedAfterStop). It narrows the window, it does not close it: a Stop landing
+    // after this question and before `run_all` still lets the call through.
     if journal.stopped(&run_id).await {
         return stop_here(
             journal,
@@ -681,8 +682,8 @@ async fn finish_round(
 /// THE STOP CHECK POINTS ARE STEP BOUNDARIES, AND THE CLOSE IS ONE. The loop asks `stopped` at
 /// the top of a round and before tools; a person who pressed Stop during the final answer, or
 /// while the last tool ran, was otherwise told the run "finished". Every clean ending comes
-/// through here so that rule lives in one place (`formal/tla/HarnessLoop.tla` StopIsHonoured,
-/// `formal/lean/Harness.lean` Close.stop_is_honoured). A failure keeps its own sentence and a
+/// through here so that rule lives in one place (`formal/tla/HarnessLoop.tla` StopIsHonoured
+/// is the trace this closes). A failure keeps its own sentence and a
 /// park keeps its card: only `finish` yields.
 async fn finish_or_stop(
     journal: &dyn RunJournal,
@@ -1653,7 +1654,7 @@ async fn converse_raw(
     // left the client's spinner up forever. The `for` stays as the spend backstop; leaving it
     // is a failure that says so.
     let ending = projection.fail(format!(
-        "this run reached its limit of {} model calls",
+        "this run reached its loop bound of {} rounds",
         MAX_ROUNDS + MAX_COMPUTER_ROUNDS
     ));
     all.extend(

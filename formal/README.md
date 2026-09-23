@@ -36,10 +36,10 @@ journal write for `LEASE_MS`; a crash kills every loop and lease; a renewal can 
 | No model call while a round's tool results are not yet durable | safety | `DurableBeforeNextCall` |
 | Spoken and screen budgets hold; model calls ≤ `R + C` | safety | `BudgetsHold`, `CallsBounded`; Lean `Budget.calls_bounded` |
 | At most one tool batch runs after a Stop (the check-to-`run_all` gap) | safety | `AtMostOneToolRunAfterStop` |
-| A Stop recorded before the run ends is how it ends | safety | `StopIsHonoured`; Lean `Close.stop_is_honoured` |
+| A Stop recorded before the close asks is how the run ends | safety | `StopIsHonoured` |
 | An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |
-| A Stop pressed while the card was up keeps the approved call from running | safety | `NoApprovedAfterStop`; Lean `Close.no_approved_after_stop` |
-| No tool starts on a run the log has ended | safety | `NoWorkAfterEnd` |
+| A Stop recorded before the continuation asks keeps the approved call from running | safety | `NoApprovedAfterStop` |
+| After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` |
 | The sweep never fails a run a live loop is driving | safety | `NoFalseFailure` |
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
@@ -59,11 +59,16 @@ Each trace is TLC's shortest.
    `LEASE_MS` was failed as "interrupted by a restart" while it was still playing.
 3. **An approved call ran on a stopped run** (`RunLifecycle_nostopcheck`): answer → Stop →
    the continuation runs the call. `resume_conversation` executed it before its first
-   `stopped` question.
+   `stopped` question. The model separates the question from the act, as the code does. With
+   the check, a Stop recorded before the question is honoured; a Stop landing between the
+   question and `run_all` still gets through. That one-step race is in every check-then-act;
+   closing it would need the executor itself to ask.
 4. **A loop kept working on a run the log had already failed** (`RunLifecycle_noendedstop`):
-   a renewal fails, the lease lapses, the sweep fails the run, and the loop carries on.
-   `stopped()` was true only for `Stopped`, so tools kept running and the log refused every
-   event they produced.
+   a renewal fails, the lease lapses, the sweep fails the run, and the loop starts tool after
+   tool until its budget runs out. `stopped()` was true only for `Stopped`, and the log
+   refused every event those tools produced. Now at most one more tool starts, the one
+   already past its check. The cost: a live viewer of that loop is shown `run-stopped`
+   although nobody pressed Stop. The log still records the real ending.
 5. **Unreachable, but a trap**: `fellOut`. At production budgets (`HarnessLoop_production`,
    1.3M states) the `for` bound is never what ends a run. If it ever were, the code returned
    with no terminal event: the client's spinner would stay up forever.
@@ -91,9 +96,15 @@ Each trace is TLC's shortest.
   and an ended projection is a fixed point. `awaiting_approval` is modelled as non-terminal,
   because it is.
 - **`Close`.** `close true v ≠ finished` for every verdict. Without a Stop, `close` is the
-  identity. A failure and a park survive a Stop. `runsApproved true _ = false`.
+  identity. A failure and a park survive a Stop. These restate the one-line definitions and
+  are not linked to the Rust. They record the close's intended rule; `StopIsHonoured` and the
+  tests check the code.
 - **`Answer`.** With `append(log, expected)` succeeding only when `log = expected`, any batch
-  of commits that read the same seq has at most one success.
+  of commits that read the same seq has at most one success. Assumption: each successful
+  commit spawns exactly one continuation (`answer_run`, `resume_settled`).
+- **How much `Budget` rests on the transcription.** `never_falls_out` is a sum-of-counters
+  bound; its hypothesis carries the loop's meaning. It holds because the loop has exactly one
+  `continue` and it spends a budget, which the verifier re-checked against `lib.rs`.
 - **Not proved in Lean:** the interleavings. The lifecycle properties rest on TLC's bounded
   search (two suspensions, two tool rounds per loop, up to two concurrent answer requests).
   So does the claim that the fix set is minimal (next section).
@@ -108,14 +119,18 @@ The state graph was the object being minimised. The results:
   hang for an unbounded spend if a future `continue` forgot its budget.
 - **"Stop" and "finish" meet in one place.** Six clean-finish sites each chose `finish()`
   directly. They now share `finish_or_stop`, the one close the Lean `Close` model describes.
-- **The fix set is minimal among the candidates, by exhaustive bounded search.** Over all 2³
-  on/off combinations of the three lifecycle switches:
-  - with renewals that never fail, `{lease on resume, stop before approved}` is necessary and
-    sufficient;
-  - once a renewal may fail (it can: `recovery.rs` only logs a failed `hold_run`), "any ended
-    status stops the loop" is also necessary for `NoWorkAfterEnd`.
+- **The fix set is minimal among the candidates, by exhaustive bounded search** over all
+  2³ combinations of the three lifecycle switches, in both lease regimes:
+  - **Renewals never fail.** `{lease on resume, stop before approved}` is necessary and
+    sufficient for all four safety properties.
+  - **A renewal may fail** (it can: `recovery.rs` only logs a failed `hold_run`).
+    `{stop before approved, any ended status stops the loop}` is necessary for
+    `NoApprovedAfterStop` and `AtMostOneStaleTool`. `NoFalseFailure` cannot hold in this
+    regime (see `RunLifecycle_lapse`).
 
-  No proper subset satisfies the properties. "Minimal" is claimed only for these candidates.
+  So all three switches are needed. With the lease, a live run is failed only if a renewal
+  fails, not merely because a tool is slow. "Minimal" is claimed only among these
+  candidates.
 - **Not simplified here: 18 exits hand-build their endings.** Their journal writes come in
   one, two or three batches, all ignoring errors. A single `close(verdict)` that writes the
   round and its ending in one batch is the smaller design: it would remove the window where
@@ -150,5 +165,8 @@ The state graph was the object being minimised. The results:
 - **Ignored journal writes.** Park, ending and resume writes use `let _ = record_round`
   (`EndingIsDurable`). A dropped park write leaves a live card on a run the log says is
   `running`.
+- **Check-then-act races.** They are narrowed, not closed: a Stop landing between a
+  `stopped` question and the act that follows it (`run_all`, or the RUN_FINISHED write)
+  still gets through, once per loop.
 - **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
   caused by a concurrent Stop.

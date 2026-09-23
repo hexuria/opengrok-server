@@ -2810,11 +2810,10 @@ impl opengrok_harness::RunJournal for StoreJournal {
     /// find.
     ///
     /// ANY ENDED RUN ANSWERS YES, NOT ONLY A STOPPED ONE. A loop whose run the log has already
-    /// ended — failed by the recovery sweep after a lease renewal was lost, or finished by a
-    /// second loop on the same run — was told "not stopped" and carried on running tools and
-    /// paying for model calls whose every event the log then refused. The log is the one
-    /// place that says whether the run is still going, so it ends the loop here
-    /// (`formal/tla/RunLifecycle.tla` NoWorkAfterEnd, with LeaseCanLapse).
+    /// ended — failed by the sweep after a lost lease renewal, or finished by a second loop
+    /// from a retried POST on the same runId — carried on running tools whose every event the
+    /// log then refused (`formal/tla/RunLifecycle.tla` AtMostOneStaleTool). The cost: a live
+    /// viewer of such a loop sees `run-stopped` though no person stopped it; the log is right.
     async fn stopped(&self, run_id: &str) -> bool {
         let run_id = RunId::from_stored(run_id.to_string());
         match self.state.auth.store.run_status(&run_id).await {
