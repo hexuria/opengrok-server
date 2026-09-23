@@ -1,0 +1,154 @@
+# Formal models of the harness
+
+Two TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
+facts the loop and the run lifecycle branch on — no events, HTTP, SQL or serialisation. They
+were written against `4a25af6` and drove the fixes that ship with them; each fix exists because
+TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
+
+| File | What it is |
+|---|---|
+| `tla/HarnessLoop.tla` | One segment of `converse_raw` (`crates/opengrok-harness/src/lib.rs`): the rounds, the two Stop check points, every exit, the budgets, a journal whose writes may fail. |
+| `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases. |
+| `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
+| `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose. |
+
+## Model
+
+**Loop** (`HarnessLoop`). States `open → top → call → check2 → run → judge → top …`, ending in
+`done` with one of `finished | failed | stopped | parked`. A model call replies with words,
+nothing, a plan-only flood, tool calls, a stream error or a door error. A tool round's results
+are ok, refused (two distinguishable signatures), parked, a work failure, an argv mistake or a
+missing binary; its calls are screen actions, other work, or a chart/form. The person may press
+Stop at any step.
+
+**Lifecycle** (`RunLifecycle`). The aggregate is `running | awaiting | finished | failed |
+stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
+approve → live ⇄ tool → dead`. An answer is two steps — read, then append at the seq it read —
+so two requests can interleave. The sweep fails a `running` run that has no lease and no
+journal write for `LEASE_MS`; a crash kills every loop and lease; a renewal can fail.
+
+## Properties
+
+| Property | Kind | Where |
+|---|---|---|
+| Every ending emits exactly one terminal event | safety | `ExactlyOneEnding`; Lean `Ending.at_most_one_terminal`, `ended_is_stable` |
+| The loop never leaves its `for` without an ending | safety | `NeverFallsOut`; Lean `Budget.never_falls_out` |
+| No model call while a round's tool results are not yet durable | safety | `DurableBeforeNextCall` |
+| Spoken and screen budgets hold; model calls ≤ `R + C` | safety | `BudgetsHold`, `CallsBounded`; Lean `Budget.calls_bounded` |
+| At most one tool batch runs after a Stop (the check-to-`run_all` gap) | safety | `AtMostOneToolRunAfterStop` |
+| A Stop recorded before the run ends is how it ends | safety | `StopIsHonoured`; Lean `Close.stop_is_honoured` |
+| An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |
+| A Stop pressed while the card was up keeps the approved call from running | safety | `NoApprovedAfterStop`; Lean `Close.no_approved_after_stop` |
+| No tool starts on a run the log has ended | safety | `NoWorkAfterEnd` |
+| The sweep never fails a run a live loop is driving | safety | `NoFalseFailure` |
+| Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
+| No run is left `running` with nobody driving it | liveness | `NoOrphan` |
+| The ending the client saw is in the journal | safety | `EndingIsDurable`, which fails by nature (see below) |
+
+## TLA+ findings
+
+Each trace is TLC's shortest.
+
+1. **A Stop during the final answer ended the run as "finished"** (`HarnessLoop_4a25af6_stop`).
+   `open → top → call`, Stop, then the model answers in words → `RUN_FINISHED`. Stop was asked
+   only at the top of a round and before tools, and the final round has neither.
+2. **A resumed run was failed by the sweep while its approved call was running**
+   (`RunLifecycle_4a25af6`, 5 states): park → answer → sweep. The turn holds a lease
+   (`routes.rs` `Lease::new`), but its continuation (`continue_run`, `resume_suspended_run`)
+   held none, and an approved call writes nothing while it runs. So a recipe longer than
+   `LEASE_MS` was failed as "interrupted by a restart" while it was still playing.
+3. **An approved call ran on a stopped run** (`RunLifecycle_nostopcheck`): answer → Stop →
+   the continuation runs the call. `resume_conversation` executed it before its first
+   `stopped` question.
+4. **A loop kept working on a run the log had already failed** (`RunLifecycle_noendedstop`):
+   a renewal fails, the lease lapses, the sweep fails the run, and the loop carries on.
+   `stopped()` was true only for `Stopped`, so tools kept running and the log refused every
+   event they produced.
+5. **Unreachable, but a trap**: `fellOut`. At production budgets (`HarnessLoop_production`,
+   1.3M states) the `for` bound is never what ends a run. If it ever were, the code returned
+   with no terminal event: the client's spinner would stay up forever.
+6. **Holds as built**: double answers. A double-click, two clients, or a retry after a timeout
+   all read the same seq, and the unique `(stream_id, stream_seq)` lets exactly one commit.
+   This holds in every configuration, so no change was made.
+7. **Stated limits, kept as failing configurations:**
+   - `HarnessLoop_durable`: if the journal refuses the ending, it does not hold it. The loop
+     cannot fix that alone, and the sweep eventually ends such a run.
+   - `RunLifecycle_lapse`: a lease without a fencing token cannot stop a lapsed renewal
+     letting the sweep fail a live run. The fix for 4 makes that loop stop at its next step
+     boundary rather than keep spending.
+
+## Lean findings
+
+`lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
+
+- **`Budget`.** Each continuing round strictly decreases `(R − spoken) + (C − computer)`
+  (`measure_decreases`). After *k* continuing rounds, `spoken + computer = k` (`after_sum`),
+  so at most `R + C − 2` rounds continue. Every iteration reached is `< R + C`
+  (`never_falls_out`), for all `R, C ≥ 1`. Assumption: the only `continue` spends a budget,
+  which is `lib.rs`'s bookkeeping, transcribed.
+- **`Ending`.** The projection's `finished` flag is an invariant, "ended ⇔ exactly one terminal
+  emitted", preserved by every operation. Any operation sequence emits at most one terminal,
+  and an ended projection is a fixed point. `awaiting_approval` is modelled as non-terminal,
+  because it is.
+- **`Close`.** `close true v ≠ finished` for every verdict. Without a Stop, `close` is the
+  identity. A failure and a park survive a Stop. `runsApproved true _ = false`.
+- **`Answer`.** With `append(log, expected)` succeeding only when `log = expected`, any batch
+  of commits that read the same seq has at most one success.
+- **Not proved in Lean:** the interleavings. The lifecycle properties rest on TLC's bounded
+  search (two suspensions, two tool rounds per loop, up to two concurrent answer requests).
+  So does the claim that the fix set is minimal (next section).
+
+## Simplification
+
+The state graph was the object being minimised. The results:
+
+- **The `for`'s fall-out branch is now an ending.** One terminal-less transition is gone, so
+  every exit ends the same way. The bound itself stays as the spend backstop Lean shows it
+  never needs to be. Replacing it with `loop` would remove one more branch but trade a silent
+  hang for an unbounded spend if a future `continue` forgot its budget.
+- **"Stop" and "finish" meet in one place.** Six clean-finish sites each chose `finish()`
+  directly. They now share `finish_or_stop`, the one close the Lean `Close` model describes.
+- **The fix set is minimal among the candidates, by exhaustive bounded search.** Over all 2³
+  on/off combinations of the three lifecycle switches:
+  - with renewals that never fail, `{lease on resume, stop before approved}` is necessary and
+    sufficient;
+  - once a renewal may fail (it can: `recovery.rs` only logs a failed `hold_run`), "any ended
+    status stops the loop" is also necessary for `NoWorkAfterEnd`.
+
+  No proper subset satisfies the properties. "Minimal" is claimed only for these candidates.
+- **Not simplified here: 18 exits hand-build their endings.** Their journal writes come in
+  one, two or three batches, all ignoring errors. A single `close(verdict)` that writes the
+  round and its ending in one batch is the smaller design: it would remove the window where
+  the journal holds a round without its ending. It is a larger refactor of `converse_raw`
+  and is left as the next step.
+
+## Implementation
+
+- `crates/opengrok-harness/src/lib.rs`
+  - `finish_or_stop` is now the close for every clean finish.
+  - Falling out of the `for` fails the run with a sentence.
+  - `resume_conversation` asks `stopped` before running (or refusing) the approved call.
+- `crates/opengrok-server/src/agui/routes.rs`
+  - `StoreJournal::stopped` answers yes for any terminal status.
+  - `continue_run` holds a recovery `Lease`.
+- `crates/opengrok-server/src/agui/resume.rs`: `resume_suspended_run` holds a recovery
+  `Lease`.
+- Tests derived from the traces, in `crates/opengrok-harness/tests/unit/loop_tests.rs`:
+  - `a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop` (finding 1)
+  - `a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call` (finding 3)
+  - `a_refused_card_is_read_by_the_model_and_never_runs` (`Close.runsApproved`)
+
+  The first two fail on `4a25af6` and pass now.
+
+## Remaining hazards the models name but this change does not fix
+
+- **Same-runId retries.** A retried `POST /ag-ui` with the same `runId` starts a second loop
+  on the same run. Neither `DrainResult::AlreadyThisRun` nor an unqueued turn checks for a
+  live loop. The fix for 4 makes the loser stop once the winner ends the run, but both can
+  run tools until then. Closing this needs a per-run claim, and that is a server design
+  decision.
+- **Ignored journal writes.** Park, ending and resume writes use `let _ = record_round`
+  (`EndingIsDurable`). A dropped park write leaves a live card on a run the log says is
+  `running`.
+- **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
+  caused by a concurrent Stop.
