@@ -1524,8 +1524,9 @@ async fn missing_binary_on_user_machine_ends_in_one_round() {
     assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(1));
 }
 
-/// The 4m 17s Hog Rider turn ran `find ~` and `find /Users/uriah` to locate AGENT.md.
-/// Those commands must not reach the Mac, and the turn must end on that round.
+/// The 4m 17s Hog Rider turn ran `find ~` and `find /Users/uriah`. Those
+/// commands must not reach the Mac. The first refusal is for the model, so
+/// the next round can call the catalog instead of ending on the refusal.
 #[tokio::test]
 async fn a_home_directory_find_is_refused_before_it_runs() {
     struct Door(Mutex<usize>);
@@ -1537,23 +1538,27 @@ async fn a_home_directory_find_is_refused_before_it_runs() {
                 *count += 1;
                 *count
             };
-            assert!(
-                round <= 1,
-                "a home-directory find must not get a retry: round {round}"
-            );
-            Ok(Box::pin(futures::stream::iter(
-                ums_deltas("c1", "find ~ -name AGENT.md", "I'll look up AGENT.md")
-                    .into_iter()
-                    .map(Ok),
-            )))
+            let script = match round {
+                1 => ums_deltas("c1", "find ~ -name AGENT.md", "I'll look up AGENT.md"),
+                2 => ums_deltas(
+                    "c2",
+                    "gpui-agent invoke profile.search --q juan",
+                    "I'll search",
+                ),
+                _ => vec![ModelDelta::Text(
+                    "Juan Dela Cruz, TIN 00000000000000.".to_string(),
+                )],
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
 
-    let ran = Arc::new(Mutex::new(0usize));
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
     let ran_tool = ran.clone();
     let tool: LocalTool = Arc::new(move |call| {
-        *ran_tool.lock().unwrap() += 1;
-        opengrok_tools::ToolResult::ok(&call.id, "should not run")
+        let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+        ran_tool.lock().unwrap().push(command);
+        opengrok_tools::ToolResult::ok(&call.id, "exit 0\n--- stdout ---\nJuan Dela Cruz")
     });
 
     let events = run_conversation(
@@ -1567,17 +1572,23 @@ async fn a_home_directory_find_is_refused_before_it_runs() {
     )
     .await;
 
-    assert_eq!(*ran.lock().unwrap(), 0, "find must not be dispatched");
+    let ran = ran.lock().unwrap();
+    assert!(
+        ran.iter().all(|command| !command.starts_with("find ")),
+        "find must not be dispatched: {ran:?}"
+    );
+    assert!(
+        ran.iter().any(|command| command.contains("profile.search")),
+        "the catalog invoke runs after the refusal: {ran:?}"
+    );
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     let text = assistant_text(&events);
     assert!(
-        text.contains("do not search the disk"),
-        "one short refusal: {text:?}"
+        text.contains("Juan Dela Cruz"),
+        "the catalog answer is the chat, not the refusal: {text:?}"
     );
+    assert!(!text.contains("AGENT.md"), "{text:?}");
     assert!(!text.to_ascii_lowercase().contains("i'll look"), "{text:?}");
-    let timing = run_timing_value(&events).expect("run-timing");
-    assert_eq!(timing["tool_rounds"], 1);
-    assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(1));
 }
 
 #[test]
@@ -1587,10 +1598,17 @@ fn listing_and_show_commands_are_readonly_shell_fast_path() {
         name: name.into(),
         arguments: serde_json::json!({ "command": command }),
     };
-    assert!(is_readonly_listing_shell(&call(
-        "shell",
-        "gpui-agent hello"
-    )));
+    assert!(
+        !is_readonly_listing_shell(&call("shell", "gpui-agent hello")),
+        "a host probe must not consume the one listing"
+    );
+    assert!(
+        !is_readonly_listing_shell(&call(
+            opengrok_tools::USER_MACHINE_SHELL,
+            "gpui-agent invoke --help"
+        )),
+        "help is not a catalog read"
+    );
     assert!(is_readonly_listing_shell(&call(
         opengrok_tools::USER_MACHINE_SHELL,
         "gpui-agent invoke profile.list"
@@ -1631,6 +1649,17 @@ fn a_find_of_the_home_directory_is_a_broad_walk_and_a_deeper_path_is_not() {
     ));
     assert!(!is_broad_filesystem_walk(
         "find /Users/uriah/code/bir -name AGENT.md"
+    ));
+    // Run 01a0c9f5. `$HOME/.config` is one component and stays broad.
+    // `$HOME/Library/...` is a directory and is not.
+    assert!(is_broad_filesystem_walk(
+        r#"find "$HOME/.config" -iname '*gpui*'"#
+    ));
+    assert!(!is_broad_filesystem_walk(
+        r#"find "$HOME/Library/Application Support" "$HOME/Library/Preferences" -iname '*gpui*'"#
+    ));
+    assert!(!is_broad_filesystem_walk(
+        "find /Users/uriah/Library/Preferences -iname '*bir*'"
     ));
 }
 
@@ -2471,4 +2500,311 @@ async fn the_same_screen_four_times_ends_the_run() {
             .contains("has not changed"),
         "{last:?}"
     );
+}
+
+/// A second home-directory find in the same turn stops. The person sees the
+/// refusal, not another 90s walk.
+#[tokio::test]
+async fn a_second_home_directory_find_ends_the_turn() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            assert!(
+                round <= 2,
+                "a second home-directory find ends the turn: round {round}"
+            );
+            Ok(Box::pin(futures::stream::iter(
+                ums_deltas("c1", "find ~ -name AGENT.md", "I'll look again")
+                    .into_iter()
+                    .map(Ok),
+            )))
+        }
+    }
+
+    let ran = Arc::new(Mutex::new(0usize));
+    let ran_tool = ran.clone();
+    let tool: LocalTool = Arc::new(move |call| {
+        *ran_tool.lock().unwrap() += 1;
+        opengrok_tools::ToolResult::ok(&call.id, "should not run")
+    });
+
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&ums_runner(tool)),
+        &MemoryJournal::new(),
+        request("open the profile"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert_eq!(*ran.lock().unwrap(), 0, "neither find is dispatched");
+    let text = assistant_text(&events);
+    assert!(
+        text.contains("home directory"),
+        "the second refusal is the sentence: {text:?}"
+    );
+    assert!(!text.contains("AGENT.md"), "{text:?}");
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(2));
+}
+
+/// Grey run 01a0c9ed: hello exited 0, then profile.search was skipped as a
+/// second listing and the chat stayed empty. Hello is a probe. The search runs.
+#[tokio::test]
+async fn hello_does_not_consume_the_listing_so_profile_search_runs() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = match round {
+                1 => ums_deltas("c1", "gpui-agent hello", "I'll probe the host"),
+                2 => ums_deltas(
+                    "c2",
+                    "GPUI_AGENT_ADDR=127.0.0.1:17421 gpui-agent invoke profile.search --q juan",
+                    "I'll search",
+                ),
+                _ => vec![ModelDelta::Text(
+                    "Juan Dela Cruz, TIN 00000000000000.".to_string(),
+                )],
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+    let commands_run = commands.clone();
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&ums_runner(Arc::new(move |call| {
+            let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+            commands_run.lock().unwrap().push(command.clone());
+            let body = if command.contains("profile.search") {
+                "exit 0\n--- stdout ---\nJuan Dela Cruz TIN 00000000000000"
+            } else {
+                "exit 0\n--- stdout ---\n{\"hello\":{\"app\":\"bir-desktop\",\"ready\":true}}"
+            };
+            opengrok_tools::ToolResult::ok(&call.id, body)
+        }))),
+        &MemoryJournal::new(),
+        request("get juan dela cruz tax profile"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = commands.lock().unwrap();
+    assert_eq!(ran.len(), 2, "hello and the search both run: {ran:?}");
+    assert!(
+        ran.iter().any(|command| command.contains("profile.search")),
+        "profile.search must be dispatched: {ran:?}"
+    );
+    let text = assistant_text(&events);
+    assert!(
+        text.contains("Juan Dela Cruz"),
+        "the search answer is the chat: {text:?}"
+    );
+    assert!(
+        !text.to_ascii_lowercase().contains("i'll probe"),
+        "{text:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// A third catalog read used to finish before any TEXT_MESSAGE. The person
+/// still gets the sentence from the read that actually ran.
+#[tokio::test]
+async fn a_repeated_listing_closes_with_the_catalog_sentence() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = match round {
+                1 => ums_deltas("c1", "gpui-agent invoke profile.list", "I'll list"),
+                2 => ums_deltas("c2", "gpui-agent invoke profile.search --q juan", "again"),
+                3 => ums_deltas("c3", "gpui-agent invoke profile.list", "once more"),
+                _ => panic!("the third listing closes the turn: round {round}"),
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let n = Arc::new(Mutex::new(0usize));
+    let n_run = n.clone();
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&ums_runner(Arc::new(move |call| {
+            *n_run.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(
+                &call.id,
+                "exit 0\n--- stdout ---\nJuan Dela Cruz TIN 00000000000000",
+            )
+        }))),
+        &MemoryJournal::new(),
+        request("list tax profiles"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*n.lock().unwrap(), 1, "only the first catalog read runs");
+    let text = assistant_text(&events);
+    assert!(
+        text.contains("Juan Dela Cruz"),
+        "a repeated listing still leaves a sentence: {text:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// Green run 01a0ca61: `profile.create` ignores name and tin, returns only
+/// `{view: profile-manager}`, and quote variants of that invoke burned all
+/// 8 model calls. The second create is the same action. It does not run,
+/// and the chat is the editor sentence.
+#[tokio::test]
+async fn a_second_profile_create_closes_with_the_editor_sentence() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = match round {
+                1 => ums_deltas("c1", "gpui-agent invoke profile.list", "I'll list"),
+                2 => ums_deltas(
+                    "c2",
+                    "gpui-agent invoke profile.create --arg name=Juana Jane --arg tin=00000000000001",
+                    "",
+                ),
+                3 => ums_deltas(
+                    "c3",
+                    "gpui-agent invoke profile.create --arg name='Juana Jane' --arg tin=00000000000001",
+                    "",
+                ),
+                4 => ums_deltas(
+                    "c4",
+                    "gpui-agent invoke profile.create --arg 'name=Juana Jane' --arg tin=00000000000001",
+                    "",
+                ),
+                _ => panic!("a repeated profile.create closes the turn: round {round}"),
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+    let commands_run = commands.clone();
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&ums_runner(Arc::new(move |call| {
+            let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+            commands_run.lock().unwrap().push(command.clone());
+            let body = if command.contains("profile.list") {
+                "exit 0\n--- stdout ---\n{\"result\":[{\"name\":\"Juan Dela Cruz\"}]}\n"
+            } else if command.contains("name=Juana Jane") && !command.contains('\'') {
+                "exit 2\n--- stderr ---\nerror: unexpected argument 'Jane' found\n"
+            } else {
+                "exit 0\n--- stdout ---\n{\"v\":2,\"ok\":true,\"result\":{\"view\":\"profile-manager\"}}\n"
+            };
+            opengrok_tools::ToolResult::ok(&call.id, body)
+        }))),
+        &MemoryJournal::new(),
+        request("create Juana Jane"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = commands.lock().unwrap();
+    assert_eq!(
+        ran.iter()
+            .filter(|command| command.contains("profile.create"))
+            .count(),
+        2,
+        "the failed quote and the one open run; the repeat does not: {ran:?}"
+    );
+    let text = assistant_text(&events);
+    assert!(
+        text.contains("Opened profile-manager. Nothing was saved."),
+        "the editor sentence is the chat, not the round cap: {text:?}"
+    );
+    assert!(
+        !text.contains("limit of 8 model calls"),
+        "the cap is not the answer: {text:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// After the editor opens, a different command still runs. Create is not a
+/// wall in front of set-value.
+#[tokio::test]
+async fn set_value_after_profile_create_still_runs() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = match round {
+                1 => ums_deltas("c1", "gpui-agent invoke profile.create", ""),
+                2 => ums_deltas("c2", "gpui-agent set-value profile-name 'Juana Jane'", ""),
+                3 => vec![ModelDelta::Text(
+                    "The editor is open for Juana Jane. Nothing is saved yet.".to_string(),
+                )],
+                _ => panic!("set-value is one more command, then the answer: round {round}"),
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+    let commands_run = commands.clone();
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&ums_runner(Arc::new(move |call| {
+            let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+            commands_run.lock().unwrap().push(command.clone());
+            let body = if command.contains("set-value") {
+                "exit 0\n--- stdout ---\n{\"ok\":true,\"result\":{\"id\":\"profile-name\"}}\n"
+            } else {
+                "exit 0\n--- stdout ---\n{\"v\":2,\"ok\":true,\"result\":{\"view\":\"profile-manager\"}}\n"
+            };
+            opengrok_tools::ToolResult::ok(&call.id, body)
+        }))),
+        &MemoryJournal::new(),
+        request("create Juana Jane"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = commands.lock().unwrap();
+    assert!(
+        ran.iter().any(|command| command.contains("set-value")),
+        "set-value still runs after create: {ran:?}"
+    );
+    let text = assistant_text(&events);
+    assert!(
+        text.contains("Juana Jane"),
+        "the model's answer is the chat: {text:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }

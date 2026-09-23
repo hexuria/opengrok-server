@@ -226,13 +226,14 @@ pub(super) enum ChosenSkill {
 /// would fire on any message that happened to begin with a slash — a path, a date, a command they
 /// were quoting.
 ///
-/// ONE TURN. The id is read off this request and nowhere else, so the skill reaches this turn's
-/// system message and no later one. A run suspended on a card resumes on the message it opened
-/// with (`run.system_for_resume`), which is the same turn and therefore the same skill — WHEN one
-/// was captured. A run journalled before `system` was recorded has none, and both resume sites
-/// then compose identity and role with no tail at all, losing the skill along with the
-/// whose-computer discipline and the network line. That gap predates skills, and no turn that
-/// quotes one can reach it: a turn that composes a skill also journals the message it composed.
+/// THIS REQUEST WINS. When it names no skill, [`skill_line_for_turn`] reuses the skill from the
+/// newest prior run on this thread that had one. A different thread does not. A run suspended on
+/// a card resumes on the message it opened with (`run.system_for_resume`), which is the same turn
+/// and therefore the same skill — WHEN one was captured. A run journalled before `system` was
+/// recorded has none, and both resume sites then compose identity and role with no tail at all,
+/// losing the skill along with the whose-computer discipline and the network line. That gap
+/// predates skills, and no turn that quotes one can reach it: a turn that composes a skill also
+/// journals the message it composed.
 pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     let value = input.forwarded_props.get("skill")?;
     // Absent and null are "no skill chosen", and so is blank — a composer that always sends the
@@ -309,6 +310,84 @@ async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSk
             why.line().to_string()
         }
     }
+}
+
+/// The skill line for this turn, and the id to record on `RunEvent::Started`.
+///
+/// An id on this request is used as sent. None means look at prior runs on this
+/// thread, newest first, and take the first that quoted a skill. A refusal line
+/// records no id, so a skill that cannot be given does not stick.
+async fn skill_line_for_turn(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+    input: &RunAgentInput,
+) -> (String, Option<String>) {
+    let chosen = match chosen_skill_from(input) {
+        Some(chosen) => chosen,
+        None => match inherited_skill_id(state, account, thread_id).await {
+            Some(id) => ChosenSkill::Id(id),
+            None => return (String::new(), None),
+        },
+    };
+    let id = match &chosen {
+        ChosenSkill::Id(id) => Some(id.clone()),
+        ChosenSkill::Unusable(_) => None,
+    };
+    let line = skill_segment(state, account, &chosen).await;
+    let recorded = line
+        .contains("For THIS message the person chose the skill `")
+        .then_some(id)
+        .flatten();
+    (line, recorded)
+}
+
+/// Newest prior run on this thread, owned by this account, that quoted a skill.
+/// Walks past a turn that recorded none: that is the follow-up which dropped the
+/// skill (run 01a0c9ef) and the turn before it still has the body.
+async fn inherited_skill_id(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+) -> Option<String> {
+    let runs = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(thread_id, account, 8)
+        .await
+        .ok()?;
+    for run in runs {
+        let loaded = match state.auth.store.load_run(&run.id).await {
+            Ok((loaded, _)) => loaded,
+            Err(error) => {
+                tracing::warn!(%error, "could not read a prior run while inheriting a skill");
+                continue;
+            }
+        };
+        if let Some(skill_id) = loaded
+            .skill_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(skill_id.to_string());
+        }
+        if let Some(name) = loaded
+            .system
+            .as_deref()
+            .and_then(crate::persona::skill_name_from_system)
+        {
+            match state.auth.store.skill_named(account.as_str(), name).await {
+                Ok(Some(row)) => return Some(row.id),
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%error, "could not resolve an inherited skill by name");
+                    return None;
+                }
+            }
+        }
+    }
+    None
 }
 
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
@@ -2493,6 +2572,7 @@ async fn start_claimed_turn(
     // role never reached the model. Anonymous runs still compose nothing — there is nobody to
     // introduce, and loading a named coworker's role without a principal would leak configuration
     // by the shape of the reply.
+    let mut recorded_skill: Option<String> = None;
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
             let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
@@ -2536,11 +2616,11 @@ async fn start_claimed_turn(
             // The skill the person chose, read against the account the token named and never
             // against anything in the body. A skill that cannot be given does not cost the turn —
             // it costs the skill, and the coworker is told to say so rather than answer as though
-            // it had followed instructions it never saw (CLAUDE.md #8).
-            let skill_line = match chosen_skill_from(&input) {
-                None => String::new(),
-                Some(chosen) => skill_segment(&state, account_id, &chosen).await,
-            };
+            // it had followed instructions it never saw (CLAUDE.md #8). No id on this request
+            // reuses the skill from a prior run on this thread.
+            let (skill_line, skill_id) =
+                skill_line_for_turn(&state, account_id, &input.thread_id, &input).await;
+            recorded_skill = skill_id;
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
@@ -2587,6 +2667,20 @@ async fn start_claimed_turn(
     if system.is_some() {
         messages.retain(|message| message.role != "system");
     }
+    // NativeChat steer is stop, then a new run whose body is chat bubbles. A stopped
+    // turn often has tool results and no assistant text, so the next run repeats the
+    // work. Splice those results in front of the new message. A finished answer is
+    // already in the bubbles. A parked card is a fresh turn, not a continuation.
+    if let Some(account) = &account_id {
+        continue_stopped_turn(
+            &state,
+            account,
+            &input.thread_id,
+            &input.run_id,
+            &mut messages,
+        )
+        .await;
+    }
 
     let request = ModelRequest {
         gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
@@ -2611,6 +2705,7 @@ async fn start_claimed_turn(
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
         system,
+        skill_id: recorded_skill,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -2677,6 +2772,9 @@ pub struct StoreJournal {
     /// pin: a role edited while a person answered an approval card must not change the coworker
     /// halfway through the turn.
     pub system: Option<String>,
+    /// The skill quoted into `system`, recorded so the next message on this thread
+    /// can reuse it when the client sends no skill id.
+    pub skill_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -2695,6 +2793,7 @@ impl opengrok_harness::RunJournal for StoreJournal {
                 coworker_id: self.coworker_id.as_ref(),
                 model: self.model.as_deref(),
                 system: self.system.as_deref(),
+                skill_id: self.skill_id.as_deref(),
             },
             events,
         )
@@ -2731,6 +2830,7 @@ struct RunStart<'a> {
     coworker_id: Option<&'a CoworkerId>,
     model: Option<&'a str>,
     system: Option<&'a str>,
+    skill_id: Option<&'a str>,
 }
 
 async fn append_events(
@@ -2745,6 +2845,7 @@ async fn append_events(
         coworker_id,
         model,
         system,
+        skill_id,
     } = *start;
     if events.is_empty() {
         return Ok(());
@@ -2765,6 +2866,10 @@ async fn append_events(
                     .filter(|pin| !pin.is_empty())
                     .map(str::to_string),
                 system: system.map(str::to_string).filter(|text| !text.is_empty()),
+                skill_id: skill_id
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -3676,6 +3781,152 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
     messages
 }
 
+/// How many tool results from a stopped turn are worth showing the next one.
+/// One per model call, so a turn that hit the 8-call cap still shows every result.
+const STEER_TOOL_CAP: usize = 8;
+/// Bound one result so a shell dump cannot become the next prompt.
+const STEER_TOOL_CHARS: usize = 800;
+
+const STEER_CONTINUATION: &str = "[harness] The previous turn on this thread stopped or failed \
+before it answered. Those tool results are that turn. Continue from them and from the person's \
+latest message. Do not repeat a command that already returned ok.";
+
+/// A stopped or failed turn's tools are the work a steer should continue.
+/// A parked approval is a card the new message is declining, not a plan to resume.
+/// A finished turn already put its answer in the chat bubbles.
+pub(crate) fn prior_turn_can_continue(status: RunStatus, payloads: &[serde_json::Value]) -> bool {
+    let parked = payloads.iter().any(|payload| {
+        payload.get("name").and_then(serde_json::Value::as_str) == Some("run-awaiting-approval")
+    });
+    if parked {
+        return false;
+    }
+    matches!(
+        status,
+        RunStatus::Stopped | RunStatus::Failed | RunStatus::Running
+    )
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
+}
+
+/// Tool calls a turn already made, in order, as messages the next turn can read.
+/// The command rides with the result. A result alone does not say what was run.
+pub(crate) fn unfinished_tool_messages(payloads: &[serde_json::Value]) -> Vec<ChatMessage> {
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut arguments: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for payload in payloads {
+        let kind = payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let id = payload
+            .get("toolCallId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match kind {
+            "TOOL_CALL_START" => {
+                if let Some(name) = payload
+                    .get("toolCallName")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    names.insert(id, name.to_string());
+                }
+            }
+            "TOOL_CALL_ARGS" => {
+                if let Some(delta) = payload.get("delta").and_then(serde_json::Value::as_str) {
+                    arguments.entry(id).or_default().push_str(delta);
+                }
+            }
+            "TOOL_CALL_RESULT" => {
+                let content = payload
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if content.is_empty() {
+                    continue;
+                }
+                let name = names.get(&id).map(String::as_str).unwrap_or("tool");
+                let args = arguments.get(&id).map(String::as_str).unwrap_or("");
+                out.push(ChatMessage {
+                    images: Vec::new(),
+                    role: "user".to_string(),
+                    content: format!(
+                        "[earlier {name} {}] {}",
+                        clip_chars(args, 400),
+                        clip_chars(content, STEER_TOOL_CHARS)
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    if out.len() > STEER_TOOL_CAP {
+        out = out.split_off(out.len() - STEER_TOOL_CAP);
+    }
+    out
+}
+
+/// Put the stopped turn's tools immediately before the person's new message.
+pub(crate) fn splice_unfinished_tools(messages: &mut Vec<ChatMessage>, prior: Vec<ChatMessage>) {
+    if prior.is_empty()
+        || messages
+            .iter()
+            .any(|message| message.content.contains(STEER_CONTINUATION))
+    {
+        return;
+    }
+    let mut block = prior;
+    block.push(ChatMessage {
+        images: Vec::new(),
+        role: "user".to_string(),
+        content: STEER_CONTINUATION.to_string(),
+    });
+    let at = messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .unwrap_or(messages.len());
+    messages.splice(at..at, block);
+}
+
+/// Newest prior run on this thread, when it stopped or failed with tools and
+/// was not parked on a card.
+async fn continue_stopped_turn(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+    this_run_id: &str,
+    messages: &mut Vec<ChatMessage>,
+) {
+    let Ok(runs) = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(thread_id, account, 4)
+        .await
+    else {
+        return;
+    };
+    let Some(prior) = runs.into_iter().find(|run| run.id.as_str() != this_run_id) else {
+        return;
+    };
+    let Ok((loaded, _)) = state.auth.store.load_run(&prior.id).await else {
+        return;
+    };
+    if !prior_turn_can_continue(loaded.status, &loaded.emitted) {
+        return;
+    }
+    let tools = unfinished_tool_messages(&loaded.emitted);
+    splice_unfinished_tools(messages, tools);
+}
+
 /// Carry an answered run on, without waiting for anybody to ask again.
 ///
 /// THE SERVER PICKS IT BACK UP. A run that only continues when the next request happens to arrive
@@ -3764,6 +4015,7 @@ async fn continue_run(
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
         system: Some(system.clone()),
+        skill_id: run.skill_id.clone(),
     };
 
     let request = ModelRequest {
@@ -4280,6 +4532,62 @@ mod tests {
     use opengrok_harness::MockDoor;
     use opengrok_wire::agui::{EventType, Message};
     use serde_json::json;
+
+    #[test]
+    fn a_stopped_turn_continues_and_a_parked_card_does_not() {
+        assert!(prior_turn_can_continue(RunStatus::Stopped, &[]));
+        assert!(prior_turn_can_continue(RunStatus::Failed, &[]));
+        assert!(!prior_turn_can_continue(RunStatus::Finished, &[]));
+        assert!(!prior_turn_can_continue(
+            RunStatus::Stopped,
+            &[json!({"type":"CUSTOM","name":"run-awaiting-approval"})]
+        ));
+
+        let tools = unfinished_tool_messages(&[
+            json!({"type":"TOOL_CALL_START","toolCallId":"c1","toolCallName":"user_machine_shell"}),
+            json!({"type":"TOOL_CALL_ARGS","toolCallId":"c1","delta":"{\"command\":\"gpui-agent invoke profile.create\"}"}),
+            json!({"type":"TOOL_CALL_RESULT","toolCallId":"c1","content":"exit 0\n--- stdout ---\n{\"result\":{\"view\":\"profile-manager\"}}"}),
+        ]);
+        assert_eq!(tools.len(), 1);
+        assert!(
+            tools[0].content.contains("profile.create"),
+            "{}",
+            tools[0].content
+        );
+        assert!(
+            tools[0].content.contains("profile-manager"),
+            "{}",
+            tools[0].content
+        );
+
+        let mut messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "create Juana Jane".to_string(),
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "tin number should be 00000000000001".to_string(),
+                images: Vec::new(),
+            },
+        ];
+        splice_unfinished_tools(&mut messages, tools);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "create Juana Jane");
+        assert!(messages[1].content.contains("profile.create"));
+        assert!(messages[2].content.contains("previous turn"));
+        assert_eq!(messages[3].content, "tin number should be 00000000000001");
+
+        let again = messages.clone();
+        let mut doubled = again.clone();
+        splice_unfinished_tools(&mut doubled, again);
+        assert_eq!(
+            doubled.len(),
+            4,
+            "a second splice does not repeat the block"
+        );
+    }
 
     fn input(messages: Vec<Message>) -> RunAgentInput {
         RunAgentInput {

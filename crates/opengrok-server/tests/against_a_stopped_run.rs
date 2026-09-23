@@ -121,6 +121,7 @@ async fn seed_run(
             coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
             model: Some("oag/cheap".to_string()),
             system: None,
+            skill_id: None,
             at_ms,
         })
         .expect("start");

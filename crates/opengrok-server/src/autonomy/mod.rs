@@ -104,6 +104,7 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
         system: Some(system.clone()),
+        skill_id: None,
     };
 
     let request = ModelRequest {

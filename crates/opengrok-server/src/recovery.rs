@@ -331,6 +331,7 @@ mod tests {
             coworker_id: None,
             model: None,
             system: None,
+            skill_id: None,
             at_ms: 1,
         }];
         for (index, payload) in events.into_iter().enumerate() {

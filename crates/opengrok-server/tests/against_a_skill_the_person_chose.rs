@@ -659,13 +659,10 @@ async fn a_colleague_may_use_a_skill_their_org_already_shows_them() {
     );
 }
 
-/// The regression guard, and what it actually pins: choosing a skill only ever APPENDS. The
-/// message this endpoint composes without one is a byte-for-byte prefix of the one it composes
-/// with, and the turn after is identical to the turn before — which is the whole "one turn only"
-/// claim. It does not pin a historical golden value; there is none to pin, and calling
-/// `chosen_skill_line` on the right-hand side would only be asking the code to agree with itself.
+/// Choosing a skill appends it. The next message on the same thread, with no skill
+/// id, still gets that skill. A different thread does not: the skill is not a role.
 #[tokio::test]
-async fn a_skill_is_appended_for_one_turn_and_the_next_turn_forgets_it() {
+async fn a_skill_stays_on_the_thread_and_does_not_follow_the_coworker() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person(None).await;
@@ -697,10 +694,27 @@ async fn a_skill_is_appended_for_one_turn_and_the_next_turn_forgets_it() {
     assert!(appended.ends_with(SKILL_CLOSING_LINE), "{appended}");
     assert!(appended.contains(body), "{appended}");
 
-    // ONE TURN. The next message composes afresh, and is the message we had before the skill.
     h.turn(&ada, Some(&bot), None).await;
     let after = h.system_at(2);
-    assert_eq!(after, before, "a skill must not become a standing role");
+    assert_eq!(
+        framings(&after),
+        1,
+        "the same thread keeps the skill: {after}"
+    );
+    assert!(after.contains(body), "{after}");
+    assert_ne!(
+        marker_of(&during),
+        marker_of(&after),
+        "a marker reused across turns is a marker a body can be written against"
+    );
+
+    let other = h.hire(&ada, "Bea").await;
+    h.turn(&ada, Some(&other), None).await;
+    let elsewhere = h.system_at(3);
+    assert!(
+        !elsewhere.contains(body),
+        "another thread does not inherit the skill: {elsewhere}"
+    );
 }
 
 #[tokio::test]
