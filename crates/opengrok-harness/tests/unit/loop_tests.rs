@@ -2635,11 +2635,15 @@ async fn a_repeated_listing_closes_with_the_catalog_sentence() {
                 *count += 1;
                 *count
             };
+            assert!(
+                round <= 3,
+                "the third listing closes the turn: round {round}"
+            );
             let script = match round {
                 1 => ums_deltas("c1", "gpui-agent invoke profile.list", "I'll list"),
                 2 => ums_deltas("c2", "gpui-agent invoke profile.search --q juan", "again"),
                 3 => ums_deltas("c3", "gpui-agent invoke profile.list", "once more"),
-                _ => panic!("the third listing closes the turn: round {round}"),
+                _ => Vec::new(),
             };
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
@@ -2686,6 +2690,10 @@ async fn a_second_profile_create_closes_with_the_editor_sentence() {
                 *count += 1;
                 *count
             };
+            assert!(
+                round <= 4,
+                "a repeated profile.create closes the turn: round {round}"
+            );
             let script = match round {
                 1 => ums_deltas("c1", "gpui-agent invoke profile.list", "I'll list"),
                 2 => ums_deltas(
@@ -2703,7 +2711,7 @@ async fn a_second_profile_create_closes_with_the_editor_sentence() {
                     "gpui-agent invoke profile.create --arg 'name=Juana Jane' --arg tin=00000000000001",
                     "",
                 ),
-                _ => panic!("a repeated profile.create closes the turn: round {round}"),
+                _ => Vec::new(),
             };
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
@@ -2764,13 +2772,17 @@ async fn set_value_after_profile_create_still_runs() {
                 *count += 1;
                 *count
             };
+            assert!(
+                round <= 3,
+                "set-value is one more command, then the answer: round {round}"
+            );
             let script = match round {
                 1 => ums_deltas("c1", "gpui-agent invoke profile.create", ""),
                 2 => ums_deltas("c2", "gpui-agent set-value profile-name 'Juana Jane'", ""),
                 3 => vec![ModelDelta::Text(
                     "The editor is open for Juana Jane. Nothing is saved yet.".to_string(),
                 )],
-                _ => panic!("set-value is one more command, then the answer: round {round}"),
+                _ => Vec::new(),
             };
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
