@@ -2808,10 +2808,17 @@ impl opengrok_harness::RunJournal for StoreJournal {
     /// because the database blinked would turn a hiccup into a cancelled turn, and the person who
     /// really did press stop still has a durable `Stopped` in the log for the next boundary to
     /// find.
+    ///
+    /// ANY ENDED RUN ANSWERS YES, NOT ONLY A STOPPED ONE. A loop whose run the log has already
+    /// ended — failed by the recovery sweep after a lease renewal was lost, or finished by a
+    /// second loop on the same run — was told "not stopped" and carried on running tools and
+    /// paying for model calls whose every event the log then refused. The log is the one
+    /// place that says whether the run is still going, so it ends the loop here
+    /// (`formal/tla/RunLifecycle.tla` NoWorkAfterEnd, with LeaseCanLapse).
     async fn stopped(&self, run_id: &str) -> bool {
         let run_id = RunId::from_stored(run_id.to_string());
         match self.state.auth.store.run_status(&run_id).await {
-            Ok(status) => status == Some(RunStatus::Stopped),
+            Ok(status) => status.is_some_and(|status| status.is_terminal()),
             Err(error) => {
                 tracing::warn!(%error, run = %run_id, "could not read whether a run was stopped");
                 false
@@ -3943,6 +3950,13 @@ async fn continue_run(
     outcome: opengrok_harness::ResumeOutcome,
 ) {
     let state = host.agui.clone();
+    // HOLD THE RUN WHILE IT IS CARRIED ON, exactly as the turn that parked it did. The answer
+    // flips the run back to `running`; the parked turn's lease died with it, so without one
+    // here an approved call that ran past LEASE_MS with nothing journaled — a recipe on the
+    // box — was claimed by the sweep and failed as "interrupted by a restart" while it was
+    // still running (`formal/tla/RunLifecycle.tla` NoFalseFailure: TLC's trace is park,
+    // answer, sweep). Held before anything is loaded, so no early return runs unleased.
+    let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
     let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
         return;
