@@ -32,7 +32,27 @@ use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
 
 /// The raw tape is capped so a runaway teach cannot fill the table.
-const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
+
+/// What a request carrying a tape may weigh, and it exists because the cap above was unreachable.
+///
+/// AXUM'S DEFAULT IS 2 MB AND IT BIT FIRST. A 3 MB tape never reached `tape_into_steps` — the
+/// extractor refused it with a bare 413 and no sentence, so the one refusal written for this case
+/// ("teach a shorter task") could not run, and the comment above reasoned about a ceiling the
+/// server did not have. The limit is raised to the one the code means rather than the constant
+/// lowered to the one axum happened to impose: five megabytes of pointer moves is a long teach,
+/// not an attack, and refusing it needs to say so.
+///
+/// The slack is for the JSON around `raw` — the field names, the name, the description — because
+/// `MAX_RAW_BYTES` is measured on the re-serialised tape alone.
+///
+/// IT RAISES WHAT `POST /recipes` ACCEPTS, from axum's 2 MiB to this, which is a real change to a
+/// route that was not the point of the work that made it: tapes between two and five megabytes
+/// used to be refused at the door and are now stored as a `raw` recipe version. That is the
+/// behaviour `MAX_RAW_BYTES` always described, and a tape is bounded jsonb in a table that
+/// already holds one per teach — but it is worth knowing that the largest row this table can take
+/// grew by two and a half times on the day this constant landed.
+pub(crate) const MAX_TAPE_UPLOAD_BYTES: usize = MAX_RAW_BYTES + 64 * 1024;
 
 /// How much of a raw tape a detail response carries. Enough to read what was taped, few
 /// enough that a long teach does not push a megabyte of pointer moves through the page.
@@ -48,7 +68,12 @@ fn now_ms() -> i64 {
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
-        .route("/recipes", get(list).post(create))
+        .route(
+            "/recipes",
+            get(list)
+                .post(create)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_TAPE_UPLOAD_BYTES)),
+        )
         .route("/recipes/{id}", get(detail).put(rename).delete(remove))
         .route("/recipes/{id}/versions", post(add_version))
         .route("/recipes/{id}/versions/{version}", delete(remove_version))
@@ -136,7 +161,14 @@ pub(crate) fn may(relation: Relation, action: Action) -> Result<(), &'static str
     }
 }
 
-async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
+/// The org this person belongs to, or `None`.
+///
+/// AN EMPTY ORG IS NO ORG, and the filter is load-bearing rather than tidiness: `Register` takes
+/// `org_id` as a plain `String`, so an account created without one replays to `Some("")` rather
+/// than `None`. Two such people then have equal orgs, and anything that decides "same org, may
+/// read" from that comparison makes every person in no org a colleague of every other. Caught by
+/// `against_another_persons_skill`, where a stranger read a stranger's skill.
+pub(crate) async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
     state
         .auth
         .store
@@ -144,6 +176,7 @@ async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
         .await
         .ok()
         .and_then(|(account, _)| account.org_id)
+        .filter(|org| !org.is_empty())
 }
 
 /// Loads the recipe and checks the action; a deleted recipe is a 404 to everyone but its owner.
@@ -296,6 +329,12 @@ pub(crate) fn summary(
     })
 }
 
+/// What `filter` may say. A typo used to fall through every arm and answer an empty list, which
+/// is indistinguishable from "nothing has been shared with you" — the reply a person blames their
+/// own account for. Shared in spirit with `skills::FILTERS`, not in code: the two listings are
+/// free to grow different words.
+const FILTERS: [&str; 4] = ["mine", "shared", "org", "all"];
+
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     /// `mine` | `shared` | `org` | (absent: everything visible)
@@ -317,7 +356,22 @@ async fn list(
     };
     let org = org_of(&state, &account).await;
     let store = &state.auth.store;
-    let filter = query.filter.as_deref().unwrap_or("all");
+    let filter = query
+        .filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+        .unwrap_or("all");
+    if !FILTERS.contains(&filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{filter:?} is not a filter; it is one of {}, or leave it off for everything",
+                FILTERS.join(", ")
+            ),
+        )
+            .into_response();
+    }
     let wanted = query
         .kind
         .as_deref()
@@ -341,6 +395,10 @@ async fn list(
         }
     }
     if matches!(filter, "shared" | "org" | "all") {
+        // NOT gated on the caller having an org, deliberately: this call answers BOTH the shares
+        // made to them by name and the ones made to their org, and a person in no org can still
+        // hold the first kind. The org arm is gated inside the query instead, where a NULL org
+        // matches no row — see `recipes_shared_with`.
         match store
             .recipes_shared_with(account.as_str(), org.as_deref())
             .await
@@ -397,6 +455,44 @@ struct CreateRequest {
     raw: Vec<TapeEvent>,
 }
 
+/// A raw tape, bounded, filtered and linted: the tape as it was taped, and the steps read off
+/// it. The one road from a tape to steps.
+///
+/// `pub(crate)` AND SHARED WITH `skills::from_tape`, which takes the same tape off the same
+/// desktop recorder and makes prose of it instead of a recipe. Two copies of this would be two
+/// answers to "is this tape usable" — and the copy that drifted would be the one that fed a
+/// model, which is the reader least able to complain about a malformed tape.
+///
+/// The serialised tape is handed back rather than re-derived, because `create` stores it as the
+/// `raw` version and serialising a 5 MB tape twice is the kind of waste nothing downstream sees.
+///
+/// The refusal is a status and a sentence rather than a built `Response`, so a caller can add to
+/// it — and so this stays a function about tapes rather than about HTTP.
+pub(crate) fn tape_into_steps(
+    raw: &[TapeEvent],
+    screen: Screen,
+) -> Result<(Value, Vec<Step>), (StatusCode, String)> {
+    let value =
+        serde_json::to_value(raw).map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+    if value.to_string().len() > MAX_RAW_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the tape is over 5 MB; teach a shorter task".to_string(),
+        ));
+    }
+    let steps = opengrok_recipes::filter(raw, screen);
+    if let Err(why) = opengrok_recipes::lint(&steps, screen) {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            // NOT "did not filter into a recipe": the same sentence now reaches somebody who
+            // asked for a skill, and naming the other outcome would send them looking at the
+            // recipe they never asked for.
+            format!("the tape did not filter into usable steps: {why}"),
+        ));
+    }
+    Ok((value, steps))
+}
+
 /// `POST /recipes` — the tape in, v1 and v2 written, the recipe out.
 async fn create(
     State(state): State<AgUiState>,
@@ -410,26 +506,11 @@ async fn create(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "a recipe needs a name").into_response();
     }
-    let raw = match serde_json::to_value(&request.raw) {
-        Ok(raw) => raw,
-        Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-    };
-    if raw.to_string().len() > MAX_RAW_BYTES {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "the tape is over 5 MB; teach a shorter task",
-        )
-            .into_response();
-    }
     let screen = request.screen.unwrap_or_default();
-    let steps = opengrok_recipes::filter(&request.raw, screen);
-    if let Err(why) = opengrok_recipes::lint(&steps, screen) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("the tape did not filter into a recipe: {why}"),
-        )
-            .into_response();
-    }
+    let (raw, steps) = match tape_into_steps(&request.raw, screen) {
+        Ok(both) => both,
+        Err(refusal) => return refusal.into_response(),
+    };
     let org = org_of(&state, &account).await;
     let id = format!("rcp_{}", uuid::Uuid::now_v7());
     let at_ms = now_ms();

@@ -33,7 +33,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_core::id::CoworkerId;
 use opengrok_recipes::Values;
 use opengrok_tools::workflow::{Ending, Judging, Walker, Workflow};
 #[cfg(feature = "jev")]
@@ -45,7 +45,7 @@ use crate::agui::AgUiState;
 use crate::agui::routes::owned_coworker;
 #[cfg(feature = "jev")]
 use crate::jev::{Answer, Ask, JevError, JsonContent, NoulCriteria, Question};
-use crate::recipes::{Action, StoreRecipes, permitted};
+use crate::recipes::{Action, StoreRecipes, org_of, permitted};
 
 /// How many runs of one version the history keeps — the same five a recipe keeps, because it is
 /// the same table and the same page.
@@ -618,16 +618,6 @@ async fn permitted_recipes(
         allowed.insert(recipe_id.clone());
     }
     Ok(allowed)
-}
-
-async fn org_of(state: &AgUiState, account: &AccountId) -> Option<String> {
-    state
-        .auth
-        .store
-        .load_account(account)
-        .await
-        .ok()
-        .and_then(|(account, _)| account.org_id)
 }
 
 #[cfg(all(test, not(feature = "jev")))]

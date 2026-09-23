@@ -282,6 +282,16 @@ impl Projection {
         events
     }
 
+    /// A CUSTOM frame that does not close the run. Used for operator metadata
+    /// (`run-timing`) that must sit *before* `RUN_FINISHED` / `RUN_ERROR`.
+    pub fn custom(&self, name: &str, value: serde_json::Value) -> Event {
+        self.event(EventType::Custom)
+            .with("name", name)
+            .with("threadId", self.thread_id.clone())
+            .with("runId", self.run_id.clone())
+            .with("value", value)
+    }
+
     /// End the run cleanly.
     pub fn finish(&mut self) -> Vec<Event> {
         let mut events = self.start();

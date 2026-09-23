@@ -17,7 +17,7 @@
 //! clicks it before typing. Without positions the old rules hold: default types only the
 //! first focused field; `samePage: true` allows Tab; `submit: true` allows Return.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use opengrok_box::{Computer, CuaAction};
 use serde::{Deserialize, Serialize};
@@ -176,10 +176,7 @@ pub fn fully_positioned(form: &FormRequest) -> bool {
 /// executor stamps and any values the model must never keep.
 #[must_use]
 pub fn form_request_from(value: &Value) -> FormRequest {
-    let source = value
-        .get("formRequest")
-        .or_else(|| value.pointer("/message/formRequest"))
-        .unwrap_or(value);
+    let source = form_source(value);
     let fields = source
         .get("fields")
         .and_then(Value::as_array)
@@ -288,7 +285,125 @@ pub fn sanitize_arguments(arguments: &Value) -> Value {
     if form.submit {
         body["submit"] = json!(true);
     }
+    // A collect card is a question, not a page fill. Non-secret prefills stay so the
+    // person sees what they already said. A login card still drops every value: a
+    // model-smuggled email or password must not sit on the entry.
+    if is_chat_collection(arguments) {
+        body["collect"] = json!(true);
+        if let (Some(out_fields), Some(in_fields)) = (
+            body.get_mut("fields").and_then(Value::as_array_mut),
+            form_source(arguments)
+                .get("fields")
+                .and_then(Value::as_array),
+        ) {
+            for field in out_fields {
+                let secret = field
+                    .get("secret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || field
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|kind| {
+                            SECRET_TYPES
+                                .iter()
+                                .any(|secret| secret.eq_ignore_ascii_case(kind))
+                        });
+                if secret {
+                    continue;
+                }
+                let id = field.get("id").and_then(Value::as_str);
+                let mut matching = in_fields
+                    .iter()
+                    .filter(|row| row.get("id").and_then(Value::as_str) == id);
+                let Some(source) = matching.next() else {
+                    continue;
+                };
+                // Submit values are keyed by id, so duplicate ids have no safe association.
+                if matching.next().is_some() {
+                    continue;
+                }
+                if let Some(value) = source.get("value").and_then(scalar_text) {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        field["value"] = json!(value);
+                    }
+                }
+            }
+        }
+    }
     body
+}
+
+/// The person is answering in chat. The values come back to the model. Nothing is typed
+/// into a page. A login card leaves this false, so a missing flag cannot skip the fill.
+#[must_use]
+pub fn is_chat_collection(value: &Value) -> bool {
+    form_source(value).get("collect").and_then(Value::as_bool) == Some(true)
+}
+
+// Cards and tool arguments use the same precedence, including a present null wrapper.
+fn form_source(value: &Value) -> &Value {
+    value
+        .get("formRequest")
+        .or_else(|| value.pointer("/message/formRequest"))
+        .unwrap_or(value)
+}
+
+/// Reject ambiguous ids before a card waits: its answers are keyed by id, not by row.
+pub(crate) fn validate_field_ids(arguments: &Value) -> Result<(), &'static str> {
+    let mut seen = BTreeSet::new();
+    if let Some(fields) = form_source(arguments)
+        .get("fields")
+        .and_then(Value::as_array)
+    {
+        for id in fields
+            .iter()
+            .filter_map(|field| field.get("id").and_then(Value::as_str))
+            .filter(|id| !id.is_empty())
+        {
+            if !seen.insert(id) {
+                return Err(
+                    "Field IDs must be unique. Give each field a different id and call request_user_form again.",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A string, number, or bool the person or the model wrote. Objects are not field text.
+fn scalar_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// What the model reads after a collect card. The answers are the point. A page was not filled.
+#[must_use]
+pub fn collection_tool_result(form: &FormRequest, shared: &BTreeMap<String, String>) -> String {
+    let title = if form.title.is_empty() {
+        "a form"
+    } else {
+        form.title.as_str()
+    };
+    let shared_line = if shared.is_empty() {
+        "No fields were filled.".to_string()
+    } else {
+        let listed = shared
+            .iter()
+            .map(|(id, value)| format!("{id}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("Shared fields: {listed}.")
+    };
+    format!(
+        "The person submitted \"{title}\". Nothing was typed into a page. {shared_line} \
+Use these values. Do not ask for a field they already filled."
+    )
 }
 
 #[must_use]
@@ -350,12 +465,7 @@ pub fn submitted_values(form: &FormRequest, raw: &Value) -> BTreeMap<String, Str
         .iter()
         .filter_map(|field| {
             let value = object.get(&field.id)?;
-            let text = match value {
-                Value::String(text) => text.clone(),
-                Value::Number(number) => number.to_string(),
-                Value::Bool(flag) => flag.to_string(),
-                _ => return None,
-            };
+            let text = scalar_text(value)?;
             Some((field.id.clone(), text))
         })
         .collect()
@@ -370,7 +480,15 @@ pub fn shared_values(
 ) -> BTreeMap<String, String> {
     form.fields
         .iter()
-        .filter(|field| !field.is_secret())
+        .filter(|field| {
+            !field.is_secret()
+                && form
+                    .fields
+                    .iter()
+                    .filter(|other| other.id == field.id)
+                    .count()
+                    == 1
+        })
         .filter_map(|field| {
             let value = values.get(&field.id)?;
             Some((field.id.clone(), value.clone()))
@@ -482,6 +600,57 @@ pub fn handoff_instruction(form: &FormRequest) -> String {
     }
 }
 
+/// The sentence a settled card gives the model. A collect card never claims a page was filled.
+/// A login card still does, because that path types into the page.
+#[must_use]
+pub fn model_facing_result(
+    entry: &Value,
+    form: &FormRequest,
+    resolution: FormResolution,
+    shared: &BTreeMap<String, String>,
+    timed_out: bool,
+) -> String {
+    if is_chat_collection(entry) {
+        // Old settled cards can carry values saved before the current field filtering.
+        let shared = shared_values(form, shared);
+        collection_resolution(form, resolution, &shared, timed_out)
+    } else {
+        tool_result_content(form, resolution, shared, timed_out)
+    }
+}
+
+fn collection_resolution(
+    form: &FormRequest,
+    resolution: FormResolution,
+    shared: &BTreeMap<String, String>,
+    timed_out: bool,
+) -> String {
+    let title = if form.title.is_empty() {
+        "a form"
+    } else {
+        form.title.as_str()
+    };
+    match resolution {
+        FormResolution::Submitted => collection_tool_result(form, shared),
+        FormResolution::FillFailed => format!(
+            "The person submitted \"{title}\" but the answers were not kept. Nothing was typed \
+             into a page. Ask again with request_user_form and collect true."
+        ),
+        FormResolution::Dismissed if timed_out => format!(
+            "The wait for \"{title}\" timed out. Continue without those fields. Do not invent \
+             them, and do not raise the same form again."
+        ),
+        FormResolution::Dismissed => format!(
+            "The person dismissed \"{title}\" without answering. Continue without those fields. \
+             Do not invent them, and do not raise the same form again."
+        ),
+        FormResolution::Escalated => format!(
+            "The person chose to finish \"{title}\" on the computer. Wait for them. Do not invent \
+             the fields."
+        ),
+    }
+}
+
 /// History line for a later turn reading the gateway transcript. None for an unresolved card
 /// (the waiting tool result has not landed yet) and none for a non-form entry.
 #[must_use]
@@ -509,9 +678,10 @@ pub fn history_line(entry: &Value) -> Option<String> {
                 .collect()
         })
         .unwrap_or_default();
-    let line = tool_result_content(&form, resolution, &shared, timed_out);
+    let line = model_facing_result(entry, &form, resolution, &shared, timed_out);
     if contains_secret_value(&line, &form, &shared) {
-        return Some(tool_result_content(
+        return Some(model_facing_result(
+            entry,
             &form,
             resolution,
             &BTreeMap::new(),
@@ -733,787 +903,5 @@ pub fn overall_resolution(outcomes: &[FieldOutcome]) -> FormResolution {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use opengrok_box::{BoxResult, CommandOutput, StartedCommand};
-    use std::sync::Mutex;
-
-    #[test]
-    fn password_and_otp_are_secret_without_the_flag() {
-        let password = FormField {
-            id: "p".into(),
-            label: "Password".into(),
-            r#type: "password".into(),
-            required: true,
-            secret: false,
-            at: None,
-        };
-        let otp = FormField {
-            id: "o".into(),
-            label: "Code".into(),
-            r#type: "otp".into(),
-            required: true,
-            secret: false,
-            at: None,
-        };
-        let email = FormField {
-            id: "e".into(),
-            label: "Email".into(),
-            r#type: "email".into(),
-            required: true,
-            secret: false,
-            at: None,
-        };
-        assert!(password.is_secret());
-        assert!(otp.is_secret());
-        assert!(!email.is_secret());
-    }
-
-    #[test]
-    fn sanitize_drops_values_and_identity() {
-        let raw = json!({
-            "title": "Google account email",
-            "instruction": "Enter the address.",
-            "fields": [{
-                "id": "email",
-                "label": "Email",
-                "type": "email",
-                "required": true,
-                "value": "should-not-keep@example.com"
-            }],
-            "values": { "password": "s3cret" },
-            "coworker_id": "cw_x",
-            "box_id": "box_x",
-            "domain": "accounts.google.com",
-            "liveHost": "accounts.google.com"
-        });
-        let cleaned = sanitize_arguments(&raw);
-        assert!(cleaned.get("values").is_none(), "{cleaned}");
-        assert!(cleaned.get("coworker_id").is_none(), "{cleaned}");
-        let dumped = cleaned.to_string();
-        assert!(!dumped.contains("s3cret"), "{dumped}");
-        assert!(!dumped.contains("should-not-keep"), "{dumped}");
-        assert_eq!(cleaned["title"], "Google account email");
-        assert_eq!(cleaned["liveHost"], "accounts.google.com");
-        assert_eq!(cleaned["fields"][0]["id"], "email");
-        assert!(cleaned["fields"][0].get("value").is_none());
-    }
-
-    #[test]
-    fn challenge_kind_round_trips_on_sanitize() {
-        let raw = json!({
-            "title": "Enter code",
-            "fields": [{ "id": "otp", "label": "Code", "type": "otp", "required": true }],
-            "challengeKind": "otp",
-            "samePage": true,
-            "submit": true,
-            "values": { "otp": "123456" }
-        });
-        let cleaned = sanitize_arguments(&raw);
-        assert_eq!(cleaned["challengeKind"], "otp");
-        assert_eq!(cleaned["samePage"], true);
-        assert_eq!(cleaned["submit"], true);
-        assert!(cleaned.get("values").is_none());
-        assert!(!cleaned.to_string().contains("123456"));
-    }
-
-    #[test]
-    fn shared_values_omit_secrets() {
-        let form = FormRequest {
-            title: "Sign in".into(),
-            instruction: String::new(),
-            fields: vec![
-                FormField {
-                    id: "email".into(),
-                    label: "Email".into(),
-                    r#type: "email".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-                FormField {
-                    id: "password".into(),
-                    label: "Password".into(),
-                    r#type: "password".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let shared = shared_values(&form, &values);
-        assert_eq!(
-            shared.get("email").map(String::as_str),
-            Some("ada@example.com")
-        );
-        assert!(!shared.contains_key("password"));
-        let content = tool_result_content(&form, FormResolution::Submitted, &shared, false);
-        assert!(content.contains("ada@example.com"));
-        assert!(content.contains("filled into the page"));
-        assert!(content.contains("Screenshot"));
-        assert!(content.contains("password-only"));
-        assert!(content.contains("new entryId"));
-        assert!(!content.contains("logged in"));
-        assert!(!content.contains("s3cret-pass"));
-        assert!(!contains_secret_value(&content, &form, &values));
-    }
-
-    #[test]
-    fn unresolved_reads_the_official_rule() {
-        let pending = json!({
-            "kind": "send-message",
-            "id": "e_1",
-            "message": { "type": "user-form", "formRequest": { "title": "x", "fields": [] } }
-        });
-        assert!(is_unresolved(&pending));
-        let settled = json!({
-            "kind": "send-message",
-            "id": "e_1",
-            "formResolution": "submitted",
-            "message": { "type": "user-form", "formRequest": { "title": "x", "fields": [] } }
-        });
-        assert!(!is_unresolved(&settled));
-        let dismissed_widget = json!({
-            "kind": "send-message",
-            "id": "e_1",
-            "widgetDismissed": true,
-            "message": { "type": "user-form", "formRequest": { "title": "x", "fields": [] } }
-        });
-        assert!(!is_unresolved(&dismissed_widget));
-        assert!(history_line(&pending).is_none());
-        let line = history_line(&settled).expect("settled history");
-        assert!(
-            line.contains("submitted")
-                || line.contains("filled")
-                || line.contains("Filled")
-                || line.contains("submitted")
-                || line.contains("form")
-        );
-        assert!(!line.contains("s3cret"));
-    }
-
-    #[derive(Default)]
-    struct FillSpy {
-        acts: Mutex<Vec<CuaAction>>,
-        shots: Mutex<u32>,
-        fail_type: bool,
-    }
-
-    #[async_trait]
-    impl Computer for FillSpy {
-        async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
-            Ok("box".into())
-        }
-        async fn run(&self, _b: &str, _c: &str, _t: u32) -> BoxResult<CommandOutput> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
-            Err(opengrok_box::BoxError::NoSuchBox)
-        }
-        async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
-            Ok(())
-        }
-        async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
-            Ok(String::new())
-        }
-        async fn stop(&self, _b: &str) -> BoxResult<()> {
-            Ok(())
-        }
-        async fn resume(&self, _b: &str) -> BoxResult<()> {
-            Ok(())
-        }
-        async fn destroy(&self, _b: &str) -> BoxResult<()> {
-            Ok(())
-        }
-        async fn state(&self, _b: &str) -> BoxResult<String> {
-            Ok("running".into())
-        }
-        async fn screenshot(&self, _b: &str) -> BoxResult<opengrok_box::Screenshot> {
-            *self.shots.lock().unwrap() += 1;
-            Err(opengrok_box::no_screen())
-        }
-        async fn act(&self, _b: &str, action: &CuaAction) -> BoxResult<()> {
-            self.acts.lock().unwrap().push(action.clone());
-            if self.fail_type && matches!(action, CuaAction::Type { .. }) {
-                return Err(opengrok_box::BoxError::NoSuchBox);
-            }
-            Ok(())
-        }
-    }
-
-    fn field(id: &str, kind: &str, at: Option<(i32, i32)>) -> FormField {
-        FormField {
-            id: id.into(),
-            label: id.into(),
-            r#type: kind.into(),
-            required: true,
-            secret: false,
-            at: at.map(|(x, y)| FieldAt { x, y }),
-        }
-    }
-
-    /// With positions, every field is clicked, emptied and typed: the password lands in the
-    /// password box whatever the browser had focused (the Facebook mistype of 21 Sep 2026).
-    #[tokio::test]
-    async fn positioned_fields_are_clicked_before_they_are_typed() {
-        let spy = FillSpy::default();
-        let form = FormRequest {
-            title: "Log in".into(),
-            instruction: String::new(),
-            fields: vec![
-                field("email", "email", Some((640, 512))),
-                field("password", "password", Some((640, 560))),
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: true,
-            submit: true,
-        };
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert!(
-            outcomes.iter().all(|o| o.filled && !o.fill_failed),
-            "{outcomes:?}"
-        );
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts,
-            vec![
-                CuaAction::Click {
-                    x: 640,
-                    y: 512,
-                    button: None
-                },
-                CuaAction::Key {
-                    key: "ctrl+a".into()
-                },
-                CuaAction::Type {
-                    text: "ada@example.com".into()
-                },
-                CuaAction::Click {
-                    x: 640,
-                    y: 560,
-                    button: None
-                },
-                CuaAction::Key {
-                    key: "ctrl+a".into()
-                },
-                CuaAction::Type {
-                    text: "s3cret-pass".into()
-                },
-                CuaAction::Key {
-                    key: "Return".into()
-                },
-            ],
-            "click, select, type per field, no Tab, then Return: {acts:?}"
-        );
-    }
-
-    /// The likeliest model output: one card, both fields positioned, `samePage` forgotten,
-    /// `submit` forgotten. Positions make it a whole fill, not a silent half-fill reported as
-    /// submitted — but not a Return: only a card the model marked as one page submits itself,
-    /// so a position gone stale while the person typed cannot post a password as a username.
-    #[tokio::test]
-    async fn a_positioned_form_types_every_field_without_same_page_but_does_not_return() {
-        let spy = FillSpy::default();
-        let form = FormRequest {
-            title: "Log in".into(),
-            instruction: String::new(),
-            fields: vec![
-                field("email", "email", Some((640, 512))),
-                field("password", "password", Some((640, 560))),
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        assert!(!types_only_first_field(&form));
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert!(
-            outcomes.iter().all(|o| o.filled && !o.fill_failed),
-            "{outcomes:?}"
-        );
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts.len(),
-            6,
-            "click, select, type ×2, and no Return: {acts:?}"
-        );
-        assert!(
-            !acts.contains(&CuaAction::Key {
-                key: "Return".into()
-            }),
-            "{acts:?}"
-        );
-        // Marked as one page, the same card logs in.
-        let mut marked = form.clone();
-        marked.same_page = true;
-        assert!(should_press_return(&marked, 2));
-        // The model is told what happened, and not the stepped advice.
-        let said = tool_result_content(&form, FormResolution::Submitted, &BTreeMap::new(), false);
-        assert!(said.contains("clicked at the position"), "{said}");
-        assert!(!said.contains("Only the FIRST field"), "{said}");
-    }
-
-    /// Positions arrive as floats more often than not; a point off any screen is no point.
-    #[test]
-    fn float_positions_are_points_and_absurd_ones_are_not() {
-        let form = form_request_from(&serde_json::json!({
-            "title": "Log in",
-            "fields": [
-                { "id": "a", "label": "A", "at": { "x": 640.4, "y": 511.6 } },
-                { "id": "b", "label": "B", "at": { "x": 4294968576i64, "y": 10 } },
-                { "id": "c", "label": "C", "at": { "x": -3, "y": 10 } }
-            ]
-        }));
-        assert_eq!(form.fields[0].at, Some(FieldAt { x: 640, y: 512 }));
-        assert_eq!(form.fields[1].at, None);
-        assert_eq!(form.fields[2].at, None);
-    }
-
-    /// A same-page form that skips an optional blank field still Tabs past it, so the next
-    /// value does not land in the blank field's box (a pre-existing miss).
-    #[tokio::test]
-    async fn a_skipped_field_on_a_same_page_form_is_still_tabbed_past() {
-        let spy = FillSpy::default();
-        let mut optional = field("nickname", "text", None);
-        optional.required = false;
-        let form = FormRequest {
-            title: "Sign up".into(),
-            instruction: String::new(),
-            fields: vec![
-                field("email", "email", None),
-                optional,
-                field("password", "password", None),
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: true,
-            submit: false,
-        };
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert!(
-            outcomes.iter().all(|o| o.filled && !o.fill_failed),
-            "{outcomes:?}"
-        );
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts,
-            vec![
-                CuaAction::Type {
-                    text: "ada@example.com".into()
-                },
-                CuaAction::Key { key: "Tab".into() },
-                CuaAction::Key { key: "Tab".into() },
-                CuaAction::Type {
-                    text: "s3cret-pass".into()
-                },
-            ],
-            "two Tabs: one past the blank optional field: {acts:?}"
-        );
-    }
-
-    /// `at` is read from the tool call, and a half-given point is no point.
-    #[test]
-    fn a_field_position_is_read_from_the_request() {
-        let form = form_request_from(&serde_json::json!({
-            "title": "Log in",
-            "samePage": true,
-            "fields": [
-                { "id": "email", "label": "Email", "type": "email", "at": { "x": 640, "y": 512 } },
-                { "id": "password", "label": "Password", "type": "password", "at": { "x": 640 } },
-                { "id": "otp", "label": "Code" }
-            ]
-        }));
-        assert_eq!(form.fields[0].at, Some(FieldAt { x: 640, y: 512 }));
-        assert_eq!(form.fields[1].at, None, "x without y is no position");
-        assert_eq!(form.fields[2].at, None);
-    }
-
-    #[tokio::test]
-    async fn fill_types_only_the_first_field_by_default() {
-        let spy = FillSpy::default();
-        let form = FormRequest {
-            title: "Sign in".into(),
-            instruction: String::new(),
-            fields: vec![
-                FormField {
-                    id: "email".into(),
-                    label: "Email".into(),
-                    r#type: "email".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-                FormField {
-                    id: "password".into(),
-                    label: "Password".into(),
-                    r#type: "password".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert_eq!(outcomes.len(), 2);
-        assert!(outcomes[0].filled && !outcomes[0].fill_failed);
-        assert!(
-            !outcomes[1].filled && !outcomes[1].fill_failed,
-            "password is the next challenge, not a CUA miss: {:?}",
-            outcomes[1]
-        );
-        assert_eq!(overall_resolution(&outcomes), FormResolution::Submitted);
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts,
-            vec![CuaAction::Type {
-                text: "ada@example.com".into()
-            }],
-            "default multi-field must not Tab or Return: {acts:?}"
-        );
-        assert_eq!(*spy.shots.lock().unwrap(), 0, "fill must not screenshot");
-    }
-
-    #[tokio::test]
-    async fn a_single_password_field_may_press_return() {
-        let spy = FillSpy::default();
-        let form = FormRequest {
-            title: "Password".into(),
-            instruction: String::new(),
-            fields: vec![FormField {
-                id: "password".into(),
-                label: "Password".into(),
-                r#type: "password".into(),
-                required: true,
-                secret: false,
-                at: None,
-            }],
-            domain: None,
-            live_host: None,
-            challenge_kind: Some("password".into()),
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert_eq!(overall_resolution(&outcomes), FormResolution::Submitted);
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts,
-            vec![
-                CuaAction::Type {
-                    text: "s3cret-pass".into()
-                },
-                CuaAction::Key {
-                    key: "Return".into()
-                },
-            ]
-        );
-        assert_eq!(*spy.shots.lock().unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn same_page_with_submit_tabs_and_returns() {
-        let spy = FillSpy::default();
-        let form = FormRequest {
-            title: "Sign in".into(),
-            instruction: String::new(),
-            fields: vec![
-                FormField {
-                    id: "email".into(),
-                    label: "Email".into(),
-                    r#type: "email".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-                FormField {
-                    id: "password".into(),
-                    label: "Password".into(),
-                    r#type: "password".into(),
-                    required: true,
-                    secret: false,
-                    at: None,
-                },
-            ],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: true,
-            submit: true,
-        };
-        let values = BTreeMap::from([
-            ("email".into(), "ada@example.com".into()),
-            ("password".into(), "s3cret-pass".into()),
-        ]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert!(outcomes.iter().all(|o| o.filled && !o.fill_failed));
-        let acts = spy.acts.lock().unwrap().clone();
-        assert_eq!(
-            acts,
-            vec![
-                CuaAction::Type {
-                    text: "ada@example.com".into()
-                },
-                CuaAction::Key { key: "Tab".into() },
-                CuaAction::Type {
-                    text: "s3cret-pass".into()
-                },
-                CuaAction::Key {
-                    key: "Return".into()
-                },
-            ]
-        );
-        assert_eq!(*spy.shots.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn return_is_opt_in_on_multi_field_forms() {
-        let email = FormField {
-            id: "email".into(),
-            label: "Email".into(),
-            r#type: "email".into(),
-            required: true,
-            secret: false,
-            at: None,
-        };
-        let password = FormField {
-            id: "password".into(),
-            label: "Password".into(),
-            r#type: "password".into(),
-            required: true,
-            secret: false,
-            at: None,
-        };
-        let multi = FormRequest {
-            fields: vec![email.clone(), password.clone()],
-            ..FormRequest::default()
-        };
-        assert!(
-            !should_press_return(&multi, 1),
-            "default multi-field must not Return"
-        );
-        assert!(types_only_first_field(&multi));
-        let single = FormRequest {
-            fields: vec![password.clone()],
-            challenge_kind: Some("password".into()),
-            passkey_mode: None,
-            ..FormRequest::default()
-        };
-        assert!(should_press_return(&single, 1));
-        let same_page_submit = FormRequest {
-            fields: vec![email, password],
-            same_page: true,
-            submit: true,
-            ..FormRequest::default()
-        };
-        assert!(should_press_return(&same_page_submit, 2));
-        assert!(!types_only_first_field(&same_page_submit));
-    }
-
-    #[test]
-    fn submitted_values_keep_only_this_forms_fields() {
-        let form = FormRequest {
-            title: "Sign in".into(),
-            instruction: String::new(),
-            fields: vec![FormField {
-                id: "email".into(),
-                label: "Email".into(),
-                r#type: "email".into(),
-                required: true,
-                secret: false,
-                at: None,
-            }],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        let raw = json!({
-            "email": "ada@example.com",
-            "password": "s3cret",
-            "coworker_id": "cw_x"
-        });
-        let values = submitted_values(&form, &raw);
-        assert_eq!(
-            values.get("email").map(String::as_str),
-            Some("ada@example.com")
-        );
-        assert!(!values.contains_key("password"));
-        assert!(!values.contains_key("coworker_id"));
-    }
-
-    #[test]
-    fn field_outcomes_are_the_recovery_card_shape() {
-        let outcomes = vec![
-            FieldOutcome {
-                id: "email".into(),
-                filled: true,
-                fill_failed: false,
-            },
-            FieldOutcome {
-                id: "password".into(),
-                filled: false,
-                fill_failed: true,
-            },
-        ];
-        assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
-        let dumped = serde_json::to_value(&outcomes).expect("outcomes json");
-        assert_eq!(dumped[0]["id"], "email");
-        assert_eq!(dumped[0]["filled"], true);
-        assert_eq!(dumped[0]["fillFailed"], false);
-        assert_eq!(dumped[1]["fillFailed"], true);
-    }
-
-    #[test]
-    fn live_handoff_holds_the_screen_after_the_form_settles() {
-        let form = json!({
-            "kind": "send-message",
-            "id": "e_form",
-            "formResolution": "escalated",
-            "widgetDismissed": true,
-            "message": { "type": "user-form", "formRequest": { "title": "x", "fields": [] } }
-        });
-        assert!(!is_unresolved(&form));
-        assert!(
-            !holds_the_screen(&form),
-            "escalated form alone must not hold"
-        );
-        let live = json!({
-            "kind": "send-message",
-            "id": "e_hand",
-            "message": { "type": "attachment", "url": "sand://box" },
-            "boxRequestId": "req_1",
-            "boxInstruction": "Finish this form on the computer."
-        });
-        assert!(is_live_handoff(&live));
-        assert!(holds_the_screen(&live));
-        let handed_back = json!({
-            "kind": "send-message",
-            "id": "e_hand",
-            "message": { "type": "attachment", "url": "sand://box" },
-            "boxRequestId": "req_1",
-            "boxResolution": "handed_back"
-        });
-        assert!(!is_live_handoff(&handed_back));
-        assert!(!holds_the_screen(&handed_back));
-        let declined = json!({
-            "kind": "send-message",
-            "id": "e_hand",
-            "message": { "type": "attachment", "url": "sand://box" },
-            "boxRequestId": "req_1",
-            "boxResolution": "declined"
-        });
-        assert!(!is_live_handoff(&declined));
-        assert!(HAND_BACK_TOOL_RESULT.contains("Screenshot"));
-        assert!(!HAND_BACK_TOOL_RESULT.to_lowercase().contains("logged in"));
-    }
-
-    #[tokio::test]
-    async fn a_failed_type_is_fill_failed_and_does_not_press_return() {
-        let spy = FillSpy {
-            fail_type: true,
-            ..FillSpy::default()
-        };
-        let form = FormRequest {
-            title: "Sign in".into(),
-            instruction: String::new(),
-            fields: vec![FormField {
-                id: "password".into(),
-                label: "Password".into(),
-                r#type: "password".into(),
-                required: true,
-                secret: false,
-                at: None,
-            }],
-            domain: None,
-            live_host: None,
-            challenge_kind: None,
-            passkey_mode: None,
-            same_page: false,
-            submit: false,
-        };
-        let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
-        let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
-        assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
-        assert_eq!(outcomes[0].id, "password");
-        assert!(outcomes[0].fill_failed);
-        let acts = spy.acts.lock().unwrap().clone();
-        assert!(
-            !acts
-                .iter()
-                .any(|act| matches!(act, CuaAction::Key { key } if key == "Return")),
-            "partial fill must not submit the page: {acts:?}"
-        );
-        assert_eq!(*spy.shots.lock().unwrap(), 0);
-    }
-
-    #[test]
-    fn timed_out_dismiss_short_circuits() {
-        let form = FormRequest {
-            title: "Sign in".into(),
-            ..FormRequest::default()
-        };
-        let line = tool_result_content(&form, FormResolution::Dismissed, &BTreeMap::new(), true);
-        assert_eq!(line, HOLD_TIMED_OUT_TOOL_RESULT);
-        let settled = json!({
-            "kind": "send-message",
-            "id": "e_1",
-            "formResolution": "dismissed",
-            "timedOut": true,
-            "message": { "type": "user-form", "formRequest": { "title": "Sign in", "fields": [] } }
-        });
-        let history = history_line(&settled).expect("timed out history");
-        assert_eq!(history, HOLD_TIMED_OUT_TOOL_RESULT);
-    }
-}
+#[path = "../tests/unit/user_form.rs"]
+mod tests;

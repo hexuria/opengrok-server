@@ -39,6 +39,12 @@ struct Seeded {
     coworker: CoworkerId,
     run: RunId,
     schedule: ScheduleId,
+    /// A skill with a body and a bundled file: three tables the purge has to reach, and the
+    /// reason this field exists is that it did not, and nothing here would have noticed.
+    skill: String,
+    /// A queued follow-up on this account's thread; purged with the account, not left behind
+    /// naming someone who is gone.
+    pending: String,
 }
 
 /// One account with everything the purge has to reach: its org, a coworker, a run with frames
@@ -132,6 +138,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
             system: None,
+            skill_id: None,
             at_ms,
         })
         .expect("start");
@@ -202,12 +209,63 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         .await
         .expect("site login");
 
+    // A skill, its body and a file beside it — the three skill tables, all keyed off the
+    // account or its org.
+    let skill = format!("skl_purge_{}", uuid::Uuid::now_v7());
+    store
+        .create_skill(
+            opengrok_store::NewSkill {
+                id: &skill,
+                owner_id: account.as_str(),
+                org_id: Some(org.as_str()),
+                name: "purge-fixture",
+                description: "",
+                source: "authored",
+                enabled: true,
+            },
+            Some(opengrok_store::NewSkillVersion {
+                kind: "authored",
+                body: "instructions",
+                note: "",
+                files: &[opengrok_store::SkillFileRow {
+                    path: "sheet.md".to_string(),
+                    bytes: b"beside it".to_vec(),
+                }],
+                created_by: account.as_str(),
+            }),
+            at_ms,
+        )
+        .await
+        .expect("skill");
+
+    let pending = opengrok_core::id::PendingUserMessageId::new().to_string();
+    let thread = coworker.to_string();
+    store
+        .enqueue_pending_user_message(
+            opengrok_store::NewPendingUserMessage {
+                id: &pending,
+                thread_id: &thread,
+                account_id: account.as_str(),
+                content: "a follow-up that must not survive a purge",
+                reply_to: None,
+                recipe_id: None,
+                recipe_values: None,
+                skill_id: None,
+                client_message_id: Some("msg_purge"),
+            },
+            at_ms,
+        )
+        .await
+        .expect("pending user message");
+
     Seeded {
         account,
         org,
         coworker,
         run,
         schedule,
+        skill,
+        pending,
     }
 }
 
@@ -218,6 +276,8 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
     let coworker = seeded.coworker.to_string();
     let run = seeded.run.to_string();
     let schedule = seeded.schedule.to_string();
+    let skill = seeded.skill.clone();
+    let pending = seeded.pending.clone();
     let streams = vec![
         format!("account/{account}"),
         format!("org/{org}"),
@@ -261,6 +321,22 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
             "site_login",
             "select count(*) from site_login where account_id = $1",
             &account,
+        ),
+        ("skill", "select count(*) from skill where id = $1", &skill),
+        (
+            "skill_version",
+            "select count(*) from skill_version where skill_id = $1",
+            &skill,
+        ),
+        (
+            "skill_file",
+            "select count(*) from skill_file where skill_id = $1",
+            &skill,
+        ),
+        (
+            "pending_user_message",
+            "select count(*) from pending_user_message where id = $1",
+            &pending,
         ),
         (
             "secret_store (site logins)",

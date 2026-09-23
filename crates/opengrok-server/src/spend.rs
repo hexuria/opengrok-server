@@ -644,7 +644,7 @@ impl GuardedDoor {
             return Ok(usage);
         }
         let Some(admin) = self.admin.as_ref() else {
-            return Err(ModelError::SpendCap(format!(
+            return Err(ModelError::Held(format!(
                 "{name} has spend limits, but this deployment has no gateway admin connection to \
                  read its meter with (OG_GATEWAY_ADMIN_URL). Its turns are held until it does."
             )));
@@ -662,7 +662,7 @@ impl GuardedDoor {
                 }
                 Ok(usage)
             }
-            Ok(None) => Err(ModelError::SpendCap(format!(
+            Ok(None) => Err(ModelError::Held(format!(
                 "{name} has spend limits, but the gateway no longer knows its key; its turns \
                  are held. Retire and re-hire it, or ask an admin."
             ))),
@@ -670,7 +670,7 @@ impl GuardedDoor {
                 tracing::error!(%error, key_id, "spend guard: the meter could not be read");
                 match self.cached(key_id, STALE_OK_MS) {
                     Some(usage) => Ok(usage),
-                    None => Err(ModelError::SpendCap(format!(
+                    None => Err(ModelError::Held(format!(
                         "{name}'s spend meter could not be read ({error}); the turn is held. \
                          Try again in a moment."
                     ))),
@@ -704,7 +704,7 @@ impl GuardedDoor {
             return Ok(reading);
         }
         let Some(admin) = self.admin.as_ref() else {
-            return Err(ModelError::SpendCap(format!(
+            return Err(ModelError::Held(format!(
                 "{name}'s turn draws on a points pool, but this deployment has no gateway admin \
                  connection to read it with (OG_GATEWAY_ADMIN_URL). Its turns are held until it does."
             )));
@@ -712,7 +712,7 @@ impl GuardedDoor {
         let pairs = crate::points::pool_keys_by_coworker(&self.store, payer)
             .await
             .map_err(|error| {
-                ModelError::SpendCap(format!(
+                ModelError::Held(format!(
                     "The keys {name}'s pool sums over could not be listed ({error}); the turn \
                      is held."
                 ))
@@ -749,7 +749,7 @@ impl GuardedDoor {
                 }
                 Ok(reading)
             }
-            Ok(None) => Err(ModelError::SpendCap(format!(
+            Ok(None) => Err(ModelError::Held(format!(
                 "{name}'s turn draws on a points pool, but the gateway has no reference price \
                  set, so points cannot be counted; an admin sets it on the admin page. The turn \
                  is held."
@@ -758,7 +758,7 @@ impl GuardedDoor {
                 tracing::error!(%error, payer = %payer.as_str(), "points guard: the pool could not be read");
                 match self.cached_pool(payer.as_str(), STALE_OK_MS) {
                     Some(reading) => Ok(reading),
-                    None => Err(ModelError::SpendCap(format!(
+                    None => Err(ModelError::Held(format!(
                         "The pool {name}'s turn draws on could not be read ({error}); it is held. \
                          Try again in a moment."
                     ))),
@@ -904,7 +904,7 @@ impl ModelDoor for GuardedDoor {
                 coworker = %coworker.as_str(),
                 "points guard: a request named a spend scope but no actor; the turn is held"
             );
-            return Err(ModelError::SpendCap(
+            return Err(ModelError::Held(
                 "This turn does not say whose spend it is, so it cannot be counted against \
                  anybody's limits; it is held. This is a server bug, not a limit you have hit."
                     .to_string(),
@@ -912,7 +912,7 @@ impl ModelDoor for GuardedDoor {
         };
         let limits = self.limits_for(&coworker, &payer).await.map_err(|error| {
                 tracing::error!(%error, coworker = %coworker.as_str(), "points guard: limits could not be read");
-                ModelError::SpendCap(format!(
+                ModelError::Held(format!(
                     "This coworker's points limits could not be read ({error}); the turn is held."
                 ))
             })?;
@@ -972,21 +972,21 @@ impl ModelDoor for GuardedDoor {
         {
             Ok(Some(key)) => key,
             Ok(None) => {
-                return Err(ModelError::SpendCap(format!(
+                return Err(ModelError::Held(format!(
                     "{name} is under a points limit but has no gateway key of its own to count on, \
                      so its turns are held. A coworker is metered when its hirer is in an org and \
                      the deployment has a gateway admin connection and a vault; ask an admin."
                 )));
             }
             Err(error) => {
-                return Err(ModelError::SpendCap(format!(
+                return Err(ModelError::Held(format!(
                     "{name}'s key could not be read ({error}); the turn is held."
                 )));
             }
         };
         let usage = self.reading(&key.key_id, &name).await?;
         let (Some(month), Some(day)) = (usage.month_points, usage.day_points) else {
-            return Err(ModelError::SpendCap(format!(
+            return Err(ModelError::Held(format!(
                 "{name} is under a points limit, but the gateway has no reference price set, so \
                  points cannot be counted; an admin sets it on the admin page. The turn is held."
             )));
@@ -1017,6 +1017,10 @@ impl ModelDoor for GuardedDoor {
         };
         if let Some(sentence) = over_points(&name, &limits, &counted) {
             tracing::info!(coworker = %coworker.as_str(), "points guard: refused — {sentence}");
+            // THE ONE GENUINE CAP IN THIS FILE. Everything else above is `ModelError::Held`: a
+            // meter that would not answer, a key that could not be read, a request with no payer
+            // — nobody has spent anything in any of those, and a caller turning them into an HTTP
+            // status must not answer 402 about somebody's billing because a read failed.
             return Err(ModelError::SpendCap(sentence));
         }
         self.inner.stream(request).await

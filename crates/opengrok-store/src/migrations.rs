@@ -972,6 +972,165 @@ alter table site_login drop constraint if exists site_login_account_id_origin_us
 create unique index if not exists site_login_owner_site_name_kind
     on site_login (account_id, origin, username, kind);
 
+-- SKILLS. A named, versioned bundle of instructions a person invokes for one turn by typing
+-- `/name`: a SKILL.md body, plus whatever small files sit beside it. Owned by an account, visible
+-- to the owner's org, soft-deleted so a run that cited one can still say what it cited.
+--
+-- MODELLED ON `recipe` DELIBERATELY. Ownership, versioning, soft delete and org visibility are
+-- the same problem there, and the shapes that solved it are worth repeating rather than
+-- re-inventing a second time to be got wrong once.
+create table if not exists skill (
+    id            text    primary key,
+    owner_id      text    not null,
+    org_id        text,
+    name          text    not null,
+    description   text    not null default '',
+    -- Where this skill came from: 'authored', 'uploaded', or 'taught'. Descriptive, written by
+    -- the server from how the row was made, and never a permission.
+    source        text    not null default 'authored',
+    -- The owner's switch, and it is not only about turns: a disabled skill leaves the ORG's
+    -- listing and stops reading for a colleague (`server/skills.rs`, `relation_to`), because a
+    -- colleague seeing one would be seeing something they cannot use. Its OWNER still lists and
+    -- reads it — switching a skill off is not hiding it from yourself. The turn path is a later
+    -- PR and reads this column rather than a request.
+    enabled       boolean not null default true,
+    created_at_ms bigint  not null,
+    updated_at_ms bigint  not null,
+    deleted_at_ms bigint
+);
+create index if not exists skill_owner_idx on skill (owner_id);
+create index if not exists skill_org_idx on skill (org_id);
+-- WHEN SOMEBODY SAID THIS BODY WAS FIT TO USE. Null means nobody has, which is where a skill a
+-- MODEL wrote from a recording starts (`server/skills.rs`, `from_tape`). A skill a person wrote
+-- or uploaded is stamped as it is inserted, because writing it IS reading it.
+--
+-- A FACT, NOT THE ENFORCEMENT POINT. `enabled` decides what a turn may use and stays the only
+-- thing that decides it. This column exists because that switch cannot tell "nobody has read
+-- this" from "read, approved, and switched off again a month later" — the two rows are
+-- byte-identical — so a client drawing a review queue had to guess from `source = 'taught'` plus
+-- a switch position, a heuristic the server never promised and could quietly break.
+--
+-- THE CATALOGUE IS CHECKED FIRST, for the reason spelled out on `skill_file_version_fk` below and
+-- learned again here: `alter table` takes an ACCESS EXCLUSIVE lock on the table BEFORE it decides
+-- there is nothing to do, so a bare `add column if not exists` in a file replayed on every boot
+-- fights every write in flight. Written that way it deadlocked against a concurrent
+-- `add_skill_version` the first time the gate ran it. Guarded, the steady state reads one
+-- catalogue row and takes no lock at all.
+--
+-- The backfill sits inside the same guard and therefore runs exactly once. `or enabled` is the
+-- half that is easy to leave out and wrong to: a taught skill that is already switched on was
+-- approved by somebody — that is the only way it can be on — and leaving it null would make an
+-- already-reviewed skill look unreviewed, which is the exact state this column exists to tell
+-- apart. The dev database is the one most likely to hold such rows.
+--
+-- AND IT HOLDS THE LOCK FOR THE REST OF THE FILE. The schema is executed as one batch, so the
+-- ACCESS EXCLUSIVE this ALTER takes is held until the last statement below commits — once, on the
+-- boot that adds the column, on a table with no long transactions against it. Worth knowing
+-- before adding anything slow after this point.
+--
+-- `table_schema` is named because `skill` is a common word: a stale row in another schema on the
+-- search path would otherwise answer this question for us and leave the column unmade.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'skill'
+           and column_name = 'approved_at_ms'
+    ) then
+        alter table skill add column approved_at_ms bigint;
+        update skill set approved_at_ms = created_at_ms
+         where source <> 'taught' or enabled;
+    end if;
+end $do$;
+-- ONE `/name` MEANS ONE SKILL. Two live skills called `review` under one account make the
+-- invocation ambiguous, and the ambiguity would be resolved by whichever row sorted first.
+-- Partial, so a deleted row never blocks the name it used to hold.
+create unique index if not exists skill_owner_name_idx
+    on skill (owner_id, name) where deleted_at_ms is null;
+
+create table if not exists skill_version (
+    skill_id      text   not null references skill (id),
+    version       int    not null,
+    -- 'authored' (a person wrote it here), 'uploaded' (a SKILL.md came in) or 'taught' (a turn
+    -- wrote it down). Read by name in Rust, and deliberately NOT a check constraint or an enum
+    -- type, for the reason spelled out on `recipe_version.kind` above: adding the fourth value
+    -- would be a lock on a table several replicas migrate at once, for no protection the code
+    -- does not already give.
+    kind          text   not null,
+    -- Text, not jsonb: a skill body is Markdown a model reads, and jsonb would re-order and
+    -- re-escape it. Capped in the server (`skills::MAX_SKILL_BODY_CHARS`) rather than here,
+    -- because a refusal has to be able to say what the limit was and what arrived.
+    body          text   not null,
+    note          text   not null default '',
+    created_by    text   not null,
+    created_at_ms bigint not null,
+    primary key (skill_id, version)
+);
+
+-- The small files that came with a version. Per VERSION, not per skill: a new body that drops a
+-- reference file must not leave the old body reading a file that is no longer beside it.
+create table if not exists skill_file (
+    skill_id text  not null references skill (id),
+    version  int   not null,
+    path     text  not null,
+    bytes    bytea not null,
+    primary key (skill_id, version, path)
+);
+-- A file belongs to a VERSION that exists. `add_skill_version` writes both in one transaction so
+-- it cannot be otherwise today, but the invariant belongs in the schema: a file row naming a
+-- version nobody can open is bytes with no page, and it would be invisible until somebody read
+-- the table by hand.
+--
+-- THE CATALOGUE IS CHECKED FIRST, and that guard is the whole point of the block rather than
+-- tidiness. Postgres has no `add constraint if not exists`, and the obvious spelling —
+-- `drop constraint if exists` followed by `add constraint` — is wrong HERE, where the file is
+-- replayed on every boot: `alter table ... add constraint` takes an ACCESS EXCLUSIVE lock on the
+-- table before it does anything else, so every restart would fight the writes already in flight.
+-- It does not merely slow things down; written that way it deadlocked against a concurrent
+-- insert the first time the gate ran it. Guarded, the steady-state path issues no ALTER and takes
+-- no lock at all.
+do $do$ begin
+    if not exists (select 1 from pg_constraint where conname = 'skill_file_version_fk') then
+        alter table skill_file add constraint skill_file_version_fk
+            foreign key (skill_id, version) references skill_version (skill_id, version)
+            on delete cascade;
+    end if;
+end $do$;
+
+-- A NativeChat follow-up that has not yet become a run. Mutable on purpose: the product is
+-- cancel and edit *before* drain, and an append-only stream would make those two writes a
+-- tombstone dance for a row that should simply go away. Identity is (thread, account) — a
+-- shared coworker does not share this queue (CLAUDE.md #5, one transcript per person).
+--
+-- `status` is a word, not an enum type, for the same reason as `skill_version.kind`: adding a
+-- third value must not take an ACCESS EXCLUSIVE lock on every boot. The only writers are the
+-- functions in `pending.rs`; they spell `pending` and `drained`.
+create table if not exists pending_user_message (
+    id                 text        primary key,
+    thread_id          text        not null,
+    account_id         text        not null,
+    content            text        not null,
+    reply_to           jsonb,
+    recipe_id          text,
+    recipe_values      jsonb,
+    skill_id           text,
+    client_message_id  text,
+    status             text        not null,
+    created_at_ms      bigint      not null,
+    updated_at_ms      bigint      not null,
+    drained_at_ms      bigint,
+    drained_run_id     text
+);
+create index if not exists pending_user_message_thread_idx
+    on pending_user_message (account_id, thread_id, created_at_ms)
+    where status = 'pending';
+-- Idempotent enqueue: the client's bubble id is the natural key. Drained rows KEEP the key so
+-- a second POST cannot re-queue a send that already became a run. Cancelled rows are deleted,
+-- so the same bubble can be queued again after the person takes it back.
+create unique index if not exists pending_user_message_client_idx
+    on pending_user_message (account_id, thread_id, client_message_id)
+    where client_message_id is not null;
+
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (

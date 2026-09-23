@@ -133,25 +133,12 @@ impl McpServer {
     }
 }
 
-/// One skill: `skills/<name>/SKILL.md`, plus whatever sits beside it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Skill {
-    pub name: String,
-    /// The frontmatter `description`, when present. It is what a coworker reads to decide whether
-    /// a skill is relevant, so it is worth surfacing separately from the body.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// The instructions themselves, frontmatter stripped.
-    pub body: String,
-}
-
 /// A loaded bundle.
 #[derive(Debug, Clone)]
 pub struct Plugin {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub mcp: McpConfig,
-    pub skills: Vec<Skill>,
     /// Whether anybody here has read this. Decided at install by the catalogue, carried with the
     /// plugin, and read by the policy layer — an unverified plugin's tools ask before each use.
     pub trust: Trust,
@@ -183,7 +170,6 @@ impl Plugin {
         };
 
         Ok(Self {
-            skills: load_skills(&root.join("skills"))?,
             root,
             manifest,
             mcp,
@@ -264,86 +250,124 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, PluginError
         .map_err(|error| PluginError::Malformed(path.to_path_buf(), error.to_string()))
 }
 
-fn load_skills(dir: &Path) -> Result<Vec<Skill>, PluginError> {
-    if !dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|error| PluginError::Unreadable(dir.to_path_buf(), error.to_string()))?;
-
-    let mut skills = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_file = path.join("SKILL.md");
-        if !skill_file.is_file() {
-            // A directory without SKILL.md is not a skill. Skipped rather than refused: a stray
-            // folder must not stop a plugin's other skills from loading.
-            continue;
-        }
-        let text = std::fs::read_to_string(&skill_file)
-            .map_err(|error| PluginError::Unreadable(skill_file.clone(), error.to_string()))?;
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let (description, body) = split_frontmatter(&text);
-        skills.push(Skill {
-            name,
-            description,
-            body,
-        });
-    }
-    // Sorted, so a coworker is given its skills in the same order every time — an unstable prompt
-    // is an unreproducible run.
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(skills)
+/// A `SKILL.md` taken apart: what its frontmatter claimed, and the instructions under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frontmatter {
+    /// The frontmatter `name`. The folder loader ignores it — a skill on disk is named by its
+    /// directory — but an uploaded `SKILL.md` has no directory, so this is the only name it can
+    /// have arrived with.
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// The instructions themselves, frontmatter stripped. On an unclosed fence this is the WHOLE
+    /// text, fence and all: nothing is dropped on the floor.
+    pub body: String,
+    /// Whether the opening `---` was matched by a closing one. `true` when there was no
+    /// frontmatter at all — there was nothing to close.
+    ///
+    /// A caller that accepts text from a person MUST check this. An unclosed fence means the
+    /// whole document was read as body, and a route that ignored the flag would answer 200 to an
+    /// upload it had in fact failed to understand.
+    pub closed: bool,
 }
 
-/// Pull `description` out of YAML-ish frontmatter and return the body without it.
+/// Pull `name` and `description` out of YAML-ish frontmatter and return the body without it.
 ///
 /// Deliberately not a YAML parser: frontmatter here is a handful of `key: value` lines, and adding
-/// a YAML dependency to read one field would be a large surface for a small gain. Anything it
+/// a YAML dependency to read two fields would be a large surface for a small gain. Anything it
 /// cannot read is left in the body rather than lost.
-fn split_frontmatter(text: &str) -> (Option<String>, String) {
-    let trimmed = text.trim_start_matches('\u{feff}');
+///
+/// THE ONE PARSER. The server's `/skills` upload path reads the same bytes this does, and a second
+/// implementation there would mean an uploaded skill and an installed one disagreeing about where
+/// a body starts — the disagreement would show up as frontmatter leaking into a system message.
+///
+/// NOT EVERY CALLER CHECKS `closed`, AND ONE OF THEM IS THE BOOT-TIME LOADER. `skills_in` above
+/// takes `parsed.body` and never looks at the flag, so a `SKILL.md` on disk that opens with a
+/// `---` it never closes is installed with its whole text as the body rather than refused the way
+/// an upload would be. Since leading whitespace is stripped here, that now includes a file whose
+/// first non-blank line is a `---` used as a horizontal rule: everything up to the next `---`
+/// becomes frontmatter and is dropped. Both are consequences of the loader ignoring the flag, not
+/// of the parse — a caller that accepts text from a person or a disk MUST read `closed`.
+pub fn split_frontmatter(text: &str) -> Frontmatter {
+    // LEADING WHITESPACE GOES BEFORE THE FENCE IS LOOKED FOR, and it is not tidiness. The test
+    // below is `starts_with("---")`, so ONE blank line in front of the fence made the whole
+    // frontmatter block body — and a body is what a model is later handed as instructions. Two
+    // documents one newline apart were then parsed in opposite ways: `---\nname: x` with no
+    // closing fence was refused as unreadable, and `\n---\nname: x` was stored with its `name:`
+    // line as the first line of the instructions. A model asked for a `SKILL.md` puts a newline
+    // after its opening marker as often as not, so this was reachable without anybody trying.
+    let trimmed = text.trim_start_matches('\u{feff}').trim_start();
     if !trimmed.starts_with("---") {
-        return (None, trimmed.to_string());
+        return Frontmatter {
+            name: None,
+            description: None,
+            body: trimmed.to_string(),
+            closed: true,
+        };
     }
-    let mut lines = trimmed.lines();
-    lines.next(); // the opening ---
 
+    let mut name = None;
     let mut description = None;
-    let mut consumed = trimmed.len();
-    let mut seen = trimmed.lines().next().map_or(0, |l| l.len() + 1);
-
-    for line in lines {
-        let line_len = line.len() + 1;
-        if line.trim_end() == "---" {
-            consumed = seen + line_len;
+    let mut consumed = None;
+    let mut seen = 0usize;
+    // OFFSETS COME OFF THE SLICES THEMSELVES, never rebuilt as `line.len() + 1`.
+    //
+    // `str::lines()` strips `\r\n` as one, so the rebuilt offset was a byte short for every CRLF
+    // line and the body slice started INSIDE the closing fence: `---\r\nname: a\r\n---\r\nBody`
+    // came back as a body of `-\r\nBody`, and the error grew a byte per frontmatter line until
+    // the tail of the last `key: value` line landed in the body — which is then stored as
+    // version 1 and read out into a system message. A file written on Windows, or checked out
+    // with `core.autocrlf=true`, is all it takes.
+    for (index, line) in trimmed.split_inclusive('\n').enumerate() {
+        seen += line.len();
+        if index == 0 {
+            continue; // the opening ---
+        }
+        let content = line.trim_end();
+        if content == "---" {
+            consumed = Some(seen);
             break;
         }
-        if let Some(value) = line.strip_prefix("description:") {
-            description = Some(
-                value
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'')
-                    .to_string(),
-            );
+        if let Some(value) = content.strip_prefix("name:") {
+            name = Some(unquote(value));
         }
-        seen += line_len;
+        if let Some(value) = content.strip_prefix("description:") {
+            description = Some(unquote(value));
+        }
     }
+
+    let Some(consumed) = consumed else {
+        // NO CLOSING FENCE. Everything is returned as body — the doc comment above promises that
+        // what cannot be read is left in the body rather than lost — and `closed` is false so a
+        // caller can refuse instead of storing a document it only half understood. Returning an
+        // empty body here (which is what this used to do) made a mistyped fence look like a
+        // successful upload of a skill with nothing in it.
+        return Frontmatter {
+            name: None,
+            description: None,
+            body: trimmed.to_string(),
+            closed: false,
+        };
+    };
 
     let body = trimmed
         .get(consumed..)
         .unwrap_or("")
         .trim_start()
         .to_string();
-    (description.filter(|d| !d.is_empty()), body)
+    Frontmatter {
+        name: name.filter(|value| !value.is_empty()),
+        description: description.filter(|value| !value.is_empty()),
+        body,
+        closed: true,
+    }
+}
+
+fn unquote(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
 }
 
 #[cfg(test)]
@@ -395,14 +419,13 @@ mod tests {
 
     /// A plugin is a BUNDLE: identity, words and tools together.
     #[test]
-    fn a_bundle_loads_its_manifest_skills_and_servers() {
+    fn a_bundle_loads_its_manifest_and_its_servers() {
         let dir = a_plugin();
         let plugin = Plugin::load(dir.path()).expect("should load");
 
         assert_eq!(plugin.manifest.name, "gmail");
         assert_eq!(plugin.manifest.version.as_deref(), Some("1.2.0"));
         assert_eq!(plugin.mcp.servers.len(), 2, "two servers");
-        assert_eq!(plugin.skills.len(), 2, "two skills");
     }
 
     /// The three transports, exactly as the schema declares them.
@@ -448,49 +471,105 @@ mod tests {
 
     #[test]
     fn frontmatter_becomes_a_description_and_leaves_the_body() {
-        let dir = a_plugin();
-        let plugin = Plugin::load(dir.path()).unwrap();
-        let skill = plugin
-            .skills
-            .iter()
-            .find(|skill| skill.name == "writing-replies")
-            .unwrap();
+        let parsed =
+            split_frontmatter("---\ndescription: \"How to draft a good reply\"\n---\nBe brief.\n");
         assert_eq!(
-            skill.description.as_deref(),
+            parsed.description.as_deref(),
             Some("How to draft a good reply")
         );
-        assert_eq!(skill.body.trim(), "Be brief.");
+        assert_eq!(parsed.body.trim(), "Be brief.");
         assert!(
-            !skill.body.contains("---"),
+            !parsed.body.contains("---"),
             "frontmatter should be stripped"
         );
+    }
+
+    /// The upload path has no folder to take a name from, so the frontmatter `name` has to
+    /// survive the parse even though the folder loader above does not use it.
+    #[test]
+    fn frontmatter_carries_the_name_for_a_skill_that_arrived_without_a_folder() {
+        let parsed = split_frontmatter(
+            "---\nname: writing-replies\ndescription: \"How to draft a good reply\"\n---\nBe brief.\n",
+        );
+        assert_eq!(parsed.name.as_deref(), Some("writing-replies"));
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("How to draft a good reply")
+        );
+        assert_eq!(parsed.body.trim(), "Be brief.");
+    }
+
+    /// A file written on Windows parses to the same body as one written on a Mac. The offsets
+    /// used to be rebuilt as `line.len() + 1`, one byte short per CRLF line, so the body started
+    /// inside the closing fence and the error grew with every frontmatter line.
+    #[test]
+    fn a_crlf_skill_parses_exactly_like_an_lf_one() {
+        let lf = split_frontmatter("---\nname: a\ndescription: d\n---\nBody\n");
+        let crlf = split_frontmatter("---\r\nname: a\r\ndescription: d\r\n---\r\nBody\r\n");
+        assert_eq!(crlf.name, lf.name);
+        assert_eq!(crlf.description, lf.description);
+        assert_eq!(crlf.body.trim_end(), "Body");
+        assert!(crlf.closed);
+
+        // The error used to compound, so a long frontmatter is the case that proves the fix:
+        // with eight lines the tail of the last one landed in the body.
+        let many = "---\r\n".to_string()
+            + &(1..=8)
+                .map(|n| format!("key{n}: value{n}\r\n"))
+                .collect::<String>()
+            + "description: kept\r\n---\r\nThe body, whole.\r\n";
+        let parsed = split_frontmatter(&many);
+        assert_eq!(parsed.description.as_deref(), Some("kept"));
+        assert_eq!(parsed.body.trim_end(), "The body, whole.");
+        assert!(
+            !parsed.body.contains("value8") && !parsed.body.contains('-'),
+            "no frontmatter leaked into the body: {:?}",
+            parsed.body
+        );
+    }
+
+    /// A mistyped closing fence must not look like a successful parse of an empty skill.
+    #[test]
+    fn an_unclosed_fence_keeps_every_byte_and_says_it_is_unclosed() {
+        let text = "---\nname: a\ndescription: d\nBody with no closing fence.\n";
+        let parsed = split_frontmatter(text);
+        assert!(!parsed.closed, "the fence was never closed");
+        assert_eq!(parsed.body, text, "nothing is dropped on the floor");
+        assert_eq!(parsed.name, None, "an unread block claims nothing");
+        assert_eq!(parsed.description, None);
+
+        // A document with no frontmatter at all has nothing to close, so it is not "unclosed".
+        assert!(split_frontmatter("Just instructions.\n").closed);
+    }
+
+    /// ONE BLANK LINE was enough to smuggle a whole frontmatter block into a body, and the body
+    /// is what a coworker is given as instructions. Reproduced by a reviewer on the from-tape
+    /// route, where the writer is a model rather than a person and puts one there by habit.
+    #[test]
+    fn a_fence_after_a_blank_line_is_still_frontmatter() {
+        for text in [
+            "\n---\nname: a\ndescription: d\n---\nBody\n",
+            "  \n\t---\nname: a\ndescription: d\n---\nBody\n",
+            "\u{feff}\n---\nname: a\ndescription: d\n---\nBody\n",
+        ] {
+            let parsed = split_frontmatter(text);
+            assert_eq!(parsed.name.as_deref(), Some("a"), "{text:?}");
+            assert_eq!(parsed.description.as_deref(), Some("d"), "{text:?}");
+            assert_eq!(parsed.body.trim(), "Body", "{text:?}");
+            assert!(parsed.closed, "{text:?}");
+        }
+        // And its unclosed twin is refusable rather than storable: the pair used to disagree.
+        assert!(!split_frontmatter("\n---\nname: a\nBody\n").closed);
+        assert!(!split_frontmatter("---\nname: a\nBody\n").closed);
     }
 
     /// A skill without frontmatter is still a skill; its body must survive whole.
     #[test]
     fn a_skill_without_frontmatter_keeps_all_of_its_text() {
-        let dir = a_plugin();
-        let plugin = Plugin::load(dir.path()).unwrap();
-        let skill = plugin
-            .skills
-            .iter()
-            .find(|skill| skill.name == "triage")
-            .unwrap();
-        assert_eq!(skill.description, None);
-        assert!(skill.body.contains("just instructions"));
-    }
-
-    /// Skills arrive in a stable order: an unstable prompt is an unreproducible run.
-    #[test]
-    fn skills_are_ordered_the_same_way_every_time() {
-        let dir = a_plugin();
-        let names: Vec<_> = Plugin::load(dir.path())
-            .unwrap()
-            .skills
-            .into_iter()
-            .map(|skill| skill.name)
-            .collect();
-        assert_eq!(names, vec!["triage", "writing-replies"]);
+        let parsed = split_frontmatter("No frontmatter here, just instructions.\n");
+        assert_eq!(parsed.description, None);
+        assert_eq!(parsed.name, None);
+        assert!(parsed.body.contains("just instructions"));
     }
 
     /// Client-specific data belongs to somebody else and must pass through untouched.
@@ -505,26 +584,15 @@ mod tests {
         );
     }
 
-    /// Both halves are optional, because plugins exist that are only one of them.
+    /// A manifest alone is a plugin: `mcp.json` is optional, and a bundle that declares no server
+    /// still loads rather than being refused for what it does not have.
     #[test]
-    fn a_plugin_may_be_only_skills_or_only_servers() {
+    fn a_plugin_without_servers_still_loads() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"name":"words-only"}"#);
-        write(dir.path(), "skills/a/SKILL.md", "just words");
+        write(dir.path(), "plugin.json", r#"{"name":"nothing-much"}"#);
         let plugin = Plugin::load(dir.path()).unwrap();
         assert!(plugin.mcp.servers.is_empty());
-        assert_eq!(plugin.skills.len(), 1);
-
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "plugin.json", r#"{"name":"tools-only"}"#);
-        write(
-            dir.path(),
-            "mcp.json",
-            r#"{"mcpServers":{"a":{"type":"stdio","command":"x"}}}"#,
-        );
-        let plugin = Plugin::load(dir.path()).unwrap();
-        assert!(plugin.skills.is_empty());
-        assert_eq!(plugin.mcp.servers.len(), 1);
+        assert_eq!(plugin.manifest.name, "nothing-much");
     }
 
     #[test]
@@ -594,13 +662,5 @@ mod tests {
             .unwrap()
             .with_trust(Trust::Verified);
         assert!(plugin.tools_needing_approval().is_empty());
-    }
-
-    /// A stray folder must not stop the rest of a plugin's skills from loading.
-    #[test]
-    fn a_directory_without_a_skill_file_is_skipped_quietly() {
-        let dir = a_plugin();
-        fs::create_dir_all(dir.path().join("skills/not-a-skill")).unwrap();
-        assert_eq!(Plugin::load(dir.path()).unwrap().skills.len(), 2);
     }
 }

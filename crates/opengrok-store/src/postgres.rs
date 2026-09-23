@@ -2727,11 +2727,17 @@ impl PgStore {
             "{select}
               join recipe_share s on s.recipe_id = r.id
              where r.deleted_at_ms is null and r.owner_id <> $1
-               and ((s.scope = 'account' and s.scope_id = $1) or (s.scope = 'org' and s.scope_id = $2))
+               and ((s.scope = 'account' and s.scope_id = $1)
+                 or (s.scope = 'org' and $2 is not null and s.scope_id <> '' and s.scope_id = $2))
              order by r.updated_at_ms desc"
         )))
         .bind(account_id)
-        .bind(org_id.unwrap_or(""))
+        // AN EMPTY ORG IS NO ORG, and it is checked on BOTH sides. `unwrap_or("")` used to
+        // collapse "no org" into an org id of `''`, which matched any `recipe_share` row written
+        // with the same empty id — every person in no org would have been shown every other
+        // orgless person's shared recipes. A NULL matches nothing, and `scope_id <> ''`
+        // neutralises a row an older build may already have written.
+        .bind(org_id.filter(|org| !org.is_empty()))
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::new();
@@ -2975,18 +2981,22 @@ impl PgStore {
         .bind(account_id)
         .fetch_optional(&self.pool)
         .await?;
-        let via_org = match org_id {
+        // The org that answered, not merely whether one did: the insert below stamps it into
+        // `granted_by`, and re-deriving it there is how `unwrap_or("")` got in. `scope_id <> ''`
+        // neutralises a row an older build may already have written with an empty org.
+        let via_org: Option<&str> = match org_id.filter(|org| !org.is_empty()) {
             Some(org) => sqlx::query(
-                "select 1 from recipe_share where recipe_id = $1 and scope = 'org' and scope_id = $2",
+                "select 1 from recipe_share
+                  where recipe_id = $1 and scope = 'org' and scope_id <> '' and scope_id = $2",
             )
             .bind(recipe_id)
             .bind(org)
             .fetch_optional(&self.pool)
             .await?
-            .is_some(),
-            None => false,
+            .map(|_| org),
+            None => None,
         };
-        if direct.is_none() && !via_org {
+        if direct.is_none() && via_org.is_none() {
             return Ok(false);
         }
         let (accepted, declined) = if accept {
@@ -3005,7 +3015,7 @@ impl PgStore {
             .bind(declined)
             .execute(&self.pool)
             .await?;
-        } else {
+        } else if let Some(org) = via_org {
             sqlx::query(
                 "insert into recipe_share (recipe_id, scope, scope_id, granted_by, granted_at_ms, accepted_at_ms, declined_at_ms)
                  values ($1, 'account', $2, 'org:' || $3, $4, $5, $6)
@@ -3014,7 +3024,7 @@ impl PgStore {
             )
             .bind(recipe_id)
             .bind(account_id)
-            .bind(org_id.unwrap_or(""))
+            .bind(org)
             .bind(at_ms)
             .bind(accepted)
             .bind(declined)

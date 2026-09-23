@@ -160,7 +160,9 @@ fn honour_preferences(preferred: &[String], runner: Option<&ToolRunner>) -> Vec<
 /// sentence: they named the task and its inputs. Carrying that through means the model does not
 /// have to infer a search term from prose — which is exactly how one turn came to search a word
 /// lifted from the conversation instead of the one that was asked for.
-fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String, String>)> {
+pub(super) fn chosen_recipe_from(
+    input: &RunAgentInput,
+) -> Option<(String, BTreeMap<String, String>)> {
     let recipe = input
         .forwarded_props
         .get("recipe")
@@ -168,9 +170,16 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
         .map(str::trim)
         .filter(|id| !id.is_empty())?
         .to_string();
-    let values = input
-        .forwarded_props
-        .get("recipeValues")
+    Some((
+        recipe,
+        recipe_values_from(input.forwarded_props.get("recipeValues")),
+    ))
+}
+
+/// A recipe's inputs as the text its steps receive. Also how a queued send's saved values are
+/// read, so a saved send and the turn that fires it cannot disagree about what was chosen.
+pub(super) fn recipe_values_from(values: Option<&serde_json::Value>) -> BTreeMap<String, String> {
+    values
         .and_then(|value| value.as_object())
         .map(|object| {
             object
@@ -188,8 +197,197 @@ fn chosen_recipe_from(input: &RunAgentInput) -> Option<(String, BTreeMap<String,
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    Some((recipe, values))
+        .unwrap_or_default()
+}
+
+/// The most a `forwardedProps.skill` may be before it is refused unread.
+///
+/// Ours are `skl_` plus a UUID — 40 characters. The bound is generous enough for a longer id shape
+/// later and small enough that a 2 MB `skill` field is refused before it reaches a log line: this
+/// value is caller-controlled, and a WARN that carries it is a record whose size the caller picks.
+const MAX_SKILL_ID_CHARS: usize = 128;
+
+/// What `forwardedProps.skill` said this turn.
+pub(super) enum ChosenSkill {
+    /// An id worth looking up: bounded, and of a shape an id we mint could have.
+    Id(String),
+    /// Something was sent and it cannot be an id — a number, an object, two megabytes of text. NOT
+    /// the same as nothing chosen, and that distinction is the point: read as "no skill", a client
+    /// that changed the field's shape would stop applying skills with no refusal, no log and
+    /// nothing anywhere for anybody to notice. Carries the KIND, never the value.
+    Unusable(&'static str),
+}
+
+/// The skill the person chose in the composer this turn, by id.
+///
+/// `forwardedProps.skill`, arriving exactly the way `chosen_recipe_from` reads a recipe. THERE IS
+/// NO `/name` PARSED OUT OF THE MESSAGE TEXT, here or anywhere: the composer already knows which
+/// skill the person picked from the list it drew them, and a second answer read out of their prose
+/// would fire on any message that happened to begin with a slash — a path, a date, a command they
+/// were quoting.
+///
+/// THIS REQUEST WINS. When it names no skill, [`skill_line_for_turn`] reuses the skill from the
+/// newest prior run on this thread that had one. A different thread does not. A run suspended on
+/// a card resumes on the message it opened with (`run.system_for_resume`), which is the same turn
+/// and therefore the same skill — WHEN one was captured. A run journalled before `system` was
+/// recorded has none, and both resume sites then compose identity and role with no tail at all,
+/// losing the skill along with the whose-computer discipline and the network line. That gap
+/// predates skills, and no turn that quotes one can reach it: a turn that composes a skill also
+/// journals the message it composed.
+pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
+    let value = input.forwarded_props.get("skill")?;
+    // Absent and null are "no skill chosen", and so is blank — a composer that always sends the
+    // key sends an empty string when nothing is picked. Everything else is a claim about a skill.
+    if value.is_null() {
+        return None;
+    }
+    let Some(id) = value.as_str() else {
+        return Some(ChosenSkill::Unusable("not a string"));
+    };
+    let id = id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if id.len() > MAX_SKILL_ID_CHARS {
+        return Some(ChosenSkill::Unusable("longer than any id"));
+    }
+    // Bounded above, and here restricted to characters an id we mint can contain. A newline in
+    // this value would otherwise be written into a WARN, where it forges a whole log record at a
+    // position the caller chooses.
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Some(ChosenSkill::Unusable("not shaped like an id"));
+    }
+    Some(ChosenSkill::Id(id.to_string()))
+}
+
+/// The skill segment of this turn's system message: the person's instructions quoted between
+/// unforgeable markers, or the sentence saying they were not.
+///
+/// EVERY PATH OUT OF HERE SAYS SOMETHING. A chosen skill that cannot be given is the case the
+/// refusal line exists for, so returning an empty string on any of these would be precisely the
+/// silence it was written to prevent.
+async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSkill) -> String {
+    // EVERY REFUSAL BELOW GOES THROUGH `NotForThisTurn::line`, including the two this function
+    // decides itself. A sentence chosen at the call site is a sentence that drifts from the table
+    // that decides the rest.
+    let id = match chosen {
+        ChosenSkill::Unusable(kind) => {
+            // The VALUE is not logged. It is caller-controlled and unbounded, so a WARN carrying
+            // it is a log record whose size and contents the caller writes; the kind is what tells
+            // a client shape change from somebody probing.
+            let why = crate::skills::NotForThisTurn::NotAnId;
+            tracing::warn!(kind, why = ?why, "a turn carried a `skill` that cannot be an id");
+            return why.line().to_string();
+        }
+        ChosenSkill::Id(id) => id,
+    };
+    let skill = match crate::skills::for_turn(state, account, id).await {
+        Ok(skill) => skill,
+        Err(why) => {
+            // `?` on both, not `%`: the id is caller-controlled and `why` carries a store error
+            // verbatim, and Display writes a newline as a newline — one forged log record per
+            // request, at a position the caller picks. Which case it was is recorded here and
+            // nowhere else: the sentence the person reads names no cause at all.
+            tracing::warn!(skill = ?id, why = ?why, "a chosen skill was not given to a turn");
+            return why.line().to_string();
+        }
+    };
+    let quoted = crate::persona::skill_marker(&skill.body)
+        .map(|marker| {
+            crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author)
+        })
+        .filter(|segment| !segment.is_empty());
+    match quoted {
+        Some(segment) => segment,
+        None => {
+            // No marker the body does not already contain, so the quote could not be closed where
+            // we say it closes. Refuse rather than quote it unbounded.
+            let why = crate::skills::NotForThisTurn::Unquotable;
+            tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+            why.line().to_string()
+        }
+    }
+}
+
+/// The skill line for this turn, and the id to record on `RunEvent::Started`.
+///
+/// An id on this request is used as sent. None means look at prior runs on this
+/// thread, newest first, and take the first that quoted a skill. A refusal line
+/// records no id, so a skill that cannot be given does not stick.
+async fn skill_line_for_turn(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+    input: &RunAgentInput,
+) -> (String, Option<String>) {
+    let chosen = match chosen_skill_from(input) {
+        Some(chosen) => chosen,
+        None => match inherited_skill_id(state, account, thread_id).await {
+            Some(id) => ChosenSkill::Id(id),
+            None => return (String::new(), None),
+        },
+    };
+    let id = match &chosen {
+        ChosenSkill::Id(id) => Some(id.clone()),
+        ChosenSkill::Unusable(_) => None,
+    };
+    let line = skill_segment(state, account, &chosen).await;
+    let recorded = line
+        .contains("For THIS message the person chose the skill `")
+        .then_some(id)
+        .flatten();
+    (line, recorded)
+}
+
+/// Newest prior run on this thread, owned by this account, that quoted a skill.
+/// Walks past a turn that recorded none: that is the follow-up which dropped the
+/// skill (run 01a0c9ef) and the turn before it still has the body.
+async fn inherited_skill_id(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+) -> Option<String> {
+    let runs = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(thread_id, account, 8)
+        .await
+        .ok()?;
+    for run in runs {
+        let loaded = match state.auth.store.load_run(&run.id).await {
+            Ok((loaded, _)) => loaded,
+            Err(error) => {
+                tracing::warn!(%error, "could not read a prior run while inheriting a skill");
+                continue;
+            }
+        };
+        if let Some(skill_id) = loaded
+            .skill_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(skill_id.to_string());
+        }
+        if let Some(name) = loaded
+            .system
+            .as_deref()
+            .and_then(crate::persona::skill_name_from_system)
+        {
+            match state.auth.store.skill_named(account.as_str(), name).await {
+                Ok(Some(row)) => return Some(row.id),
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%error, "could not resolve an inherited skill by name");
+                    return None;
+                }
+            }
+        }
+    }
+    None
 }
 
 fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
@@ -746,7 +944,10 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/computer/reset",
             post(computer_reset),
         )
-        .with_state(state)
+        .with_state(state.clone())
+        // Pending user messages: NativeChat's follow-up queue. Nested under the thread they
+        // belong to, because `GET /ag-ui/threads/{id}` is already how other clients hydrate.
+        .merge(super::pending::router(state))
 }
 
 /// `GET /models` — the routes this deployment's gateway advertises.
@@ -2274,10 +2475,61 @@ pub async fn run(
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
+    }
+
+    // Refuse stale sends before interrupting a parked turn or preparing any model work.
+    if let Some(account) = &account_id {
+        if let Err(refusal) =
+            crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
+        {
+            return refusal;
+        }
+    } else if crate::agui::pending::pending_id_from(&input).is_some() {
+        return (StatusCode::UNAUTHORIZED, "sign in to send a queued message").into_response();
+    }
+
+    // PAST THE CLAIM, A HANG-UP MUST NOT CANCEL THE TURN. The queued send is drained now, and the
+    // setup below waits on a box wake, the store and the door. Run inline, a client that timed
+    // out there dropped this future and left the row drained under a run that never started. The
+    // turn itself was always spawned; now the setup that leads to it is too.
+    let turn = tokio::spawn(start_claimed_turn(
+        gateway,
+        input,
+        account_id,
+        run_coworker,
+        model,
+        coworker_name,
+        coworker_role,
+    ));
+    match turn.await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error, "a claimed turn's setup did not finish");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this turn could not be started",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Everything a turn does once any queued send it fires has been claimed.
+async fn start_claimed_turn(
+    gateway: crate::host_state::HostState,
+    input: RunAgentInput,
+    account_id: Option<opengrok_core::id::AccountId>,
+    run_coworker: Option<CoworkerId>,
+    model: String,
+    coworker_name: String,
+    coworker_role: Option<String>,
+) -> Response {
+    let state = gateway.agui.clone();
+    if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
         crate::agui::resume::interrupt_parked_hitl(
             &gateway,
             account_id,
-            &coworker_id,
+            coworker_id,
             account_id.as_str(),
         )
         .await;
@@ -2320,6 +2572,7 @@ pub async fn run(
     // role never reached the model. Anonymous runs still compose nothing — there is nobody to
     // introduce, and loading a named coworker's role without a principal would leak configuration
     // by the shape of the reply.
+    let mut recorded_skill: Option<String> = None;
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
             let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
@@ -2360,11 +2613,19 @@ pub async fn run(
                 }
                 _ => String::new(),
             };
+            // The skill the person chose, read against the account the token named and never
+            // against anything in the body. A skill that cannot be given does not cost the turn —
+            // it costs the skill, and the coworker is told to say so rather than answer as though
+            // it had followed instructions it never saw (CLAUDE.md #8). No id on this request
+            // reuses the skill from a prior run on this thread.
+            let (skill_line, skill_id) =
+                skill_line_for_turn(&state, account_id, &input.thread_id, &input).await;
+            recorded_skill = skill_id;
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}{}",
+                    "{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2375,11 +2636,29 @@ pub async fn run(
                     crate::persona::network_off_line(network_off, network_unconfirmed),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
+                    // LAST, AFTER EVERY SEGMENT THAT SAYS WHAT THIS COWORKER MAY DO. A skill body
+                    // is prose a person wrote; it must not be able to read as granting itself
+                    // something the segments above just withheld. `persona::chosen_skill_line`
+                    // carries the rest of the reason, and an empty one adds nothing at all — a
+                    // turn with no skill is byte-for-byte the turn we had before.
+                    skill_line,
                 )),
             );
             if text.is_empty() { None } else { Some(text) }
         }
-        _ => None,
+        // A turn with no coworker composes no persona — there is nobody to introduce, and loading
+        // a named coworker's role without a principal would leak configuration by the shape of the
+        // reply. A SKILL CHOSEN ON SUCH A TURN IS STILL SOMETHING THE PERSON ASKED FOR AND IS NOT
+        // GETTING, and dropping it here without a word was exactly the silence the refusal line
+        // exists to prevent. It is the generic sentence because there is no account to resolve the
+        // skill against, and trimmed because there is no paragraph above it to join.
+        _ => match chosen_skill_from(&input) {
+            Some(_) => {
+                tracing::warn!("a turn carried a chosen skill with no coworker to give it to");
+                Some(crate::persona::SKILL_UNAVAILABLE_LINE.trim().to_string())
+            }
+            None => None,
+        },
     };
 
     let mut messages = to_chat_messages(&input);
@@ -2387,6 +2666,20 @@ pub async fn run(
     // about the same coworker; drop it when we composed one.
     if system.is_some() {
         messages.retain(|message| message.role != "system");
+    }
+    // NativeChat steer is stop, then a new run whose body is chat bubbles. A stopped
+    // turn often has tool results and no assistant text, so the next run repeats the
+    // work. Splice those results in front of the new message. A finished answer is
+    // already in the bubbles. A parked card is a fresh turn, not a continuation.
+    if let Some(account) = &account_id {
+        continue_stopped_turn(
+            &state,
+            account,
+            &input.thread_id,
+            &input.run_id,
+            &mut messages,
+        )
+        .await;
     }
 
     let request = ModelRequest {
@@ -2412,6 +2705,7 @@ pub async fn run(
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
         system,
+        skill_id: recorded_skill,
     };
 
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
@@ -2478,6 +2772,9 @@ pub struct StoreJournal {
     /// pin: a role edited while a person answered an approval card must not change the coworker
     /// halfway through the turn.
     pub system: Option<String>,
+    /// The skill quoted into `system`, recorded so the next message on this thread
+    /// can reuse it when the client sends no skill id.
+    pub skill_id: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -2496,6 +2793,7 @@ impl opengrok_harness::RunJournal for StoreJournal {
                 coworker_id: self.coworker_id.as_ref(),
                 model: self.model.as_deref(),
                 system: self.system.as_deref(),
+                skill_id: self.skill_id.as_deref(),
             },
             events,
         )
@@ -2532,6 +2830,7 @@ struct RunStart<'a> {
     coworker_id: Option<&'a CoworkerId>,
     model: Option<&'a str>,
     system: Option<&'a str>,
+    skill_id: Option<&'a str>,
 }
 
 async fn append_events(
@@ -2546,6 +2845,7 @@ async fn append_events(
         coworker_id,
         model,
         system,
+        skill_id,
     } = *start;
     if events.is_empty() {
         return Ok(());
@@ -2566,6 +2866,10 @@ async fn append_events(
                     .filter(|pin| !pin.is_empty())
                     .map(str::to_string),
                 system: system.map(str::to_string).filter(|text| !text.is_empty()),
+                skill_id: skill_id
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string),
                 at_ms,
             })
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -2889,6 +3193,15 @@ pub async fn replay_thread(
             return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
         }
     };
+    let pending =
+        match crate::agui::pending::thread_pending_json(&state.auth.store, &thread_id, &account_id)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+            }
+        };
     if newest_first.is_empty() && hidden.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
@@ -2957,8 +3270,23 @@ pub async fn replay_thread(
         });
     }
 
-    Json(serde_json::json!({ "threadId": thread_id, "runs": runs, "hiddenRunIds": hidden }))
-        .into_response()
+    let mut body = serde_json::json!({
+        "threadId": thread_id,
+        "runs": runs,
+        "hiddenRunIds": hidden,
+    });
+    // Sibling of `runs`, never mixed into a run's frames: a queued send is not a turn yet, and
+    // dropping it into `events` would make NativeChat paint a bubble as if the coworker had
+    // already seen it. `pendingEvents` are CUSTOM `pending-user-message` snapshots for clients
+    // that already walk CUSTOM; `pendingUserMessages` is the array to replace a local queue with.
+    if let Some(object) = body.as_object_mut()
+        && let Some(pending) = pending.as_object()
+    {
+        for (key, value) in pending {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    Json(body).into_response()
 }
 
 /// Hide a turn from every client of the account that owns it.
@@ -3453,6 +3781,152 @@ pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessag
     messages
 }
 
+/// How many tool results from a stopped turn are worth showing the next one.
+/// One per model call, so a turn that hit the 8-call cap still shows every result.
+const STEER_TOOL_CAP: usize = 8;
+/// Bound one result so a shell dump cannot become the next prompt.
+const STEER_TOOL_CHARS: usize = 800;
+
+const STEER_CONTINUATION: &str = "[harness] The previous turn on this thread stopped or failed \
+before it answered. Those tool results are that turn. Continue from them and from the person's \
+latest message. Do not repeat a command that already returned ok.";
+
+/// A stopped or failed turn's tools are the work a steer should continue.
+/// A parked approval is a card the new message is declining, not a plan to resume.
+/// A finished turn already put its answer in the chat bubbles.
+pub(crate) fn prior_turn_can_continue(status: RunStatus, payloads: &[serde_json::Value]) -> bool {
+    let parked = payloads.iter().any(|payload| {
+        payload.get("name").and_then(serde_json::Value::as_str) == Some("run-awaiting-approval")
+    });
+    if parked {
+        return false;
+    }
+    matches!(
+        status,
+        RunStatus::Stopped | RunStatus::Failed | RunStatus::Running
+    )
+}
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}…")
+}
+
+/// Tool calls a turn already made, in order, as messages the next turn can read.
+/// The command rides with the result. A result alone does not say what was run.
+pub(crate) fn unfinished_tool_messages(payloads: &[serde_json::Value]) -> Vec<ChatMessage> {
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut arguments: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for payload in payloads {
+        let kind = payload
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let id = payload
+            .get("toolCallId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        match kind {
+            "TOOL_CALL_START" => {
+                if let Some(name) = payload
+                    .get("toolCallName")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    names.insert(id, name.to_string());
+                }
+            }
+            "TOOL_CALL_ARGS" => {
+                if let Some(delta) = payload.get("delta").and_then(serde_json::Value::as_str) {
+                    arguments.entry(id).or_default().push_str(delta);
+                }
+            }
+            "TOOL_CALL_RESULT" => {
+                let content = payload
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if content.is_empty() {
+                    continue;
+                }
+                let name = names.get(&id).map(String::as_str).unwrap_or("tool");
+                let args = arguments.get(&id).map(String::as_str).unwrap_or("");
+                out.push(ChatMessage {
+                    images: Vec::new(),
+                    role: "user".to_string(),
+                    content: format!(
+                        "[earlier {name} {}] {}",
+                        clip_chars(args, 400),
+                        clip_chars(content, STEER_TOOL_CHARS)
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    if out.len() > STEER_TOOL_CAP {
+        out = out.split_off(out.len() - STEER_TOOL_CAP);
+    }
+    out
+}
+
+/// Put the stopped turn's tools immediately before the person's new message.
+pub(crate) fn splice_unfinished_tools(messages: &mut Vec<ChatMessage>, prior: Vec<ChatMessage>) {
+    if prior.is_empty()
+        || messages
+            .iter()
+            .any(|message| message.content.contains(STEER_CONTINUATION))
+    {
+        return;
+    }
+    let mut block = prior;
+    block.push(ChatMessage {
+        images: Vec::new(),
+        role: "user".to_string(),
+        content: STEER_CONTINUATION.to_string(),
+    });
+    let at = messages
+        .iter()
+        .rposition(|message| message.role == "user")
+        .unwrap_or(messages.len());
+    messages.splice(at..at, block);
+}
+
+/// Newest prior run on this thread, when it stopped or failed with tools and
+/// was not parked on a card.
+async fn continue_stopped_turn(
+    state: &AgUiState,
+    account: &AccountId,
+    thread_id: &str,
+    this_run_id: &str,
+    messages: &mut Vec<ChatMessage>,
+) {
+    let Ok(runs) = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(thread_id, account, 4)
+        .await
+    else {
+        return;
+    };
+    let Some(prior) = runs.into_iter().find(|run| run.id.as_str() != this_run_id) else {
+        return;
+    };
+    let Ok((loaded, _)) = state.auth.store.load_run(&prior.id).await else {
+        return;
+    };
+    if !prior_turn_can_continue(loaded.status, &loaded.emitted) {
+        return;
+    }
+    let tools = unfinished_tool_messages(&loaded.emitted);
+    splice_unfinished_tools(messages, tools);
+}
+
 /// Carry an answered run on, without waiting for anybody to ask again.
 ///
 /// THE SERVER PICKS IT BACK UP. A run that only continues when the next request happens to arrive
@@ -3541,6 +4015,7 @@ async fn continue_run(
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
         system: Some(system.clone()),
+        skill_id: run.skill_id.clone(),
     };
 
     let request = ModelRequest {
@@ -3850,7 +4325,7 @@ fn reply_quote(
 /// IDEMPOTENT ON PURPOSE. A client that cannot rely on this field spells the quote into `content`
 /// itself — NativeChat does, so a reply works against a server that predates `replyTo` — and
 /// saying it twice is worse than not reading the field at all.
-fn with_reply_context(
+pub(super) fn with_reply_context(
     content: &str,
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],
@@ -4057,6 +4532,62 @@ mod tests {
     use opengrok_harness::MockDoor;
     use opengrok_wire::agui::{EventType, Message};
     use serde_json::json;
+
+    #[test]
+    fn a_stopped_turn_continues_and_a_parked_card_does_not() {
+        assert!(prior_turn_can_continue(RunStatus::Stopped, &[]));
+        assert!(prior_turn_can_continue(RunStatus::Failed, &[]));
+        assert!(!prior_turn_can_continue(RunStatus::Finished, &[]));
+        assert!(!prior_turn_can_continue(
+            RunStatus::Stopped,
+            &[json!({"type":"CUSTOM","name":"run-awaiting-approval"})]
+        ));
+
+        let tools = unfinished_tool_messages(&[
+            json!({"type":"TOOL_CALL_START","toolCallId":"c1","toolCallName":"user_machine_shell"}),
+            json!({"type":"TOOL_CALL_ARGS","toolCallId":"c1","delta":"{\"command\":\"gpui-agent invoke profile.create\"}"}),
+            json!({"type":"TOOL_CALL_RESULT","toolCallId":"c1","content":"exit 0\n--- stdout ---\n{\"result\":{\"view\":\"profile-manager\"}}"}),
+        ]);
+        assert_eq!(tools.len(), 1);
+        assert!(
+            tools[0].content.contains("profile.create"),
+            "{}",
+            tools[0].content
+        );
+        assert!(
+            tools[0].content.contains("profile-manager"),
+            "{}",
+            tools[0].content
+        );
+
+        let mut messages = vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: "create Juana Jane".to_string(),
+                images: Vec::new(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "tin number should be 00000000000001".to_string(),
+                images: Vec::new(),
+            },
+        ];
+        splice_unfinished_tools(&mut messages, tools);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "create Juana Jane");
+        assert!(messages[1].content.contains("profile.create"));
+        assert!(messages[2].content.contains("previous turn"));
+        assert_eq!(messages[3].content, "tin number should be 00000000000001");
+
+        let again = messages.clone();
+        let mut doubled = again.clone();
+        splice_unfinished_tools(&mut doubled, again);
+        assert_eq!(
+            doubled.len(),
+            4,
+            "a second splice does not repeat the block"
+        );
+    }
 
     fn input(messages: Vec<Message>) -> RunAgentInput {
         RunAgentInput {

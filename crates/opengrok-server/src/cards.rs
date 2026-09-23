@@ -66,8 +66,9 @@ pub const POLICY_ASK_REASON: &str =
 
 /// The in-chat `user-form` card. Transcribed from official 0.29/0.30 `user-form/view.tsx`:
 /// `message.type` is `user-form`, `formRequest` is the field schema, and `formResolution` is a
-/// sibling of `message` (not inside it). Identity keys and any `values` the model smuggled are
-/// dropped so a password cannot sit on the entry waiting for submit.
+/// sibling of `message` (not inside it). Identity keys and a login card's field values are
+/// dropped so a password cannot sit on the entry. A collect card keeps non-secret `value`
+/// prefills. `sanitize_arguments` is what enforces that split.
 pub fn user_form_card(
     entry_id: &str,
     arguments: &Value,

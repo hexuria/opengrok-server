@@ -124,6 +124,7 @@ async fn seed_run(
             coworker_id: None,
             model: None,
             system: None,
+            skill_id: None,
             at_ms,
         })
         .expect("start");

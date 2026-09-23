@@ -25,10 +25,12 @@ pub mod autonomy;
 pub mod gateway;
 pub mod identity;
 pub mod migrations;
+pub mod pending;
 pub mod points;
 pub mod postgres;
 pub mod purge;
 pub mod replica;
+pub mod skills;
 pub mod spend;
 pub mod templates;
 pub mod vault;
@@ -38,6 +40,10 @@ pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
 };
+pub use pending::{
+    DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
+    PendingUserMessageRow,
+};
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
     ArtifactRow, CredentialUpdate, PasskeyMeta, PasskeyWrite, PgStore, RecipeGrantRow, RecipeRow,
@@ -46,6 +52,7 @@ pub use postgres::{
 };
 pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
+pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};

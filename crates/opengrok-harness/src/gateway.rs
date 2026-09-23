@@ -66,15 +66,33 @@ impl GatewayDoor {
 /// exhausted", "the monthly budget for this principal is exhausted"); the sentence a person reads
 /// keeps those words and says what to do about them. A key cap does not reset — it is a wall at
 /// the number written on it — so "raise it" is the only way through that one.
+/// The 402 the gateway sent, as a sentence a person can act on.
+///
+/// THE UPSTREAM DETAIL IS BOUNDED AND FLATTENED, because this string is user-facing twice over:
+/// it is what a transcript shows, and `skills::from_tape` answers 402 with it. `error.message` is
+/// chosen by the far side — a gateway having a bad day answers with an HTML page, a stack trace
+/// or an internal identifier, and all of it used to travel whole. `Refused` below has been
+/// bounded to 500 characters since the day it was written; this is the one people read.
 fn spend_cap_sentence(body: &str) -> String {
     let detail = serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|value| value["error"]["message"].as_str().map(str::to_string))
+        .and_then(|value| value["error"]["message"].as_str().map(bounded))
         .unwrap_or_else(|| "a spend cap is reached".to_string());
     format!(
         "This coworker cannot take a turn: {detail}. Raise its cap in the console (a key's cap \
          does not reset), or wait for a monthly budget to reset."
     )
+}
+
+/// One upstream sentence, on one line, short enough to read. See `spend_cap_sentence`.
+fn bounded(message: &str) -> String {
+    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 200 {
+        let kept: String = flat.chars().take(200).collect();
+        format!("{kept}…")
+    } else {
+        flat
+    }
 }
 
 /// One `data:` frame of an OpenAI-dialect stream. Only the fields we act on are named; the rest
@@ -382,7 +400,10 @@ impl ModelDoor for GatewayDoor {
             None => self.key.as_str(),
             Some(crate::model::GatewayKey::Own(key)) => key.as_str(),
             Some(crate::model::GatewayKey::Unavailable(reason)) => {
-                return Err(ModelError::SpendCap(format!(
+                // HELD, NOT CAPPED: the key could not be produced, which is a fault on this side
+                // or in the vault. The sentence says "held" and always did; the variant now
+                // agrees with it.
+                return Err(ModelError::Held(format!(
                     "This coworker's own gateway key could not be used: {reason}. Its turns are \
                      held rather than run on the deployment's key, which would step around its cap."
                 )));

@@ -45,11 +45,16 @@ echo "3. the message events are properly nested"
 # fragments a model happened to emit, and would break the moment streaming got finer-grained —
 # which is exactly what happened when the stub was replaced by the real harness.
 sequence=$(echo "$events" | jq -r '.type' | tr '\n' ' ')
+# Compact CUSTOM `run-timing` sits immediately before the closer so a consumer
+# can show a debug clock without holding the spinner (which keys off RUN_FINISHED).
 case "$sequence" in
   "RUN_STARTED TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT"*"TEXT_MESSAGE_END RUN_FINISHED ") ;;
+  "RUN_STARTED TEXT_MESSAGE_START TEXT_MESSAGE_CONTENT"*"TEXT_MESSAGE_END CUSTOM RUN_FINISHED ") ;;
   *) fail "sequence was: $sequence" ;;
 esac
 ok "start, content(s), end — in order"
+echo "$events" | jq -e 'select(.type == "CUSTOM" and .name == "run-timing")' >/dev/null \
+  || fail "expected compact CUSTOM run-timing before RUN_FINISHED"
 
 echo "4. our ids come back, not ids the server invented"
 # openbot correlates its own UI against these; minting our own would orphan the reply.
