@@ -106,6 +106,7 @@ async fn abandon_a_run(
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
             system: None,
+            skill_id: None,
             at_ms: now_ms(),
         })
         .expect("start");

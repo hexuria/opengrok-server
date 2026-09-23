@@ -663,6 +663,42 @@ pub async fn enqueue_and_wait(
     }
 }
 
+/// What the daemon evals before the model's command.
+///
+/// The daemon is a GUI process. Its shell is `/bin/sh`, whose PATH is
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, so `gpui-agent` in `~/.cargo/bin` is
+/// `command not found`. A function named `gpui-agent` is illegal there
+/// (`not a valid identifier`). A temp script of that name is worse: the shell
+/// deletes it on exit, and the next command repeats the dead path. eBIRForms
+/// refuses a client without `GPUI_AGENT_TOKEN`. That value is in the host
+/// process, not in this daemon. Copy it into the environment from whichever
+/// of 17423 or 17421 is listening. The assignment uses the lookup, never a
+/// literal. `tr` uses `\012` because `$(printf '\n')` is empty after command
+/// substitution strips the newline. The gate and the audit keep `command` as
+/// the model wrote it, so an allow rule of `gpui-agent` still matches.
+const USER_MACHINE_SHELL_PREAMBLE: &str = r#"export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; if [ -z "${GPUI_AGENT_TOKEN:-}" ]; then _gpui_pid=""; for _gpui_port in 17423 17421; do _gpui_pid=$(lsof -nP -iTCP:"$_gpui_port" -sTCP:LISTEN -t 2>/dev/null | head -1); if [ -n "$_gpui_pid" ]; then break; fi; done; if [ -n "$_gpui_pid" ]; then _gpui_token=$(ps -wwE -p "$_gpui_pid" -o command= 2>/dev/null | tr ' ' '\012' | sed -n 's/^GPUI_AGENT_TOKEN=//p' | head -1); if [ -n "$_gpui_token" ]; then export GPUI_AGENT_TOKEN="$_gpui_token"; fi; fi; unset _gpui_pid _gpui_port _gpui_token; fi; "#;
+
+fn command_with_user_bin_path(command: &str) -> String {
+    format!("{USER_MACHINE_SHELL_PREAMBLE}{command}")
+}
+
+/// The shell frame `run_on_machine` sends. The PATH prefix lives here so the
+/// gate's command and this frame cannot drift apart in two call sites.
+fn user_machine_shell_message(
+    exec_id: &str,
+    command: &str,
+    simple_commands: &[String],
+    timeout_ms: u64,
+) -> serde_json::Value {
+    wire::shell_server_message(
+        exec_id,
+        &command_with_user_bin_path(command),
+        simple_commands,
+        "",
+        timeout_ms,
+    )
+}
+
 /// Dispatch an approved command to a machine's daemon and wait for its result, finishing the audit
 /// row with the outcome case. Assumes the gate already said yes and the row already exists.
 async fn run_on_machine(
@@ -673,11 +709,10 @@ async fn run_on_machine(
     command: &str,
     simple_commands: &[String],
 ) -> EnqueueResult {
-    let server_message = wire::shell_server_message(
+    let server_message = user_machine_shell_message(
         request_id,
         command,
         simple_commands,
-        "",
         EXEC_TIMEOUT.as_millis() as u64,
     );
     let rx = match state
@@ -1129,5 +1164,34 @@ mod tests {
         assert!(!matches("   ", "echo hi"));
         let p = policy(LocalExecMode::Ask, &[""], &[]);
         assert_eq!(decide(&p, "echo hi"), LocalExecDecision::Ask);
+    }
+
+    #[test]
+    fn the_gate_sees_gpui_agent_and_the_wire_command_has_the_user_bin_path() {
+        let command = "gpui-agent hello";
+        let p = policy(LocalExecMode::Ask, &["gpui-agent"], &[]);
+        assert_eq!(decide(&p, command), LocalExecDecision::Allow);
+        let dispatched = command_with_user_bin_path(command);
+        assert_ne!(decide(&p, &dispatched), LocalExecDecision::Allow);
+        let message = user_machine_shell_message("req", command, &[command.to_string()], 1);
+        assert_eq!(
+            message["shellStreamArgs"]["command"].as_str(),
+            Some(dispatched.as_str())
+        );
+        assert_eq!(
+            message["shellStreamArgs"]["simpleCommands"][0].as_str(),
+            Some(command)
+        );
+        assert!(dispatched.starts_with(
+            "export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; "
+        ));
+        assert!(dispatched.contains("export GPUI_AGENT_TOKEN=\"$_gpui_token\""));
+        assert!(!dispatched.contains("gpui-agent()"));
+        assert!(!dispatched.contains("mktemp"));
+        assert!(dispatched.ends_with("fi; gpui-agent hello"));
+        // The value is read from the host process. The audited string must not
+        // carry a literal secret, and it must not name a temp shim.
+        assert!(!dispatched.contains("dev-secret"));
+        assert!(!dispatched.contains("/T/tmp."));
     }
 }

@@ -624,6 +624,7 @@ async fn resume_suspended_run(
         coworker_id: Some(coworker_id.clone()),
         model: run.model.clone(),
         system: Some(system.clone()),
+        skill_id: run.skill_id.clone(),
     };
     let request = ModelRequest {
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,

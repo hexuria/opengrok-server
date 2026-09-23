@@ -152,6 +152,9 @@ fn looks_like_write(command: &str) -> bool {
 
 fn looks_like_listing_or_show(command: &str) -> bool {
     let first = command.split_whitespace().next().unwrap_or("");
+    // `gpui-agent hello` and `gpui-agent invoke --help` are probes. Counting either
+    // as the one listing made the following `profile.search` a synthetic skip, and
+    // the turn closed with no sentence (run 01a0c9ed).
     matches!(
         first,
         "ls" | "cat"
@@ -164,14 +167,12 @@ fn looks_like_listing_or_show(command: &str) -> bool {
             | "stat"
             | "echo"
             | "printf"
-            | "gpui-agent"
             | "type"
     ) || command.contains("profile.list")
         || command.contains("profile.search")
         || command.contains("dues.list")
         || command.contains("forms_set.get")
         || command.contains(".list")
-        || command.contains(" invoke ")
 }
 
 /// `find ~` and `find /Users/<name>` exited 0 after about 90s on the demo machine.
@@ -215,14 +216,14 @@ fn segment_is_broad_find(segment: &str) -> bool {
 
 fn is_broad_find_root(path: &str) -> bool {
     let path = path.trim_end_matches('/');
-    if path == "~"
-        || path.starts_with("~/")
-        || path == "$HOME"
-        || path.starts_with("$HOME/")
-        || path == "${HOME}"
-        || path.starts_with("${HOME}/")
-    {
+    // Home itself, or one component under it (`$HOME/.config`). A deeper path
+    // (`$HOME/Library/Application Support`) is a directory and still runs.
+    // `starts_with("$HOME/")` used to refuse every one of those.
+    if path == "~" || path == "$HOME" || path == "${HOME}" {
         return true;
+    }
+    if let Some(rest) = home_child(path) {
+        return !rest.is_empty() && !rest.contains('/');
     }
     if path == "/Users" || path == "/Volumes" {
         return true;
@@ -236,6 +237,12 @@ fn is_broad_find_root(path: &str) -> bool {
     false
 }
 
+fn home_child(path: &str) -> Option<&str> {
+    path.strip_prefix("~/")
+        .or_else(|| path.strip_prefix("$HOME/"))
+        .or_else(|| path.strip_prefix("${HOME}/"))
+}
+
 fn is_broad_walk_call(call: &opengrok_tools::ToolCall) -> bool {
     matches!(
         call.name.as_str(),
@@ -246,12 +253,13 @@ fn is_broad_walk_call(call: &opengrok_tools::ToolCall) -> bool {
 fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolResult {
     opengrok_tools::ToolResult::refused(
         &call.id,
-        "do not search the disk for AGENT.md or this skill. The invoke names already in the skill are the catalog.",
+        "that search walks the whole home directory. The invoke names already in the skill are the catalog.",
     )
 }
 
-/// First work tool is a read-only shell/invoke for listing or showing — the
-/// NativeChat BIR `profile.list` / `dues.list` / `gpui-agent hello` case.
+/// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`).
+/// A host probe such as `gpui-agent hello` is not one: it must not consume the
+/// single listing this turn is allowed to run.
 fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
     matches!(
         call.name.as_str(),
@@ -792,6 +800,13 @@ async fn converse_raw(
     let mut work_fail_streak: u32 = 0;
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
+    // The catalog sentence to show if a later round only repeats the listing.
+    // Without it the early finish below closes the run with no TEXT_MESSAGE.
+    let mut last_listing: Option<String> = None;
+    // A shell that already selected a named target or opened a view-only editor,
+    // keyed by invoke name so quote variants are one action. The sentence is
+    // what the chat shows if that action is asked again or spends the last call.
+    let mut opened: Option<(String, String)> = None;
     let mut timing = timing::TurnTiming::new();
     let verbose_timing = timing::verbose_from_env();
 
@@ -1021,6 +1036,48 @@ async fn converse_raw(
                         is_client_render_tool(&call.name) || is_readonly_listing_shell(call)
                     });
                 if had_successful_listing && listing_only && skipped_redundant_listing {
+                    if !round_has_assistant_text(&round_events)
+                        && let Some(fact) = last_listing.clone()
+                    {
+                        emit_visible_text(&mut projection, sink, &mut round_events, fact).await;
+                    }
+                    pin_last_agent_shot(
+                        sink,
+                        &mut last_agent_shot,
+                        opengrok_tools::ImageVisibility::End,
+                        &mut round_events,
+                    )
+                    .await;
+                    let ending = projection.finish();
+                    all.extend(
+                        finish_round(
+                            journal,
+                            sink,
+                            run_id,
+                            &projection,
+                            &timing,
+                            verbose_timing,
+                            round_events,
+                            ending,
+                        )
+                        .await,
+                    );
+                    return all;
+                }
+                let same_open = opened.as_ref().is_some_and(|(previous, _)| {
+                    !calls.is_empty()
+                        && calls.iter().all(|call| {
+                            matches!(
+                                call.name.as_str(),
+                                "shell" | opengrok_tools::USER_MACHINE_SHELL
+                            ) && intent::shell_action_key(shell_command(&call.arguments))
+                                == *previous
+                        })
+                });
+                if same_open && let Some((_, sentence)) = opened.clone() {
+                    if !round_has_assistant_text(&round_events) {
+                        emit_visible_text(&mut projection, sink, &mut round_events, sentence).await;
+                    }
                     pin_last_agent_shot(
                         sink,
                         &mut last_agent_shot,
@@ -1122,8 +1179,13 @@ async fn converse_raw(
                     round_events.extend(produced);
                     let mut message = tool_result_message(result);
                     let shell_failed = intent::counts_as_work_failure(result.ok, &result.content);
-                    if result.ok && !shell_failed && is_readonly_listing_shell(call) {
+                    if result.ok
+                        && !shell_failed
+                        && is_readonly_listing_shell(call)
+                        && !skip_listing
+                    {
                         had_successful_listing = true;
+                        last_listing = Some(intent::short_failure_fact(&result.content));
                         message.content.push_str("\n\n");
                         message.content.push_str(intent::READONLY_SHELL_NUDGE);
                     } else if shell_failed && !result.awaiting_approval {
@@ -1134,6 +1196,25 @@ async fn converse_raw(
                         {
                             message.content.push_str("\n\n");
                             message.content.push_str(intent::FAILED_TOOL_NUDGE);
+                        }
+                    }
+                    if matches!(
+                        call.name.as_str(),
+                        "shell" | opengrok_tools::USER_MACHINE_SHELL
+                    ) {
+                        let opened_now = intent::opened_target_sentence(&result.content)
+                            .map(|sentence| (sentence, intent::OPENED_TARGET_NUDGE))
+                            .or_else(|| {
+                                intent::opened_editor_sentence(&result.content)
+                                    .map(|sentence| (sentence, intent::OPENED_EDITOR_NUDGE))
+                            });
+                        if let Some((sentence, nudge)) = opened_now {
+                            let key = intent::shell_action_key(shell_command(&call.arguments));
+                            if !key.is_empty() {
+                                opened = Some((key, sentence));
+                                message.content.push_str("\n\n");
+                                message.content.push_str(nudge);
+                            }
                         }
                     }
                     request.messages.push(message);
@@ -1149,17 +1230,27 @@ async fn converse_raw(
                         && !intent::counts_as_work_failure(true, &result.content)
                 });
                 if work_failed {
-                    // A missing binary, or a find of the home directory, is not fixed by
-                    // rewording the same command. Stop this round.
-                    if results.iter().zip(calls.iter()).any(|(result, call)| {
-                        intent::is_unrecoverable_command_miss(&result.content)
-                            || is_broad_walk_call(call)
-                    }) {
+                    // A missing binary is not fixed by rewording the same command. Stop
+                    // this round. A home-directory find is refused once so the model can
+                    // call the catalog; a second find reaches the streak ceiling below.
+                    // A rejected `--arg` (missing year, a JSON blob as a positional) is
+                    // the host's sentence for the model to correct. It must not spend
+                    // the one retry, or the second mistake becomes the chat bubble.
+                    let argv_mistake = results.iter().all(|result| {
+                        !intent::counts_as_work_failure(result.ok, &result.content)
+                            || intent::is_invoke_argv_mistake(&result.content)
+                    });
+                    if results
+                        .iter()
+                        .any(|result| intent::is_unrecoverable_command_miss(&result.content))
+                    {
                         work_fail_streak = intent::MAX_FAILED_WORK_ROUNDS;
-                    } else {
+                    } else if !argv_mistake {
                         work_fail_streak = work_fail_streak.saturating_add(1);
                     }
-                } else if work_ok {
+                } else if work_ok && !skip_listing {
+                    // A synthetic "already listed" ok is not a catalog read. Clearing
+                    // last_failure here is how a later skip finished with a blank chat.
                     work_fail_streak = 0;
                     last_failure = None;
                 }
@@ -1228,7 +1319,11 @@ async fn converse_raw(
                     })
                     .collect();
                 let every_call_refused = !results.is_empty() && refused.len() == results.len();
-                if every_call_refused && last_refused.as_ref() == Some(&refused) {
+                // A home-directory find is refused before it runs. The second one
+                // stops through the work-fail streak, which emits one sentence.
+                // The identical-refusal closer would fail the run with no chat line.
+                let broad_walk = calls.iter().any(is_broad_walk_call);
+                if every_call_refused && !broad_walk && last_refused.as_ref() == Some(&refused) {
                     let names: Vec<&str> = refused.iter().map(|(name, _)| name.as_str()).collect();
                     let why = results
                         .first()
@@ -1416,6 +1511,36 @@ async fn converse_raw(
                     None
                 };
                 if let Some(why) = over {
+                    if let Some((_, sentence)) = opened.clone() {
+                        let mut pin_events = Vec::new();
+                        if !round_has_assistant_text(&round_events) {
+                            emit_visible_text(&mut projection, sink, &mut pin_events, sentence)
+                                .await;
+                        }
+                        pin_last_agent_shot(
+                            sink,
+                            &mut last_agent_shot,
+                            opengrok_tools::ImageVisibility::End,
+                            &mut pin_events,
+                        )
+                        .await;
+                        let _ = record_round(journal, run_id, &pin_events).await;
+                        all.append(&mut pin_events);
+                        let ending = projection.finish();
+                        all.extend(
+                            finish_ending(
+                                journal,
+                                sink,
+                                run_id,
+                                &projection,
+                                &timing,
+                                verbose_timing,
+                                ending,
+                            )
+                            .await,
+                        );
+                        return all;
+                    }
                     let mut pin_events = Vec::new();
                     pin_last_agent_shot(
                         sink,

@@ -18,6 +18,17 @@ Do not announce another probe or run the same listing again. Do not narrate I'll
 pub const EMPTY_RESULT_NUDGE: &str = "[harness] No matches. Do not repeat the same query. \
 Answer with what was not found.";
 
+/// A click or invoke already selected a named target. Say that and stop.
+pub const OPENED_TARGET_NUDGE: &str = "[harness] That selected the target. Answer with the name \
+and where it opened. Do not run the same command again.";
+
+/// `profile.create` opens an editor and writes nothing. The next hop fills
+/// fields with a different command, or answers. Another create does not.
+pub const OPENED_EDITOR_NUDGE: &str = "[harness] That opened the editor and wrote nothing. \
+Arguments on this command were ignored. Ask for the missing fields with request_user_form \
+and collect set to true. Put values the person already gave on each field as value. \
+Do not call profile.save until that form is answered. set-value is not an invoke name.";
+
 /// After the first failed work tool: one silent fix, not a diary.
 pub const FAILED_TOOL_NUDGE: &str = "[harness] That call failed. If a one-step fix is obvious \
 (wrong port, missing flag), retry once with no narration. If it fails again, stop — the harness \
@@ -238,6 +249,92 @@ fn leading_render_exit_code(content: &str) -> Option<i32> {
             .count()
             == 1;
     is_render.then_some(code)
+}
+
+/// The invoke name when the command is `gpui-agent invoke NAME`. Quote variants
+/// of one invoke are one action. A click or `set-value` has no invoke token, so
+/// the key stays the whole command.
+pub fn shell_action_key(command: &str) -> String {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let Some(index) = tokens.iter().position(|token| *token == "invoke") else {
+        return command.to_string();
+    };
+    let Some(name) = tokens.get(index + 1) else {
+        return command.to_string();
+    };
+    let name = name.trim_matches(|c: char| c == '\'' || c == '"' || c == '\\');
+    if name.is_empty() || name.starts_with('-') {
+        command.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn stdout_json_result(content: &str) -> Option<serde_json::Value> {
+    if counts_as_work_failure(true, content) {
+        return None;
+    }
+    let stdout = content.split_once("--- stdout ---")?.1;
+    let start = stdout.find('{')?;
+    let end = stdout.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&stdout[start..=end]).ok()?;
+    Some(value.get("result").cloned().unwrap_or(value))
+}
+
+/// A successful shell whose stdout JSON names what it opened.
+///
+/// `gpui-agent click` returns `{result:{name, view}}`. The first such result is
+/// the navigation. A later identical command is not more work.
+pub fn opened_target_sentence(content: &str) -> Option<String> {
+    let result = stdout_json_result(content)?;
+    let name = result
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?;
+    let view = result
+        .get("view")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|view| !view.is_empty());
+    Some(match view {
+        Some(view) => format!("{name} is selected on {view}."),
+        None => format!("{name} is selected."),
+    })
+}
+
+/// A successful invoke whose result is only `{view}`. `profile.create` does
+/// this: the editor opened and nothing was written. A later call of the same
+/// invoke is not more work.
+pub fn opened_editor_sentence(content: &str) -> Option<String> {
+    let result = stdout_json_result(content)?;
+    if result
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        return None;
+    }
+    let object = result.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let view = object
+        .get("view")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|view| !view.is_empty())?;
+    Some(format!("Opened {view}. Nothing was saved."))
+}
+
+/// The host rejected the invoke's arguments. The next call can pass `--arg`.
+/// Exit 127 is not this: a missing binary does not become a flag fix.
+pub fn is_invoke_argv_mistake(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    lower.contains("requires args.") || lower.contains("unexpected argument")
 }
 
 /// `command not found` / exit 127 will not be fixed by rewording the same binary name.
@@ -478,6 +575,64 @@ mod tests {
         assert!(!counts_as_work_failure(
             true,
             "exit 1\nmore output from the command"
+        ));
+    }
+
+    #[test]
+    fn a_click_that_selects_a_named_target_is_the_navigation() {
+        let rendered = "exit 0\n--- stdout ---\n{\n  \"ok\": true,\n  \"result\": {\n    \"name\": \"Juan Dela Cruz\",\n    \"view\": \"dashboard\"\n  }\n}\n";
+        assert_eq!(
+            opened_target_sentence(rendered).as_deref(),
+            Some("Juan Dela Cruz is selected on dashboard.")
+        );
+        assert!(
+            opened_target_sentence("exit 0\n--- stdout ---\nTalk to an embedded AgentHost\n")
+                .is_none()
+        );
+        assert!(opened_target_sentence(
+            "exit 1\n--- stderr ---\nerror: connect 127.0.0.1:17421 failed: Connection refused\n"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_view_only_create_is_an_open_editor_and_quote_variants_are_one_invoke() {
+        let rendered = "exit 0\n--- stdout ---\n{\"v\":2,\"ok\":true,\"result\":{\"view\":\"profile-manager\"}}\n";
+        assert_eq!(
+            opened_editor_sentence(rendered).as_deref(),
+            Some("Opened profile-manager. Nothing was saved.")
+        );
+        assert!(opened_target_sentence(rendered).is_none());
+        let named = "exit 0\n--- stdout ---\n{\"result\":{\"name\":\"Juan Dela Cruz\",\"view\":\"dashboard\"}}\n";
+        assert!(opened_editor_sentence(named).is_none());
+        assert_eq!(
+            shell_action_key(
+                "gpui-agent invoke profile.create --arg name='Juana Jane' --arg tin=00000000000001"
+            ),
+            "profile.create"
+        );
+        assert_eq!(
+            shell_action_key(
+                "gpui-agent invoke profile.create --arg 'name=Juana Jane' --arg tin=00000000000001"
+            ),
+            "profile.create"
+        );
+        assert_eq!(
+            shell_action_key("gpui-agent set-value profile-name 'Juana Jane'"),
+            "gpui-agent set-value profile-name 'Juana Jane'"
+        );
+    }
+
+    #[test]
+    fn a_rejected_invoke_argument_is_not_a_missing_binary() {
+        let year = "exit 1\n--- stderr ---\nerror: profile.forms_set.get requires args.year as a JSON number\n";
+        let blob = "exit 2\n--- stderr ---\nerror: unexpected argument '{\"query\":\"juan dela cruz\"}' found\n";
+        assert!(is_invoke_argv_mistake(year));
+        assert!(is_invoke_argv_mistake(blob));
+        assert!(counts_as_work_failure(true, year));
+        assert!(!is_unrecoverable_command_miss(year));
+        assert!(!is_invoke_argv_mistake(
+            "exit 127\n--- stderr ---\nsh: gpui-agent: command not found\n"
         ));
     }
 }

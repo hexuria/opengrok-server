@@ -379,6 +379,19 @@ pub fn chosen_skill_line(name: &str, body: &str, marker: &str, author: SkillAuth
     )
 }
 
+/// The name in the sentence [`chosen_skill_line`] writes. A later turn on the same
+/// thread reads it when the log has no `skill_id` yet. The user's message is not
+/// a source: this sentence is one the server wrote.
+#[must_use]
+pub fn skill_name_from_system(system: &str) -> Option<&str> {
+    const LEAD: &str = "For THIS message the person chose the skill `";
+    let start = system.find(LEAD)? + LEAD.len();
+    let rest = system.get(start..)?;
+    let end = rest.find('`')?;
+    let name = rest.get(..end)?.trim();
+    (!name.is_empty()).then_some(name)
+}
+
 /// What a coworker is told when the person chose a skill for this message and it could not be
 /// given: the turn runs, and it runs honestly.
 ///
@@ -593,6 +606,17 @@ mod tests {
             title: title.map(str::to_string),
             role: role.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn skill_name_from_system_reads_the_sentence_this_server_wrote() {
+        let line = chosen_skill_line("drive-bir", "Use profile.list.", "m", SkillAuthor::Chooser);
+        assert_eq!(skill_name_from_system(&line), Some("drive-bir"));
+        assert_eq!(skill_name_from_system("no skill here"), None);
+        assert_eq!(
+            skill_name_from_system("For THIS message the person chose the skill ``."),
+            None
+        );
     }
 
     #[test]

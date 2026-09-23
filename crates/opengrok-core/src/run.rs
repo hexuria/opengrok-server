@@ -135,6 +135,11 @@ pub enum RunEvent {
         /// Same reasoning as `model` above, and absent on logs written before this field.
         #[serde(default)]
         system: Option<String>,
+        /// The skill quoted into `system`, when this turn had one. A later message on the
+        /// same thread that sends no `forwardedProps.skill` reads it back. Absent on logs
+        /// written before this field (`#[serde(default)]`).
+        #[serde(default)]
+        skill_id: Option<String>,
         at_ms: i64,
     },
     /// One rendered protocol event, stored verbatim so a replay is byte-exact rather than
@@ -205,6 +210,8 @@ pub struct Run {
     pub model: Option<String>,
     /// Captured at start. See `RunEvent::Started::system`.
     pub system: Option<String>,
+    /// Captured at start. See `RunEvent::Started::skill_id`.
+    pub skill_id: Option<String>,
     pub status: RunStatus,
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
@@ -230,6 +237,7 @@ impl Default for Run {
             coworker_id: None,
             model: None,
             system: None,
+            skill_id: None,
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
@@ -271,6 +279,8 @@ pub enum RunCommand {
         /// The composed system message this turn opens with, captured so a resume speaks with
         /// the same identity and standing role the turn began with.
         system: Option<String>,
+        /// See `RunEvent::Started::skill_id`.
+        skill_id: Option<String>,
         at_ms: i64,
     },
     Emit {
@@ -323,6 +333,7 @@ impl Run {
                 coworker_id,
                 model,
                 system,
+                skill_id,
                 ..
             } => {
                 self.started = true;
@@ -330,6 +341,7 @@ impl Run {
                 self.coworker_id = coworker_id.clone();
                 self.model = model.clone();
                 self.system.clone_from(system);
+                self.skill_id.clone_from(skill_id);
                 self.status = RunStatus::Running;
             }
             RunEvent::Emitted { payload, .. } => self.emitted.push(payload.clone()),
@@ -402,12 +414,14 @@ impl Run {
                 coworker_id,
                 model,
                 system,
+                skill_id,
                 at_ms,
             } => Ok(vec![RunEvent::Started {
                 thread_id,
                 coworker_id,
                 model,
                 system,
+                skill_id,
                 at_ms,
             }]),
 
@@ -537,6 +551,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             })
             .unwrap()
@@ -558,6 +573,7 @@ mod tests {
                 coworker_id: None,
                 model: Some("openai/gpt-5.6-luna".to_string()),
                 system: Some("You are Ada.".to_string()),
+                skill_id: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -573,6 +589,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -588,6 +605,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: Some(String::new()),
+                skill_id: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -624,6 +642,7 @@ mod tests {
             coworker_id: None,
             model: None,
             system: None,
+            skill_id: None,
             at_ms: 1,
         }];
         for index in 0..5 {
@@ -703,6 +722,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -855,6 +875,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             },
             RunEvent::Suspended {
@@ -1045,6 +1066,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -1124,6 +1146,7 @@ mod tests {
                 coworker_id: None,
                 model: Some("openai/gpt-5.5".to_string()),
                 system: None,
+                skill_id: None,
                 at_ms: 1,
             })
             .unwrap()

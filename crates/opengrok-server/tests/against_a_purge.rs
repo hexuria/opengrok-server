@@ -138,6 +138,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
             system: None,
+            skill_id: None,
             at_ms,
         })
         .expect("start");
