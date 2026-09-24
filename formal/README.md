@@ -1,6 +1,6 @@
 # Formal models of the harness
 
-Two TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
+Three TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
 facts the loop and the run lifecycle branch on — no events, HTTP, SQL or serialisation. They
 were written against `4a25af6` and drove the fixes that ship with them; each fix exists because
 TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
@@ -9,6 +9,7 @@ TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
 |---|---|
 | `tla/HarnessLoop.tla` | One segment of `converse_raw` (`crates/opengrok-harness/src/lib.rs`): the rounds, the two Stop check points, every exit, the budgets, a journal whose writes may fail. |
 | `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases, and a client retrying its POST with the same run id. |
+| `tla/JournalAppend.tla` | One journal write racing a Stop, as the store sees it: read the run, append at the next seq, lose the race with a `Conflict`. Which errors a write may retry. |
 | `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
 | `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose. |
 
@@ -47,6 +48,8 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
 | The ending the client saw is in the journal | safety | `EndingIsDurable`, which fails by nature (see below) |
+| A round journaled while a Stop lands is kept | safety | `JournalAppend` `RoundKept` |
+| No round is written twice | safety | `JournalAppend` `NoDuplicate` |
 
 ## TLA+ findings
 
@@ -91,6 +94,17 @@ Each trace is TLC's shortest.
    retry's loop is told to stop. The assumption was wrong, not the property: stopping a loop on
    an ended run is right only once a retry can no longer start one there. That is the per-run
    claim, and `RunLifecycle_retry` (two loops on one run, `OneDriver`) is the same gap.
+
+9. **A Stop dropped the round it interrupted** (`JournalAppend_4a25af6`). Every write reads
+   the run and appends at the next seq; the loser of two concurrent writes gets `Conflict`
+   and has written nothing. `stop_run` retries its own Conflicts; the journal did not, so
+   the turn's round lost to the Stop and vanished from the log — the frames `run.rs`
+   deliberately keeps accepting on a stopped run. A mid-run write that lost showed the
+   person "the run could not be recorded" instead of "stopped". The journal now retries a
+   Conflict, and only a Conflict: `JournalAppend_retryall` shows that retrying every error
+   writes a round twice when a commit lands and its reply is lost. One concurrent writer needs
+   two attempts (TLC, `MaxTries = 1` fails); the code allows five, like `STOP_ATTEMPTS`.
+   `JournalAppend_truth` keeps the limit: a lost reply still reads as a failure.
 
 ## Lean findings
 
@@ -155,12 +169,17 @@ The state graph was the object being minimised. The results:
     must not be widened before the claim (finding 8).
 - `crates/opengrok-server/src/agui/resume.rs`: `resume_suspended_run` holds a recovery
   `Lease`.
+- `crates/opengrok-server/src/agui/routes.rs`: `append_events` retries a `Conflict`
+  (`APPEND_ATTEMPTS`), and no other error.
 - Tests derived from the traces, in `crates/opengrok-harness/tests/unit/loop_tests.rs`:
   - `a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop` (finding 1)
   - `a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call` (finding 3)
   - `a_refused_card_is_read_by_the_model_and_never_runs` (`Close.runsApproved`)
 
   The first two fail on `4a25af6` and pass now.
+- `crates/opengrok-server/tests/against_a_stopped_run.rs`:
+  `a_round_journaled_while_a_stop_lands_keeps_its_frames` races three rounds against a Stop
+  on Postgres (`RoundKept`, `NoDuplicate`).
 
 ## Remaining hazards the models name but this change does not fix
 

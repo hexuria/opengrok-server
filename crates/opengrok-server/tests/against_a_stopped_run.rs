@@ -694,3 +694,80 @@ async fn stopping_a_run_that_was_waiting_closes_its_card_at_once() {
         "and it is gone from the queue: {after}"
     );
 }
+
+/// A ROUND JOURNALED WHILE A STOP LANDS KEEPS ITS FRAMES (`formal/tla/JournalAppend.tla`
+/// RoundKept). Every writer reads the run and appends at the next seq, so two writers at once
+/// means one of them is refused with a Conflict. The Stop retried its own; the turn's journal did
+/// not, so the round on screen when the button was pressed was dropped from the log — the frames
+/// `run.rs` goes on accepting on a stopped run for exactly that moment. Three rounds race a Stop
+/// here, on several runs so the race is really run: every round lands once, and the run ends
+/// stopped.
+#[tokio::test]
+async fn a_round_journaled_while_a_stop_lands_keeps_its_frames() {
+    use opengrok_harness::RunJournal;
+    use opengrok_wire::agui::{Event, EventType};
+
+    let database_url = database_or_skip!();
+    let email = format!("stop-race-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+
+    for attempt in 0..8 {
+        let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+        let run_id = seed_run(
+            &h.store,
+            &account,
+            &thread,
+            now_ms(),
+            &["opening the browser"],
+            Ending::Running,
+        )
+        .await;
+        let journal = Arc::new(opengrok_server::agui::routes::StoreJournal {
+            state: h.state.clone(),
+            thread_id: thread.clone(),
+            account_id: Some(account.clone()),
+            coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
+            model: Some("oag/cheap".to_string()),
+            system: None,
+            skill_id: None,
+        });
+
+        let writes: Vec<_> = (0..3)
+            .map(|round| {
+                let journal = journal.clone();
+                let run_id = run_id.as_str().to_string();
+                tokio::spawn(async move {
+                    let frame = Event::new(EventType::TextMessageContent, now_ms())
+                        .with("messageId", "msg-1")
+                        .with("delta", format!("round {round}"));
+                    journal.record(&run_id, &[frame]).await
+                })
+            })
+            .collect();
+        let (status, body) = h.stop(&access, run_id.as_str()).await;
+        assert_eq!(status, 202, "{body}");
+        for write in writes {
+            write
+                .await
+                .expect("join")
+                .expect("a round that lost the race is written again, not dropped");
+        }
+
+        let (run, _) = h.store.load_run(&run_id).await.expect("load");
+        assert_eq!(run.status, RunStatus::Stopped, "attempt {attempt}");
+        for round in 0..3 {
+            let wanted = format!("round {round}");
+            let landed = run
+                .emitted
+                .iter()
+                .filter(|frame| frame.get("delta").and_then(Value::as_str) == Some(wanted.as_str()))
+                .count();
+            assert_eq!(
+                landed, 1,
+                "round {round} lands exactly once on attempt {attempt}: {:?}",
+                run.emitted
+            );
+        }
+    }
+}

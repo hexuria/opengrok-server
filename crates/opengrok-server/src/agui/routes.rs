@@ -2826,7 +2826,32 @@ impl opengrok_harness::RunJournal for StoreJournal {
     }
 }
 
+/// Attempts at a journal write that loses the race to another writer: one more than a run has
+/// writers at once (its turn, a Stop, the sweep), like `STOP_ATTEMPTS`.
+const APPEND_ATTEMPTS: usize = 5;
+
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
+///
+/// RETRIED ON A CONFLICT, AND ONLY ON ONE. A Conflict is a write that lost the race and wrote
+/// nothing, so reading and deciding again is what a write a moment later would have done. Without
+/// it the turn lost every race to a Stop (which retries its own), and the round on screen when the
+/// button was pressed left the log. Any other error may be a commit whose reply was lost: writing
+/// it again would log the round twice (`formal/tla/JournalAppend.tla`).
+async fn append_events(
+    state: &AgUiState,
+    run_id: &str,
+    start: &RunStart<'_>,
+    events: &[Event],
+) -> Result<(), opengrok_store::StoreError> {
+    for _ in 1..APPEND_ATTEMPTS {
+        match append_events_once(state, run_id, start, events).await {
+            Err(opengrok_store::StoreError::Conflict) => continue,
+            other => return other,
+        }
+    }
+    append_events_once(state, run_id, start, events).await
+}
+
 /// What a run records about itself at its first batch. A struct rather than five more
 /// parameters: these are one fact — whose turn this is and what it opened with — and they are
 /// only ever passed together.
@@ -2839,7 +2864,8 @@ struct RunStart<'a> {
     skill_id: Option<&'a str>,
 }
 
-async fn append_events(
+/// One attempt: read the run, decide what this batch appends, write it at the seq it read.
+async fn append_events_once(
     state: &AgUiState,
     run_id: &str,
     start: &RunStart<'_>,
