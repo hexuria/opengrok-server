@@ -2811,7 +2811,14 @@ impl opengrok_harness::RunJournal for StoreJournal {
     ) -> Result<(), opengrok_harness::JournalError> {
         append_events(&self.state, run_id, &self.run_start(), events)
             .await
-            .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
+            .map_err(|error| match error {
+                AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
+                    "run {run_id} ended before its card could be recorded"
+                )),
+                AppendError::Store(error) => {
+                    opengrok_harness::JournalError::Unwritable(error.to_string())
+                }
+            })
     }
 
     /// The log's own answer to "has somebody stopped this run". One primary-key read of the
@@ -2928,14 +2935,29 @@ async fn append_events(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
-) -> Result<(), opengrok_store::StoreError> {
+) -> Result<(), AppendError> {
     for _ in 1..APPEND_ATTEMPTS {
         match append_events_once(state, run_id, start, events).await {
-            Err(opengrok_store::StoreError::Conflict) => continue,
+            Err(AppendError::Store(opengrok_store::StoreError::Conflict)) => continue,
             other => return other,
         }
     }
     append_events_once(state, run_id, start, events).await
+}
+
+/// Why a batch was not written.
+#[derive(Debug)]
+enum AppendError {
+    Store(opengrok_store::StoreError),
+    /// The batch parks, and the run it parks has ended: the Stop won the race the loop's last
+    /// `stopped` question could not see. Nothing was written (`RunJournal::record`).
+    Ended,
+}
+
+impl From<opengrok_store::StoreError> for AppendError {
+    fn from(error: opengrok_store::StoreError) -> Self {
+        Self::Store(error)
+    }
 }
 
 /// What a run records about itself at its first batch. A struct rather than five more
@@ -2956,7 +2978,7 @@ async fn append_events_once(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
-) -> Result<(), opengrok_store::StoreError> {
+) -> Result<(), AppendError> {
     let RunStart {
         thread_id,
         account_id,
@@ -2972,20 +2994,26 @@ async fn append_events_once(
     let mut to_append = Vec::new();
 
     if !run.started {
-        let started = run
-            .decide(start_command(start, at_ms))
-            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        let started = run.decide(start_command(start, at_ms)).map_err(|error| {
+            AppendError::Store(opengrok_store::StoreError::Corrupt(error.to_string()))
+        })?;
         for event in &started {
             run.apply(event);
         }
         to_append.extend(started);
     }
+    // A batch that parks must record its suspension, or record nothing.
+    let parks = events.iter().any(is_suspend_frame);
 
     for event in events {
-        let payload = serde_json::to_value(event)
-            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        let payload = serde_json::to_value(event).map_err(|error| {
+            AppendError::Store(opengrok_store::StoreError::Corrupt(error.to_string()))
+        })?;
         // The aggregate refuses a frame after an ending; that is a rule, not a hiccup.
         let Ok(decided) = run.decide(RunCommand::Emit { payload, at_ms }) else {
+            if parks {
+                return Err(AppendError::Ended);
+            }
             break;
         };
         for decided_event in &decided {
@@ -2996,19 +3024,17 @@ async fn append_events_once(
         // A suspension carries which call is waiting, so a person can answer *that* call later.
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
-        if event.event_type == opengrok_wire::agui::EventType::Custom
-            && crate::agui::resume::is_suspend_custom(
-                event.extra.get("name").and_then(|name| name.as_str()),
-            )
-        {
+        if is_suspend_frame(event) {
             let call_id = event
                 .extra
                 .get("callId")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string();
-            if !call_id.is_empty()
-                && let Ok(suspended) = run.decide(RunCommand::Suspend {
+            if !call_id.is_empty() {
+                // REFUSED ONLY WHEN THE RUN HAS ENDED. Dropping the refusal and writing the rest
+                // put a card on screen for a suspension the log never got; answering it was a 409.
+                let Ok(suspended) = run.decide(RunCommand::Suspend {
                     call_id,
                     tool: event
                         .extra
@@ -3031,8 +3057,9 @@ async fn append_events_once(
                             .unwrap_or_default(),
                     ),
                     at_ms,
-                })
-            {
+                }) else {
+                    return Err(AppendError::Ended);
+                };
                 for suspended_event in &suspended {
                     run.apply(suspended_event);
                 }
@@ -3090,6 +3117,14 @@ async fn append_events_once(
     Ok(())
 }
 
+/// A `run-awaiting-approval` CUSTOM: the frame whose suspension makes a card answerable.
+fn is_suspend_frame(event: &Event) -> bool {
+    event.event_type == opengrok_wire::agui::EventType::Custom
+        && crate::agui::resume::is_suspend_custom(
+            event.extra.get("name").and_then(|name| name.as_str()),
+        )
+}
+
 /// What a POST whose run id already has a run gets, or `None` while the id is free.
 ///
 /// ITS OWNER GETS THE RUN BACK: what it has recorded, then what it records until it ends or
@@ -3112,20 +3147,26 @@ async fn answer_for_existing_run(
     if !run.started {
         return None;
     }
-    let owner = match account {
-        Some(account) => state
-            .auth
-            .store
-            .run_owned_by(&id, account)
-            .await
-            .unwrap_or(false)
-            .then(|| account.clone()),
-        None => None,
+    let Some(account) = account else {
+        return Some(run_taken());
     };
-    Some(match owner {
-        Some(account) => attach(state.clone(), account, id),
-        None => run_taken(),
+    let owned = state.auth.store.run_owned_by(&id, account).await;
+    Some(match owned {
+        Ok(true) => attach(state.clone(), account.clone(), id),
+        other => not_attached(other),
     })
+}
+
+/// A POST that may not attach: someone else's run, or an owner the store could not confirm.
+///
+/// A READ THAT FAILS IS A 503, NEVER `run-exists`. The 409 tells its caller to use a new run id,
+/// and the owner retrying a dropped stream obeys it: a second run with the same words, every
+/// model call and tool twice — what the existing-run check exists to prevent.
+fn not_attached(owned: Result<bool, opengrok_store::StoreError>) -> Response {
+    match owned {
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Ok(_) => run_taken(),
+    }
 }
 
 fn run_taken() -> Response {
@@ -5275,6 +5316,17 @@ mod tests {
                 (event.event_type, name)
             })
             .collect()
+    }
+
+    /// AN OWNER THE STORE COULD NOT CONFIRM IS TOLD TO RETRY, NOT TO START OVER. A 409 sends the
+    /// owner of a dropped stream to a new run id, and the turn runs twice.
+    #[test]
+    fn a_failed_ownership_read_is_a_503_not_run_exists() {
+        assert_eq!(
+            not_attached(Err(opengrok_store::StoreError::Corrupt("gone".to_string()))).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(not_attached(Ok(false)).status(), StatusCode::CONFLICT);
     }
 
     /// AN ATTACHED STREAM ENDS THE WAY THE RUN ENDED, NOT THE WAY ITS LOG LAST CLOSED. A parked

@@ -153,6 +153,25 @@ Each trace is TLC's shortest.
     the store accepted (see the hazards below); `RetryNotRefused` holds trivially once the claim
     is on, because `attach` is not modelled, and its closer and frames are unit-tested instead.
 
+13. **The peer review** (`origin/main..3eb8304`, three traces, each now fixed):
+    - **A park still showed a dead card after a Stop** (`HarnessLoop_3eb8304_park`, nine
+      states). `close` asks `stopped`, hears no, and a Stop commits before the park's write.
+      That write lost to the Stop with a `Conflict`, and `append_events` retried it (finding 9).
+      On a stopped run the frames were accepted and the `Suspended` refused. The refusal was
+      dropped, so the write said Ok and the card went out with nothing behind it. For a run the
+      sweep had failed the frame itself was refused, with the same Ok. A batch that parks is
+      now all or nothing: the write answers `JournalError::Ended` and writes none of it. `close`
+      writes the round again with the stop's ending, the one the log can back. The model
+      splits the park's question from its write (`ParkWrite`), and `EndedRefusesPark` is the
+      fix.
+    - **A Stop's `RUN_FINISHED` released held login forms.** A form that parked after a Stop
+      became a stop, so its stamping CUSTOM never went out, and the stop's `RUN_FINISHED`
+      counted as clean. NativeChat painted a login card with a raw `call-…` id. The hold now
+      notes the `run-stopped` frame and withholds the forms at the closer.
+    - **A failed ownership read was a `409 run-exists`.** Obeying it, the owner of a dropped
+      stream started a new run id with the same words: every model call and tool twice. It is
+      a 503 now, like the failed `load_run` before it.
+
 ## Lean findings
 
 `lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
@@ -233,7 +252,11 @@ The state graph was the object being minimised. The results:
     gives the owner its run back through `attach` (the log's own frames, then one closer by
     status); anybody else gets `409 run-exists`.
   - `StoreJournal::stopped` answers yes for any ended run (findings 8 and 11).
-  - `AgUiSink` releases held login-form frames only after a clean ending.
+  - `append_events` refuses whole a batch that parks a run that has ended (`AppendError::Ended`,
+    surfaced as `JournalError::Ended`); `close` then ends the run stopped.
+  - `AgUiSink` releases held login-form frames only after a clean ending, and a stop's
+    `RUN_FINISHED` is not one.
+  - `answer_for_existing_run` answers a failed ownership read with 503, never `run-exists`.
 - `crates/opengrok-store/src/postgres.rs`: a run's owner is set once; `run_progress` is the
   cheap read `attach` polls.
 - `scripts/slice2-agui-smoke.sh`, `scripts/slice3-harness-smoke.sh`: one run id per run.
@@ -245,16 +268,21 @@ The state graph was the object being minimised. The results:
     `a_parked_round_and_its_card_are_journaled_together`,
     `a_chart_round_and_its_ending_are_journaled_together`,
     `a_park_after_a_stop_ends_the_run_stopped_with_no_card`,
-    `a_round_whose_write_failed_is_not_written_again`; and, covering paths that were already
+    `a_round_whose_write_failed_is_not_written_again`,
+    `a_park_whose_write_finds_the_run_stopped_ends_stopped_with_no_card`; and, covering paths that were already
     right, `a_refused_card_is_read_by_the_model_and_never_runs` and
     `a_door_that_will_not_open_ends_the_run_once`.
-  - `against_a_stopped_run.rs` (Postgres): `a_round_journaled_while_a_stop_lands_keeps_its_frames`.
+  - `against_a_stopped_run.rs` (Postgres): `a_round_journaled_while_a_stop_lands_keeps_its_frames`,
+    `a_park_written_after_the_run_ended_is_refused_whole`.
   - `against_a_retried_run.rs` (Postgres): a retry gets its run back and the model is asked
     once; two POSTs at once run one loop; another account's POST is refused and leaves the run
     its owner's; an anonymous caller cannot reuse a run id; the owner is set once.
   - `routes.rs` and `user_form.rs` unit tests: `an_attached_stream_closes_with_what_the_run_is`,
     `an_attached_stream_sends_only_the_logs_own_frames`,
-    `held_form_frames_go_out_only_after_a_clean_ending`.
+    `held_form_frames_go_out_only_after_a_clean_ending`,
+    `held_form_frames_do_not_go_out_after_a_stop`,
+    `a_failed_ownership_read_is_a_503_not_run_exists` (only the second of two reads would have
+    to fail, and no test store injects that, so the mapping is tested alone).
 
 ## Remaining hazards the models name but this change does not fix
 
@@ -274,7 +302,8 @@ The state graph was the object being minimised. The results:
   ending could not be written is still `running` in the log until the sweep fails it, with the
   sweep's "interrupted by a restart" (`EndingIsDurable`).
 - **Check-then-act races.** They are narrowed, not closed: a Stop landing between a
-  `stopped` question and the act that follows it (`run_all`, or the RUN_FINISHED write)
-  still gets through, once per loop.
+  `stopped` question and the act that follows it (`run_all`, or a finish's `RUN_FINISHED`
+  write) still gets through, once per loop. For a park the gap is closed (finding 13): the
+  log's refusal of the `Suspended` is the answer.
 - **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
   caused by a concurrent Stop.

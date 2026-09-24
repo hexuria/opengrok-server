@@ -707,6 +707,9 @@ async fn close(
     if let Some(visibility) = pin {
         pin_last_agent_shot(sink, last_agent_shot, visibility, &mut round).await;
     }
+    // A park closes the projection with its own `RUN_FINISHED`; the stop that may replace it
+    // below needs the projection as it was before.
+    let before_park = matches!(ending, Ending::Park(_)).then(|| projection.clone());
     let mut closing = match ending {
         Ending::Finish(_) | Ending::Park(_) if journal.stopped(run_id).await => {
             projection.stopped()
@@ -719,9 +722,34 @@ async fn close(
     if !closing.is_empty() {
         timing::splice_before_run_end(&mut closing, timing.event(projection));
     }
-    let from = round.len();
+    let mut from = round.len();
     round.extend(closing);
-    if let Err(error) = record_round(journal, run_id, &round).await {
+    let mut written = record_round(journal, run_id, &round).await;
+    // A STOP THAT LANDED AFTER THE QUESTION ABOVE. The park's write found the run ended and wrote
+    // nothing, so its card would have had no suspension behind it. The log already holds the
+    // Stop; the round goes in again with the stop's ending, the one the log can back.
+    if matches!(written, Err(JournalError::Ended(_)))
+        && let Some(before_park) = before_park
+    {
+        *projection = before_park;
+        round.truncate(from);
+        pin_last_agent_shot(
+            sink,
+            last_agent_shot,
+            opengrok_tools::ImageVisibility::End,
+            &mut round,
+        )
+        .await;
+        // The pin has gone out live; what follows it is this ending's own.
+        from = round.len();
+        let mut stopped = projection.stopped();
+        if !stopped.is_empty() {
+            timing::splice_before_run_end(&mut stopped, timing.event(projection));
+        }
+        round.extend(stopped);
+        written = record_round(journal, run_id, &round).await;
+    }
+    if let Err(error) = written {
         let refused = round.split_off(from);
         round.extend(projection.unrecorded(refused, error.to_string()));
     }

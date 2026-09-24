@@ -239,3 +239,16 @@ fn held_form_frames_go_out_only_after_a_clean_ending() {
     assert!(finished.push(form_tool_args("call-2")).is_none());
     assert_eq!(finished.release_at_end(true).len(), 2);
 }
+
+/// A STOP'S `RUN_FINISHED` IS NOT A FINISH. A form that parked after a Stop became a stop, so its
+/// stamping CUSTOM never went out; releasing its held frames on the closer painted a login card
+/// with a raw `call-…` id and no suspension behind it.
+#[test]
+fn held_form_frames_do_not_go_out_after_a_stop() {
+    let mut stopped = UserFormSseHold::default();
+    assert!(stopped.push(form_tool_start("call-1")).is_none());
+    assert!(stopped.push(form_tool_args("call-1")).is_none());
+    let notice = Event::new(EventType::Custom, 3).with("name", "run-stopped");
+    assert!(stopped.push(notice).is_some(), "the notice itself goes out");
+    assert!(stopped.release_at_end(true).is_empty());
+}

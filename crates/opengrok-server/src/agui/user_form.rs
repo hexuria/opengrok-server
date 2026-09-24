@@ -1299,6 +1299,8 @@ pub(crate) fn is_live_user_form_custom(event: &Event) -> bool {
 pub(crate) struct UserFormSseHold {
     form_ids: HashSet<String>,
     held: Vec<Event>,
+    /// A `run-stopped` frame has passed: the `RUN_FINISHED` behind it closes a stop, not a finish.
+    stopped: bool,
 }
 
 impl UserFormSseHold {
@@ -1332,6 +1334,12 @@ impl UserFormSseHold {
                 if Self::tool_call_id(&event).is_some_and(|id| self.form_ids.contains(id)) {
                     self.held.push(event);
                     return None;
+                }
+                Some(event)
+            }
+            EventType::Custom => {
+                if event.extra.get("name").and_then(Value::as_str) == Some("run-stopped") {
+                    self.stopped = true;
                 }
                 Some(event)
             }
@@ -1369,13 +1377,18 @@ impl UserFormSseHold {
         opengrok_harness::scrub_streamed_tool_args(std::mem::take(&mut self.held))
     }
 
-    /// The stream's closer has arrived. After `RUN_FINISHED` the leftovers go out as
-    /// `release_rest` sends them; after `RUN_ERROR` they go nowhere. A run that failed has no
-    /// suspension behind any card, and NativeChat paints one from these frames — a button whose
-    /// answer can only be a 409, most of all for a park whose write the log refused.
+    /// The stream's closer has arrived. After a finish's `RUN_FINISHED` the leftovers go out as
+    /// `release_rest` sends them; after `RUN_ERROR`, or the `RUN_FINISHED` that closes a stop,
+    /// they go nowhere. A run that failed or was stopped has no suspension behind any card, and
+    /// NativeChat paints one from these frames — a button whose answer can only be a 409, most of
+    /// all for a park whose write the log refused or that a Stop turned into a stop.
     pub(crate) fn release_at_end(&mut self, clean: bool) -> Vec<Event> {
         let rest = self.release_rest();
-        if clean { rest } else { Vec::new() }
+        if clean && !self.stopped {
+            rest
+        } else {
+            Vec::new()
+        }
     }
 }
 

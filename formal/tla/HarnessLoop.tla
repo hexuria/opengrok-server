@@ -22,7 +22,8 @@ CONSTANTS MaxRounds,       \* MAX_ROUNDS
           FallOutFails,    \* FIX: leaving the `for` ends the run with RUN_ERROR, never silently
           StopAtClose,     \* FIX: a clean finish asks `stopped` once more and yields to a Stop
           OneWriteClose,   \* FIX: every exit writes the round it ends on and its ending in ONE write
-          WriteBeforeEmit  \* FIX: an ending reaches the client only once the log holds it
+          WriteBeforeEmit, \* FIX: an ending reaches the client only once the log holds it
+          EndedRefusesPark \* FIX: a park whose write finds the run ended writes nothing and ends stopped
 
 ForBound == MaxRounds + MaxComputer   \* lib.rs:813 `for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS)`
 
@@ -173,8 +174,12 @@ Judge ==
        IN
        CASE outcome = "await" ->                                          \* lib.rs:1276-1304 park
               \* With StopAtClose a park asks too: a Stop pressed while the tool ran must not
-              \* end the run on a card, which its answer would find already stopped.
-              Close("split", IF StopAtClose /\ stop THEN "stopped" ELSE "parked") /\ UNCHANGED loopVars
+              \* end the run on a card, which its answer would find already stopped. The question
+              \* and the write are two steps (ParkWrite): a Stop can land between them.
+              IF StopAtClose
+                THEN IF stop THEN Close("split", "stopped") /\ UNCHANGED loopVars
+                     ELSE pc' = "park" /\ UNCHANGED <<loopVars, endVars>>
+                ELSE Close("split", "parked") /\ UNCHANGED loopVars
          [] Refused(outcome) /\ lastRefused = outcome ->                  \* lib.rs:1326-1358
               Close("split", "failed") /\ UNCHANGED loopVars
          [] OTHER ->
@@ -210,6 +215,15 @@ Judge ==
                                    ELSE Next_
     /\ UNCHANGED <<anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
 
+\* The park's write, after `close` asked `stopped` and heard no. A Stop recorded in the gap makes
+\* the log refuse the `Suspended`; at 3eb8304 the refusal was dropped and the rest written, so the
+\* run ended on a card the log could not answer (the peer review's trace). With EndedRefusesPark
+\* the write refuses the batch whole and the round goes in with the stop's ending.
+ParkWrite ==
+    /\ pc = "park"
+    /\ Close("split", IF EndedRefusesPark /\ stop THEN "stopped" ELSE "parked")
+    /\ UNCHANGED <<loopVars, anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
+
 \* The person presses Stop. It is written to the journal; the loop only reads it.
 PressStop ==
     /\ pc /= "done" /\ ~stop /\ stop' = TRUE
@@ -217,7 +231,7 @@ PressStop ==
 
 Done == pc = "done" /\ UNCHANGED vars
 
-Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge
+Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge \/ ParkWrite
 Next == Step \/ PressStop \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 
@@ -225,7 +239,7 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 (* PROPERTIES *)
 
 TypeOK ==
-    /\ pc \in {"open", "top", "call", "check2", "run", "judge", "done"}
+    /\ pc \in {"open", "top", "call", "check2", "run", "judge", "park", "done"}
     /\ ending \in {"none", "finished", "failed", "stopped", "parked", "fellOut"}
     /\ told \in {"none", "finished", "failed", "stopped", "parked", "unrecorded"}
     /\ terminals \in 0..1

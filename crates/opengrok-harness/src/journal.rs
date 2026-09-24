@@ -18,6 +18,11 @@ use opengrok_wire::agui::Event;
 pub enum JournalError {
     #[error("the run could not be recorded: {0}")]
     Unwritable(String),
+    /// The run ended before this batch could be written, and the batch opened a card: a
+    /// suspension the log refuses leaves a card whose answer can only be a 409. Nothing of the
+    /// batch was written, so the loop may write its round again with the ending the log holds.
+    #[error("the run ended before this could be recorded: {0}")]
+    Ended(String),
 }
 
 /// Somewhere a run's events are durably kept.
@@ -25,6 +30,10 @@ pub enum JournalError {
 pub trait RunJournal: Send + Sync {
     /// Record events for `run_id`. Must not return until they are durable: the loop treats a
     /// return as permission to continue, and continuing on a lie is how work is lost.
+    ///
+    /// A BATCH THAT PARKS IS ALL OR NOTHING. If its suspension cannot be recorded because the run
+    /// has ended — a Stop that landed after the loop last asked — write none of it and answer
+    /// `Ended`: an `Ok` there is a card on screen with no suspension behind it.
     async fn record(&self, run_id: &str, events: &[Event]) -> Result<(), JournalError>;
 
     /// Has somebody stopped this run — or has the log ended it some other way?

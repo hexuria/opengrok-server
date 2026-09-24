@@ -3230,3 +3230,56 @@ async fn a_round_whose_write_failed_is_not_written_again() {
         .count();
     assert_eq!(calls, 1, "the round is in the log once: {written:?}");
 }
+
+/// A STOP THAT LANDS BETWEEN THE CLOSE'S QUESTION AND ITS WRITE STILL WINS (the peer review's
+/// trace). The park's write found the run stopped: its `Suspended` was refused, the rest was
+/// written, and the card went out with nothing behind it. The write now refuses the whole batch
+/// as `Ended`, and the round goes in again with the stop's ending.
+#[tokio::test]
+async fn a_park_whose_write_finds_the_run_stopped_ends_stopped_with_no_card() {
+    /// Never answers "stopped"; refuses, whole, any batch that opens a card.
+    struct StoppedUnderTheWrite {
+        kept: Mutex<Vec<Vec<Event>>>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for StoppedUnderTheWrite {
+        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            if events.iter().any(is_awaiting_card) {
+                return Err(JournalError::Ended("a Stop got there first".to_string()));
+            }
+            self.kept
+                .lock()
+                .map_err(|_| JournalError::Unwritable("poisoned".to_string()))?
+                .push(events.to_vec());
+            Ok(())
+        }
+    }
+    let journal = StoppedUnderTheWrite {
+        kept: Mutex::new(Vec::new()),
+    };
+    let sink = Collect(Mutex::new(Vec::new()));
+    let events = run_conversation_streaming(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+        &sink,
+    )
+    .await;
+    let live = sink.0.lock().unwrap().clone();
+    let written = journal.kept.lock().unwrap().concat();
+    for seen in [&events, &live, &written] {
+        assert!(!seen.iter().any(is_awaiting_card), "no card: {seen:?}");
+        assert!(seen.iter().any(is_run_stopped), "{seen:?}");
+        assert_eq!(endings(seen).len(), 1, "{seen:?}");
+    }
+    assert!(
+        written
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallStart),
+        "the round that asked is still in the log: {written:?}"
+    );
+}

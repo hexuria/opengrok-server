@@ -28,7 +28,7 @@ enum Open {
 }
 
 /// Accumulates deltas and emits correctly-bracketed AG-UI events.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Projection {
     thread_id: String,
     run_id: String,
