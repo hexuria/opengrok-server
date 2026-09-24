@@ -27,11 +27,7 @@ pub trait RunJournal: Send + Sync {
     /// return as permission to continue, and continuing on a lie is how work is lost.
     async fn record(&self, run_id: &str, events: &[Event]) -> Result<(), JournalError>;
 
-    /// Has somebody stopped this run — or has the log ended it some other way?
-    ///
-    /// The loop's only question is "may I carry on", so an implementation answers yes for ANY
-    /// ended run: stopped, failed by the recovery sweep, finished by another loop. A loop on an
-    /// ended run otherwise kept running tools whose every event the log then refused.
+    /// Has somebody stopped this run?
     ///
     /// ASKED OF THE JOURNAL BECAUSE THE JOURNAL IS WHERE A STOP IS WRITTEN DOWN. A stop is not a
     /// message passed between two tasks that happen to be in the same process: it is a person

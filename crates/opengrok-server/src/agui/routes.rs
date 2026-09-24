@@ -2809,15 +2809,15 @@ impl opengrok_harness::RunJournal for StoreJournal {
     /// really did press stop still has a durable `Stopped` in the log for the next boundary to
     /// find.
     ///
-    /// ANY ENDED RUN ANSWERS YES, NOT ONLY A STOPPED ONE. A loop whose run the log has already
-    /// ended — failed by the sweep after a lost lease renewal, or finished by a second loop
-    /// from a retried POST on the same runId — carried on running tools whose every event the
-    /// log then refused (`formal/tla/RunLifecycle.tla` AtMostOneStaleTool). The cost: a live
-    /// viewer of such a loop sees `run-stopped` though no person stopped it; the log is right.
+    /// ONLY A STOP ANSWERS YES, NOT EVERY ENDED RUN, tidier as that looks. A retried POST with
+    /// the same run id starts a new turn on a run that has already ended (`AlreadyThisRun`, the
+    /// slice2 smoke); answering yes for Finished or Failed turned that retry into an instant
+    /// `run-stopped` (CI, 23 Sep 2026). So a loop whose run the sweep failed under it carries
+    /// on to its own ending; stopping it needs the per-run claim first (`formal/README.md`).
     async fn stopped(&self, run_id: &str) -> bool {
         let run_id = RunId::from_stored(run_id.to_string());
         match self.state.auth.store.run_status(&run_id).await {
-            Ok(status) => status.is_some_and(|status| status.is_terminal()),
+            Ok(status) => status == Some(RunStatus::Stopped),
             Err(error) => {
                 tracing::warn!(%error, run = %run_id, "could not read whether a run was stopped");
                 false

@@ -8,7 +8,7 @@ TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
 | File | What it is |
 |---|---|
 | `tla/HarnessLoop.tla` | One segment of `converse_raw` (`crates/opengrok-harness/src/lib.rs`): the rounds, the two Stop check points, every exit, the budgets, a journal whose writes may fail. |
-| `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases. |
+| `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases, and a client retrying its POST with the same run id. |
 | `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
 | `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose. |
 
@@ -25,7 +25,8 @@ Stop at any step.
 stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
 approve → live ⇄ tool → dead`. An answer is two steps — read, then append at the seq it read —
 so two requests can interleave. The sweep fails a `running` run that has no lease and no
-journal write for `LEASE_MS`; a crash kills every loop and lease; a renewal can fail.
+journal write for `LEASE_MS`; a crash kills every loop and lease; a renewal can fail. Loop 0
+is the loop a retried POST with the same run id starts, at any point in the run's life.
 
 ## Properties
 
@@ -39,7 +40,9 @@ journal write for `LEASE_MS`; a crash kills every loop and lease; a renewal can 
 | A Stop recorded before the close asks is how the run ends | safety | `StopIsHonoured` |
 | An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |
 | A Stop recorded before the continuation asks keeps the approved call from running | safety | `NoApprovedAfterStop` |
-| After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` |
+| After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` — fails today: a retry runs a whole turn on an ended run |
+| A retried POST is answered, never told to stop unless a person did | safety | `RetryNotRefused` |
+| At most one loop drives a run at any moment | safety | `OneDriver` — fails today (`RunLifecycle_retry`) |
 | The sweep never fails a run a live loop is driving | safety | `NoFalseFailure` |
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
@@ -63,12 +66,10 @@ Each trace is TLC's shortest.
    the check, a Stop recorded before the question is honoured; a Stop landing between the
    question and `run_all` still gets through. That one-step race is in every check-then-act;
    closing it would need the executor itself to ask.
-4. **A loop kept working on a run the log had already failed** (`RunLifecycle_noendedstop`):
-   a renewal fails, the lease lapses, the sweep fails the run, and the loop starts tool after
-   tool until its budget runs out. `stopped()` was true only for `Stopped`, and the log
-   refused every event those tools produced. Now at most one more tool starts, the one
-   already past its check. The cost: a live viewer of that loop is shown `run-stopped`
-   although nobody pressed Stop. The log still records the real ending.
+4. **A loop keeps working on a run the log has already failed** (the lapse regime): a renewal
+   fails, the lease lapses, the sweep fails the run, and the loop starts tool after tool until
+   its budget runs out, because `stopped()` answers only for `Stopped`. The obvious fix, "any
+   ended run means stop", shipped in this PR's first push and was reverted: see 8.
 5. **Unreachable, but a trap**: `fellOut`. At production budgets (`HarnessLoop_production`,
    1.3M states) the `for` bound is never what ends a run. If it ever were, the code returned
    with no terminal event: the client's spinner would stay up forever.
@@ -79,8 +80,17 @@ Each trace is TLC's shortest.
    - `HarnessLoop_durable`: if the journal refuses the ending, it does not hold it. The loop
      cannot fix that alone, and the sweep eventually ends such a run.
    - `RunLifecycle_lapse`: a lease without a fencing token cannot stop a lapsed renewal
-     letting the sweep fail a live run. The fix for 4 makes that loop stop at its next step
-     boundary rather than keep spending.
+     letting the sweep fail a live run.
+8. **CI found what the model assumed away** (`RunLifecycle_endedstop`). The first push made
+   `stopped()` answer yes for any ended run, and TLC passed it — because the model let a loop
+   run only on a run it had started. The slice2 smoke POSTs the same body twice; the second
+   POST is a same-runId retry on a finished run, which the server treats as a new turn
+   (`DrainResult::AlreadyThisRun`). That loop was now told "stopped" before it said a word:
+   `RUN_STARTED CUSTOM CUSTOM RUN_FINISHED`. The model now has the retry (loop 0), and TLC
+   prints the smoke's trace in four states: the turn finishes → the client retries → the
+   retry's loop is told to stop. The assumption was wrong, not the property: stopping a loop on
+   an ended run is right only once a retry can no longer start one there. That is the per-run
+   claim, and `RunLifecycle_retry` (two loops on one run, `OneDriver`) is the same gap.
 
 ## Lean findings
 
@@ -119,18 +129,14 @@ The state graph was the object being minimised. The results:
   hang for an unbounded spend if a future `continue` forgot its budget.
 - **"Stop" and "finish" meet in one place.** Six clean-finish sites each chose `finish()`
   directly. They now share `finish_or_stop`, the one close the Lean `Close` model describes.
-- **The fix set is minimal among the candidates, by exhaustive bounded search** over all
-  2³ combinations of the three lifecycle switches, in both lease regimes:
-  - **Renewals never fail.** `{lease on resume, stop before approved}` is necessary and
-    sufficient for all four safety properties.
-  - **A renewal may fail** (it can: `recovery.rs` only logs a failed `hold_run`).
-    `{stop before approved, any ended status stops the loop}` is necessary for
-    `NoApprovedAfterStop` and `AtMostOneStaleTool`. `NoFalseFailure` cannot hold in this
-    regime (see `RunLifecycle_lapse`).
-
-  So all three switches are needed. With the lease, a live run is failed only if a renewal
-  fails, not merely because a tool is slow. "Minimal" is claimed only among these
-  candidates.
+- **The fix set is minimal among the candidates, by exhaustive bounded search.** With
+  renewals that never fail, `{lease on resume, stop before approved}` is necessary and
+  sufficient for `ApprovedAtMostOnce`, `NoApprovedAfterStop`, `NoFalseFailure` and
+  `RetryNotRefused`: drop the lease and `RunLifecycle_4a25af6` fails, drop the check and
+  `RunLifecycle_nostopcheck` fails. "Any ended run means stop" is needed for
+  `AtMostOneStaleTool` once renewals can fail, but without the claim it contradicts
+  `RetryNotRefused` (`RunLifecycle_endedstop`), so it waits for the claim. "Minimal" is
+  claimed only among these candidates.
 - **Not simplified here: 18 exits hand-build their endings.** Their journal writes come in
   one, two or three batches, all ignoring errors. A single `close(verdict)` that writes the
   round and its ending in one batch is the smaller design: it would remove the window where
@@ -144,8 +150,9 @@ The state graph was the object being minimised. The results:
   - Falling out of the `for` fails the run with a sentence.
   - `resume_conversation` asks `stopped` before running (or refusing) the approved call.
 - `crates/opengrok-server/src/agui/routes.rs`
-  - `StoreJournal::stopped` answers yes for any terminal status.
   - `continue_run` holds a recovery `Lease`.
+  - `StoreJournal::stopped` still answers only for `Stopped`, with a comment saying why it
+    must not be widened before the claim (finding 8).
 - `crates/opengrok-server/src/agui/resume.rs`: `resume_suspended_run` holds a recovery
   `Lease`.
 - Tests derived from the traces, in `crates/opengrok-harness/tests/unit/loop_tests.rs`:
@@ -157,11 +164,11 @@ The state graph was the object being minimised. The results:
 
 ## Remaining hazards the models name but this change does not fix
 
-- **Same-runId retries.** A retried `POST /ag-ui` with the same `runId` starts a second loop
-  on the same run. Neither `DrainResult::AlreadyThisRun` nor an unqueued turn checks for a
-  live loop. The fix for 4 makes the loser stop once the winner ends the run, but both can
-  run tools until then. Closing this needs a per-run claim, and that is a server design
-  decision.
+- **Same-runId retries** (`RunLifecycle_retry`). A retried `POST /ag-ui` with the same
+  `runId` starts a second loop on the same run. Neither `DrainResult::AlreadyThisRun` nor an
+  unqueued turn checks for a live loop, so both loops run tools until the run ends, and a
+  retry of an ended run runs a whole turn whose events the log refuses. Closing it needs a
+  per-run claim.
 - **Ignored journal writes.** Park, ending and resume writes use `let _ = record_round`
   (`EndingIsDurable`). A dropped park write leaves a live card on a run the log says is
   `running`.
