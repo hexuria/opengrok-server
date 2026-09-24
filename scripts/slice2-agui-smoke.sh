@@ -14,7 +14,9 @@ ok()   { echo "  ok: $*"; }
 command -v jq >/dev/null || fail "jq is required"
 
 THREAD="thread-$(date +%s)"
-RUN="run-$(date +%s)"
+# The process id as well as the second: a run id is one run, and two smokes started in the
+# same second used to share one (slice2's run got slice3's turn appended to it).
+RUN="run-$(date +%s)-$$"
 BODY=$(cat <<JSON
 {"threadId":"$THREAD","runId":"$RUN","messages":[{"id":"m1","role":"user","content":"ping"}]}
 JSON

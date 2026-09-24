@@ -130,6 +130,9 @@ Each trace is TLC's shortest.
     its end, with one closer — and a 409 otherwise; an anonymous caller owns nothing. The owner
     is now set once. With the claim, no loop can start on an ended run, so "any ended run means
     stop" is back: `RunLifecycle_endedstop` still prints CI's trace, but only with the claim off.
+    The claim's first gate run caught two smokes, slice2 and slice3, that had been sharing a run
+    id whenever they started in the same second; slice3's turn used to be appended to slice2's
+    run. Each now adds its process id.
 
 ## Lean findings
 
