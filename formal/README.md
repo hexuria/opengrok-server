@@ -48,6 +48,8 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
 | The ending the client saw is in the journal | safety | `EndingIsDurable`, which fails by nature (see below) |
+| The client is shown an ending only if the log holds it; otherwise it is told the run could not be recorded | safety | `ToldIsTrue` |
+| The log never holds the round a run ended on without the ending it ended with | safety | `RoundNeverWithoutEnding` |
 | A round journaled while a Stop lands is kept | safety | `JournalAppend` `RoundKept` |
 | No round is written twice | safety | `JournalAppend` `NoDuplicate` |
 
@@ -106,6 +108,18 @@ Each trace is TLC's shortest.
    two attempts (TLC, `MaxTries = 1` fails); the code allows five, like `STOP_ATTEMPTS`.
    `JournalAppend_truth` keeps the limit: a lost reply still reads as a failure.
 
+10. **Eighteen exits, three ways to write an ending** (`HarnessLoop_4a25af6_told`,
+    `HarnessLoop_4a25af6_split`). Some exits wrote the round and its ending in one write, some
+    in two (plan flood, park, refused twice, same screen), and the chart and budget exits in
+    three (the durable round, the pinned screenshot, the ending). Every ending was emitted to
+    the client before its write, and every one of those writes ignored its error. TLC: a
+    client shown `RUN_FINISHED` for a run the log still holds as running (9 states); a park
+    whose tool call reached the log without the `Suspended` that makes its card answerable
+    (15 states). Now every exit names an `Ending` and `close` does the rest: the Stop check,
+    the fallback sentence, the pin, one write of the round with its ending, and only then the
+    emit. A refused write is shown as the one true ending, "the run could not be recorded".
+    The chart and budget exits are decided above the durable write, so they write once too.
+
 ## Lean findings
 
 `lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
@@ -151,11 +165,11 @@ The state graph was the object being minimised. The results:
   `AtMostOneStaleTool` once renewals can fail, but without the claim it contradicts
   `RetryNotRefused` (`RunLifecycle_endedstop`), so it waits for the claim. "Minimal" is
   claimed only among these candidates.
-- **Not simplified here: 18 exits hand-build their endings.** Their journal writes come in
-  one, two or three batches, all ignoring errors. A single `close(verdict)` that writes the
-  round and its ending in one batch is the smaller design: it would remove the window where
-  the journal holds a round without its ending. It is a larger refactor of `converse_raw`
-  and is left as the next step.
+- **One way out.** `converse_raw` had 18 exits that each built their own ending, in one,
+  two or three writes, with four helpers (`stop_here`, `finish_round`, `finish_or_stop`,
+  `finish_ending`). There is now one: every exit is `end_run!(round, Ending::…)`, and `close`
+  is the only function that ends a run. The model already had a single `Close` action; the
+  code now matches it. Eleven ignored journal writes became one checked write.
 
 ## Implementation
 
@@ -171,12 +185,21 @@ The state graph was the object being minimised. The results:
   `Lease`.
 - `crates/opengrok-server/src/agui/routes.rs`: `append_events` retries a `Conflict`
   (`APPEND_ATTEMPTS`), and no other error.
+- `crates/opengrok-harness/src/lib.rs`: `Ending` and `close` replace the four ending helpers;
+  `resume_conversation` goes through `close` too, and its durable write is now checked.
+  `crates/opengrok-harness/src/projection.rs`: `unrecorded` swaps a refused ending for the one
+  `RUN_ERROR` that is true.
 - Tests derived from the traces, in `crates/opengrok-harness/tests/unit/loop_tests.rs`:
   - `a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop` (finding 1)
   - `a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call` (finding 3)
   - `a_refused_card_is_read_by_the_model_and_never_runs` (`Close.runsApproved`)
 
   The first two fail on `4a25af6` and pass now.
+- Also in `loop_tests.rs`, from `ToldIsTrue` and `RoundNeverWithoutEnding`:
+  `an_ending_the_journal_refused_is_told_as_unrecorded`,
+  `a_park_the_journal_refused_shows_no_card`, `a_parked_round_and_its_card_are_journaled_together`,
+  `a_chart_round_and_its_ending_are_journaled_together` (each fails on the previous commit), and
+  `a_door_that_will_not_open_ends_the_run_once`.
 - `crates/opengrok-server/tests/against_a_stopped_run.rs`:
   `a_round_journaled_while_a_stop_lands_keeps_its_frames` races three rounds against a Stop
   on Postgres (`RoundKept`, `NoDuplicate`).
@@ -188,9 +211,9 @@ The state graph was the object being minimised. The results:
   unqueued turn checks for a live loop, so both loops run tools until the run ends, and a
   retry of an ended run runs a whole turn whose events the log refuses. Closing it needs a
   per-run claim.
-- **Ignored journal writes.** Park, ending and resume writes use `let _ = record_round`
-  (`EndingIsDurable`). A dropped park write leaves a live card on a run the log says is
-  `running`.
+- **A journal that is down stays down.** `close` tells the client the truth, but a run whose
+  ending could not be written is still `running` in the log until the sweep fails it, with the
+  sweep's "interrupted by a restart" (`EndingIsDurable`).
 - **Check-then-act races.** They are narrowed, not closed: a Stop landing between a
   `stopped` question and the act that follows it (`run_all`, or the RUN_FINISHED write)
   still gets through, once per loop.
