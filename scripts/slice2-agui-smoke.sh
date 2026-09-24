@@ -21,8 +21,11 @@ JSON
 )
 
 echo "1. the endpoint streams server-sent events"
+# Its own run id: a run id is used once, and a second POST with one that already has a run is
+# answered with that run (its owner) or refused (anybody else, and an anonymous caller owns
+# nothing). This check only wants the headers of a fresh run.
 headers=$(curl -sS -o /dev/null -D - -X POST "$BASE/ag-ui" \
-  -H 'content-type: application/json' -d "$BODY" --max-time 10)
+  -H 'content-type: application/json' -d "${BODY/$RUN/$RUN-headers}" --max-time 10)
 echo "$headers" | grep -qi "content-type: text/event-stream" \
   || fail "not an event stream: $(echo "$headers" | head -5)"
 ok "content-type is text/event-stream"

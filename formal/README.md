@@ -41,9 +41,9 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | A Stop recorded before the close asks is how the run ends | safety | `StopIsHonoured` |
 | An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |
 | A Stop recorded before the continuation asks keeps the approved call from running | safety | `NoApprovedAfterStop` |
-| After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` — fails today: a retry runs a whole turn on an ended run |
+| After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` |
 | A retried POST is answered, never told to stop unless a person did | safety | `RetryNotRefused` |
-| At most one loop drives a run at any moment | safety | `OneDriver` — fails today (`RunLifecycle_retry`) |
+| At most one loop drives a run at any moment | safety | `OneDriver` |
 | The sweep never fails a run a live loop is driving | safety | `NoFalseFailure` |
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
@@ -120,6 +120,17 @@ Each trace is TLC's shortest.
     emit. A refused write is shown as the one true ending, "the run could not be recorded".
     The chart and budget exits are decided above the durable write, so they write once too.
 
+11. **A run id was a key anyone could turn twice** (`RunLifecycle_retry`, `OneDriver`). A POST
+    whose run id already had a run started a second loop on it, and `append_run` preferred the
+    newer account, so another account's POST with a leaked run id appended its own turn to the
+    run and became its owner. Now the first POST claims the run: its `Started` goes in at the
+    first seq under the unique `(stream_id, stream_seq)`, exactly as an answer commits (Lean
+    `Answer.at_most_one_commit` is the same argument), and only the claimer runs a loop. A POST
+    that finds the run already there gets it back if it owns it — replayed, then followed to
+    its end, with one closer — and a 409 otherwise; an anonymous caller owns nothing. The owner
+    is now set once. With the claim, no loop can start on an ended run, so "any ended run means
+    stop" is back: `RunLifecycle_endedstop` still prints CI's trace, but only with the claim off.
+
 ## Lean findings
 
 `lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
@@ -157,14 +168,19 @@ The state graph was the object being minimised. The results:
   hang for an unbounded spend if a future `continue` forgot its budget.
 - **"Stop" and "finish" meet in one place.** Six clean-finish sites each chose `finish()`
   directly. They now share `finish_or_stop`, the one close the Lean `Close` model describes.
-- **The fix set is minimal among the candidates, by exhaustive bounded search.** With
-  renewals that never fail, `{lease on resume, stop before approved}` is necessary and
-  sufficient for `ApprovedAtMostOnce`, `NoApprovedAfterStop`, `NoFalseFailure` and
-  `RetryNotRefused`: drop the lease and `RunLifecycle_4a25af6` fails, drop the check and
-  `RunLifecycle_nostopcheck` fails. "Any ended run means stop" is needed for
-  `AtMostOneStaleTool` once renewals can fail, but without the claim it contradicts
-  `RetryNotRefused` (`RunLifecycle_endedstop`), so it waits for the claim. "Minimal" is
-  claimed only among these candidates.
+- **The fix set is minimal among the candidates, by exhaustive bounded search.** Over all
+  2⁴ combinations of the four lifecycle switches (lease on resume, stop before the approved
+  call, any ended run means stop, the claim), in both regimes:
+  - **Renewals that never fail.** Exactly two combinations pass all six properties: all four,
+    and all but "any ended run means stop". Drop the lease and `NoFalseFailure` fails, the stop
+    check and `NoApprovedAfterStop` fails, the claim and `OneDriver` fails.
+  - **Renewals that may fail** (`recovery.rs` only logs a failed `hold_run`). All four, and all
+    but the lease, pass the five properties this regime can have (`NoFalseFailure` cannot, see
+    `RunLifecycle_lapse`). Drop "any ended run means stop" and `AtMostOneStaleTool` fails.
+
+  No proper subset passes both regimes, so all four ship. "Minimal" is claimed only among these
+  candidates.
+
 - **One way out.** `converse_raw` had 18 exits that each built their own ending, in one,
   two or three writes, with four helpers (`stop_here`, `finish_round`, `finish_or_stop`,
   `finish_ending`). There is now one: every exit is `end_run!(round, Ending::…)`, and `close`
@@ -179,8 +195,14 @@ The state graph was the object being minimised. The results:
   - `resume_conversation` asks `stopped` before running (or refusing) the approved call.
 - `crates/opengrok-server/src/agui/routes.rs`
   - `continue_run` holds a recovery `Lease`.
-  - `StoreJournal::stopped` still answers only for `Stopped`, with a comment saying why it
-    must not be widened before the claim (finding 8).
+  - `StoreJournal::stopped` answers yes for any ended run; the comment says why that needed the
+    claim first (findings 8 and 11).
+  - `start_claimed_turn` answers a run id that already has a run before any side effect, and
+    claims the run (`StoreJournal::claim`) before it starts a loop. `answer_for_existing_run`
+    and `attach` give the owner its run back; anybody else gets `409 run-exists`.
+- `crates/opengrok-store/src/postgres.rs`: a run's owner is set once.
+- `scripts/slice2-agui-smoke.sh`: the header check POSTs its own run id. It used to send the
+  second request's body, which only worked because a reused run id ran a second turn.
 - `crates/opengrok-server/src/agui/resume.rs`: `resume_suspended_run` holds a recovery
   `Lease`.
 - `crates/opengrok-server/src/agui/routes.rs`: `append_events` retries a `Conflict`
@@ -200,17 +222,17 @@ The state graph was the object being minimised. The results:
   `a_park_the_journal_refused_shows_no_card`, `a_parked_round_and_its_card_are_journaled_together`,
   `a_chart_round_and_its_ending_are_journaled_together` (each fails on the previous commit), and
   `a_door_that_will_not_open_ends_the_run_once`.
+- `crates/opengrok-server/tests/against_a_retried_run.rs` (Postgres): a retry gets its run back
+  and nothing runs twice; two POSTs at once run one loop; another account's POST is refused and
+  leaves the run its owner's; an anonymous caller cannot reuse a run id; the owner is set once.
 - `crates/opengrok-server/tests/against_a_stopped_run.rs`:
   `a_round_journaled_while_a_stop_lands_keeps_its_frames` races three rounds against a Stop
   on Postgres (`RoundKept`, `NoDuplicate`).
 
 ## Remaining hazards the models name but this change does not fix
 
-- **Same-runId retries** (`RunLifecycle_retry`). A retried `POST /ag-ui` with the same
-  `runId` starts a second loop on the same run. Neither `DrainResult::AlreadyThisRun` nor an
-  unqueued turn checks for a live loop, so both loops run tools until the run ends, and a
-  retry of an ended run runs a whole turn whose events the log refuses. Closing it needs a
-  per-run claim.
+- **A reattached stream moves a round at a time.** The owner's retry follows the log, which
+  the turn writes once per round, so its words arrive per round rather than per token.
 - **A journal that is down stays down.** `close` tells the client the truth, but a run whose
   ending could not be written is still `running` in the log until the sweep fails it, with the
   sweep's "interrupted by a restart" (`EndingIsDurable`).

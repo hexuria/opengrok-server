@@ -400,9 +400,10 @@ impl PgStore {
                status = excluded.status,
                event_count = excluded.event_count,
                updated_at_ms = excluded.updated_at_ms,
-               -- The owner is set once and never overwritten with NULL: a later batch that arrives
-               -- without a session must not orphan a run somebody owns.
-               account_id = coalesce(excluded.account_id, run_view.account_id),
+               -- The owner is set once, by the first batch that names one, and never changed: a
+               -- later batch without a session must not orphan the run, and a later batch from
+               -- somebody else must not take it (a POST used to, with nothing but the run id).
+               account_id = coalesce(run_view.account_id, excluded.account_id),
                -- The start is the first append's stamp, kept for good.
                started_at_ms = coalesce(run_view.started_at_ms, excluded.started_at_ms)",
         )
