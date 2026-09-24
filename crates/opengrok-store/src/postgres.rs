@@ -400,9 +400,10 @@ impl PgStore {
                status = excluded.status,
                event_count = excluded.event_count,
                updated_at_ms = excluded.updated_at_ms,
-               -- The owner is set once and never overwritten with NULL: a later batch that arrives
-               -- without a session must not orphan a run somebody owns.
-               account_id = coalesce(excluded.account_id, run_view.account_id),
+               -- The owner is set once, by the first batch that names one, and never changed: a
+               -- later batch without a session must not orphan the run, and a later batch from
+               -- somebody else must not take it (a POST used to, with nothing but the run id).
+               account_id = coalesce(run_view.account_id, excluded.account_id),
                -- The start is the first append's stamp, kept for good.
                started_at_ms = coalesce(run_view.started_at_ms, excluded.started_at_ms)",
         )
@@ -425,6 +426,22 @@ impl PgStore {
     /// a running turn to find out whether somebody has stopped it: replaying the whole event stream
     /// to read one word would grow with the length of the conversation and be paid for on the hot
     /// path. `None` means the projection has never heard of this run.
+    /// A run's status and how many frames it has emitted: one primary-key read, for a reader
+    /// that follows a run and wants to reload it only when something changed.
+    pub async fn run_progress(&self, id: &RunId) -> StoreResult<Option<(RunStatus, i64)>> {
+        let row = sqlx::query("select status, event_count from run_view where id = $1")
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(row) => Ok(Some((
+                RunStatus::from_stored(&row.try_get::<String, _>("status")?),
+                row.try_get::<i64, _>("event_count")?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
     pub async fn run_status(&self, id: &RunId) -> StoreResult<Option<RunStatus>> {
         let row = sqlx::query("select status from run_view where id = $1")
             .bind(id.as_str())

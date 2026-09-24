@@ -649,6 +649,129 @@ async fn a_stop_lands_between_the_model_asking_for_a_tool_and_the_tool_running()
     );
 }
 
+fn is_run_stopped(event: &Event) -> bool {
+    event.event_type == EventType::Custom
+        && event.extra.get("name").and_then(|name| name.as_str()) == Some("run-stopped")
+}
+
+/// THE CLOSE IS A STEP BOUNDARY TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured). TLC's
+/// trace: the round opens unstopped, the person presses Stop while the model is answering in
+/// words, the answer ends the run. It used to end as RUN_FINISHED — the person was told the
+/// coworker finished when they had stopped it.
+#[tokio::test]
+async fn a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop() {
+    // Not stopped when the round opens; stopped by the time the answer closes it.
+    let journal = StoppingJournal::saying_stop_after(1);
+
+    let events = run_conversation(
+        &MockDoor::echoing(),
+        None,
+        &journal,
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert!(
+        events.iter().any(is_run_stopped),
+        "a stop recorded before the run ended is how it ends: {events:?}"
+    );
+    assert!(
+        assistant_text(&events).contains("hello"),
+        "what the model already said is kept, not withdrawn: {events:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let endings = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                EventType::RunFinished | EventType::RunError
+            )
+        })
+        .count();
+    assert_eq!(endings, 1, "still exactly one ending: {events:?}");
+}
+
+/// A STOP PRESSED WHILE THE CARD WAS UP WINS OVER THE ANSWER (`formal/tla/RunLifecycle.tla`
+/// NoApprovedAfterStop). The answer is appended, then the Stop, then the continuation starts:
+/// the approved call must not run, and the model must not be asked anything.
+#[tokio::test]
+async fn a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let door = CountingToolDoor(calls.clone());
+    let journal = StoppingJournal::saying_stop_after(0);
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "play the recipe"}),
+    };
+
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &journal,
+        request("go"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "the approved call did not run");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "and the model was not asked again"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult),
+        "no result is invented for a call that never ran: {events:?}"
+    );
+    assert!(events.iter().any(is_run_stopped), "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        journal.batches().concat().iter().any(is_run_stopped),
+        "the stop is journaled, not only shown"
+    );
+}
+
+/// A REFUSAL NEVER REACHES THE EXECUTOR: the
+/// person said no, so the model reads the refusal and the box is not touched.
+#[tokio::test]
+async fn a_refused_card_is_read_by_the_model_and_never_runs() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "rm -rf build"}),
+    };
+
+    let events = resume_conversation(
+        &MockDoor::echoing(),
+        &runner,
+        &MemoryJournal::new(),
+        request("clean up"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::refused(call, 1, "the person said no"),
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "a refused call does not run");
+    let result = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCallResult)
+        .expect("the refusal is written where the result would have gone");
+    assert_eq!(result.extra.get("ok"), Some(&serde_json::json!(false)));
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
 /// A model that never stops asking would otherwise run until the money ran out. The bound ends
 /// the run as a result the client can see, not a silent stop.
 #[tokio::test]
@@ -2819,4 +2942,344 @@ async fn set_value_after_profile_create_still_runs() {
         "the model's answer is the chat: {text:?}"
     );
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+fn is_awaiting_card(event: &Event) -> bool {
+    event.event_type == EventType::Custom
+        && event.extra.get("name").and_then(|name| name.as_str()) == Some("run-awaiting-approval")
+}
+
+fn endings(events: &[Event]) -> Vec<&Event> {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                EventType::RunFinished | EventType::RunError
+            )
+        })
+        .collect()
+}
+
+/// Everything a live watcher was sent, in order.
+struct Collect(Mutex<Vec<Event>>);
+#[async_trait::async_trait]
+impl EventSink for Collect {
+    async fn emit(&self, events: &[Event]) {
+        if let Ok(mut seen) = self.0.lock() {
+            seen.extend(events.iter().cloned());
+        }
+    }
+}
+
+/// Refuses every write that carries the event `refuse` picks, and takes the rest.
+struct Refusing(fn(&Event) -> bool);
+#[async_trait::async_trait]
+impl RunJournal for Refusing {
+    async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+        if events.iter().any(self.0) {
+            return Err(JournalError::Unwritable("the disk is full".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// AN ENDING THE LOG REFUSED IS NEVER SHOWN (`formal/tla/HarnessLoop.tla` ToldIsTrue). The ending
+/// used to be emitted before its write and the write's error ignored, so a person was told the
+/// run finished while the log still said it was running. Now they are told the one true thing,
+/// once, and the words already said stay said.
+#[tokio::test]
+async fn an_ending_the_journal_refused_is_told_as_unrecorded() {
+    let journal = Refusing(|event| {
+        matches!(
+            event.event_type,
+            EventType::RunFinished | EventType::RunError
+        )
+    });
+    let sink = Collect(Mutex::new(Vec::new()));
+    let events = run_conversation_streaming(
+        &MockDoor::echoing(),
+        None,
+        &journal,
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+        &sink,
+    )
+    .await;
+    let live = sink.0.lock().unwrap().clone();
+    for seen in [&events, &live] {
+        let ends = endings(seen);
+        assert_eq!(ends.len(), 1, "exactly one ending: {seen:?}");
+        assert_eq!(ends[0].event_type, EventType::RunError, "{seen:?}");
+        let message = ends[0].extra.get("message").and_then(|m| m.as_str());
+        assert!(
+            message.is_some_and(|m| m.contains("could not be recorded")),
+            "{message:?}"
+        );
+    }
+    assert!(assistant_text(&live).contains("hello"), "{live:?}");
+}
+
+/// A CARD THE LOG NEVER GOT IS NEVER SHOWN. Answering a card whose suspension was not recorded
+/// is a 409, so a card painted from an unrecorded park was a button that could not work.
+#[tokio::test]
+async fn a_park_the_journal_refused_shows_no_card() {
+    let journal = Refusing(is_awaiting_card);
+    let sink = Collect(Mutex::new(Vec::new()));
+    let events = run_conversation_streaming(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+        &sink,
+    )
+    .await;
+    let live = sink.0.lock().unwrap().clone();
+    for seen in [&events, &live] {
+        assert!(!seen.iter().any(is_awaiting_card), "no card: {seen:?}");
+        assert_eq!(endings(seen).len(), 1, "{seen:?}");
+        assert_eq!(seen.last().unwrap().event_type, EventType::RunError);
+    }
+}
+
+/// A PARKED ROUND AND ITS CARD ARE ONE WRITE (`formal/tla/HarnessLoop.tla`
+/// RoundNeverWithoutEnding). They were two, so a failed second write left the log holding the
+/// tool call that asked for a person with no `Suspended` to answer.
+#[tokio::test]
+async fn a_parked_round_and_its_card_are_journaled_together() {
+    let journal = MemoryJournal::new();
+    run_conversation(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let batches = journal.batches();
+    let last = batches.last().expect("a last write");
+    assert!(
+        last.iter()
+            .any(|event| event.event_type == EventType::ToolCallStart),
+        "the round that asked: {batches:?}"
+    );
+    assert!(
+        last.iter().any(is_awaiting_card),
+        "and its card: {batches:?}"
+    );
+}
+
+/// A CHART ENDS THE RUN, IN ONE WRITE. NativeChat paints bar_chart from its TOOL_CALL frames, so
+/// the run finishes after it. The round was journaled before the ending, and the ending after.
+#[tokio::test]
+async fn a_chart_round_and_its_ending_are_journaled_together() {
+    let journal = MemoryJournal::new();
+    let door = MockDoor::with_script(vec![
+        ModelDelta::ToolCallStart {
+            id: "c1".to_string(),
+            name: "bar_chart".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: "c1".to_string(),
+            delta: r#"{"title":"spend"}"#.to_string(),
+        },
+        ModelDelta::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &journal,
+        request("chart it"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(endings(&events).len(), 1, "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let batches = journal.batches();
+    let last = batches.last().expect("a last write");
+    assert!(
+        last.iter()
+            .any(|event| event.event_type == EventType::ToolCallStart)
+            && last
+                .iter()
+                .any(|event| event.event_type == EventType::RunFinished),
+        "the chart and the finish in one write: {batches:?}"
+    );
+}
+
+/// A DOOR THAT WILL NOT OPEN ENDS THE RUN ONCE, SAYING WHY, and asks nothing further.
+#[tokio::test]
+async fn a_door_that_will_not_open_ends_the_run_once() {
+    struct ClosedDoor(Arc<Mutex<usize>>);
+    #[async_trait::async_trait]
+    impl ModelDoor for ClosedDoor {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            if let Ok(mut calls) = self.0.lock() {
+                *calls += 1;
+            }
+            Err(ModelError::Stream("the gateway is down".to_string()))
+        }
+    }
+    let calls = Arc::new(Mutex::new(0usize));
+    let journal = MemoryJournal::new();
+    let events = run_conversation(
+        &ClosedDoor(calls.clone()),
+        Some(&tool_runner()),
+        &journal,
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), 1);
+    let ends = endings(&events);
+    assert_eq!(ends.len(), 1, "{events:?}");
+    assert_eq!(ends[0].event_type, EventType::RunError);
+    assert!(
+        journal
+            .batches()
+            .concat()
+            .iter()
+            .any(|event| event.event_type == EventType::RunError),
+        "and the log holds it"
+    );
+}
+
+/// A PARK ASKS `stopped` TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured, the verifier's trace).
+/// A Stop pressed while the tool ran used to end the run on a card: its `Suspended` is refused on
+/// a stopped run, so the card's answer was a 409.
+#[tokio::test]
+async fn a_park_after_a_stop_ends_the_run_stopped_with_no_card() {
+    // Not stopped at the top of the round or before the tools; stopped by the close.
+    let journal = StoppingJournal::saying_stop_after(2);
+    let events = run_conversation(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert!(!events.iter().any(is_awaiting_card), "no card: {events:?}");
+    assert!(events.iter().any(is_run_stopped), "{events:?}");
+    assert_eq!(endings(&events).len(), 1, "{events:?}");
+}
+
+/// A WRITE THAT FAILED MAY HAVE LANDED, SO IT IS NOT WRITTEN AGAIN (`formal/tla/JournalAppend.tla`
+/// NoDuplicate). After the durable write of a round came back an error, the close used to write
+/// the round again with its ending — twice in the log when the first commit had landed and only
+/// its reply was lost.
+#[tokio::test]
+async fn a_round_whose_write_failed_is_not_written_again() {
+    /// Keeps every batch, and answers the first round's write with an error anyway.
+    struct LostReply {
+        kept: Mutex<Vec<Vec<Event>>>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for LostReply {
+        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            let mut kept = self.kept.lock().map_err(|_| {
+                JournalError::Unwritable("the journal's lock was poisoned".to_string())
+            })?;
+            let first_round = events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallResult)
+                && !kept
+                    .concat()
+                    .iter()
+                    .any(|event| event.event_type == EventType::ToolCallResult);
+            kept.push(events.to_vec());
+            if first_round {
+                return Err(JournalError::Unwritable("the reply was lost".to_string()));
+            }
+            Ok(())
+        }
+    }
+    let journal = LostReply {
+        kept: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &CountingToolDoor(Arc::new(Mutex::new(0usize))),
+        Some(&tool_runner()),
+        &journal,
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(endings(&events).len(), 1, "{events:?}");
+    let written = journal.kept.lock().unwrap().concat();
+    let calls = written
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallStart)
+        .count();
+    assert_eq!(calls, 1, "the round is in the log once: {written:?}");
+}
+
+/// A STOP THAT LANDS BETWEEN THE CLOSE'S QUESTION AND ITS WRITE STILL WINS (the peer review's
+/// trace). The park's write found the run stopped: its `Suspended` was refused, the rest was
+/// written, and the card went out with nothing behind it. The write now refuses the whole batch
+/// as `Ended`, and the round goes in again with the stop's ending.
+#[tokio::test]
+async fn a_park_whose_write_finds_the_run_stopped_ends_stopped_with_no_card() {
+    /// Never answers "stopped"; refuses, whole, any batch that opens a card.
+    struct StoppedUnderTheWrite {
+        kept: Mutex<Vec<Vec<Event>>>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for StoppedUnderTheWrite {
+        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            if events.iter().any(is_awaiting_card) {
+                return Err(JournalError::Ended("a Stop got there first".to_string()));
+            }
+            self.kept
+                .lock()
+                .map_err(|_| JournalError::Unwritable("poisoned".to_string()))?
+                .push(events.to_vec());
+            Ok(())
+        }
+    }
+    let journal = StoppedUnderTheWrite {
+        kept: Mutex::new(Vec::new()),
+    };
+    let sink = Collect(Mutex::new(Vec::new()));
+    let events = run_conversation_streaming(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+        &sink,
+    )
+    .await;
+    let live = sink.0.lock().unwrap().clone();
+    let written = journal.kept.lock().unwrap().concat();
+    for seen in [&events, &live, &written] {
+        assert!(!seen.iter().any(is_awaiting_card), "no card: {seen:?}");
+        assert!(seen.iter().any(is_run_stopped), "{seen:?}");
+        assert_eq!(endings(seen).len(), 1, "{seen:?}");
+    }
+    assert!(
+        written
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallStart),
+        "the round that asked is still in the log: {written:?}"
+    );
 }

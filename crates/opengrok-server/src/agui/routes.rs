@@ -2525,6 +2525,17 @@ async fn start_claimed_turn(
     coworker_role: Option<String>,
 ) -> Response {
     let state = gateway.agui.clone();
+    // A RUN ID THAT ALREADY HAS A RUN IS NOT A NEW TURN. A client retrying its POST — its stream
+    // dropped, or it sent the same body twice — used to start a second loop on the same run: a
+    // second model call, every tool twice, one transcript interleaving both. Answered here,
+    // before anything below has a side effect (a parked card stopped, a box woken). AFTER the
+    // queued-send check, deliberately: a same-run retry whose words changed gets that check's
+    // own refusal (`stale-pending-message`), which says more than being handed the old run.
+    // The claim further down is what makes it exact: two POSTs at once can both get past this.
+    if let Some(answer) = answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
+    {
+        return answer;
+    }
     if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
         crate::agui::resume::interrupt_parked_hitl(
             &gateway,
@@ -2708,6 +2719,20 @@ async fn start_claimed_turn(
         skill_id: recorded_skill,
     };
 
+    // THE CLAIM. Exactly one POST per run id appends the run's `Started` at the first seq, under
+    // the unique `(stream_id, stream_seq)`, and only that one runs a loop
+    // (`formal/tla/RunLifecycle.tla` OneDriver). One that lost to a POST racing it is answered
+    // the way the check at the top answers a retry.
+    match journal.claim(&input.run_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return answer_for_existing_run(&state, account_id.as_ref(), &input.run_id)
+                .await
+                .unwrap_or_else(run_taken);
+        }
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+
     // Hold the run while we serve it, so a recovery sweep does not mistake a slow model call for
     // an abandoned run. Released when the spawned turn drops — including when the process dies,
     // which is exactly the case the lease exists for.
@@ -2784,21 +2809,16 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         events: &[Event],
     ) -> Result<(), opengrok_harness::JournalError> {
-        append_events(
-            &self.state,
-            run_id,
-            &RunStart {
-                thread_id: &self.thread_id,
-                account_id: self.account_id.as_ref(),
-                coworker_id: self.coworker_id.as_ref(),
-                model: self.model.as_deref(),
-                system: self.system.as_deref(),
-                skill_id: self.skill_id.as_deref(),
-            },
-            events,
-        )
-        .await
-        .map_err(|error| opengrok_harness::JournalError::Unwritable(error.to_string()))
+        append_events(&self.state, run_id, &self.run_start(), events)
+            .await
+            .map_err(|error| match error {
+                AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
+                    "run {run_id} ended before its card could be recorded"
+                )),
+                AppendError::Store(error) => {
+                    opengrok_harness::JournalError::Unwritable(error.to_string())
+                }
+            })
     }
 
     /// The log's own answer to "has somebody stopped this run". One primary-key read of the
@@ -2808,10 +2828,18 @@ impl opengrok_harness::RunJournal for StoreJournal {
     /// because the database blinked would turn a hiccup into a cancelled turn, and the person who
     /// really did press stop still has a durable `Stopped` in the log for the next boundary to
     /// find.
+    ///
+    /// ANY ENDED RUN ANSWERS YES. A loop only runs on a run it claimed or resumed, so a run that
+    /// ended under it was ended from outside — failed by the sweep after a renewal was lost —
+    /// and carrying on only spends on events the log refuses (`formal/tla/RunLifecycle.tla`
+    /// AtMostOneStaleTool). Before the claim this broke a same-runId retry, which ran a loop on
+    /// an ended run and was told to stop before it said a word (the slice2 smoke, 23 Sep 2026).
+    /// The cost: a loop whose run the sweep failed ends its live stream as `run-stopped`, though
+    /// nobody pressed Stop; the log keeps the real ending.
     async fn stopped(&self, run_id: &str) -> bool {
         let run_id = RunId::from_stored(run_id.to_string());
         match self.state.auth.store.run_status(&run_id).await {
-            Ok(status) => status == Some(RunStatus::Stopped),
+            Ok(status) => status.is_some_and(|status| status.is_terminal()),
             Err(error) => {
                 tracing::warn!(%error, run = %run_id, "could not read whether a run was stopped");
                 false
@@ -2820,7 +2848,118 @@ impl opengrok_harness::RunJournal for StoreJournal {
     }
 }
 
+impl StoreJournal {
+    fn run_start(&self) -> RunStart<'_> {
+        RunStart {
+            thread_id: &self.thread_id,
+            account_id: self.account_id.as_ref(),
+            coworker_id: self.coworker_id.as_ref(),
+            model: self.model.as_deref(),
+            system: self.system.as_deref(),
+            skill_id: self.skill_id.as_deref(),
+        }
+    }
+
+    /// Start `run_id` for this turn. `Ok(false)` is a run that already exists, from an earlier
+    /// POST with the same id or one racing this one: not this turn's to run.
+    pub async fn claim(&self, run_id: &str) -> Result<bool, opengrok_store::StoreError> {
+        let id = RunId::from_stored(run_id.to_string());
+        let (mut run, seq) = self.state.auth.store.load_run(&id).await?;
+        if run.started {
+            return Ok(false);
+        }
+        let at_ms = now_ms();
+        let started = run
+            .decide(start_command(&self.run_start(), at_ms))
+            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        for event in &started {
+            run.apply(event);
+        }
+        let view = RunView {
+            id: id.clone(),
+            thread_id: self.thread_id.clone(),
+            status: run.status,
+            event_count: run.emitted.len() as i64,
+            updated_at_ms: at_ms,
+        };
+        match self
+            .state
+            .auth
+            .store
+            .append_run(&id, seq, &started, &view, self.account_id.as_ref())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(opengrok_store::StoreError::Conflict) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// The `Start` a run records about itself: whose turn, and what it opened with.
+fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
+    RunCommand::Start {
+        thread_id: start.thread_id.to_string(),
+        coworker_id: start.coworker_id.cloned(),
+        model: start
+            .model
+            .map(str::trim)
+            .filter(|pin| !pin.is_empty())
+            .map(str::to_string),
+        system: start
+            .system
+            .map(str::to_string)
+            .filter(|text| !text.is_empty()),
+        skill_id: start
+            .skill_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string),
+        at_ms,
+    }
+}
+
+/// Attempts at a journal write that loses the race to another writer: one more than a run has
+/// writers at once (its turn, a Stop, the sweep), like `STOP_ATTEMPTS`.
+const APPEND_ATTEMPTS: usize = 5;
+
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
+///
+/// RETRIED ON A CONFLICT, AND ONLY ON ONE. A Conflict is a write that lost the race and wrote
+/// nothing, so reading and deciding again is what a write a moment later would have done. Without
+/// it the turn lost every race to a Stop (which retries its own), and the round on screen when the
+/// button was pressed left the log. Any other error may be a commit whose reply was lost: writing
+/// it again would log the round twice (`formal/tla/JournalAppend.tla`).
+async fn append_events(
+    state: &AgUiState,
+    run_id: &str,
+    start: &RunStart<'_>,
+    events: &[Event],
+) -> Result<(), AppendError> {
+    for _ in 1..APPEND_ATTEMPTS {
+        match append_events_once(state, run_id, start, events).await {
+            Err(AppendError::Store(opengrok_store::StoreError::Conflict)) => continue,
+            other => return other,
+        }
+    }
+    append_events_once(state, run_id, start, events).await
+}
+
+/// Why a batch was not written.
+#[derive(Debug)]
+enum AppendError {
+    Store(opengrok_store::StoreError),
+    /// The batch parks, and the run it parks has ended: the Stop won the race the loop's last
+    /// `stopped` question could not see. Nothing was written (`RunJournal::record`).
+    Ended,
+}
+
+impl From<opengrok_store::StoreError> for AppendError {
+    fn from(error: opengrok_store::StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
 /// What a run records about itself at its first batch. A struct rather than five more
 /// parameters: these are one fact — whose turn this is and what it opened with — and they are
 /// only ever passed together.
@@ -2833,19 +2972,17 @@ struct RunStart<'a> {
     skill_id: Option<&'a str>,
 }
 
-async fn append_events(
+/// One attempt: read the run, decide what this batch appends, write it at the seq it read.
+async fn append_events_once(
     state: &AgUiState,
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
-) -> Result<(), opengrok_store::StoreError> {
+) -> Result<(), AppendError> {
     let RunStart {
         thread_id,
         account_id,
-        coworker_id,
-        model,
-        system,
-        skill_id,
+        ..
     } = *start;
     if events.is_empty() {
         return Ok(());
@@ -2857,33 +2994,26 @@ async fn append_events(
     let mut to_append = Vec::new();
 
     if !run.started {
-        let started = run
-            .decide(RunCommand::Start {
-                thread_id: thread_id.to_string(),
-                coworker_id: coworker_id.cloned(),
-                model: model
-                    .map(str::trim)
-                    .filter(|pin| !pin.is_empty())
-                    .map(str::to_string),
-                system: system.map(str::to_string).filter(|text| !text.is_empty()),
-                skill_id: skill_id
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_string),
-                at_ms,
-            })
-            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        let started = run.decide(start_command(start, at_ms)).map_err(|error| {
+            AppendError::Store(opengrok_store::StoreError::Corrupt(error.to_string()))
+        })?;
         for event in &started {
             run.apply(event);
         }
         to_append.extend(started);
     }
+    // A batch that parks must record its suspension, or record nothing.
+    let parks = events.iter().any(is_suspend_frame);
 
     for event in events {
-        let payload = serde_json::to_value(event)
-            .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+        let payload = serde_json::to_value(event).map_err(|error| {
+            AppendError::Store(opengrok_store::StoreError::Corrupt(error.to_string()))
+        })?;
         // The aggregate refuses a frame after an ending; that is a rule, not a hiccup.
         let Ok(decided) = run.decide(RunCommand::Emit { payload, at_ms }) else {
+            if parks {
+                return Err(AppendError::Ended);
+            }
             break;
         };
         for decided_event in &decided {
@@ -2894,19 +3024,17 @@ async fn append_events(
         // A suspension carries which call is waiting, so a person can answer *that* call later.
         // Read from the event the projection emitted, because the harness is the only thing that
         // knows the run stopped.
-        if event.event_type == opengrok_wire::agui::EventType::Custom
-            && crate::agui::resume::is_suspend_custom(
-                event.extra.get("name").and_then(|name| name.as_str()),
-            )
-        {
+        if is_suspend_frame(event) {
             let call_id = event
                 .extra
                 .get("callId")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string();
-            if !call_id.is_empty()
-                && let Ok(suspended) = run.decide(RunCommand::Suspend {
+            if !call_id.is_empty() {
+                // REFUSED ONLY WHEN THE RUN HAS ENDED. Dropping the refusal and writing the rest
+                // put a card on screen for a suspension the log never got; answering it was a 409.
+                let Ok(suspended) = run.decide(RunCommand::Suspend {
                     call_id,
                     tool: event
                         .extra
@@ -2929,8 +3057,9 @@ async fn append_events(
                             .unwrap_or_default(),
                     ),
                     at_ms,
-                })
-            {
+                }) else {
+                    return Err(AppendError::Ended);
+                };
                 for suspended_event in &suspended {
                     run.apply(suspended_event);
                 }
@@ -2986,6 +3115,218 @@ async fn append_events(
         .append_run(&run_id, seq, &to_append, &view, account_id)
         .await?;
     Ok(())
+}
+
+/// A `run-awaiting-approval` CUSTOM: the frame whose suspension makes a card answerable.
+fn is_suspend_frame(event: &Event) -> bool {
+    event.event_type == opengrok_wire::agui::EventType::Custom
+        && crate::agui::resume::is_suspend_custom(
+            event.extra.get("name").and_then(|name| name.as_str()),
+        )
+}
+
+/// What a POST whose run id already has a run gets, or `None` while the id is free.
+///
+/// ITS OWNER GETS THE RUN BACK: what it has recorded, then what it records until it ends or
+/// parks — the answer the retry was waiting for, without a second loop making a second one.
+/// ANYBODY ELSE IS REFUSED. A run id is a password (see `replay_run`), and a POST used to be the
+/// way around it: a stranger's turn appended to the run and, through `append_run`, became its
+/// owner. An anonymous caller owns nothing, so it is refused too.
+async fn answer_for_existing_run(
+    state: &AgUiState,
+    account: Option<&AccountId>,
+    run_id: &str,
+) -> Option<Response> {
+    let id = RunId::from_stored(run_id.to_string());
+    let run = match state.auth.store.load_run(&id).await {
+        Ok((run, _)) => run,
+        Err(error) => {
+            return Some((StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response());
+        }
+    };
+    if !run.started {
+        return None;
+    }
+    let Some(account) = account else {
+        return Some(run_taken());
+    };
+    let owned = state.auth.store.run_owned_by(&id, account).await;
+    Some(match owned {
+        Ok(true) => attach(state.clone(), account.clone(), id),
+        other => not_attached(other),
+    })
+}
+
+/// A POST that may not attach: someone else's run, or an owner the store could not confirm.
+///
+/// A READ THAT FAILS IS A 503, NEVER `run-exists`. The 409 tells its caller to use a new run id,
+/// and the owner retrying a dropped stream obeys it: a second run with the same words, every
+/// model call and tool twice — what the existing-run check exists to prevent.
+fn not_attached(owned: Result<bool, opengrok_store::StoreError>) -> Response {
+    match owned {
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Ok(_) => run_taken(),
+    }
+}
+
+fn run_taken() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "run-exists",
+            "message": "this run id already has a run; a new turn needs a new run id",
+        })),
+    )
+        .into_response()
+}
+
+/// How often an attached stream looks for what its run has recorded since. The turn journals a
+/// round at a time, so the stream moves a round at a time, and a second is plenty. Each look is
+/// one primary-key read; the log itself is read only when that says something changed.
+const ATTACH_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Stream a run that another request is running or ran: what it has recorded, then what it
+/// records, until it ends or parks.
+///
+/// ONLY THE LOG'S OWN FRAMES, ONE FOR ONE. Replay hydration also appends transcript cards it
+/// could not match, and for a run with no frames yet it matches none, so every card the
+/// coworker ever showed this person would arrive here — and the count used to resume the
+/// stream would then skip that many real frames on the next look.
+///
+/// ONE CLOSER, THE ONE THE RUN'S STATUS SAYS (`attached_closer`). Closers inside the log are
+/// held back: a parked and resumed run has the park's `RUN_FINISHED` in the middle, and a
+/// parked run that was stopped still ends its log with it.
+fn attach(state: AgUiState, account_id: AccountId, run_id: RunId) -> Response {
+    use opengrok_wire::agui::EventType;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    tokio::spawn(async move {
+        let unreadable = |thread_id: &str| {
+            Event::new(EventType::RunError, now_ms())
+                .with("threadId", thread_id.to_string())
+                .with("runId", run_id.as_str())
+                .with(
+                    "message",
+                    "this run could not be read back; ask for it again",
+                )
+        };
+        let mut sent = 0usize;
+        let mut seen = None;
+        let mut stop_notice = false;
+        let mut last: Option<Event> = None;
+        loop {
+            // A client that hung up stops the follow; a long tool would otherwise keep it
+            // reading the log for nobody until the run ended.
+            if tx.is_closed() {
+                return;
+            }
+            let progress = match state.auth.store.run_progress(&run_id).await {
+                Ok(progress) => progress,
+                Err(_) => {
+                    let _ = tx.send(unreadable(""));
+                    return;
+                }
+            };
+            if progress == seen && matches!(progress, Some((RunStatus::Running, _))) {
+                tokio::time::sleep(ATTACH_POLL).await;
+                continue;
+            }
+            seen = progress;
+            let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
+                let _ = tx.send(unreadable(""));
+                return;
+            };
+            let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+            let frames = log_frames(
+                events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+                run.emitted.len(),
+            );
+            for frame in frames.into_iter().skip(sent) {
+                sent += 1;
+                let Ok(event) = serde_json::from_value::<Event>(frame) else {
+                    continue;
+                };
+                let is_end = matches!(
+                    event.event_type,
+                    EventType::RunFinished | EventType::RunError
+                );
+                if !is_end {
+                    stop_notice |= event.event_type == EventType::Custom
+                        && event.extra.get("name").and_then(|name| name.as_str())
+                            == Some("run-stopped");
+                    if tx.send(event.clone()).is_err() {
+                        return;
+                    }
+                }
+                last = Some(event);
+            }
+            if run.status == RunStatus::Running {
+                tokio::time::sleep(ATTACH_POLL).await;
+                continue;
+            }
+            for event in attached_closer(&run, &run_id, last.as_ref(), stop_notice, now_ms()) {
+                if tx.send(event).is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+    });
+    sse(futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|event| (Ok::<_, std::io::Error>(event), rx))
+    }))
+}
+
+/// A replay's frames that are the log's own: hydration overlays cards onto them in place and
+/// appends the cards it could not place, which an attached stream must not send (see `attach`).
+fn log_frames(mut hydrated: Vec<serde_json::Value>, logged: usize) -> Vec<serde_json::Value> {
+    hydrated.truncate(logged);
+    hydrated
+}
+
+/// The closer an attached stream ends with, from what the run IS rather than from the last closer
+/// its log happens to hold. `last` is the log's last frame and `stop_notice` whether its
+/// `run-stopped` was already sent.
+fn attached_closer(
+    run: &opengrok_core::run::Run,
+    run_id: &RunId,
+    last: Option<&Event>,
+    stop_notice: bool,
+    at_ms: i64,
+) -> Vec<Event> {
+    use opengrok_wire::agui::EventType;
+    let closing = |event_type| {
+        Event::new(event_type, at_ms)
+            .with("threadId", run.thread_id.clone())
+            .with("runId", run_id.as_str())
+    };
+    let last_is = |event_type| last.filter(|event| event.event_type == event_type).cloned();
+    match run.status {
+        RunStatus::Failed => vec![last_is(EventType::RunError).unwrap_or_else(|| {
+            closing(EventType::RunError).with(
+                "message",
+                run.failure
+                    .clone()
+                    .unwrap_or_else(|| "the run failed".to_string()),
+            )
+        })],
+        RunStatus::Stopped => {
+            let mut ending = Vec::new();
+            if !stop_notice {
+                ending.push(closing(EventType::Custom).with("name", "run-stopped"));
+            }
+            ending.push(match (stop_notice, last_is(EventType::RunFinished)) {
+                (true, Some(finished)) => finished,
+                _ => closing(EventType::RunFinished),
+            });
+            ending
+        }
+        // Finished, or parked on a card: the log's own closer when it has one.
+        _ => {
+            vec![last_is(EventType::RunFinished).unwrap_or_else(|| closing(EventType::RunFinished))]
+        }
+    }
 }
 
 /// Replay a run from the log.
@@ -3943,6 +4284,13 @@ async fn continue_run(
     outcome: opengrok_harness::ResumeOutcome,
 ) {
     let state = host.agui.clone();
+    // HOLD THE RUN WHILE IT IS CARRIED ON, exactly as the turn that parked it did. The answer
+    // flips the run back to `running`; the parked turn's lease died with it, so without one
+    // here an approved call that ran past LEASE_MS with nothing journaled — a recipe on the
+    // box — was claimed by the sweep and failed as "interrupted by a restart" while it was
+    // still running (`formal/tla/RunLifecycle.tla` NoFalseFailure: TLC's trace is park,
+    // answer, sweep). Held before anything is loaded, so no early return runs unleased.
+    let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
     let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
         return;
@@ -4424,11 +4772,11 @@ impl AgUiSink {
         hold.release_for(call_id, entry_id)
     }
 
-    fn release_held_forms(&self) -> Vec<Event> {
+    fn release_held_forms(&self, clean: bool) -> Vec<Event> {
         let Ok(mut hold) = self.form_hold.lock() else {
             return Vec::new();
         };
-        hold.release_rest()
+        hold.release_at_end(clean)
     }
 }
 
@@ -4475,7 +4823,8 @@ impl EventSink for AgUiSink {
                 opengrok_wire::agui::EventType::RunFinished
                     | opengrok_wire::agui::EventType::RunError
             ) {
-                for held in self.release_held_forms() {
+                let clean = event.event_type == opengrok_wire::agui::EventType::RunFinished;
+                for held in self.release_held_forms(clean) {
                     if !self.send(held) {
                         return;
                     }
@@ -4943,5 +5292,149 @@ mod tests {
         assert_eq!(wire["formRequest"]["title"], "Google account");
         assert_eq!(wire["arguments"]["title"], "Google account");
         assert!(wire.get("values").is_none());
+    }
+
+    fn a_run(status: RunStatus, failure: Option<&str>) -> opengrok_core::run::Run {
+        opengrok_core::run::Run {
+            thread_id: "th".to_string(),
+            status,
+            failure: failure.map(str::to_string),
+            ..opengrok_core::run::Run::default()
+        }
+    }
+
+    fn closer_types(events: &[Event]) -> Vec<(EventType, Option<String>)> {
+        events
+            .iter()
+            .map(|event| {
+                let name = event
+                    .extra
+                    .get("name")
+                    .or_else(|| event.extra.get("message"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                (event.event_type, name)
+            })
+            .collect()
+    }
+
+    /// AN OWNER THE STORE COULD NOT CONFIRM IS TOLD TO RETRY, NOT TO START OVER. A 409 sends the
+    /// owner of a dropped stream to a new run id, and the turn runs twice.
+    #[test]
+    fn a_failed_ownership_read_is_a_503_not_run_exists() {
+        assert_eq!(
+            not_attached(Err(opengrok_store::StoreError::Corrupt("gone".to_string()))).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(not_attached(Ok(false)).status(), StatusCode::CONFLICT);
+    }
+
+    /// AN ATTACHED STREAM ENDS THE WAY THE RUN ENDED, NOT THE WAY ITS LOG LAST CLOSED. A parked
+    /// run that was stopped, or swept after its card was answered, still ends its log with the
+    /// park's `RUN_FINISHED`; the closer used to be that one, which left a live card on screen.
+    #[test]
+    fn an_attached_stream_closes_with_what_the_run_is() {
+        let run_id = RunId::from_stored("run-1".to_string());
+        let park_closer = Event::new(EventType::RunFinished, 1);
+        let run_error = Event::new(EventType::RunError, 1).with("message", "the model hung up");
+
+        let stopped = attached_closer(
+            &a_run(RunStatus::Stopped, None),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(
+            closer_types(&stopped),
+            vec![
+                (EventType::Custom, Some("run-stopped".to_string())),
+                (EventType::RunFinished, None)
+            ]
+        );
+
+        let swept = attached_closer(
+            &a_run(RunStatus::Failed, Some("interrupted by a restart")),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(
+            closer_types(&swept),
+            vec![(
+                EventType::RunError,
+                Some("interrupted by a restart".to_string())
+            )]
+        );
+
+        let failed = attached_closer(
+            &a_run(RunStatus::Failed, Some("the model hung up")),
+            &run_id,
+            Some(&run_error),
+            false,
+            2,
+        );
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].timestamp, run_error.timestamp,
+            "the log's own closer"
+        );
+
+        // A loop that ended as a stop already sent its notice; only the closer is left.
+        let stopped_by_loop = attached_closer(
+            &a_run(RunStatus::Stopped, None),
+            &run_id,
+            Some(&park_closer),
+            true,
+            2,
+        );
+        assert_eq!(
+            closer_types(&stopped_by_loop),
+            vec![(EventType::RunFinished, None)]
+        );
+
+        let parked = attached_closer(
+            &a_run(RunStatus::AwaitingApproval, None),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].timestamp, park_closer.timestamp);
+    }
+
+    /// A RUN WITH NO FRAMES YET GETS NO CARDS. Hydration appends the transcript cards it cannot
+    /// place, and with nothing logged the run's window is everything, so every card this
+    /// coworker ever showed would reach an attached stream — and the next look would skip as
+    /// many real frames. Only the log's own frames go out.
+    #[test]
+    fn an_attached_stream_sends_only_the_logs_own_frames() {
+        let card = json!({
+            "kind": "send-message",
+            "id": "e_old",
+            "timestampMs": 5,
+            "message": {
+                "type": "user-form",
+                "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
+            }
+        });
+        let (from, to) = run_time_window(&[]);
+        let hydrated = crate::agui::user_form::hydrate_agui_events(
+            Vec::new(),
+            std::slice::from_ref(&card),
+            from,
+            to,
+        );
+        assert_eq!(
+            hydrated.len(),
+            1,
+            "hydration invents a card for an empty run"
+        );
+        assert!(
+            log_frames(hydrated, 0).is_empty(),
+            "the attached stream sends none"
+        );
     }
 }

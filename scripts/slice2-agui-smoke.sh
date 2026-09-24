@@ -14,15 +14,20 @@ ok()   { echo "  ok: $*"; }
 command -v jq >/dev/null || fail "jq is required"
 
 THREAD="thread-$(date +%s)"
-RUN="run-$(date +%s)"
+# The process id as well as the second: a run id is one run, and two smokes started in the
+# same second used to share one (slice2's run got slice3's turn appended to it).
+RUN="run-$(date +%s)-$$"
 BODY=$(cat <<JSON
 {"threadId":"$THREAD","runId":"$RUN","messages":[{"id":"m1","role":"user","content":"ping"}]}
 JSON
 )
 
 echo "1. the endpoint streams server-sent events"
+# Its own run id: a run id is used once, and a second POST with one that already has a run is
+# answered with that run (its owner) or refused (anybody else, and an anonymous caller owns
+# nothing). This check only wants the headers of a fresh run.
 headers=$(curl -sS -o /dev/null -D - -X POST "$BASE/ag-ui" \
-  -H 'content-type: application/json' -d "$BODY" --max-time 10)
+  -H 'content-type: application/json' -d "${BODY/$RUN/$RUN-headers}" --max-time 10)
 echo "$headers" | grep -qi "content-type: text/event-stream" \
   || fail "not an event stream: $(echo "$headers" | head -5)"
 ok "content-type is text/event-stream"

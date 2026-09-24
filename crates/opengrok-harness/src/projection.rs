@@ -28,7 +28,7 @@ enum Open {
 }
 
 /// Accumulates deltas and emits correctly-bracketed AG-UI events.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Projection {
     thread_id: String,
     run_id: String,
@@ -373,6 +373,36 @@ impl Projection {
         );
         events
     }
+
+    /// Replace an ending the log refused with the one that is true: the run could not be recorded.
+    ///
+    /// NOT A SECOND ENDING. `close` emits an ending only once the log holds it, so the refused one
+    /// was never shown and this is the only ending the run gets. The brackets it closed stay
+    /// closed and its `run-timing` stays (one CUSTOM, then the closer); its cards and its stop
+    /// notice go — a card for a suspension the log never got answers 409 — and its terminal
+    /// becomes the one `RUN_ERROR` (`formal/lean/Harness.lean` Close.unrecorded_one_terminal).
+    pub fn unrecorded(&self, refused: Vec<Event>, message: impl Into<String>) -> Vec<Event> {
+        let mut events: Vec<Event> = refused
+            .into_iter()
+            .filter(|event| match event.event_type {
+                EventType::TextMessageEnd
+                | EventType::ReasoningMessageEnd
+                | EventType::ToolCallEnd => true,
+                EventType::Custom => {
+                    event.extra.get("name").and_then(|name| name.as_str())
+                        == Some(crate::timing::RUN_TIMING_NAME)
+                }
+                _ => false,
+            })
+            .collect();
+        events.push(
+            self.event(EventType::RunError)
+                .with("threadId", self.thread_id.clone())
+                .with("runId", self.run_id.clone())
+                .with("message", message.into()),
+        );
+        events
+    }
 }
 
 #[cfg(test)]
@@ -563,6 +593,30 @@ mod tests {
         let mut projection = Projection::new("t1", "r1", 100);
         projection.finish();
         assert!(projection.fail("too late").is_empty());
+    }
+
+    /// An ending the log refused becomes exactly one `RUN_ERROR`: the card and the finish it
+    /// carried are gone, the message it had open is still closed.
+    #[test]
+    fn an_unrecorded_ending_is_one_run_error_that_keeps_its_brackets() {
+        let mut projection = Projection::new("t1", "r1", 100);
+        projection.push(ModelDelta::Text("waiting on you".to_string()));
+        let mut refused = projection.awaiting_approval(
+            &opengrok_tools::ToolCall {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                arguments: serde_json::Value::Null,
+            },
+            opengrok_tools::AwaitingReason::ExecConsent,
+            None,
+        );
+        refused.extend(projection.finish());
+        let told = projection.unrecorded(refused, "the run could not be recorded: down");
+        assert_eq!(
+            types(&told),
+            vec![EventType::TextMessageEnd, EventType::RunError],
+            "{told:?}"
+        );
     }
 
     /// A suspended run is neither finished nor failed, and must still be addable to.

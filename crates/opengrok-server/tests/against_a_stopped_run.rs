@@ -694,3 +694,144 @@ async fn stopping_a_run_that_was_waiting_closes_its_card_at_once() {
         "and it is gone from the queue: {after}"
     );
 }
+
+/// A ROUND JOURNALED WHILE A STOP LANDS KEEPS ITS FRAMES (`formal/tla/JournalAppend.tla`
+/// RoundKept). Every writer reads the run and appends at the next seq, so two writers at once
+/// means one of them is refused with a Conflict. The Stop retried its own; the turn's journal did
+/// not, so the round on screen when the button was pressed was dropped from the log — the frames
+/// `run.rs` goes on accepting on a stopped run for exactly that moment. Three rounds race a Stop
+/// here, on several runs so the race is really run: every round lands once, and the run ends
+/// stopped.
+#[tokio::test]
+async fn a_round_journaled_while_a_stop_lands_keeps_its_frames() {
+    use opengrok_harness::RunJournal;
+    use opengrok_wire::agui::{Event, EventType};
+
+    let database_url = database_or_skip!();
+    let email = format!("stop-race-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+
+    for attempt in 0..8 {
+        let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+        let run_id = seed_run(
+            &h.store,
+            &account,
+            &thread,
+            now_ms(),
+            &["opening the browser"],
+            Ending::Running,
+        )
+        .await;
+        let journal = Arc::new(opengrok_server::agui::routes::StoreJournal {
+            state: h.state.clone(),
+            thread_id: thread.clone(),
+            account_id: Some(account.clone()),
+            coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
+            model: Some("oag/cheap".to_string()),
+            system: None,
+            skill_id: None,
+        });
+
+        let writes: Vec<_> = (0..3)
+            .map(|round| {
+                let journal = journal.clone();
+                let run_id = run_id.as_str().to_string();
+                tokio::spawn(async move {
+                    let frame = Event::new(EventType::TextMessageContent, now_ms())
+                        .with("messageId", "msg-1")
+                        .with("delta", format!("round {round}"));
+                    journal.record(&run_id, &[frame]).await
+                })
+            })
+            .collect();
+        let (status, body) = h.stop(&access, run_id.as_str()).await;
+        assert_eq!(status, 202, "{body}");
+        for write in writes {
+            write
+                .await
+                .expect("join")
+                .expect("a round that lost the race is written again, not dropped");
+        }
+
+        let (run, _) = h.store.load_run(&run_id).await.expect("load");
+        assert_eq!(run.status, RunStatus::Stopped, "attempt {attempt}");
+        for round in 0..3 {
+            let wanted = format!("round {round}");
+            let landed = run
+                .emitted
+                .iter()
+                .filter(|frame| frame.get("delta").and_then(Value::as_str) == Some(wanted.as_str()))
+                .count();
+            assert_eq!(
+                landed, 1,
+                "round {round} lands exactly once on attempt {attempt}: {:?}",
+                run.emitted
+            );
+        }
+    }
+}
+
+/// A PARK THAT FINDS ITS RUN ENDED WRITES NOTHING (the peer review's trace). A Stop that commits
+/// between the close's `stopped` question and the park's write used to leave the card's frames in
+/// the log with no `Suspended` — the refusal was dropped and the write said Ok, so the client got
+/// a card whose answer was a 409. The same for a run the sweep failed, where even the frame is
+/// refused.
+#[tokio::test]
+async fn a_park_written_after_the_run_ended_is_refused_whole() {
+    use opengrok_harness::{JournalError, RunJournal};
+    use opengrok_wire::agui::{Event, EventType};
+
+    let database_url = database_or_skip!();
+    let email = format!("park-race-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, _) = h.person(&email).await;
+
+    for ending in [Ending::Stopped, Ending::Failed("interrupted by a restart")] {
+        let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+        let run_id = seed_run(
+            &h.store,
+            &account,
+            &thread,
+            now_ms(),
+            &["opening the browser"],
+            ending,
+        )
+        .await;
+        let (before, _) = h.store.load_run(&run_id).await.expect("load");
+        let journal = opengrok_server::agui::routes::StoreJournal {
+            state: h.state.clone(),
+            thread_id: thread.clone(),
+            account_id: Some(account.clone()),
+            coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
+            model: Some("oag/cheap".to_string()),
+            system: None,
+            skill_id: None,
+        };
+        let round = [
+            Event::new(EventType::ToolCallStart, now_ms())
+                .with("toolCallId", "call-1")
+                .with("toolCallName", "shell"),
+            Event::new(EventType::Custom, now_ms())
+                .with("name", "run-awaiting-approval")
+                .with("callId", "call-1")
+                .with("tool", "shell")
+                .with("arguments", json!({"command": "ls"})),
+            Event::new(EventType::RunFinished, now_ms()),
+        ];
+        let written = journal.record(run_id.as_str(), &round).await;
+        assert!(
+            matches!(written, Err(JournalError::Ended(_))),
+            "{:?}: {written:?}",
+            before.status
+        );
+        let (after, _) = h.store.load_run(&run_id).await.expect("load");
+        assert_eq!(after.status, before.status);
+        assert_eq!(
+            after.emitted.len(),
+            before.emitted.len(),
+            "nothing of the park is written: {:?}",
+            after.emitted
+        );
+    }
+}

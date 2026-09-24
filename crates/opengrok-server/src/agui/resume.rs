@@ -572,6 +572,14 @@ async fn resume_suspended_run(
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
 ) {
+    // HOLD THE RUN WHILE IT IS CARRIED ON, as `continue_run` does and for the same reason. The answer
+    // flips the run back to `running`; the parked turn's lease died with it, so without one
+    // here an approved call that ran past LEASE_MS with nothing journaled — a recipe on the
+    // box — was claimed by the sweep and failed as "interrupted by a restart" while it was
+    // still running (`formal/tla/RunLifecycle.tla` NoFalseFailure: TLC's trace is park,
+    // answer, sweep). Held before anything is loaded, so no early return runs unleased.
+    let _lease =
+        crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
     let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
         return;
     };

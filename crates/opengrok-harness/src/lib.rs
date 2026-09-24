@@ -506,6 +506,31 @@ pub async fn resume_conversation(
     );
     let mut all = Vec::new();
 
+    // A STOP PRESSED WHILE THE CARD WAS UP WINS OVER THE ANSWER. The answer and the Stop are two
+    // appends to the same log, and the continuation is spawned after the answer lands — so a
+    // Stop can arrive between the two, and without this check the approved call ran anyway on
+    // a run the person had already stopped: the first `stopped` question in `converse_raw`
+    // comes after it. Asked before anything touches the world, including for a refusal, so a
+    // stopped run is not handed back to the model either (`formal/tla/RunLifecycle.tla`
+    // NoApprovedAfterStop). It narrows the window, it does not close it: a Stop landing
+    // after this question and before `run_all` still lets the call through.
+    let timing = timing::TurnTiming::new();
+    let verbose_timing = timing::verbose_from_env();
+    if journal.stopped(&run_id).await {
+        return close(
+            journal,
+            None,
+            &run_id,
+            &mut projection,
+            &timing,
+            verbose_timing,
+            &mut None,
+            Vec::new(),
+            Ending::Stop,
+        )
+        .await;
+    }
+
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
     let results = match outcome {
@@ -525,7 +550,6 @@ pub async fn resume_conversation(
         all.extend(projection.push_tool_result(result));
         request.messages.push(tool_result_message(result));
     }
-    let _ = record_round(journal, &run_id, &all).await;
 
     // If the approved call itself is still waiting, something is wrong with the approval rather
     // than with the run; stop rather than loop.
@@ -533,10 +557,38 @@ pub async fn resume_conversation(
         let reason = still_waiting
             .awaiting_reason
             .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
-        let parked = (&approved, reason, still_waiting.content.as_str());
-        let mut waiting = park_awaiting(&mut projection, std::slice::from_ref(&parked));
-        let _ = record_round(journal, &run_id, &waiting).await;
-        all.append(&mut waiting);
+        let waiting = vec![(approved.clone(), reason, still_waiting.content.clone())];
+        return close(
+            journal,
+            None,
+            &run_id,
+            &mut projection,
+            &timing,
+            verbose_timing,
+            &mut None,
+            all,
+            Ending::Park(waiting),
+        )
+        .await;
+    }
+
+    // DURABLE BEFORE THE NEXT CALL, as every round is: the approved call has run, and the model
+    // is about to be asked about what it did. This write's error used to be ignored.
+    if let Err(error) = record_round(journal, &run_id, &all).await {
+        // The results are not written again, only the ending (see `converse_raw`).
+        let mut ending = close(
+            journal,
+            None,
+            &run_id,
+            &mut projection,
+            &timing,
+            verbose_timing,
+            &mut None,
+            Vec::new(),
+            Ending::Fail(format!("the run could not be recorded: {error}")),
+        )
+        .await;
+        all.append(&mut ending);
         return all;
     }
 
@@ -556,45 +608,6 @@ pub async fn resume_conversation(
     .await;
     all.append(&mut rest);
     all
-}
-
-/// End a run because a person stopped it, from wherever in the loop noticed.
-///
-/// ONE JOURNAL WRITE, CARRYING BOTH. `round_events` is whatever the turn had produced in the round
-/// it was in the middle of — the model's words, the tool call it was about to make — and it has not
-/// been recorded yet, because the loop records a whole round at a time. Writing it together with
-/// the ending is what makes the transcript end at the moment the button was pressed instead of one
-/// step before it.
-#[allow(clippy::too_many_arguments)]
-async fn stop_here(
-    journal: &dyn RunJournal,
-    projection: &mut Projection,
-    sink: Option<&dyn EventSink>,
-    run_id: &str,
-    mut round_events: Vec<Event>,
-    last_agent_shot: &mut Option<Event>,
-    timing: &timing::TurnTiming,
-    verbose_timing: bool,
-) -> Vec<Event> {
-    pin_last_agent_shot(
-        sink,
-        last_agent_shot,
-        opengrok_tools::ImageVisibility::End,
-        &mut round_events,
-    )
-    .await;
-    let ending = projection.stopped();
-    finish_round(
-        journal,
-        sink,
-        run_id,
-        projection,
-        timing,
-        verbose_timing,
-        round_events,
-        ending,
-    )
-    .await
 }
 
 async fn flush_withheld_text(
@@ -632,46 +645,117 @@ fn round_has_assistant_text(events: &[Event]) -> bool {
         .any(|event| event.event_type == opengrok_wire::agui::EventType::TextMessageContent)
 }
 
-/// Attach `run-timing`, show it live, journal the round+ending as one or two writes
-/// depending on what the caller already recorded. Always one CUSTOM then the closer.
-#[allow(clippy::too_many_arguments)]
-async fn finish_round(
-    journal: &dyn RunJournal,
-    sink: Option<&dyn EventSink>,
-    run_id: &str,
-    projection: &Projection,
-    timing: &timing::TurnTiming,
-    verbose_timing: bool,
-    mut round_events: Vec<Event>,
-    mut ending: Vec<Event>,
-) -> Vec<Event> {
-    if !ending.is_empty() {
-        timing::splice_before_run_end(&mut ending, timing.event(projection));
-    }
-    emit_live(sink, &ending).await;
-    round_events.extend(ending);
-    let _ = record_round(journal, run_id, &round_events).await;
-    timing.log(run_id, verbose_timing);
-    round_events
+/// A call waiting on a person, and the gate's sentence for its card.
+type Waiting = (
+    opengrok_tools::ToolCall,
+    opengrok_tools::AwaitingReason,
+    String,
+);
+
+/// How a run ends. Every exit of the loop names one and hands it, with the round it ends on, to
+/// `close`.
+enum Ending {
+    /// A clean finish, with the sentence to show when the round said nothing of its own (the
+    /// listing fact, the opened sentence, the failure fact). Yields to a recorded Stop.
+    Finish(Option<String>),
+    Fail(String),
+    /// A person pressed Stop.
+    Stop,
+    /// Calls waiting on a person: a card each, then `RUN_FINISHED`.
+    Park(Vec<Waiting>),
 }
 
-/// When the round is already journaled, only the ending (with timing) is a new write.
-async fn finish_ending(
+/// End the run. The one place a run ends, whichever exit got here.
+///
+/// THE ROUND AND ITS ENDING ARE ONE WRITE. The exits used to write the round and then the ending,
+/// in one, two or three writes, so a failed later write left the log holding the round a run
+/// ended on without its ending: a park's tool call with no `Suspended`, a run that replays as
+/// still going (`formal/tla/HarnessLoop.tla` RoundNeverWithoutEnding).
+///
+/// AN ENDING REACHES THE CLIENT ONLY ONCE THE LOG HOLDS IT. It used to be emitted before its
+/// write, whose error was ignored, so a person could be shown a finish, a stop or a card the log
+/// never got, and answering that card was a 409. If the write fails the client is told the one
+/// true thing, that the run could not be recorded (ToldIsTrue). The round's own frames still
+/// stream as they are produced; only the ending waits.
+///
+/// A CLEAN FINISH OR A PARK ASKS `stopped` ONCE MORE. The close is a step boundary too, so a Stop
+/// pressed during the final answer or the last tool is how the run ends (StopIsHonoured). A park
+/// asks as well: its `Suspended` would be refused on a stopped run, and the card would be a
+/// button whose answer is a 409. A failure keeps its sentence.
+#[allow(clippy::too_many_arguments)]
+async fn close(
     journal: &dyn RunJournal,
     sink: Option<&dyn EventSink>,
     run_id: &str,
-    projection: &Projection,
+    projection: &mut Projection,
     timing: &timing::TurnTiming,
     verbose_timing: bool,
-    mut ending: Vec<Event>,
+    last_agent_shot: &mut Option<Event>,
+    mut round: Vec<Event>,
+    ending: Ending,
 ) -> Vec<Event> {
-    if !ending.is_empty() {
-        timing::splice_before_run_end(&mut ending, timing.event(projection));
+    if let Ending::Finish(Some(sentence)) = &ending
+        && !round_has_assistant_text(&round)
+    {
+        emit_visible_text(projection, sink, &mut round, sentence.clone()).await;
     }
-    emit_live(sink, &ending).await;
-    let _ = record_round(journal, run_id, &ending).await;
+    let pin = match &ending {
+        Ending::Finish(_) | Ending::Stop => Some(opengrok_tools::ImageVisibility::End),
+        Ending::Fail(_) => Some(opengrok_tools::ImageVisibility::Failure),
+        Ending::Park(_) => None,
+    };
+    if let Some(visibility) = pin {
+        pin_last_agent_shot(sink, last_agent_shot, visibility, &mut round).await;
+    }
+    // A park closes the projection with its own `RUN_FINISHED`; the stop that may replace it
+    // below needs the projection as it was before.
+    let before_park = matches!(ending, Ending::Park(_)).then(|| projection.clone());
+    let mut closing = match ending {
+        Ending::Finish(_) | Ending::Park(_) if journal.stopped(run_id).await => {
+            projection.stopped()
+        }
+        Ending::Finish(_) => projection.finish(),
+        Ending::Stop => projection.stopped(),
+        Ending::Fail(message) => projection.fail(message),
+        Ending::Park(waiting) => park_awaiting(projection, &waiting),
+    };
+    if !closing.is_empty() {
+        timing::splice_before_run_end(&mut closing, timing.event(projection));
+    }
+    let mut from = round.len();
+    round.extend(closing);
+    let mut written = record_round(journal, run_id, &round).await;
+    // A STOP THAT LANDED AFTER THE QUESTION ABOVE. The park's write found the run ended and wrote
+    // nothing, so its card would have had no suspension behind it. The log already holds the
+    // Stop; the round goes in again with the stop's ending, the one the log can back.
+    if matches!(written, Err(JournalError::Ended(_)))
+        && let Some(before_park) = before_park
+    {
+        *projection = before_park;
+        round.truncate(from);
+        pin_last_agent_shot(
+            sink,
+            last_agent_shot,
+            opengrok_tools::ImageVisibility::End,
+            &mut round,
+        )
+        .await;
+        // The pin has gone out live; what follows it is this ending's own.
+        from = round.len();
+        let mut stopped = projection.stopped();
+        if !stopped.is_empty() {
+            timing::splice_before_run_end(&mut stopped, timing.event(projection));
+        }
+        round.extend(stopped);
+        written = record_round(journal, run_id, &round).await;
+    }
+    if let Err(error) = written {
+        let refused = round.split_off(from);
+        round.extend(projection.unrecorded(refused, error.to_string()));
+    }
+    emit_live(sink, &round[from..]).await;
     timing.log(run_id, verbose_timing);
-    ending
+    round
 }
 
 /// Forward a batch to a live watcher. Empty batches are skipped so a no-op `finish` after
@@ -761,20 +845,6 @@ async fn converse_raw(
     // the schema list.
     let tools_offered = work_tools_offered(&request.tools);
 
-    let mut opening = projection.start();
-    if let Err(error) = journal.record(run_id, &opening).await {
-        // A run we cannot record must not proceed: it would produce work that a reconnect can
-        // never reproduce, which is the failure this design exists to prevent.
-        let mut failed = projection.fail(format!("the run could not be recorded: {error}"));
-        emit_live(sink, &opening).await;
-        emit_live(sink, &failed).await;
-        all.append(&mut opening);
-        all.append(&mut failed);
-        return all;
-    }
-    emit_live(sink, &opening).await;
-    all.append(&mut opening);
-
     // The calls the tools refused last round, by name and arguments. A model that asks
     // for exactly the same thing again is not going to get a different answer, and
     // burning the remaining rounds on it only delays telling the person.
@@ -810,26 +880,50 @@ async fn converse_raw(
     let mut timing = timing::TurnTiming::new();
     let verbose_timing = timing::verbose_from_env();
 
+    // EVERY EXIT OF THIS LOOP IS `close`. Returning any other way is how one exit ended a run with
+    // no terminal event and others wrote their ending in two halves; this keeps the one way out
+    // from being copied, with its eight arguments, to every place a run can end.
+    macro_rules! end_run {
+        ($round:expr, $ending:expr) => {{
+            all.extend(
+                close(
+                    journal,
+                    sink,
+                    run_id,
+                    &mut projection,
+                    &timing,
+                    verbose_timing,
+                    &mut last_agent_shot,
+                    $round,
+                    $ending,
+                )
+                .await,
+            );
+            return all;
+        }};
+    }
+
+    let mut opening = projection.start();
+    let opened_ok = journal.record(run_id, &opening).await;
+    emit_live(sink, &opening).await;
+    all.append(&mut opening);
+    if let Err(error) = opened_ok {
+        // A run we cannot record must not proceed: it would produce work that a reconnect can
+        // never reproduce, which is the failure this design exists to prevent. The opening is
+        // not written again: a write that failed may still have landed.
+        end_run!(
+            Vec::new(),
+            Ending::Fail(format!("the run could not be recorded: {error}"))
+        );
+    }
+
     for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
         let mut round_events = Vec::new();
 
         // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
         // going to ask next is not asked, and nothing more is spent on it.
         if journal.stopped(run_id).await {
-            all.extend(
-                stop_here(
-                    journal,
-                    &mut projection,
-                    sink,
-                    run_id,
-                    round_events,
-                    &mut last_agent_shot,
-                    &timing,
-                    verbose_timing,
-                )
-                .await,
-            );
-            return all;
+            end_run!(round_events, Ending::Stop);
         }
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
@@ -838,28 +932,7 @@ async fn converse_raw(
             Ok(stream) => Some(stream),
             Err(error) => {
                 timing.record_model(timing::elapsed_ms(model_started));
-                pin_last_agent_shot(
-                    sink,
-                    &mut last_agent_shot,
-                    opengrok_tools::ImageVisibility::Failure,
-                    &mut round_events,
-                )
-                .await;
-                let failed = projection.fail(error.to_string());
-                all.extend(
-                    finish_round(
-                        journal,
-                        sink,
-                        run_id,
-                        &projection,
-                        &timing,
-                        verbose_timing,
-                        round_events,
-                        failed,
-                    )
-                    .await,
-                );
-                return all;
+                end_run!(round_events, Ending::Fail(error.to_string()));
             }
         };
 
@@ -913,31 +986,12 @@ async fn converse_raw(
                             && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
                         {
                             timing.record_model(timing::elapsed_ms(model_started));
-                            let ending = projection.fail(format!(
-                                "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
-                            ));
-                            pin_last_agent_shot(
-                                sink,
-                                &mut last_agent_shot,
-                                opengrok_tools::ImageVisibility::Failure,
-                                &mut round_events,
-                            )
-                            .await;
-                            let _ = record_round(journal, run_id, &round_events).await;
-                            all.append(&mut round_events);
-                            all.extend(
-                                finish_ending(
-                                    journal,
-                                    sink,
-                                    run_id,
-                                    &projection,
-                                    &timing,
-                                    verbose_timing,
-                                    ending,
-                                )
-                                .await,
+                            end_run!(
+                                round_events,
+                                Ending::Fail(format!(
+                                    "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
+                                ))
                             );
-                            return all;
                         }
                     }
                     Err(error) => {
@@ -952,28 +1006,7 @@ async fn converse_raw(
                             )
                             .await;
                         }
-                        pin_last_agent_shot(
-                            sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::Failure,
-                            &mut round_events,
-                        )
-                        .await;
-                        let failed = projection.fail(error.to_string());
-                        all.extend(
-                            finish_round(
-                                journal,
-                                sink,
-                                run_id,
-                                &projection,
-                                &timing,
-                                verbose_timing,
-                                round_events,
-                                failed,
-                            )
-                            .await,
-                        );
-                        return all;
+                        end_run!(round_events, Ending::Fail(error.to_string()));
                     }
                 }
             }
@@ -1016,53 +1049,14 @@ async fn converse_raw(
                 // revision can take it back. So a recipe that has started finishes, and the
                 // stop takes hold before the next one.
                 if journal.stopped(run_id).await {
-                    all.extend(
-                        stop_here(
-                            journal,
-                            &mut projection,
-                            sink,
-                            run_id,
-                            round_events,
-                            &mut last_agent_shot,
-                            &timing,
-                            verbose_timing,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Stop);
                 }
                 let listing_only = calls.iter().any(is_readonly_listing_shell)
                     && calls.iter().all(|call| {
                         is_client_render_tool(&call.name) || is_readonly_listing_shell(call)
                     });
                 if had_successful_listing && listing_only && skipped_redundant_listing {
-                    if !round_has_assistant_text(&round_events)
-                        && let Some(fact) = last_listing.clone()
-                    {
-                        emit_visible_text(&mut projection, sink, &mut round_events, fact).await;
-                    }
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::End,
-                        &mut round_events,
-                    )
-                    .await;
-                    let ending = projection.finish();
-                    all.extend(
-                        finish_round(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            round_events,
-                            ending,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Finish(last_listing.clone()));
                 }
                 let same_open = opened.as_ref().is_some_and(|(previous, _)| {
                     !calls.is_empty()
@@ -1075,31 +1069,7 @@ async fn converse_raw(
                         })
                 });
                 if same_open && let Some((_, sentence)) = opened.clone() {
-                    if !round_has_assistant_text(&round_events) {
-                        emit_visible_text(&mut projection, sink, &mut round_events, sentence).await;
-                    }
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::End,
-                        &mut round_events,
-                    )
-                    .await;
-                    let ending = projection.finish();
-                    all.extend(
-                        finish_round(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            round_events,
-                            ending,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Finish(Some(sentence)));
                 }
                 let waking = box_wake_frame(runner, &mut projection, &calls).await;
                 emit_live(sink, &waking).await;
@@ -1255,21 +1225,17 @@ async fn converse_raw(
                     last_failure = None;
                 }
 
-                let waiting: Vec<(
-                    &opengrok_tools::ToolCall,
-                    opengrok_tools::AwaitingReason,
-                    &str,
-                )> = results
+                let waiting: Vec<Waiting> = results
                     .iter()
                     .zip(calls.iter())
                     .filter(|(result, _)| result.awaiting_approval)
                     .map(|(result, call)| {
                         (
-                            call,
+                            call.clone(),
                             result
                                 .awaiting_reason
                                 .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent),
-                            result.content.as_str(),
+                            result.content.clone(),
                         )
                     })
                     .collect();
@@ -1285,22 +1251,7 @@ async fn converse_raw(
                     // forever spinner. The aggregate stays `awaiting-approval` (the journal
                     // does not Finish a suspended run) so Continue can still resume. A new
                     // user message interrupts instead of leaving a zombie parked run.
-                    let waiting_events = park_awaiting(&mut projection, &waiting);
-                    let _ = record_round(journal, run_id, &round_events).await;
-                    all.append(&mut round_events);
-                    all.extend(
-                        finish_ending(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            waiting_events,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Park(waiting));
                 }
 
                 let refused: Vec<(String, serde_json::Value)> = calls
@@ -1329,32 +1280,13 @@ async fn converse_raw(
                         .first()
                         .map(|result| result.content.as_str())
                         .unwrap_or("refused");
-                    let ending = projection.fail(format!(
-                        "`{}` was refused the same way twice ({why}); stopping instead of retrying",
-                        names.join("`, `")
-                    ));
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::Failure,
-                        &mut round_events,
-                    )
-                    .await;
-                    let _ = record_round(journal, run_id, &round_events).await;
-                    all.append(&mut round_events);
-                    all.extend(
-                        finish_ending(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            ending,
-                        )
-                        .await,
+                    end_run!(
+                        round_events,
+                        Ending::Fail(format!(
+                            "`{}` was refused the same way twice ({why}); stopping instead of retrying",
+                            names.join("`, `")
+                        ))
                     );
-                    return all;
                 }
                 last_refused = every_call_refused.then_some(refused);
 
@@ -1371,31 +1303,12 @@ async fn converse_raw(
                     }
                 }
                 if same_screen + 1 >= SAME_SCREEN_LIMIT {
-                    let ending = projection.fail(format!(
+                    end_run!(
+                        round_events,
+                        Ending::Fail(format!(
                             "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
-                        ));
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::Failure,
-                        &mut round_events,
-                    )
-                    .await;
-                    let _ = record_round(journal, run_id, &round_events).await;
-                    all.append(&mut round_events);
-                    all.extend(
-                        finish_ending(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            ending,
-                        )
-                        .await,
+                        ))
                     );
-                    return all;
                 }
 
                 // Work-tool preamble was withheld from chat AND from `said` (F8).
@@ -1409,83 +1322,13 @@ async fn converse_raw(
                 }
 
                 if work_fail_streak >= intent::MAX_FAILED_WORK_ROUNDS {
-                    if !round_has_assistant_text(&round_events)
-                        && let Some(fact) = last_failure.clone()
-                    {
-                        emit_visible_text(&mut projection, sink, &mut round_events, fact).await;
-                    }
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::End,
-                        &mut round_events,
-                    )
-                    .await;
-                    let ending = projection.finish();
-                    all.extend(
-                        finish_round(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            round_events,
-                            ending,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Finish(last_failure.clone()));
                 }
-
-                // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
-                // dependency chain, so a crash after this point can be picked up.
-                if let Err(error) = record_round(journal, run_id, &round_events).await {
-                    let failed = projection.fail(format!("the run could not be recorded: {error}"));
-                    all.extend(
-                        finish_round(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            round_events,
-                            failed,
-                        )
-                        .await,
-                    );
-                    return all;
-                }
-                all.append(&mut round_events);
 
                 // bar_chart/form already painted from TOOL_CALL frames. Another model
                 // round in this HTTP request is what doubled charts on "generate another".
                 if calls.iter().any(|call| is_client_render_tool(&call.name)) {
-                    let mut pin_events = Vec::new();
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::End,
-                        &mut pin_events,
-                    )
-                    .await;
-                    let _ = record_round(journal, run_id, &pin_events).await;
-                    all.append(&mut pin_events);
-                    let ending = projection.finish();
-                    all.extend(
-                        finish_ending(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            ending,
-                        )
-                        .await,
-                    );
-                    return all;
+                    end_run!(round_events, Ending::Finish(None));
                 }
 
                 // Which budget this round drew on: every call a successful screen action, or anything
@@ -1511,61 +1354,31 @@ async fn converse_raw(
                     None
                 };
                 if let Some(why) = over {
-                    if let Some((_, sentence)) = opened.clone() {
-                        let mut pin_events = Vec::new();
-                        if !round_has_assistant_text(&round_events) {
-                            emit_visible_text(&mut projection, sink, &mut pin_events, sentence)
-                                .await;
-                        }
-                        pin_last_agent_shot(
-                            sink,
-                            &mut last_agent_shot,
-                            opengrok_tools::ImageVisibility::End,
-                            &mut pin_events,
-                        )
-                        .await;
-                        let _ = record_round(journal, run_id, &pin_events).await;
-                        all.append(&mut pin_events);
-                        let ending = projection.finish();
-                        all.extend(
-                            finish_ending(
-                                journal,
-                                sink,
-                                run_id,
-                                &projection,
-                                &timing,
-                                verbose_timing,
-                                ending,
-                            )
-                            .await,
-                        );
-                        return all;
-                    }
-                    let mut pin_events = Vec::new();
-                    pin_last_agent_shot(
-                        sink,
-                        &mut last_agent_shot,
-                        opengrok_tools::ImageVisibility::Failure,
-                        &mut pin_events,
-                    )
-                    .await;
-                    let _ = record_round(journal, run_id, &pin_events).await;
-                    all.append(&mut pin_events);
-                    let ending = projection.fail(why);
-                    all.extend(
-                        finish_ending(
-                            journal,
-                            sink,
-                            run_id,
-                            &projection,
-                            &timing,
-                            verbose_timing,
-                            ending,
-                        )
-                        .await,
-                    );
-                    return all;
+                    // An opened target or editor is the answer, so spending the last call on it
+                    // finishes with its sentence rather than failing.
+                    let ending = match opened.clone() {
+                        Some((_, sentence)) => Ending::Finish(Some(sentence)),
+                        None => Ending::Fail(why),
+                    };
+                    end_run!(round_events, ending);
                 }
+
+                // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
+                // dependency chain, so a crash after this point can be picked up. The chart/form
+                // and budget exits are decided ABOVE this write, so the round they end on goes
+                // down with their ending in one write rather than before it.
+                if let Err(error) = record_round(journal, run_id, &round_events).await {
+                    // NOT WRITTEN AGAIN. A write that failed may have landed (a commit whose
+                    // reply was lost), and writing the round a second time would put it in the
+                    // log twice (`formal/tla/JournalAppend.tla` NoDuplicate). Only the ending
+                    // is written, and the client is told what that write allows.
+                    all.append(&mut round_events);
+                    end_run!(
+                        Vec::new(),
+                        Ending::Fail(format!("the run could not be recorded: {error}"))
+                    );
+                }
+                all.append(&mut round_events);
                 continue;
             }
         }
@@ -1577,34 +1390,28 @@ async fn converse_raw(
         // the client cannot tell it from a coworker with nothing to say, and every one of them
         // invented its own placeholder. A run that already failed keeps its own message — `fail`
         // and `finish` are both no-ops once the run has ended.
-        let pin = if any_delta {
-            opengrok_tools::ImageVisibility::End
-        } else {
-            opengrok_tools::ImageVisibility::Failure
-        };
-        pin_last_agent_shot(sink, &mut last_agent_shot, pin, &mut round_events).await;
         let ending = if any_delta {
-            projection.finish()
+            Ending::Finish(None)
         } else {
-            projection.fail("the model returned no text")
+            Ending::Fail("the model returned no text".to_string())
         };
-        all.extend(
-            finish_round(
-                journal,
-                sink,
-                run_id,
-                &projection,
-                &timing,
-                verbose_timing,
-                round_events,
-                ending,
-            )
-            .await,
-        );
-        return all;
+        end_run!(round_events, ending);
     }
 
-    all
+    // UNREACHABLE TODAY, AND KEPT AN ENDING ANYWAY. Every `continue` spends one unit of one of
+    // the two budgets and the run ends when either is spent, so at most
+    // MAX_ROUNDS + MAX_COMPUTER_ROUNDS - 2 rounds continue — proved for every budget in
+    // `formal/lean/Harness.lean` (Budget.never_falls_out). This line used to return `all`
+    // with no terminal event: a `continue` added later without spending a budget would have
+    // left the client's spinner up forever. The `for` stays as the spend backstop; leaving it
+    // is a failure that says so.
+    end_run!(
+        Vec::new(),
+        Ending::Fail(format!(
+            "this run reached its loop bound of {} rounds",
+            MAX_ROUNDS + MAX_COMPUTER_ROUNDS
+        ))
+    );
 }
 
 /// Computer-step shots are `agent`: live SSE may carry the PNG for the Computer pane, but the
@@ -1854,14 +1661,7 @@ fn keep_recent_images(messages: &mut [ChatMessage], keep: usize) {
 ///
 /// NativeChat keys Waiting chrome off `RUN_FINISHED`. The run aggregate still
 /// stays `awaiting-approval` because the journal does not Finish a suspended run.
-fn park_awaiting(
-    projection: &mut Projection,
-    waiting: &[(
-        &opengrok_tools::ToolCall,
-        opengrok_tools::AwaitingReason,
-        &str,
-    )],
-) -> Vec<Event> {
+fn park_awaiting(projection: &mut Projection, waiting: &[Waiting]) -> Vec<Event> {
     let mut events = Vec::new();
     for (call, reason, why) in waiting {
         events.extend(projection.awaiting_approval(call, *reason, awaiting_why(why)));
