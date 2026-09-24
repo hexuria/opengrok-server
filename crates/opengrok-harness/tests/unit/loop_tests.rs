@@ -3156,3 +3156,77 @@ async fn a_door_that_will_not_open_ends_the_run_once() {
         "and the log holds it"
     );
 }
+
+/// A PARK ASKS `stopped` TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured, the verifier's trace).
+/// A Stop pressed while the tool ran used to end the run on a card: its `Suspended` is refused on
+/// a stopped run, so the card's answer was a 409.
+#[tokio::test]
+async fn a_park_after_a_stop_ends_the_run_stopped_with_no_card() {
+    // Not stopped at the top of the round or before the tools; stopped by the close.
+    let journal = StoppingJournal::saying_stop_after(2);
+    let events = run_conversation(
+        &MockDoor::asking_for_stacked_user_forms(),
+        Some(&tool_runner()),
+        &journal,
+        request("sign in"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert!(!events.iter().any(is_awaiting_card), "no card: {events:?}");
+    assert!(events.iter().any(is_run_stopped), "{events:?}");
+    assert_eq!(endings(&events).len(), 1, "{events:?}");
+}
+
+/// A WRITE THAT FAILED MAY HAVE LANDED, SO IT IS NOT WRITTEN AGAIN (`formal/tla/JournalAppend.tla`
+/// NoDuplicate). After the durable write of a round came back an error, the close used to write
+/// the round again with its ending — twice in the log when the first commit had landed and only
+/// its reply was lost.
+#[tokio::test]
+async fn a_round_whose_write_failed_is_not_written_again() {
+    /// Keeps every batch, and answers the first round's write with an error anyway.
+    struct LostReply {
+        kept: Mutex<Vec<Vec<Event>>>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for LostReply {
+        async fn record(&self, _run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            let mut kept = self.kept.lock().map_err(|_| {
+                JournalError::Unwritable("the journal's lock was poisoned".to_string())
+            })?;
+            let first_round = events
+                .iter()
+                .any(|event| event.event_type == EventType::ToolCallResult)
+                && !kept
+                    .concat()
+                    .iter()
+                    .any(|event| event.event_type == EventType::ToolCallResult);
+            kept.push(events.to_vec());
+            if first_round {
+                return Err(JournalError::Unwritable("the reply was lost".to_string()));
+            }
+            Ok(())
+        }
+    }
+    let journal = LostReply {
+        kept: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &CountingToolDoor(Arc::new(Mutex::new(0usize))),
+        Some(&tool_runner()),
+        &journal,
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(endings(&events).len(), 1, "{events:?}");
+    let written = journal.kept.lock().unwrap().concat();
+    let calls = written
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallStart)
+        .count();
+    assert_eq!(calls, 1, "the round is in the log once: {written:?}");
+}

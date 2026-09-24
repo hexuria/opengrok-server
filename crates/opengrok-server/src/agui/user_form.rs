@@ -1368,6 +1368,15 @@ impl UserFormSseHold {
         self.form_ids.clear();
         opengrok_harness::scrub_streamed_tool_args(std::mem::take(&mut self.held))
     }
+
+    /// The stream's closer has arrived. After `RUN_FINISHED` the leftovers go out as
+    /// `release_rest` sends them; after `RUN_ERROR` they go nowhere. A run that failed has no
+    /// suspension behind any card, and NativeChat paints one from these frames — a button whose
+    /// answer can only be a 409, most of all for a park whose write the log refused.
+    pub(crate) fn release_at_end(&mut self, clean: bool) -> Vec<Event> {
+        let rest = self.release_rest();
+        if clean { rest } else { Vec::new() }
+    }
 }
 
 /// Fold current gateway user-form state into AG-UI replay events so a cold

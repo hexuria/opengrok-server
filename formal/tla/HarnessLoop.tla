@@ -92,7 +92,7 @@ Close(kind, e) ==
 EndWith(e) == Close("one", e)
 
 \* A clean finish. With StopAtClose the loop asks the journal once more, so a Stop recorded
-\* while the model was talking or a tool was running is how the run ends.
+\* while the model was talking or a tool was running is how the run ends. A park asks too.
 FinishBy(kind) == Close(kind, IF StopAtClose /\ stop THEN "stopped" ELSE "finished")
 Finish == FinishBy("one")
 
@@ -172,7 +172,9 @@ Judge ==
            lr == IF Refused(outcome) THEN outcome ELSE "none"
        IN
        CASE outcome = "await" ->                                          \* lib.rs:1276-1304 park
-              Close("split", "parked") /\ UNCHANGED loopVars
+              \* With StopAtClose a park asks too: a Stop pressed while the tool ran must not
+              \* end the run on a card, which its answer would find already stopped.
+              Close("split", IF StopAtClose /\ stop THEN "stopped" ELSE "parked") /\ UNCHANGED loopVars
          [] Refused(outcome) /\ lastRefused = outcome ->                  \* lib.rs:1326-1358
               Close("split", "failed") /\ UNCHANGED loopVars
          [] OTHER ->
@@ -244,7 +246,7 @@ ToldIsTrue            == (pc = "done" /\ told \notin {"unrecorded", "none"}) => 
 \* The log never holds the round a run ended on without the ending it ended with.
 RoundNeverWithoutEnding == ~orphan
 \* A Stop that is recorded before the run ends makes the run end as stopped.
-StopIsHonoured        == (pc = "done" /\ stop) => ending /= "finished"
+StopIsHonoured        == (pc = "done" /\ stop) => ending \notin {"finished", "parked"}
 
 
 Terminates == <>(pc = "done")

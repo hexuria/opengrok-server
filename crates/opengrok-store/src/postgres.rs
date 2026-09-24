@@ -426,6 +426,22 @@ impl PgStore {
     /// a running turn to find out whether somebody has stopped it: replaying the whole event stream
     /// to read one word would grow with the length of the conversation and be paid for on the hot
     /// path. `None` means the projection has never heard of this run.
+    /// A run's status and how many frames it has emitted: one primary-key read, for a reader
+    /// that follows a run and wants to reload it only when something changed.
+    pub async fn run_progress(&self, id: &RunId) -> StoreResult<Option<(RunStatus, i64)>> {
+        let row = sqlx::query("select status, event_count from run_view where id = $1")
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            Some(row) => Ok(Some((
+                RunStatus::from_stored(&row.try_get::<String, _>("status")?),
+                row.try_get::<i64, _>("event_count")?,
+            ))),
+            None => Ok(None),
+        }
+    }
+
     pub async fn run_status(&self, id: &RunId) -> StoreResult<Option<RunStatus>> {
         let row = sqlx::query("select status from run_view where id = $1")
             .bind(id.as_str())

@@ -2528,8 +2528,10 @@ async fn start_claimed_turn(
     // A RUN ID THAT ALREADY HAS A RUN IS NOT A NEW TURN. A client retrying its POST — its stream
     // dropped, or it sent the same body twice — used to start a second loop on the same run: a
     // second model call, every tool twice, one transcript interleaving both. Answered here,
-    // before anything below has a side effect (a parked card stopped, a box woken). The claim
-    // further down is what makes it exact: two POSTs at once can both get past this.
+    // before anything below has a side effect (a parked card stopped, a box woken). AFTER the
+    // queued-send check, deliberately: a same-run retry whose words changed gets that check's
+    // own refusal (`stale-pending-message`), which says more than being handed the old run.
+    // The claim further down is what makes it exact: two POSTs at once can both get past this.
     if let Some(answer) = answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
     {
         return answer;
@@ -2825,6 +2827,8 @@ impl opengrok_harness::RunJournal for StoreJournal {
     /// and carrying on only spends on events the log refuses (`formal/tla/RunLifecycle.tla`
     /// AtMostOneStaleTool). Before the claim this broke a same-runId retry, which ran a loop on
     /// an ended run and was told to stop before it said a word (the slice2 smoke, 23 Sep 2026).
+    /// The cost: a loop whose run the sweep failed ends its live stream as `run-stopped`, though
+    /// nobody pressed Stop; the log keeps the real ending.
     async fn stopped(&self, run_id: &str) -> bool {
         let run_id = RunId::from_stored(run_id.to_string());
         match self.state.auth.store.run_status(&run_id).await {
@@ -3136,76 +3140,89 @@ fn run_taken() -> Response {
 }
 
 /// How often an attached stream looks for what its run has recorded since. The turn journals a
-/// round at a time, so the stream moves a round at a time, and a second is plenty.
+/// round at a time, so the stream moves a round at a time, and a second is plenty. Each look is
+/// one primary-key read; the log itself is read only when that says something changed.
 const ATTACH_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Stream a run that another request is running or ran: what it has recorded, then what it
 /// records, until it ends or parks.
 ///
-/// ONE ENDING, THE LAST. A run that parked and was resumed carries the park's `RUN_FINISHED`
-/// in the middle of its log, and a client ends its stream at the first closer it sees, so every
-/// closer is held back and only the run's last one is sent. A run whose log ends without one
-/// (failed by the sweep, stopped while parked) gets the ending its status says.
+/// ONLY THE LOG'S OWN FRAMES, ONE FOR ONE. Replay hydration also appends transcript cards it
+/// could not match, and for a run with no frames yet it matches none, so every card the
+/// coworker ever showed this person would arrive here — and the count used to resume the
+/// stream would then skip that many real frames on the next look.
+///
+/// ONE CLOSER, THE ONE THE RUN'S STATUS SAYS (`attached_closer`). Closers inside the log are
+/// held back: a parked and resumed run has the park's `RUN_FINISHED` in the middle, and a
+/// parked run that was stopped still ends its log with it.
 fn attach(state: AgUiState, account_id: AccountId, run_id: RunId) -> Response {
     use opengrok_wire::agui::EventType;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
     tokio::spawn(async move {
+        let unreadable = |thread_id: &str| {
+            Event::new(EventType::RunError, now_ms())
+                .with("threadId", thread_id.to_string())
+                .with("runId", run_id.as_str())
+                .with(
+                    "message",
+                    "this run could not be read back; ask for it again",
+                )
+        };
         let mut sent = 0usize;
+        let mut seen = None;
+        let mut stop_notice = false;
+        let mut last: Option<Event> = None;
         loop {
             // A client that hung up stops the follow; a long tool would otherwise keep it
             // reading the log for nobody until the run ended.
             if tx.is_closed() {
                 return;
             }
+            let progress = match state.auth.store.run_progress(&run_id).await {
+                Ok(progress) => progress,
+                Err(_) => {
+                    let _ = tx.send(unreadable(""));
+                    return;
+                }
+            };
+            if progress == seen && matches!(progress, Some((RunStatus::Running, _))) {
+                tokio::time::sleep(ATTACH_POLL).await;
+                continue;
+            }
+            seen = progress;
             let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
+                let _ = tx.send(unreadable(""));
                 return;
             };
             let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
-            let frames: Vec<Event> =
-                events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms)
-                    .await
-                    .into_iter()
-                    .filter_map(|frame| serde_json::from_value(frame).ok())
-                    .collect();
-            let is_end = |event: &Event| {
-                matches!(
+            let frames = log_frames(
+                events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+                run.emitted.len(),
+            );
+            for frame in frames.into_iter().skip(sent) {
+                sent += 1;
+                let Ok(event) = serde_json::from_value::<Event>(frame) else {
+                    continue;
+                };
+                let is_end = matches!(
                     event.event_type,
                     EventType::RunFinished | EventType::RunError
-                )
-            };
-            for event in frames.iter().skip(sent) {
-                if !is_end(event) && tx.send(event.clone()).is_err() {
-                    return;
+                );
+                if !is_end {
+                    stop_notice |= event.event_type == EventType::Custom
+                        && event.extra.get("name").and_then(|name| name.as_str())
+                            == Some("run-stopped");
+                    if tx.send(event.clone()).is_err() {
+                        return;
+                    }
                 }
+                last = Some(event);
             }
-            sent = frames.len();
             if run.status == RunStatus::Running {
                 tokio::time::sleep(ATTACH_POLL).await;
                 continue;
             }
-            let at_ms = now_ms();
-            let closing = |event_type| {
-                Event::new(event_type, at_ms)
-                    .with("threadId", run.thread_id.clone())
-                    .with("runId", run_id.as_str())
-            };
-            let ending = match (frames.last(), run.status) {
-                (Some(last), _) if is_end(last) => vec![last.clone()],
-                (_, RunStatus::Failed) => vec![
-                    closing(EventType::RunError).with(
-                        "message",
-                        run.failure
-                            .clone()
-                            .unwrap_or_else(|| "the run failed".to_string()),
-                    ),
-                ],
-                (_, RunStatus::Stopped) => vec![
-                    closing(EventType::Custom).with("name", "run-stopped"),
-                    closing(EventType::RunFinished),
-                ],
-                _ => vec![closing(EventType::RunFinished)],
-            };
-            for event in ending {
+            for event in attached_closer(&run, &run_id, last.as_ref(), stop_notice, now_ms()) {
                 if tx.send(event).is_err() {
                     return;
                 }
@@ -3218,6 +3235,57 @@ fn attach(state: AgUiState, account_id: AccountId, run_id: RunId) -> Response {
             .await
             .map(|event| (Ok::<_, std::io::Error>(event), rx))
     }))
+}
+
+/// A replay's frames that are the log's own: hydration overlays cards onto them in place and
+/// appends the cards it could not place, which an attached stream must not send (see `attach`).
+fn log_frames(mut hydrated: Vec<serde_json::Value>, logged: usize) -> Vec<serde_json::Value> {
+    hydrated.truncate(logged);
+    hydrated
+}
+
+/// The closer an attached stream ends with, from what the run IS rather than from the last closer
+/// its log happens to hold. `last` is the log's last frame and `stop_notice` whether its
+/// `run-stopped` was already sent.
+fn attached_closer(
+    run: &opengrok_core::run::Run,
+    run_id: &RunId,
+    last: Option<&Event>,
+    stop_notice: bool,
+    at_ms: i64,
+) -> Vec<Event> {
+    use opengrok_wire::agui::EventType;
+    let closing = |event_type| {
+        Event::new(event_type, at_ms)
+            .with("threadId", run.thread_id.clone())
+            .with("runId", run_id.as_str())
+    };
+    let last_is = |event_type| last.filter(|event| event.event_type == event_type).cloned();
+    match run.status {
+        RunStatus::Failed => vec![last_is(EventType::RunError).unwrap_or_else(|| {
+            closing(EventType::RunError).with(
+                "message",
+                run.failure
+                    .clone()
+                    .unwrap_or_else(|| "the run failed".to_string()),
+            )
+        })],
+        RunStatus::Stopped => {
+            let mut ending = Vec::new();
+            if !stop_notice {
+                ending.push(closing(EventType::Custom).with("name", "run-stopped"));
+            }
+            ending.push(match (stop_notice, last_is(EventType::RunFinished)) {
+                (true, Some(finished)) => finished,
+                _ => closing(EventType::RunFinished),
+            });
+            ending
+        }
+        // Finished, or parked on a card: the log's own closer when it has one.
+        _ => {
+            vec![last_is(EventType::RunFinished).unwrap_or_else(|| closing(EventType::RunFinished))]
+        }
+    }
 }
 
 /// Replay a run from the log.
@@ -4663,11 +4731,11 @@ impl AgUiSink {
         hold.release_for(call_id, entry_id)
     }
 
-    fn release_held_forms(&self) -> Vec<Event> {
+    fn release_held_forms(&self, clean: bool) -> Vec<Event> {
         let Ok(mut hold) = self.form_hold.lock() else {
             return Vec::new();
         };
-        hold.release_rest()
+        hold.release_at_end(clean)
     }
 }
 
@@ -4714,7 +4782,8 @@ impl EventSink for AgUiSink {
                 opengrok_wire::agui::EventType::RunFinished
                     | opengrok_wire::agui::EventType::RunError
             ) {
-                for held in self.release_held_forms() {
+                let clean = event.event_type == opengrok_wire::agui::EventType::RunFinished;
+                for held in self.release_held_forms(clean) {
                     if !self.send(held) {
                         return;
                     }
@@ -5182,5 +5251,138 @@ mod tests {
         assert_eq!(wire["formRequest"]["title"], "Google account");
         assert_eq!(wire["arguments"]["title"], "Google account");
         assert!(wire.get("values").is_none());
+    }
+
+    fn a_run(status: RunStatus, failure: Option<&str>) -> opengrok_core::run::Run {
+        opengrok_core::run::Run {
+            thread_id: "th".to_string(),
+            status,
+            failure: failure.map(str::to_string),
+            ..opengrok_core::run::Run::default()
+        }
+    }
+
+    fn closer_types(events: &[Event]) -> Vec<(EventType, Option<String>)> {
+        events
+            .iter()
+            .map(|event| {
+                let name = event
+                    .extra
+                    .get("name")
+                    .or_else(|| event.extra.get("message"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                (event.event_type, name)
+            })
+            .collect()
+    }
+
+    /// AN ATTACHED STREAM ENDS THE WAY THE RUN ENDED, NOT THE WAY ITS LOG LAST CLOSED. A parked
+    /// run that was stopped, or swept after its card was answered, still ends its log with the
+    /// park's `RUN_FINISHED`; the closer used to be that one, which left a live card on screen.
+    #[test]
+    fn an_attached_stream_closes_with_what_the_run_is() {
+        let run_id = RunId::from_stored("run-1".to_string());
+        let park_closer = Event::new(EventType::RunFinished, 1);
+        let run_error = Event::new(EventType::RunError, 1).with("message", "the model hung up");
+
+        let stopped = attached_closer(
+            &a_run(RunStatus::Stopped, None),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(
+            closer_types(&stopped),
+            vec![
+                (EventType::Custom, Some("run-stopped".to_string())),
+                (EventType::RunFinished, None)
+            ]
+        );
+
+        let swept = attached_closer(
+            &a_run(RunStatus::Failed, Some("interrupted by a restart")),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(
+            closer_types(&swept),
+            vec![(
+                EventType::RunError,
+                Some("interrupted by a restart".to_string())
+            )]
+        );
+
+        let failed = attached_closer(
+            &a_run(RunStatus::Failed, Some("the model hung up")),
+            &run_id,
+            Some(&run_error),
+            false,
+            2,
+        );
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].timestamp, run_error.timestamp,
+            "the log's own closer"
+        );
+
+        // A loop that ended as a stop already sent its notice; only the closer is left.
+        let stopped_by_loop = attached_closer(
+            &a_run(RunStatus::Stopped, None),
+            &run_id,
+            Some(&park_closer),
+            true,
+            2,
+        );
+        assert_eq!(
+            closer_types(&stopped_by_loop),
+            vec![(EventType::RunFinished, None)]
+        );
+
+        let parked = attached_closer(
+            &a_run(RunStatus::AwaitingApproval, None),
+            &run_id,
+            Some(&park_closer),
+            false,
+            2,
+        );
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[0].timestamp, park_closer.timestamp);
+    }
+
+    /// A RUN WITH NO FRAMES YET GETS NO CARDS. Hydration appends the transcript cards it cannot
+    /// place, and with nothing logged the run's window is everything, so every card this
+    /// coworker ever showed would reach an attached stream — and the next look would skip as
+    /// many real frames. Only the log's own frames go out.
+    #[test]
+    fn an_attached_stream_sends_only_the_logs_own_frames() {
+        let card = json!({
+            "kind": "send-message",
+            "id": "e_old",
+            "timestampMs": 5,
+            "message": {
+                "type": "user-form",
+                "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
+            }
+        });
+        let (from, to) = run_time_window(&[]);
+        let hydrated = crate::agui::user_form::hydrate_agui_events(
+            Vec::new(),
+            std::slice::from_ref(&card),
+            from,
+            to,
+        );
+        assert_eq!(
+            hydrated.len(),
+            1,
+            "hydration invents a card for an empty run"
+        );
+        assert!(
+            log_frames(hydrated, 0).is_empty(),
+            "the attached stream sends none"
+        );
     }
 }

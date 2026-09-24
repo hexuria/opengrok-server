@@ -170,6 +170,39 @@ def runsApproved (stopRecorded approved : Bool) : Bool := approved && !stopRecor
 theorem no_approved_after_stop (a : Bool) : runsApproved true a = false := by
   simp [runsApproved]
 
+/-- What an ending is made of, as far as the client's count of endings goes. -/
+inductive Frame
+  | bracket   -- TEXT_MESSAGE_END / REASONING_MESSAGE_END / TOOL_CALL_END
+  | timing    -- the run-timing CUSTOM
+  | custom    -- a card, the stop notice
+  | terminal  -- RUN_FINISHED / RUN_ERROR
+deriving DecidableEq, Repr
+
+def terminals (fs : List Frame) : Nat := (fs.filter (· = .terminal)).length
+
+/-- `Projection::unrecorded`: keep the brackets and the timing, drop the cards, the stop notice
+    and the terminal, and end with one RUN_ERROR. -/
+def unrecorded (fs : List Frame) : List Frame :=
+  fs.filter (fun f => f = .bracket || f = .timing) ++ [.terminal]
+
+/-- Whatever ending the log refused, its replacement carries exactly one terminal. -/
+theorem unrecorded_one_terminal (fs : List Frame) : terminals (unrecorded fs) = 1 := by
+  induction fs with
+  | nil => simp [unrecorded, terminals]
+  | cons f fs ih =>
+    cases f <;> simp_all [unrecorded, terminals, List.filter]
+
+/-- What `close` sends: the ending once the write succeeded, its replacement otherwise. -/
+def sent (written : Bool) (ending : List Frame) : List Frame :=
+  if written then ending else unrecorded ending
+
+/-- An ending with one terminal reaches the client with exactly one, written or not. -/
+theorem close_sends_one_terminal (written : Bool) (ending : List Frame)
+    (h : terminals ending = 1) : terminals (sent written ending) = 1 := by
+  cases written
+  · exact unrecorded_one_terminal ending
+  · simpa [sent] using h
+
 end Close
 
 namespace Answer

@@ -575,7 +575,8 @@ pub async fn resume_conversation(
     // DURABLE BEFORE THE NEXT CALL, as every round is: the approved call has run, and the model
     // is about to be asked about what it did. This write's error used to be ignored.
     if let Err(error) = record_round(journal, &run_id, &all).await {
-        return close(
+        // The results are not written again, only the ending (see `converse_raw`).
+        let mut ending = close(
             journal,
             None,
             &run_id,
@@ -583,10 +584,12 @@ pub async fn resume_conversation(
             &timing,
             verbose_timing,
             &mut None,
-            all,
+            Vec::new(),
             Ending::Fail(format!("the run could not be recorded: {error}")),
         )
         .await;
+        all.append(&mut ending);
+        return all;
     }
 
     // The first half already recorded ToolCallStart (that is why this run is
@@ -675,9 +678,10 @@ enum Ending {
 /// true thing, that the run could not be recorded (ToldIsTrue). The round's own frames still
 /// stream as they are produced; only the ending waits.
 ///
-/// A CLEAN FINISH ASKS `stopped` ONCE MORE. The close is a step boundary too, so a Stop pressed
-/// during the final answer or the last tool is how the run ends (StopIsHonoured). A failure
-/// keeps its sentence and a park its card.
+/// A CLEAN FINISH OR A PARK ASKS `stopped` ONCE MORE. The close is a step boundary too, so a Stop
+/// pressed during the final answer or the last tool is how the run ends (StopIsHonoured). A park
+/// asks as well: its `Suspended` would be refused on a stopped run, and the card would be a
+/// button whose answer is a 409. A failure keeps its sentence.
 #[allow(clippy::too_many_arguments)]
 async fn close(
     journal: &dyn RunJournal,
@@ -704,7 +708,9 @@ async fn close(
         pin_last_agent_shot(sink, last_agent_shot, visibility, &mut round).await;
     }
     let mut closing = match ending {
-        Ending::Finish(_) if journal.stopped(run_id).await => projection.stopped(),
+        Ending::Finish(_) | Ending::Park(_) if journal.stopped(run_id).await => {
+            projection.stopped()
+        }
         Ending::Finish(_) => projection.finish(),
         Ending::Stop => projection.stopped(),
         Ending::Fail(message) => projection.fail(message),
@@ -811,20 +817,6 @@ async fn converse_raw(
     // the schema list.
     let tools_offered = work_tools_offered(&request.tools);
 
-    let mut opening = projection.start();
-    if let Err(error) = journal.record(run_id, &opening).await {
-        // A run we cannot record must not proceed: it would produce work that a reconnect can
-        // never reproduce, which is the failure this design exists to prevent.
-        let mut failed = projection.fail(format!("the run could not be recorded: {error}"));
-        emit_live(sink, &opening).await;
-        emit_live(sink, &failed).await;
-        all.append(&mut opening);
-        all.append(&mut failed);
-        return all;
-    }
-    emit_live(sink, &opening).await;
-    all.append(&mut opening);
-
     // The calls the tools refused last round, by name and arguments. A model that asks
     // for exactly the same thing again is not going to get a different answer, and
     // burning the remaining rounds on it only delays telling the person.
@@ -881,6 +873,20 @@ async fn converse_raw(
             );
             return all;
         }};
+    }
+
+    let mut opening = projection.start();
+    let opened_ok = journal.record(run_id, &opening).await;
+    emit_live(sink, &opening).await;
+    all.append(&mut opening);
+    if let Err(error) = opened_ok {
+        // A run we cannot record must not proceed: it would produce work that a reconnect can
+        // never reproduce, which is the failure this design exists to prevent. The opening is
+        // not written again: a write that failed may still have landed.
+        end_run!(
+            Vec::new(),
+            Ending::Fail(format!("the run could not be recorded: {error}"))
+        );
     }
 
     for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
@@ -1334,8 +1340,13 @@ async fn converse_raw(
                 // and budget exits are decided ABOVE this write, so the round they end on goes
                 // down with their ending in one write rather than before it.
                 if let Err(error) = record_round(journal, run_id, &round_events).await {
+                    // NOT WRITTEN AGAIN. A write that failed may have landed (a commit whose
+                    // reply was lost), and writing the round a second time would put it in the
+                    // log twice (`formal/tla/JournalAppend.tla` NoDuplicate). Only the ending
+                    // is written, and the client is told what that write allows.
+                    all.append(&mut round_events);
                     end_run!(
-                        round_events,
+                        Vec::new(),
                         Ending::Fail(format!("the run could not be recorded: {error}"))
                     );
                 }

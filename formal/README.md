@@ -38,7 +38,7 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | No model call while a round's tool results are not yet durable | safety | `DurableBeforeNextCall` |
 | Spoken and screen budgets hold; model calls ≤ `R + C` | safety | `BudgetsHold`, `CallsBounded`; Lean `Budget.calls_bounded` |
 | At most one tool batch runs after a Stop (the check-to-`run_all` gap) | safety | `AtMostOneToolRunAfterStop` |
-| A Stop recorded before the close asks is how the run ends | safety | `StopIsHonoured` |
+| A Stop recorded before the close asks is how the run ends — no finish, no card | safety | `StopIsHonoured` |
 | An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |
 | A Stop recorded before the continuation asks keeps the approved call from running | safety | `NoApprovedAfterStop` |
 | After the log ends a run, a loop starts at most one more tool (the one already past its check) | safety | `AtMostOneStaleTool` |
@@ -48,7 +48,7 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | Every run ends | liveness | `Terminates`; Lean `Budget.measure_decreases` |
 | No run is left `running` with nobody driving it | liveness | `NoOrphan` |
 | The ending the client saw is in the journal | safety | `EndingIsDurable`, which fails by nature (see below) |
-| The client is shown an ending only if the log holds it; otherwise it is told the run could not be recorded | safety | `ToldIsTrue` |
+| The client is shown an ending only once its write succeeded; otherwise it is told the run could not be recorded | safety | `ToldIsTrue`; Lean `Close.close_sends_one_terminal` (one ending either way) |
 | The log never holds the round a run ended on without the ending it ended with | safety | `RoundNeverWithoutEnding` |
 | A round journaled while a Stop lands is kept | safety | `JournalAppend` `RoundKept` |
 | No round is written twice | safety | `JournalAppend` `NoDuplicate` |
@@ -134,6 +134,25 @@ Each trace is TLC's shortest.
     id whenever they started in the same second; slice3's turn used to be appended to slice2's
     run. Each now adds its process id.
 
+12. **The second verifier pass** (fresh context, the four commits above). Confirmed and fixed:
+    - `attach` skipped real frames: replay hydration appends transcript cards it cannot place,
+      and for a run with no frames yet it places none, so every card the coworker ever showed
+      reached the stream and shifted the count. It now sends only the log's own frames.
+    - `attach` closed a parked run that was stopped (or swept after its card was answered) with
+      the park's `RUN_FINISHED`, leaving a live card. The closer now follows the run's status.
+    - A park after a Stop landed during `run_all` still showed its card, whose `Suspended` the
+      log refuses on a stopped run (TLC prints it in eight states once `StopIsHonoured` covers
+      parks). A park now asks `stopped` like a finish.
+    - After a failed durable write, `close` wrote the round again with its ending: the "retry
+      every error" that `JournalAppend_retryall` shows duplicates a round whose reply was lost.
+      Only the ending is written now; the opening write goes through `close` the same way.
+    - `AgUiSink` released held login-form frames at a `RUN_ERROR`, so NativeChat could paint a
+      card with no suspension behind it. They now go out only after a clean `RUN_FINISHED`.
+
+    Overclaims corrected here: `ToldIsTrue` is about the write succeeding, not about everything
+    the store accepted (see the hazards below); `RetryNotRefused` holds trivially once the claim
+    is on, because `attach` is not modelled, and its closer and frames are unit-tested instead.
+
 ## Lean findings
 
 `lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
@@ -150,7 +169,10 @@ Each trace is TLC's shortest.
 - **`Close`.** `close true v ≠ finished` for every verdict. Without a Stop, `close` is the
   identity. A failure and a park survive a Stop. These restate the one-line definitions and
   are not linked to the Rust. They record the close's intended rule; `StopIsHonoured` and the
-  tests check the code.
+  tests check the code. (The code now also turns a park into a stop; the Lean `close` predates
+  that and still says a park survives.) `unrecorded_one_terminal` and `close_sends_one_terminal`
+  are about frames: whatever ending the log refused, its replacement carries exactly one
+  terminal, so `close` sends one ending whether or not its write succeeded.
 - **`Answer`.** With `append(log, expected)` succeeding only when `log = expected`, any batch
   of commits that read the same seq has at most one success. Assumption: each successful
   commit spawns exactly one continuation (`answer_run`, `resume_settled`).
@@ -169,8 +191,9 @@ The state graph was the object being minimised. The results:
   every exit ends the same way. The bound itself stays as the spend backstop Lean shows it
   never needs to be. Replacing it with `loop` would remove one more branch but trade a silent
   hang for an unbounded spend if a future `continue` forgot its budget.
-- **"Stop" and "finish" meet in one place.** Six clean-finish sites each chose `finish()`
-  directly. They now share `finish_or_stop`, the one close the Lean `Close` model describes.
+- **"Stop", "finish" and "park" meet in one place.** Six clean-finish sites each chose
+  `finish()` directly, and a park never asked. All of them now go through `close`, which asks
+  `stopped` for a finish and for a park.
 - **The fix set is minimal among the candidates, by exhaustive bounded search.** Over all
   2⁴ combinations of the four lifecycle switches (lease on resume, stop before the approved
   call, any ended run means stop, the claim), in both regimes:
@@ -188,54 +211,65 @@ The state graph was the object being minimised. The results:
   two or three writes, with four helpers (`stop_here`, `finish_round`, `finish_or_stop`,
   `finish_ending`). There is now one: every exit is `end_run!(round, Ending::…)`, and `close`
   is the only function that ends a run. The model already had a single `Close` action; the
-  code now matches it. Eleven ignored journal writes became one checked write.
+  code now matches it. Eleven ignored journal writes became one checked write, and a write that
+  failed is never repeated (it may have landed): only the ending is written after it.
 
 ## Implementation
 
 - `crates/opengrok-harness/src/lib.rs`
-  - `finish_or_stop` is now the close for every clean finish.
+  - Every exit names an `Ending` and returns through `close`: the stop check (a finish or a
+    park yields to a recorded Stop), the fallback sentence, the pin, one write of the round with
+    its ending, and only then the emit. A write that failed is never repeated.
+  - `resume_conversation` asks `stopped` before running (or refusing) the approved call, goes
+    through `close`, and checks its durable write.
   - Falling out of the `for` fails the run with a sentence.
-  - `resume_conversation` asks `stopped` before running (or refusing) the approved call.
+- `crates/opengrok-harness/src/projection.rs`: `unrecorded` swaps a refused ending for the one
+  `RUN_ERROR` that is true, keeping its brackets and its `run-timing`.
 - `crates/opengrok-server/src/agui/routes.rs`
-  - `continue_run` holds a recovery `Lease`.
-  - `StoreJournal::stopped` answers yes for any ended run; the comment says why that needed the
-    claim first (findings 8 and 11).
+  - `append_events` retries a `Conflict` (`APPEND_ATTEMPTS`), and no other error.
+  - `continue_run` holds a recovery `Lease`; so does `resume_suspended_run` (`resume.rs`).
   - `start_claimed_turn` answers a run id that already has a run before any side effect, and
     claims the run (`StoreJournal::claim`) before it starts a loop. `answer_for_existing_run`
-    and `attach` give the owner its run back; anybody else gets `409 run-exists`.
-- `crates/opengrok-store/src/postgres.rs`: a run's owner is set once.
-- `scripts/slice2-agui-smoke.sh`: the header check POSTs its own run id. It used to send the
-  second request's body, which only worked because a reused run id ran a second turn.
-- `crates/opengrok-server/src/agui/resume.rs`: `resume_suspended_run` holds a recovery
-  `Lease`.
-- `crates/opengrok-server/src/agui/routes.rs`: `append_events` retries a `Conflict`
-  (`APPEND_ATTEMPTS`), and no other error.
-- `crates/opengrok-harness/src/lib.rs`: `Ending` and `close` replace the four ending helpers;
-  `resume_conversation` goes through `close` too, and its durable write is now checked.
-  `crates/opengrok-harness/src/projection.rs`: `unrecorded` swaps a refused ending for the one
-  `RUN_ERROR` that is true.
-- Tests derived from the traces, in `crates/opengrok-harness/tests/unit/loop_tests.rs`:
-  - `a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop` (finding 1)
-  - `a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call` (finding 3)
-  - `a_refused_card_is_read_by_the_model_and_never_runs` (`Close.runsApproved`)
-
-  The first two fail on `4a25af6` and pass now.
-- Also in `loop_tests.rs`, from `ToldIsTrue` and `RoundNeverWithoutEnding`:
-  `an_ending_the_journal_refused_is_told_as_unrecorded`,
-  `a_park_the_journal_refused_shows_no_card`, `a_parked_round_and_its_card_are_journaled_together`,
-  `a_chart_round_and_its_ending_are_journaled_together` (each fails on the previous commit), and
-  `a_door_that_will_not_open_ends_the_run_once`.
-- `crates/opengrok-server/tests/against_a_retried_run.rs` (Postgres): a retry gets its run back
-  and nothing runs twice; two POSTs at once run one loop; another account's POST is refused and
-  leaves the run its owner's; an anonymous caller cannot reuse a run id; the owner is set once.
-- `crates/opengrok-server/tests/against_a_stopped_run.rs`:
-  `a_round_journaled_while_a_stop_lands_keeps_its_frames` races three rounds against a Stop
-  on Postgres (`RoundKept`, `NoDuplicate`).
+    gives the owner its run back through `attach` (the log's own frames, then one closer by
+    status); anybody else gets `409 run-exists`.
+  - `StoreJournal::stopped` answers yes for any ended run (findings 8 and 11).
+  - `AgUiSink` releases held login-form frames only after a clean ending.
+- `crates/opengrok-store/src/postgres.rs`: a run's owner is set once; `run_progress` is the
+  cheap read `attach` polls.
+- `scripts/slice2-agui-smoke.sh`, `scripts/slice3-harness-smoke.sh`: one run id per run.
+- Tests, each failing on the commit before its fix:
+  - `loop_tests.rs`: `a_stop_pressed_during_the_final_answer_ends_the_run_as_a_stop`,
+    `a_run_stopped_after_its_card_was_answered_does_not_run_the_approved_call`,
+    `an_ending_the_journal_refused_is_told_as_unrecorded`,
+    `a_park_the_journal_refused_shows_no_card`,
+    `a_parked_round_and_its_card_are_journaled_together`,
+    `a_chart_round_and_its_ending_are_journaled_together`,
+    `a_park_after_a_stop_ends_the_run_stopped_with_no_card`,
+    `a_round_whose_write_failed_is_not_written_again`; and, covering paths that were already
+    right, `a_refused_card_is_read_by_the_model_and_never_runs` and
+    `a_door_that_will_not_open_ends_the_run_once`.
+  - `against_a_stopped_run.rs` (Postgres): `a_round_journaled_while_a_stop_lands_keeps_its_frames`.
+  - `against_a_retried_run.rs` (Postgres): a retry gets its run back and the model is asked
+    once; two POSTs at once run one loop; another account's POST is refused and leaves the run
+    its owner's; an anonymous caller cannot reuse a run id; the owner is set once.
+  - `routes.rs` and `user_form.rs` unit tests: `an_attached_stream_closes_with_what_the_run_is`,
+    `an_attached_stream_sends_only_the_logs_own_frames`,
+    `held_form_frames_go_out_only_after_a_clean_ending`.
 
 ## Remaining hazards the models name but this change does not fix
 
 - **A reattached stream moves a round at a time.** The owner's retry follows the log, which
   the turn writes once per round, so its words arrive per round rather than per token.
+- **An ending the log accepts but the run refuses.** `ToldIsTrue` is about the write
+  succeeding. The store also drops, without an error, what the aggregate refuses once a run was
+  ended from outside: a loop whose run the sweep failed after a lost renewal ends its live stream
+  as `run-stopped`, while the log keeps the failure.
+- **A queued message sent under a run id that already has a run** is drained and answered with
+  that run. The existing-run check comes after the queued-send check on purpose, so that a
+  same-run retry whose words changed gets its `stale-pending-message` refusal; no client is known
+  to reuse a run id for a different message.
+- **An attached stream reads the whole run on every change** (one primary-key read per second
+  otherwise), with no cap on how many are attached.
 - **A journal that is down stays down.** `close` tells the client the truth, but a run whose
   ending could not be written is still `running` in the log until the sweep fails it, with the
   sweep's "interrupted by a restart" (`EndingIsDurable`).

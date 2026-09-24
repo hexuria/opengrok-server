@@ -378,18 +378,21 @@ impl Projection {
     ///
     /// NOT A SECOND ENDING. `close` emits an ending only once the log holds it, so the refused one
     /// was never shown and this is the only ending the run gets. The brackets it closed stay
-    /// closed; its cards and its stop notice go — a card for a suspension the log never got
-    /// answers 409 — and its terminal becomes the one `RUN_ERROR`.
+    /// closed and its `run-timing` stays (one CUSTOM, then the closer); its cards and its stop
+    /// notice go — a card for a suspension the log never got answers 409 — and its terminal
+    /// becomes the one `RUN_ERROR` (`formal/lean/Harness.lean` Close.unrecorded_one_terminal).
     pub fn unrecorded(&self, refused: Vec<Event>, message: impl Into<String>) -> Vec<Event> {
         let mut events: Vec<Event> = refused
             .into_iter()
-            .filter(|event| {
-                matches!(
-                    event.event_type,
-                    EventType::TextMessageEnd
-                        | EventType::ReasoningMessageEnd
-                        | EventType::ToolCallEnd
-                )
+            .filter(|event| match event.event_type {
+                EventType::TextMessageEnd
+                | EventType::ReasoningMessageEnd
+                | EventType::ToolCallEnd => true,
+                EventType::Custom => {
+                    event.extra.get("name").and_then(|name| name.as_str())
+                        == Some(crate::timing::RUN_TIMING_NAME)
+                }
+                _ => false,
             })
             .collect();
         events.push(

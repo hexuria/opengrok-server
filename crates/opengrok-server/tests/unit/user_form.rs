@@ -219,3 +219,23 @@ fn shell_tool_calls_pass_through_the_user_form_hold() {
     );
     assert!(hold.release_rest().is_empty());
 }
+
+/// A run that ENDS IN AN ERROR shows no card: a held login form would be painted from its
+/// TOOL_CALL frames with no suspension behind it, and its Continue could only answer 409.
+/// A clean ending still lets a refused form's frames through.
+#[test]
+fn held_form_frames_go_out_only_after_a_clean_ending() {
+    let mut failed = UserFormSseHold::default();
+    assert!(failed.push(form_tool_start("call-1")).is_none());
+    assert!(failed.push(form_tool_args("call-1")).is_none());
+    assert!(failed.release_at_end(false).is_empty());
+    assert!(
+        failed.release_rest().is_empty(),
+        "and nothing is left behind"
+    );
+
+    let mut finished = UserFormSseHold::default();
+    assert!(finished.push(form_tool_start("call-2")).is_none());
+    assert!(finished.push(form_tool_args("call-2")).is_none());
+    assert_eq!(finished.release_at_end(true).len(), 2);
+}
