@@ -230,6 +230,28 @@ fn a_deny_matches_any_simple_command_after_normalising() {
         "trap 'rm -rf x' EXIT",
         "caffeinate -i rm x",
         "arch -x86_64 rm x",
+        // A stream duplication or a redirection is not a word of argv, wherever it sits: the
+        // program and its subcommand are the words around it.
+        "2>&1 git push",
+        ">&2 git push",
+        "git 2>&1 push",
+        "git >&2 push",
+        "0<&0 git push",
+        ">/dev/null rm -rf x",
+        "</dev/null rm x",
+        "X=1 >/dev/null rm x",
+        // An expansion can be empty, so the word after it can be the subcommand.
+        "git $x push",
+        "git \"$@\" push",
+        "git $@ push",
+        "git $x\"push\"",
+        "git ${x:-push}",
+        "git $(true) push",
+        "git `true` push",
+        "$x rm x",
+        // A glob can name the program or the subcommand once a file matches it.
+        "/bin/r? x",
+        "git pus? origin",
     ] {
         assert!(
             is_deny(&decide(&p, line)),
@@ -246,6 +268,16 @@ fn a_deny_matches_any_simple_command_after_normalising() {
         "ls rmdir",
         "rmdir x",
         "git status",
+        // An option's value that expands is still that option's value.
+        "git -C \"$dir\" status",
+        "git log $x",
+        // A redirection's target is a path, not a program.
+        "echo x > rm",
+        "git status 2>&1",
+        // Wildcards alone name no program in particular, even where any word may be one.
+        "sudo ls *",
+        "find . -name '*' -exec ls {} \\;",
+        "git add *",
     ] {
         assert!(!is_deny(&decide(&p, line)), "{line:?}");
     }
@@ -257,6 +289,32 @@ fn a_deny_matches_any_simple_command_after_normalising() {
     assert_eq!(
         decide(&p, "true; rm x"),
         LocalExecDecision::Deny("a deny rule matched this command: `rm`".to_string())
+    );
+}
+
+/// The deny reader ran on every Ask-mode decision, twice per bot tool call, and built a copy of
+/// every suffix of a line whose program runs another: 16 KB of `sh a a …` took 3.4 GB and 8 s.
+/// A line past the cap is refused unread; one under it is read in time linear in its length.
+#[test]
+fn a_long_line_is_refused_or_read_in_linear_time() {
+    let p = policy(&["git"], &["rm x", "git push"]);
+    let started = std::time::Instant::now();
+    let huge = format!("sh{}", " a".repeat(512 * 1024));
+    let decision = decide(&p, &huge);
+    assert!(is_deny(&decision), "{decision:?}");
+    if let LocalExecDecision::Deny(why) = decision {
+        assert!(why.contains("65536"), "{why}");
+    }
+    // Just under the cap, with every word a possible program and options a matcher could chase.
+    let wide = format!("sh{}", " rm -a".repeat(10_000));
+    assert!(wide.len() < 65_536);
+    assert_eq!(decide(&p, &wide), LocalExecDecision::Ask);
+    let long = format!("sh{}", " a".repeat(32_000));
+    assert_eq!(decide(&p, &long), LocalExecDecision::Ask);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
     );
 }
 

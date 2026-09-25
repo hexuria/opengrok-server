@@ -115,14 +115,21 @@ pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> 
     }
 }
 
+/// The longest line `Ask` reads. The gate runs on every Ask-mode call, twice per bot tool call,
+/// and a line reaches it from a model's tool arguments or a 2 MB request body, so the reading
+/// must have a bound one call cannot push the server past. A longer line is refused, never
+/// asked about: on the user's own path an Ask runs it with no deny rule read.
+pub const MAX_JUDGED_BYTES: usize = 64 * 1024;
+
 /// THE GATE. The one place a command on the user's own machine is judged. Everything that would run
 /// a reverse-exec command MUST pass through here first, on the server, before anything is queued.
 ///
 /// - `Never` (default): deny, always.
 /// - `Bypass`: allow (the lists are skipped by the user's deliberate choice; still audited).
-/// - `Ask`: a deny rule matching ANY simple command in the line denies (deny wins); else an
-///   allow or session-allow rule covering the line allows, and only a line that is ONE plain
-///   simple command can be covered; else ask. See `shell` for how the line is read.
+/// - `Ask`: a line over `MAX_JUDGED_BYTES` is denied unread. A deny rule matching ANY simple
+///   command in the line denies (deny wins); else an allow or session-allow rule covering the
+///   line allows, and only a line that is ONE plain simple command can be covered; else ask.
+///   See `shell` for how the line is read.
 pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     match policy.mode {
         LocalExecMode::Never => LocalExecDecision::Deny(
@@ -130,16 +137,29 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
         ),
         LocalExecMode::Bypass => LocalExecDecision::Allow,
         LocalExecMode::Ask => {
-            let programs = shell::programs(command);
-            let denied = policy.deny.iter().find(|pattern| {
-                matches(pattern, command) || shell::denies(pattern, &programs)
-            });
-            let allowed = || match shell::read(command).plain {
+            if command.len() > MAX_JUDGED_BYTES {
+                return LocalExecDecision::Deny(format!(
+                    "this command is {} bytes; the gate reads at most {MAX_JUDGED_BYTES} before \
+                     it decides, and refuses a longer one rather than run it unread — split it \
+                     into shorter commands",
+                    command.len()
+                ));
+            }
+            let line = shell::read(command);
+            let denied = if policy.deny.is_empty() {
+                None
+            } else {
+                let runs = shell::programs(command, line.plain.as_deref());
+                policy.deny.iter().find(|pattern| {
+                    matches(pattern, command) || shell::denies(pattern, &runs)
+                })
+            };
+            let allowed = || match &line.plain {
                 Some(words) => policy
                     .allow
                     .iter()
                     .chain(policy.session_allow.iter())
-                    .any(|pattern| shell::allows(pattern, &words)),
+                    .any(|pattern| shell::allows(pattern, words)),
                 None => false,
             };
             if let Some(pattern) = denied {
