@@ -280,7 +280,8 @@ fn recipe_of(call: &opengrok_tools::ToolCall) -> Option<String> {
 /// The recipe this call played, when the box played it: a success, or a run that stopped part
 /// way. A refusal before the box (a missing parameter, a recipe not granted, an unreachable box,
 /// a policy block) played nothing. Counting it made the corrected call a "replay" that was never
-/// run, and the search the person asked for never happened (#120).
+/// run, and the search the person asked for never happened (#120). A connection lost after the
+/// request went out is part way (`BoxError::Interrupted`): the box may have been typing.
 fn played_recipe(
     call: &opengrok_tools::ToolCall,
     result: &opengrok_tools::ToolResult,

@@ -1786,6 +1786,19 @@ impl Executor {
         crate::observe::ask(&mut request, self.observe);
         let receipt = match self.computer.run_recipe(box_id.as_str(), &request).await {
             Ok(raw) => RecipeReceipt::from_value(raw),
+            // The box may have played some of it before the connection went: a replay would
+            // type on top of it. Counted as played, and the model is told to look first.
+            Err(error @ BoxError::Interrupted(_)) => {
+                return ToolResult::refused(
+                    call_id,
+                    format!(
+                        "{}. The recipe may have played part way: look at the screen before \
+                         doing anything else, and do not run it again",
+                        describe(error)
+                    ),
+                )
+                .part_way();
+            }
             Err(error) => return ToolResult::refused(call_id, describe(error)),
         };
         let _ = source
@@ -2175,6 +2188,9 @@ fn describe(error: BoxError) -> String {
         BoxError::NoSuchBox => "that computer no longer exists".to_string(),
         BoxError::Secret(reason) => reason.clone(),
         BoxError::Unreachable(detail) => format!("the computer is unreachable: {detail}"),
+        BoxError::Interrupted(detail) => {
+            format!("the connection to the computer was lost before it answered: {detail}")
+        }
         BoxError::Refused { status, body } => {
             format!("the computer refused the request ({status}): {body}")
         }
@@ -2225,6 +2241,19 @@ mod tests {
         tunnel_ready: bool,
     }
 
+    fn copy_error(error: &BoxError) -> BoxError {
+        match error {
+            BoxError::NoSuchBox => BoxError::NoSuchBox,
+            BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
+            BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
+            BoxError::Interrupted(detail) => BoxError::Interrupted(detail.clone()),
+            BoxError::Refused { status, body } => BoxError::Refused {
+                status: *status,
+                body: body.clone(),
+            },
+        }
+    }
+
     impl SpyComputer {
         fn last_box(&self) -> Option<String> {
             self.ran_on
@@ -2250,15 +2279,7 @@ mod tests {
                 calls.push((box_id.to_string(), command.to_string()));
             }
             if let Some(error) = &self.fail_with {
-                return Err(match error {
-                    BoxError::NoSuchBox => BoxError::NoSuchBox,
-                    BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
-                    BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
-                    BoxError::Refused { status, body } => BoxError::Refused {
-                        status: *status,
-                        body: body.clone(),
-                    },
-                });
+                return Err(copy_error(error));
             }
             Ok(CommandOutput {
                 exit_code: 0,
@@ -2272,6 +2293,9 @@ mod tests {
         async fn run_recipe(&self, box_id: &str, request: &Value) -> BoxResult<Value> {
             if let Ok(mut calls) = self.ran_on.lock() {
                 calls.push((box_id.to_string(), format!("recipe:{request}")));
+            }
+            if let Some(error) = &self.fail_with {
+                return Err(copy_error(error));
             }
             let name = request.get("name").and_then(Value::as_str).unwrap_or("");
             // The box answers the level it was asked for, and answers nothing about observation
@@ -4448,6 +4472,44 @@ mod tests {
             Some("kabisado"),
             "another recipe keeps the model's own values"
         );
+    }
+
+    /// A recipe whose connection dropped after the POST may have played: it is a part-way
+    /// refusal, so the loop's once-per-request rule holds (#120). One that never reached the
+    /// box played nothing, and a corrected retry is new work.
+    #[tokio::test]
+    async fn a_recipe_cut_off_mid_play_counts_as_played() {
+        for (error, played) in [
+            (
+                BoxError::Interrupted("box-exec: client error (SendRequest)".to_string()),
+                true,
+            ),
+            (
+                BoxError::Unreachable("box-exec: client error (Connect)".to_string()),
+                false,
+            ),
+        ] {
+            let spy = Arc::new(SpyComputer {
+                fail_with: Some(error),
+                ..SpyComputer::default()
+            });
+            let executor = allowing(spy)
+                .with_screen(true)
+                .with_recipes(offers(), Arc::new(SpyRecipes::default()));
+            let result = executor
+                .execute(
+                    &context_with_box("box_mine"),
+                    &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})),
+                )
+                .await;
+            assert!(!result.ok, "{result:?}");
+            assert_eq!(result.stopped_part_way, played, "{result:?}");
+            assert_eq!(
+                result.content.contains("may have played part way"),
+                played,
+                "{result:?}"
+            );
+        }
     }
 
     #[tokio::test]
