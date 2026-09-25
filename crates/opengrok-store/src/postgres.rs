@@ -815,6 +815,10 @@ impl PgStore {
     /// An empty `org_id` never matches, so two accounts with no org do not silently share.
     /// `roster_for` and `policy_to_use` repeat this predicate in SQL; the three must agree, or a
     /// member would be listed a coworker they cannot talk to, or talk to one they cannot see.
+    /// So this is exactly `roster_for`'s WHERE — retired excluded, LEFT joins so an owner whose
+    /// account row is missing still has their own coworker — because the run and approvals
+    /// doors answer 404 on a `false` here, and must not say "no such coworker" about one the
+    /// caller's roster lists.
     pub async fn may_use_coworker(
         &self,
         account_id: &AccountId,
@@ -823,9 +827,10 @@ impl PgStore {
         let row = sqlx::query(
             "select 1 as ok
              from coworker_view c
-             join account_view owner on owner.id = c.account_id
-             join account_view caller on caller.id = $1
+             left join account_view owner on owner.id = c.account_id
+             left join account_view caller on caller.id = $1
              where c.id = $2
+               and c.retired = false
                and (c.account_id = $1
                     or (c.visibility = 'org'
                         and coalesce(owner.org_id, '') <> ''
@@ -1003,35 +1008,66 @@ impl PgStore {
         principal: &AccountId,
         coworker: &CoworkerId,
     ) -> StoreResult<opengrok_policy::Context> {
+        // Three statements, each over tables in the order `migrations::run` locks them, never
+        // one statement over `grant_view` then `coworker_view`. The schema runs as ONE
+        // transaction whose `alter table … if not exists` takes ACCESS EXCLUSIVE on
+        // `coworker_view` and later `grant_view`, and holds both until it commits. A join that
+        // locked them the other way round deadlocked against a concurrent boot (another replica,
+        // or another test's harness). Postgres killed the read, and the turn was refused with
+        // "no grant" over a grant that was fine.
+        let own = self.policy_for(principal, coworker).await?;
+        if own.grant.is_some() {
+            return Ok(own);
+        }
+        let Some(owner) = self.org_mates_coworker(principal, coworker).await? else {
+            return Ok(own);
+        };
         let grant = sqlx::query(
-            "select profile, needs_approval, revoked from (
-                 select g.profile, g.needs_approval, g.revoked, 0 as priority
-                 from grant_view g
-                 where g.principal_id = $1 and g.coworker_id = $2
-                 union all
-                 select g.profile, g.needs_approval, g.revoked, 1 as priority
-                 from coworker_view c
-                 join account_view owner on owner.id = c.account_id
-                 join account_view caller on caller.id = $1
-                 join grant_view g on g.principal_id = c.account_id and g.coworker_id = c.id
-                 where c.id = $2
-                   and c.account_id <> $1
-                   and c.retired = false
-                   and c.visibility = 'org'
-                   and coalesce(owner.org_id, '') <> ''
-                   and owner.org_id = caller.org_id
-             ) as usable
-             order by priority
-             limit 1",
+            "select profile, needs_approval, revoked from grant_view
+             where principal_id = $1 and coworker_id = $2",
         )
-        .bind(principal.as_str())
+        .bind(owner.as_str())
         .bind(coworker.as_str())
         .fetch_optional(&self.pool)
         .await?
         .map(|row| grant_from_row(&row, principal, coworker))
         .transpose()?;
-        let ceiling = self.ceiling_of(coworker).await?;
-        Ok(opengrok_policy::Context { grant, ceiling })
+        Ok(opengrok_policy::Context {
+            grant,
+            ceiling: own.ceiling,
+        })
+    }
+
+    /// The owner of `coworker` when it is somebody else's, live, shared with the org, and that
+    /// org is `principal`'s (non-empty) one; `None` otherwise. `roster_for`'s sharing branch,
+    /// over `coworker_view` then `account_view` — the order the schema locks them.
+    async fn org_mates_coworker(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Option<AccountId>> {
+        let row = sqlx::query(
+            "select c.account_id
+             from coworker_view c
+             join account_view owner on owner.id = c.account_id
+             join account_view caller on caller.id = $1
+             where c.id = $2
+               and c.account_id <> $1
+               and c.retired = false
+               and c.visibility = 'org'
+               and coalesce(owner.org_id, '') <> ''
+               and owner.org_id = caller.org_id",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok::<_, StoreError>(AccountId::from_stored(
+                row.try_get::<String, _>("account_id")?,
+            ))
+        })
+        .transpose()
     }
 
     async fn ceiling_of(

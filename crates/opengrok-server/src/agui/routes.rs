@@ -513,7 +513,10 @@ pub(crate) async fn tools_for_coworker(
         .await
         .ok()?;
 
-    // The plugins this coworker may use, connected with its own credentials.
+    // The plugins this coworker may use, connected with its own credentials. On a shared
+    // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
+    // turn acts through them, while the owner's `user`-scoped ones stay the owner's (ROADMAP
+    // 19.4). Narrowing that is a decision about what sharing lends, not a filter to add here.
     let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
     // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
@@ -1726,7 +1729,7 @@ pub async fn set_approvals(
         &policy,
     );
     if let Some(reason) = decision.reason() {
-        return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+        return refuse_use(&state, &account_id, &coworker_id, reason).await;
     }
 
     let (Some(grant), Some(ceiling)) = (policy.grant, policy.ceiling) else {
@@ -1760,6 +1763,32 @@ pub async fn set_approvals(
         "needsApproval": request.tools,
     }))
     .into_response()
+}
+
+/// A refused use of a coworker, answered the way every per-coworker route answers: 404 when it
+/// is not on the caller's roster, so an outsider's probe reads the same for a coworker that
+/// exists and one that does not (#175) — and 403 with the rule's reason when it is on their
+/// roster, because somebody who can see it already knows it exists, and a refusal they can read
+/// is one they can act on (CLAUDE.md #8).
+///
+/// Asked only after the policy has refused, so it can never turn a refusal into an allow. A
+/// store error keeps the 403: its reason is the no-grant sentence an unknown id gets too, so it
+/// confirms nothing either.
+pub(crate) async fn refuse_use(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    reason: &str,
+) -> Response {
+    match state
+        .auth
+        .store
+        .may_use_coworker(account_id, coworker_id)
+        .await
+    {
+        Ok(false) => (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Ok(true) | Err(_) => (StatusCode::FORBIDDEN, reason.to_string()).into_response(),
+    }
 }
 
 /// The roster, newest first — the order the client sorts by.
@@ -2581,14 +2610,26 @@ pub async fn run(
 
     if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
         // `policy_to_use`, not `policy_for`: a coworker an org-mate shared is one this person may
-        // talk to under the owner's grant, read now. A store error is an empty context, which
-        // denies.
-        let policy = state
+        // talk to under the owner's grant, read now. A store error refuses too, but as a 503
+        // that says so: an empty context would deny with "no grant lets …", which sends the
+        // person off to repair a grant that is fine.
+        let policy = match state
             .auth
             .store
             .policy_to_use(account_id, &coworker_id)
             .await
-            .unwrap_or_default();
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::error!(%error, coworker = %coworker_id.as_str(), "the run door could not read the policy; the turn is refused");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the permission check could not be read right now, so nothing ran; send it \
+                     again in a moment",
+                )
+                    .into_response();
+            }
+        };
         let decision = opengrok_policy::decide(
             account_id,
             &coworker_id,
@@ -2596,8 +2637,7 @@ pub async fn run(
             &policy,
         );
         if let Some(reason) = decision.reason() {
-            // A refusal the client can read, not a dead socket.
-            return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+            return refuse_use(&state, account_id, &coworker_id, reason).await;
         }
 
         // WHICH MODEL A COWORKER THINKS WITH IS THE COWORKER'S, NOT THE DEPLOYMENT'S. Hiring takes

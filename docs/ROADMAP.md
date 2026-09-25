@@ -584,6 +584,22 @@ every record that sharing would otherwise break carry whose it is.
   scope is resolved from whoever is asking, and a member with no computer yet talks without
   tools. `tests/against_visibility.rs`.
 
+  What a member reaches, and what answers them, stated so nobody has to rediscover it. A coworker
+  that is not on the caller's roster answers **404 on every coworker route**, the run door
+  (`POST /ag-ui`) and `POST /coworkers/{id}/approvals` included. Those two used to say 403 "no
+  grant lets …": identical for an unknown id, so it confirmed nothing, but unlike every other
+  route; `refuse_use` now decides both. One that is on their roster and still refused (the owner
+  revoked their own grant) is a 403 with the rule's sentence. The member's turn is billed to the member
+  (`spend_actor`, and the per-person key for coworker × member), and `GET
+  /ag-ui/threads/gateway-{id}` shows each person only their own runs of the one shared thread id.
+  **Sharing lends the coworker's `bot`-scoped connections:** `connections_for(member, coworker)`
+  includes the rows owned by the coworker, and those were OAuth'd by the owner, so a member's turn
+  can act through an account the owner connected *as the coworker*. The owner's `user`-scoped and
+  lent connections are not included. Connect a personal account as `user`, never as `bot`, on a
+  coworker you will share. The owner-only routes (`/computer`, `/screen`, `/usage`, `/tools`, keys,
+  limits) answer a member 404, because `owned_coworker` gates them — the client's Open button on a
+  shared row therefore has nothing to open.
+
 ## Phase 0
 
 - [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
