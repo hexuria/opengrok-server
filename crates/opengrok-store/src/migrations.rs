@@ -1213,7 +1213,7 @@ pub async fn run(pool: &PgPool) -> StoreResult<()> {
         .execute(&mut *conn)
         .await?;
 
-    let applied = sqlx::raw_sql(SCHEMA).execute(&mut *conn).await;
+    let applied = apply_unless_current(&mut conn).await;
 
     // Release even when the migration failed, or the next boot deadlocks against our own lock.
     let released = sqlx::query("select pg_advisory_unlock($1)")
@@ -1223,5 +1223,52 @@ pub async fn run(pool: &PgPool) -> StoreResult<()> {
 
     applied?;
     released?;
+    Ok(())
+}
+
+/// Replay the schema only when THIS schema has not been applied here before.
+///
+/// A REPLAY IS NOT FREE, even when every statement is `if not exists`. The schema is one
+/// transaction, and a bare `alter table … add column if not exists` takes ACCESS EXCLUSIVE before
+/// it decides there is nothing to do, then holds it to the end. Every server and every test
+/// harness boots through here, so any read that locked those tables in the other order
+/// deadlocked against a boot: `policy_to_use` refused a turn over a grant that was fine, the
+/// site-login saves died (#239), and a recipe's history prune was killed, leaving six runs where
+/// five belong. Guarding each statement one at a time left the next one to be found in CI.
+///
+/// Keyed by the schema's digest, so any edit to `SCHEMA` replays it once, exactly as before;
+/// only an unchanged schema is skipped. The check runs under the advisory lock, so two replicas
+/// booting a new schema still apply it once and the second finds the digest.
+async fn apply_unless_current(conn: &mut sqlx::PgConnection) -> StoreResult<()> {
+    use sha2::Digest as _;
+    let digest: String = sha2::Sha256::digest(SCHEMA.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // Created on its own, before the schema: it is the one table the skip decision reads.
+    sqlx::query(
+        "create table if not exists schema_applied (
+             digest     text primary key,
+             applied_at bigint not null
+         )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    let current: Option<(i32,)> = sqlx::query_as("select 1 from schema_applied where digest = $1")
+        .bind(&digest)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if current.is_some() {
+        return Ok(());
+    }
+    sqlx::raw_sql(SCHEMA).execute(&mut *conn).await?;
+    sqlx::query(
+        "insert into schema_applied (digest, applied_at)
+         values ($1, (extract(epoch from now()) * 1000)::bigint)
+         on conflict (digest) do nothing",
+    )
+    .bind(&digest)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
