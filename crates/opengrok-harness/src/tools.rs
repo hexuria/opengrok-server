@@ -160,6 +160,15 @@ impl ToolRunner {
         self
     }
 
+    /// The system-message sentence naming plugin servers that could not be reached this turn, or
+    /// nothing. See `Executor::unavailable_plugins_line`.
+    pub fn unavailable_plugins_line(&self) -> String {
+        self.executor
+            .as_ref()
+            .map(|(executor, _)| executor.unavailable_plugins_line())
+            .unwrap_or_default()
+    }
+
     /// Whether this runner offers `run_recipe`: a screen plus at least one granted recipe.
     pub fn has_recipes(&self) -> bool {
         self.executor
