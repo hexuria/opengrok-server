@@ -17,8 +17,8 @@
 
 pub mod review;
 pub use review::{
-    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, Outcome, REVIEW_ASK_REASON, ReviewAsk,
-    ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
+    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, JudgeFailure, Outcome, REVIEW_ASK_REASON,
+    ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
     redact_arguments,
 };
 pub mod user_form;
@@ -570,11 +570,24 @@ pub const NETWORK_OFF: &str =
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The tools whose action leaves the box for the network — the ones the egress tunnel's consent
-/// card is about. One list, used by the ask, the frame's admission check and the server's
-/// resume paths.
+/// The tools whose action can leave the box for the network. By tool name, for what must hold
+/// whatever the action: a form's screen hold and a standing `never`. A screenshot taken while
+/// a sign-in handoff is open can capture the secret being typed, so it stays held.
 pub fn leaves_the_box(tool_name: &str) -> bool {
     matches!(tool_name, "computer" | "open_url" | RUN_RECIPE)
+}
+
+/// The calls the egress tunnel's card is about: a leave-box call whose action can reach the
+/// network. A `computer` screenshot only reads the box's own display and sends nothing through
+/// the person's network, yet it raised the card like a click (#165). It is the one exemption:
+/// `move` can prefetch, `scroll` can lazy-load, `key` can submit, so every other action asks,
+/// and so does anything not spelt exactly `"action": "screenshot"` — missing, misspelt, another
+/// case, not a string. One predicate for the ask, the "waking" frame and the resume paths, or
+/// the frame says the box is waking for a call that parks on a card.
+pub fn needs_egress_consent(tool_name: &str, arguments: &Value) -> bool {
+    leaves_the_box(tool_name)
+        && !(tool_name == "computer"
+            && arguments.get("action").and_then(Value::as_str) == Some("screenshot"))
 }
 
 /// The tools that run on the box (as opposed to plugin tools and the person's own machine).
@@ -639,6 +652,10 @@ pub struct Executor {
     /// Auto-review, when the run's effective policy is on: the instruction texts (resolved once
     /// per run by the server) and the judge that reads them. `None` is the cheapest short-circuit.
     auto_review: Option<AutoReview>,
+    /// The judge's failures in a row in this run. Seeded by the server from the run's journal
+    /// on a resume: every failure parks the run on a card and the executor is rebuilt, so a
+    /// count that began at zero here would never pass one.
+    judge_failures: std::sync::atomic::AtomicU32,
     /// The box has a display. Only then are `open_url` and `computer` offered: a headless box
     /// would refuse every call, and a tool that always refuses is a dead end the model retries.
     screen: bool,
@@ -692,17 +709,44 @@ struct AutoReview {
 impl AutoReview {
     /// One question, one word back, rendered into what the ladder needs. The judge sees the
     /// arguments AFTER identity overwrite and redaction, never as the model wrote them.
-    async fn judge(&self, tool: &str, arguments: &Value) -> ReviewOutcome {
+    ///
+    /// `failures` is the run's count of judge failures in a row. Once it reaches
+    /// `JUDGE_DOWN_AFTER` the judge is not asked again this run: the call is refused in words,
+    /// which the model passes on once, instead of one more card and one more billed attempt.
+    async fn judge(
+        &self,
+        tool: &str,
+        call_id: &str,
+        arguments: &Value,
+        failures: &std::sync::atomic::AtomicU32,
+    ) -> ReviewOutcome {
+        use std::sync::atomic::Ordering;
+        let streak = failures.load(Ordering::Relaxed);
+        if streak >= review::JUDGE_DOWN_AFTER {
+            tracing::warn!(
+                call = call_id,
+                tool,
+                failures = streak,
+                "auto-review judge is down for this run; refusing the call without asking it"
+            );
+            return ReviewOutcome::Block(review::judge_down_reason(streak));
+        }
         let redacted = redact_arguments(arguments);
         let verdict = self
             .judge
             .judge(ReviewAsk {
+                call_id,
                 tool,
                 arguments: &redacted,
                 allow_instructions: &self.policy.allow_instructions,
                 block_instructions: &self.policy.block_instructions,
             })
             .await;
+        if matches!(verdict, ReviewVerdict::Unavailable(_)) {
+            failures.fetch_add(1, Ordering::Relaxed);
+        } else {
+            failures.store(0, Ordering::Relaxed);
+        }
         match verdict {
             ReviewVerdict::Allow => ReviewOutcome::Allow,
             // The Settings UI labels this list "Ask first" and stores it as
@@ -711,8 +755,8 @@ impl AutoReview {
                 ReviewOutcome::Ask(ask_first_reason(&self.policy.block_instructions))
             }
             ReviewVerdict::Ask => ReviewOutcome::Ask(review::REVIEW_ASK_REASON.to_string()),
-            ReviewVerdict::Unavailable => {
-                ReviewOutcome::Ask(review::REVIEW_UNAVAILABLE_REASON.to_string())
+            ReviewVerdict::Unavailable(cause) => {
+                ReviewOutcome::Ask(review::unavailable_reason(cause))
             }
         }
     }
@@ -734,6 +778,7 @@ impl Executor {
             unavailable_plugins: BTreeMap::new(),
             user_machine: None,
             auto_review: None,
+            judge_failures: std::sync::atomic::AtomicU32::new(0),
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
             group_box_name: None,
@@ -763,6 +808,7 @@ impl Executor {
             unavailable_plugins: BTreeMap::new(),
             user_machine: None,
             auto_review: None,
+            judge_failures: std::sync::atomic::AtomicU32::new(0),
             review_approved_calls: std::collections::BTreeSet::new(),
             screen: false,
             group_box_name: None,
@@ -897,7 +943,7 @@ impl Executor {
         // In the after-wake mode the box is woken before the tunnel is asked about, so the frame
         // is right either way.
         if self.egress_tunnel == EgressTunnelMode::On
-            && screen_tool
+            && needs_egress_consent(tool_name, &call.arguments)
             && review_inactive
             && !review_approved
             && !self.egress_consented()
@@ -1116,6 +1162,15 @@ impl Executor {
     #[must_use]
     pub fn with_egress_consented(mut self, consented: bool) -> Self {
         self.egress_consented = consented;
+        self
+    }
+
+    /// The judge's failures in a row so far in this run, read back from its journal by the
+    /// resume paths. See `judge_failures`.
+    #[must_use]
+    pub fn with_judge_failures(self, failures: u32) -> Self {
+        self.judge_failures
+            .store(failures, std::sync::atomic::Ordering::Relaxed);
         self
     }
 
@@ -1578,7 +1633,7 @@ impl Executor {
         // client attached). Docker host-network is not that. With no standing auto-review
         // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
         // subsumes this (one card).
-        let leave_box_tool = leaves_the_box(&tool_name);
+        let asks_the_tunnel = needs_egress_consent(&tool_name, &arguments);
         let review_inactive = self
             .auto_review
             .as_ref()
@@ -1588,7 +1643,7 @@ impl Executor {
         // click (21 Sep 2026). The resume paths set it from the answered card's own tool.
         let egress_consented = self.egress_consented();
         if self.egress_tunnel == EgressTunnelMode::On
-            && leave_box_tool
+            && asks_the_tunnel
             && !review_approved
             && !egress_consented
             && review_inactive
@@ -1611,7 +1666,11 @@ impl Executor {
         let review = match (&gate, review_approved, self.auto_review.as_ref()) {
             (Gate::Deny(_), _, _) | (_, true, _) | (_, _, None) => None,
             (_, false, Some(review)) if !review.policy.is_active() => None,
-            (_, false, Some(review)) => Some(review.judge(&tool_name, &arguments).await),
+            (_, false, Some(review)) => Some(
+                review
+                    .judge(&tool_name, &call.id, &arguments, &self.judge_failures)
+                    .await,
+            ),
         };
 
         match combine(gate, review, gate_approved) {
@@ -1691,7 +1750,7 @@ impl Executor {
             return ToolResult::refused(&call.id, NETWORK_OFF);
         }
         if self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
-            && leave_box_tool
+            && asks_the_tunnel
             && !review_approved
             && !egress_consented
             && review_inactive
@@ -3635,13 +3694,155 @@ mod tests {
         let result = executor
             .execute(
                 &context_with_box("box_mine"),
-                &call("computer", json!({ "action": "screenshot" })),
+                &call(
+                    "computer",
+                    json!({ "action": "click", "coordinate": [120, 40] }),
+                ),
             )
             .await;
         assert!(result.awaiting_approval, "{result:?}");
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert!(result.content.contains("egress tunnel"), "{result:?}");
         assert_eq!(spy.last_box(), None, "must not run before Review an action");
+    }
+
+    /// Looking at the box's own screen sends nothing through the person's network, so the
+    /// tunnel's card is not raised for it (#165). The issue's own arguments: every field set,
+    /// `action` says screenshot.
+    #[tokio::test]
+    async fn egress_tunnel_lets_a_screenshot_through_without_a_card() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(
+                    "computer",
+                    json!({"to": [0, 0], "key": "", "text": "", "action": "screenshot",
+                           "button": 1, "scroll": [0, 0], "coordinate": [0, 0]}),
+                ),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+    }
+
+    /// Only a screenshot is exempt. Every action that acts can navigate, submit or load (a hover
+    /// prefetches, a scroll lazy-loads), and anything the gate cannot read as a screenshot asks.
+    #[tokio::test]
+    async fn egress_tunnel_still_asks_for_every_screen_action_that_acts() {
+        let mut asks: Vec<(&str, Value)> = [
+            "click",
+            "left_click",
+            "right_click",
+            "double_click",
+            "move",
+            "drag",
+            "type",
+            "key",
+            "scroll",
+            "zoom",
+            "Screenshot",
+        ]
+        .into_iter()
+        .map(|action| {
+            (
+                "computer",
+                json!({ "action": action, "coordinate": [1, 2] }),
+            )
+        })
+        .collect();
+        asks.extend([
+            ("computer", json!({})),
+            ("computer", json!({ "action": ["screenshot"] })),
+            ("computer", json!("screenshot")),
+            ("open_url", json!({ "url": "https://example.com" })),
+            (RUN_RECIPE, json!({ "recipe": "r1" })),
+        ]);
+        for (tool, arguments) in asks {
+            let spy = Arc::new(SpyComputer::default());
+            let executor = allowing(spy.clone())
+                .with_screen(true)
+                .with_egress_tunnel(true);
+            let result = executor
+                .execute(
+                    &context_with_box("box_mine"),
+                    &call(tool, arguments.clone()),
+                )
+                .await;
+            assert!(result.awaiting_approval, "{tool} {arguments}: {result:?}");
+            assert_eq!(
+                result.awaiting_reason,
+                Some(AwaitingReason::AutoReview),
+                "{tool} {arguments}"
+            );
+            assert!(result.content.contains("egress tunnel"), "{result:?}");
+            assert_eq!(spy.last_box(), None, "{tool} {arguments}");
+        }
+    }
+
+    /// The "waking" frame agrees with the gate: a screenshot the tunnel no longer asks about
+    /// reaches the box, so it wakes it; a click parks on the card first, so nothing wakes. A
+    /// held screen still holds a screenshot — a handoff's secret may be on it.
+    #[tokio::test]
+    async fn a_screenshot_under_the_tunnel_wakes_the_box() {
+        let sleepy = Arc::new(SleepyComputer::new(&["archived"]));
+        let executor = allowing(sleepy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let context = context_with_box("box_mine");
+        assert!(
+            executor
+                .box_needs_wake(&context, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        assert!(
+            !executor
+                .box_needs_wake(
+                    &context,
+                    &call("computer", json!({"action": "click", "coordinate": [1, 2]}))
+                )
+                .await
+        );
+        let mut holding = context_with_box("box_mine");
+        holding.screen_hold = true;
+        assert!(
+            !executor
+                .box_needs_wake(&holding, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        let refused = executor
+            .execute(&holding, &call("computer", json!({"action": "screenshot"})))
+            .await;
+        assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+        assert_eq!(sleepy.resumes(), 0);
+    }
+
+    /// The second tunnel ask, after a wake, draws the same line.
+    #[tokio::test]
+    async fn after_wake_mode_asks_for_a_click_but_not_a_screenshot() {
+        let spy = Arc::new(SpyComputer {
+            tunnel_ready: true,
+            ..SpyComputer::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake);
+        let context = context_with_box("box_mine");
+        let look = executor
+            .execute(&context, &call("computer", json!({"action": "screenshot"})))
+            .await;
+        assert!(!look.awaiting_approval, "{look:?}");
+        let click = executor
+            .execute(
+                &context,
+                &call("computer", json!({"action": "click", "coordinate": [1, 2]})),
+            )
+            .await;
+        assert!(click.awaiting_approval, "{click:?}");
+        assert_eq!(click.awaiting_reason, Some(AwaitingReason::AutoReview));
     }
 
     #[tokio::test]
@@ -3676,9 +3877,9 @@ mod tests {
             .execute(
                 &context,
                 &ToolCall {
-                    id: "call_shot".to_string(),
+                    id: "call_click".to_string(),
                     name: "computer".to_string(),
-                    arguments: json!({ "action": "screenshot" }),
+                    arguments: json!({ "action": "click", "coordinate": [120, 40] }),
                 },
             )
             .await;
@@ -3693,9 +3894,9 @@ mod tests {
             .with_egress_consented(true);
         let context = context_with_box("box_mine");
         let later = ToolCall {
-            id: "call_shot".to_string(),
+            id: "call_click".to_string(),
             name: "computer".to_string(),
-            arguments: json!({ "action": "screenshot" }),
+            arguments: json!({ "action": "click", "coordinate": [120, 40] }),
         };
         let result = executor.execute(&context, &later).await;
         assert!(!result.awaiting_approval, "asked again: {result:?}");
@@ -3875,7 +4076,10 @@ mod tests {
         let result = asking
             .execute(
                 &context_with_box("box_mine"),
-                &call("computer", json!({ "action": "screenshot" })),
+                &call(
+                    "computer",
+                    json!({ "action": "click", "coordinate": [1, 2] }),
+                ),
             )
             .await;
         assert!(result.awaiting_approval, "{result:?}");
@@ -3973,10 +4177,12 @@ mod tests {
         assert_eq!(spy.last_box(), None);
     }
 
+    /// The card says WHY the judge did not answer: a capped coworker's judge is refused on
+    /// every call, and "the reviewer did not answer" told nobody that (#201).
     #[tokio::test]
-    async fn a_judge_outage_asks_rather_than_allows() {
+    async fn a_judge_outage_asks_rather_than_allows_and_names_its_cause() {
         let spy = Arc::new(SpyComputer::default());
-        let judge = CountingJudge::new(ReviewVerdict::Unavailable);
+        let judge = CountingJudge::new(ReviewVerdict::Unavailable(JudgeFailure::SpendCap));
         let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
         let result = executor
             .execute(&context_with_box("box_mine"), &shell_call("c1"))
@@ -3984,7 +4190,86 @@ mod tests {
         assert!(result.awaiting_approval);
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert!(result.content.contains("did not answer"), "{result:?}");
+        assert!(result.content.contains("spend limit"), "{result:?}");
+        assert!(
+            result
+                .content
+                .strip_prefix("waiting for approval: ")
+                .is_some_and(review::is_unavailable_reason),
+            "{result:?}"
+        );
         assert_eq!(spy.last_box(), None);
+    }
+
+    /// Every cause reads differently, and none of them reads as an allow.
+    #[test]
+    fn every_judge_failure_has_its_own_words() {
+        let causes = [
+            JudgeFailure::SpendCap,
+            JudgeFailure::Held,
+            JudgeFailure::Refused(404),
+            JudgeFailure::Unreachable,
+            JudgeFailure::StreamBroke,
+            JudgeFailure::TimedOut,
+            JudgeFailure::Unparseable,
+        ];
+        let reasons: std::collections::BTreeSet<String> = causes
+            .iter()
+            .map(|cause| review::unavailable_reason(*cause))
+            .collect();
+        assert_eq!(reasons.len(), causes.len(), "{reasons:?}");
+        assert!(review::unavailable_reason(JudgeFailure::Refused(404)).contains("404"));
+        for reason in &reasons {
+            assert!(review::is_unavailable_reason(reason), "{reason}");
+            assert!(reason.contains("asked rather than allowed"), "{reason}");
+        }
+        assert!(!review::is_unavailable_reason(review::REVIEW_ASK_REASON));
+        assert!(!review::is_unavailable_reason(EGRESS_TUNNEL_ASK_REASON));
+    }
+
+    /// A run whose judge failed `JUDGE_DOWN_AFTER` times in a row stops asking it: the next
+    /// reviewed call is refused in words the model can pass on, the judge is not called (a
+    /// capped key is not billed another attempt), and nothing reaches the box. A real verdict
+    /// in between starts the count again.
+    #[tokio::test]
+    async fn a_judge_that_keeps_failing_is_not_asked_again_this_run() {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Unavailable(JudgeFailure::TimedOut));
+        let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge.clone());
+        let context = context_with_box("box_mine");
+        for id in ["c1", "c2", "c3"] {
+            let asked = executor.execute(&context, &shell_call(id)).await;
+            assert!(asked.awaiting_approval, "{id}: {asked:?}");
+            assert!(asked.content.contains("timed out"), "{asked:?}");
+        }
+        assert_eq!(judge.calls(), 3);
+        let refused = executor.execute(&context, &shell_call("c4")).await;
+        assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+        assert!(refused.content.contains("reviewer is down"), "{refused:?}");
+        assert_eq!(judge.calls(), 3, "the judge is not asked once it is down");
+        assert_eq!(spy.last_box(), None);
+
+        // Seeded from a resumed run's journal: already down, refused at once.
+        let resumed = allowing(spy.clone())
+            .with_auto_review(blocking_policy(), judge.clone())
+            .with_judge_failures(review::JUDGE_DOWN_AFTER);
+        let refused = resumed.execute(&context, &shell_call("c5")).await;
+        assert!(refused.content.contains("reviewer is down"), "{refused:?}");
+        assert_eq!(judge.calls(), 3);
+
+        // Two failures and then an answer: the count starts again.
+        let flaky = CountingJudge::new(ReviewVerdict::Ask);
+        let executor = allowing(spy.clone())
+            .with_auto_review(blocking_policy(), flaky.clone())
+            .with_judge_failures(review::JUDGE_DOWN_AFTER - 1);
+        let asked = executor.execute(&context, &shell_call("c6")).await;
+        assert!(asked.awaiting_approval, "{asked:?}");
+        assert_eq!(
+            executor
+                .judge_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     #[tokio::test]

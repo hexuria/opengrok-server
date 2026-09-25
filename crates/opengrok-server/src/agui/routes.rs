@@ -4327,11 +4327,14 @@ async fn continue_run(
     // rest of this run: one card per run, not one per click. A no is not: this once consented on
     // any answer, so a Deny on the tunnel card let the model's next screen action through with
     // no card at all (21 Sep 2026).
-    let runner = runner.with_egress_consented(
-        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
-            && answered.reason == opengrok_core::run::SuspendReason::AutoReview
-            && opengrok_tools::leaves_the_box(&answered.tool),
-    );
+    let runner = runner
+        .with_egress_consented(
+            matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+                && answered.reason == opengrok_core::run::SuspendReason::AutoReview
+                && opengrok_tools::needs_egress_consent(&answered.tool, &answered.arguments),
+        )
+        // Every judge failure parks the run, so only its journal can count them in a row (#201).
+        .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled
