@@ -259,3 +259,131 @@ fn a_run_with_no_journaled_prompt_replays_unchanged() {
     ];
     assert_eq!(with_prompt_frames(&run, events.clone()), events);
 }
+
+fn answered(call_id: &str, command: &str) -> PendingApproval {
+    PendingApproval {
+        call_id: call_id.to_string(),
+        tool: "shell".to_string(),
+        arguments: json!({"command": command}),
+        reason: opengrok_core::run::SuspendReason::PolicyApproval,
+    }
+}
+
+fn call_frames(id: &str, command: &str) -> Vec<Value> {
+    vec![
+        json!({"type": "TOOL_CALL_START", "toolCallId": id, "toolCallName": "shell"}),
+        json!({"type": "TOOL_CALL_ARGS", "toolCallId": id, "delta": json!({"command": command}).to_string()}),
+        json!({"type": "TOOL_CALL_END", "toolCallId": id}),
+    ]
+}
+
+/// "Allow once" carries on from the request and the call the person allowed, not from a bare
+/// tool output (#187). The call's "waiting" result is left out: the real one is the resume's.
+#[test]
+fn a_resumed_conversation_opens_with_the_request_and_the_call_it_approved() {
+    let mut emitted = vec![json!({"type": "RUN_STARTED"})];
+    emitted.extend(call_frames("c1", "apt install jq"));
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "waiting for approval: needs a yes"}));
+    emitted.push(json!({"type": "CUSTOM", "name": "run-awaiting-approval"}));
+    emitted.push(json!({"type": "RUN_FINISHED"}));
+    let run = run_with(
+        Some(vec![
+            json!({"id": "m1", "role": "user", "content": "install jq then count the keys in data.json"}),
+        ]),
+        emitted,
+    );
+    let messages = conversation_from(&run, &answered("c1", "apt install jq"));
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(messages[0].role, "user");
+    assert!(messages[0].content.contains("install jq then count"));
+    assert_eq!(messages[1].role, "assistant");
+    assert_eq!(messages[1].tool_calls[0].id, "c1");
+    assert_eq!(messages[1].tool_calls[0].name, "shell");
+    assert!(
+        messages[1].tool_calls[0]
+            .arguments
+            .contains("apt install jq")
+    );
+}
+
+/// A call that ran beside the parked one keeps its result, inside the same round, so the result
+/// the resume adds lands in a block the provider accepts.
+#[test]
+fn a_parked_calls_sibling_keeps_its_result_in_the_same_round() {
+    let mut emitted = call_frames("c1", "echo a");
+    emitted.extend(call_frames("c2", "rm -rf build"));
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "a"}));
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c2", "content": "waiting for approval: x"}));
+    let run = run_with(Some(Vec::new()), emitted);
+    let messages = conversation_from(&run, &answered("c2", "rm -rf build"));
+    let ids: Vec<&str> = messages[0]
+        .tool_calls
+        .iter()
+        .map(|call| call.id.as_str())
+        .collect();
+    assert_eq!(ids, ["c1", "c2"]);
+    assert_eq!(messages[1].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(messages.len(), 2, "{messages:?}");
+}
+
+/// A second park in the same run: the first call's answered result is its result, and the call
+/// waiting now is the last thing said.
+#[test]
+fn a_second_park_resumes_after_the_first_ones_result() {
+    let mut emitted = call_frames("c1", "echo a");
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "waiting for approval: x"}));
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "a"}));
+    emitted.extend(call_frames("c3", "echo c"));
+    emitted.push(json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c3", "content": "waiting for approval: y"}));
+    let run = run_with(Some(Vec::new()), emitted);
+    let messages = conversation_from(&run, &answered("c3", "echo c"));
+    let shape: Vec<(String, Option<String>)> = messages
+        .iter()
+        .map(|message| {
+            (
+                message.role.clone(),
+                message
+                    .tool_call_id
+                    .clone()
+                    .or_else(|| message.tool_calls.first().map(|call| call.id.clone())),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            ("assistant".to_string(), Some("c1".to_string())),
+            ("tool".to_string(), Some("c1".to_string())),
+            ("assistant".to_string(), Some("c3".to_string())),
+        ]
+    );
+    assert_eq!(messages[1].content, "a");
+}
+
+/// A log from before prompts were kept still resumes: what it emitted, then the answered call.
+#[test]
+fn a_run_logged_before_prompts_still_resumes() {
+    let mut emitted = vec![
+        json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "checking"}),
+        json!({"type": "TEXT_MESSAGE_END"}),
+    ];
+    emitted.extend(call_frames("c1", "ls"));
+    let run = run_with(None, emitted);
+    let messages = conversation_from(&run, &answered("c1", "ls"));
+    assert_eq!(messages[0].content, "checking");
+    assert_eq!(messages.last().unwrap().tool_calls[0].id, "c1");
+}
+
+/// A run whose log never had the call — an MCP ask writes only its suspension — still shows the
+/// model the call before the result the resume adds.
+#[test]
+fn an_answered_call_the_log_never_had_is_named_from_its_suspension() {
+    let run = run_with(Some(Vec::new()), Vec::new());
+    let messages = conversation_from(&run, &answered("c9", "uptime"));
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].tool_calls[0].id, "c9");
+    assert_eq!(
+        messages[0].tool_calls[0].arguments,
+        r#"{"command":"uptime"}"#
+    );
+}

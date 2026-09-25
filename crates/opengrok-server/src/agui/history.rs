@@ -16,7 +16,7 @@
 use std::collections::HashSet;
 
 use opengrok_core::id::{AccountId, RunId};
-use opengrok_core::run::Run;
+use opengrok_core::run::{PendingApproval, Run};
 use opengrok_harness::{ChatMessage, ImagePart, ToolCallRef};
 use opengrok_wire::agui::{Message, RunAgentInput};
 use serde_json::{Value, json};
@@ -98,7 +98,9 @@ pub(crate) async fn for_turn(
     }
 }
 
-/// The thread's earlier started runs, oldest first, or `None` when they could not be read.
+/// The thread's started runs from before `this_run`, oldest first, or `None` when they could not
+/// be read. A live turn is not in the log yet, so it gets every run in the window; a resumed one
+/// gets only what came before it.
 ///
 /// A READ THAT FAILS FALLS BACK RATHER THAN FAILING THE TURN. The client's copy is what every
 /// turn was asked with before this, so a database blink costs the turn its server-kept history,
@@ -124,7 +126,7 @@ async fn thread_runs(
     let mut runs = Vec::with_capacity(newest_first.len());
     for summary in newest_first.into_iter().rev() {
         if summary.id.as_str() == this_run {
-            continue;
+            break;
         }
         let run = match state.auth.store.load_run(&summary.id).await {
             Ok((run, _)) => run,
@@ -352,6 +354,65 @@ fn earlier_run(run: &Run) -> Vec<ChatMessage> {
         .filter_map(|message| chat_message(message, &sent))
         .collect();
     messages.extend(conversation_of(&said_in(&run.emitted), true));
+    messages
+}
+
+/// The conversation a run carries on with once a person answered its card: the thread's earlier
+/// turns, when the log can tell them whole, then this run's own (`conversation_from`).
+///
+/// ONE REBUILD FOR EVERY RESUME, so a card's yes, a submitted form and a crash resume (#91)
+/// cannot disagree about what the model is shown. A thread the log cannot tell whole resumes with
+/// this run alone, which is what every resume had before the history was kept.
+pub(crate) async fn for_resume(
+    state: &AgUiState,
+    account: &AccountId,
+    run_id: &RunId,
+    run: &Run,
+    answered: &PendingApproval,
+) -> Vec<ChatMessage> {
+    let mut messages = match thread_runs(state, account, &run.thread_id, run_id.as_str()).await {
+        Some(runs) if runs.iter().all(|run| run.prompt.is_some()) => {
+            runs.iter().flat_map(earlier_run).collect()
+        }
+        _ => Vec::new(),
+    };
+    messages.extend(conversation_from(run, answered));
+    messages
+}
+
+/// A run rebuilt from its own log for a resume: what the person asked, then everything the
+/// coworker said and did, ending on the answered call — named, with its arguments, and still
+/// without a result, because the result is what the resume adds next (#187).
+///
+/// The rebuild used to read only the emitted text and results, so after "Allow once" the model
+/// saw the system message and a bare tool output: not the request, not the call. The answered
+/// call's own "waiting for approval" result is left out; the real one follows. A run whose log
+/// never had the call (an MCP ask writes none) gets it from the suspension, so the result that
+/// follows still answers a call the model can see.
+pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<ChatMessage> {
+    let sent = prompt_of(run);
+    let mut messages: Vec<ChatMessage> = sent
+        .iter()
+        .filter_map(|message| chat_message(message, &sent))
+        .collect();
+    let said: Vec<Said> = said_in(&run.emitted)
+        .into_iter()
+        .filter(|said| !matches!(said, Said::Result { id, .. } if *id == answered.call_id))
+        .collect();
+    let called = said
+        .iter()
+        .any(|said| matches!(said, Said::Call { id, .. } if *id == answered.call_id));
+    messages.extend(conversation_of(&said, false));
+    if !called {
+        messages.push(ChatMessage::calls(
+            "",
+            vec![ToolCallRef {
+                id: answered.call_id.clone(),
+                name: answered.tool.clone(),
+                arguments: answered.arguments.to_string(),
+            }],
+        ));
+    }
     messages
 }
 

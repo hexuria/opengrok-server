@@ -2500,3 +2500,47 @@ async fn collect_network_off_still_waits_and_submits_without_computer_effects() 
     assert_eq!(h.stub.shots(), 0);
     assert_eq!(*h.stub.resumes.lock().expect("resumes"), resumes);
 }
+
+/// A SUBMITTED FORM RESUMES KNOWING WHAT IT WAS FOR (#187). The continuation used to be rebuilt
+/// from the run's emitted frames alone, so the model was handed a form result with neither the
+/// request that led to it nor the call that asked for it.
+#[tokio::test]
+async fn a_submitted_form_resumes_with_the_request_it_was_asked() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "collect-grounded-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let door = Arc::new(CollectDoor::new());
+    let h = harness_with_door(&database_url, &email, door.clone()).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Collect").await;
+    h.turn(&token, &agent, "collect answers").await;
+    let card = h.wait_for_form(&agent).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"], "agentId": agent,
+                "values": {"email": EMAIL, "password": SECRET}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let resumed = door.first_resume().await;
+    let at = |needle: &str| {
+        resumed
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is missing from the resume: {resumed}"))
+    };
+    assert!(
+        at("collect answers") < at("request_user_form"),
+        "the request comes first: {resumed}"
+    );
+    assert!(
+        at("request_user_form") < at(EMAIL),
+        "the call comes before what it returned: {resumed}"
+    );
+    assert!(!resumed.contains(SECRET), "{resumed}");
+}

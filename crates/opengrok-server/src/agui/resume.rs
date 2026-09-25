@@ -646,7 +646,14 @@ async fn resume_suspended_run(
         // discipline at the moment a person had just intervened — the worst possible moment to
         // start claiming work on the box happened on their machine.
         system: Some(system),
-        messages: crate::agui::routes::conversation_from(&run),
+        messages: crate::agui::history::for_resume(
+            &state.agui,
+            &account_id,
+            &run_id,
+            &run,
+            &pending,
+        )
+        .await,
         tools: Vec::new(),
     };
 

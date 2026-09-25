@@ -4097,48 +4097,6 @@ fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
         .into_response()
 }
 
-/// Rebuild the conversation from what a run already emitted.
-///
-/// The log is the only record of a run that outlives the request that started it, so a resumed run
-/// has to read its own history rather than being handed one. Text the assistant said and results
-/// its tools returned are what the model needs to carry on; the framing events are not.
-pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
-    let mut messages = Vec::new();
-    let mut assistant = String::new();
-
-    for payload in &run.emitted {
-        let Some(kind) = payload.get("type").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        match kind {
-            "TEXT_MESSAGE_CONTENT" => {
-                if let Some(delta) = payload.get("delta").and_then(|value| value.as_str()) {
-                    assistant.push_str(delta);
-                }
-            }
-            // An empty message is skipped rather than pushed: a provider that rejects empty
-            // content would fail the whole resumed turn over nothing.
-            "TEXT_MESSAGE_END" if !assistant.is_empty() => {
-                messages.push(ChatMessage::text(
-                    "assistant",
-                    std::mem::take(&mut assistant),
-                ));
-            }
-            "TOOL_CALL_RESULT" => {
-                if let Some(content) = payload.get("content").and_then(|value| value.as_str()) {
-                    messages.push(ChatMessage::text(
-                        "user",
-                        format!("[tool result] {content}"),
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    messages
-}
-
 /// How many tool results from a stopped turn are worth showing the next one.
 /// One per model call, so a turn that hit the 8-call cap still shows every result.
 pub(crate) const STEER_TOOL_CAP: usize = 8;
@@ -4390,7 +4348,7 @@ async fn continue_run(
         // with. Logs written before the pin was stored fall back to the current pin.
         model: run.pin_for_resume(&coworker.model),
         system: Some(system),
-        messages: conversation_from(&run),
+        messages: super::history::for_resume(&state, &account_id, &run_id, &run, &answered).await,
         tools: Vec::new(),
     };
 
