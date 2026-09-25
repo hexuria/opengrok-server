@@ -343,18 +343,19 @@ async fn another_account_cannot_take_a_run_by_its_id() {
     );
 }
 
-/// AN ANONYMOUS CALLER OWNS NOTHING, so it cannot have a run back and cannot run one twice.
+/// AN ANONYMOUS CALLER OWNS NOTHING, so it cannot have a run back and cannot run one twice —
+/// and since 25 Sep 2026 it cannot run one at all: an unsigned turn is refused before anything
+/// is journalled, so a retry of it has no run to find either.
 #[tokio::test]
 async fn an_anonymous_post_cannot_reuse_a_run_id() {
     let database_url = database_or_skip!();
     let h = harness(&database_url, &format!("{}@og.local", fresh("retry-anon"))).await;
     let (thread, run) = (fresh("th"), fresh("run"));
-    let (status, first) = h.post(None, &thread, &run).await;
-    assert_eq!(status, 200);
-    assert!(ends_once(&first), "{:?}", types(&first));
     let (status, _) = h.post(None, &thread, &run).await;
-    assert_eq!(status, 409);
-    assert_eq!(h.logged(&run, "RUN_STARTED").await, 1);
+    assert_eq!(status, 401);
+    let (status, _) = h.post(None, &thread, &run).await;
+    assert_eq!(status, 401);
+    assert_eq!(h.logged(&run, "RUN_STARTED").await, 0);
 }
 
 /// THE OWNER IS SET ONCE. A batch written later in somebody else's name does not move the run to

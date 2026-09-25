@@ -4,7 +4,8 @@
 //! take no credential (or take one they are about to check), so nothing else bounds what they
 //! cost: a mail per call, a row per call, a hash per call, a DNS query per call. Each gets a
 //! budget — so many hits per key per window — and once it is spent the door answers 429 with a
-//! `Retry-After`, in plain words.
+//! `Retry-After`, in plain words. One door here does take a credential: a coworker-less `/ag-ui`
+//! turn, which has a payer but nothing that meters it (`AGUI_UNSCOPED`).
 //!
 //! In memory, per replica, on purpose. A limit exists to bound cost, and a fleet of N replicas
 //! each letting through its own budget still bounds it (at N times the figure); a table would
@@ -61,6 +62,16 @@ pub const CLIENT_REGISTRATION: Budget = Budget {
 pub const LOGIN_FAILURES: Budget = Budget {
     name: "login-failures",
     per_window: 30,
+    window_ms: HOUR_MS,
+};
+
+/// `POST /ag-ui` turns that name no coworker, per account. Such a turn has a payer but no gateway
+/// key of its own, so it runs on the deployment's key where no meter sees it (`GuardedDoor` meters
+/// a coworker's key); this is the bound on what one account can spend that way. A coworker's
+/// turn is metered and capped by its own key instead, and never counts here.
+pub const AGUI_UNSCOPED: Budget = Budget {
+    name: "agui-unscoped",
+    per_window: 60,
     window_ms: HOUR_MS,
 };
 

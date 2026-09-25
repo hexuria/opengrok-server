@@ -348,8 +348,9 @@ pub async fn key_for_opt(
 ) -> Option<GatewayKey> {
     match (coworker_id, actor) {
         (Some(coworker_id), Some(actor)) => key_for(state, coworker_id, actor).await,
-        // No coworker, or nobody named: the deployment's key. An anonymous AG-UI run has no
-        // person to bill, and inventing one would put a stranger's turn on somebody's pool.
+        // No coworker, or nobody named: the deployment's key, unmetered. `/ag-ui` refuses an
+        // unsigned turn and bounds a coworker-less one per account (`budget::AGUI_UNSCOPED`);
+        // inventing a payer here would put a stranger's turn on somebody's pool.
         _ => None,
     }
 }

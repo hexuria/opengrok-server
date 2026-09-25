@@ -52,7 +52,7 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
+use crate::agui::routes::{BearerRefusal, principal_from_bearer, tools_for_coworker};
 
 /// How long an MCP call waits for a sleeping box before trying its command anyway. The MCP client
 /// (Claude Code) has its own request timeout, so this stays well under it; a box still starting
@@ -151,13 +151,12 @@ async fn guard(State(state): State<HostState>, mut req: Request, next: Next) -> 
             "this token names a person, not a coworker — mint a bot key \
              (POST /coworkers/{id}/keys) or sign in through OAuth and use that as the bearer",
         ),
-        Ok(None) => unauthorized(
+        Ok(None) | Err(BearerRefusal::NotOurs) => unauthorized(
             &public_url,
             "missing or unrecognised bearer — use a coworker's bot key, or sign in through OAuth",
         ),
-        // `principal_from_bearer`'s only Err today is a revoked key; a revoked key must be named
-        // revoked, never silently downgraded to anonymous.
-        Err(_) => unauthorized(&public_url, "this bot key has been revoked"),
+        // A revoked key must be named revoked, never silently downgraded to anonymous.
+        Err(BearerRefusal::Revoked) => unauthorized(&public_url, "this bot key has been revoked"),
     }
 }
 

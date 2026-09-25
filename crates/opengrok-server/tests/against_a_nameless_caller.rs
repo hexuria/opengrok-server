@@ -11,8 +11,11 @@
 //! transcript that read like a quota they had hit. Observed on 17 Sep 2026 against a live server,
 //! twice, with `auth_len=0` in the request log both times.
 //!
-//! Anonymous turns are still allowed. What is refused is naming somebody else's coworker while
-//! declining to say who you are.
+//! Since 25 Sep 2026 NO turn is anonymous. An unsigned turn ran on the deployment's gateway key
+//! with no payer and no meter, and an expired or foreign bearer silently became one — so anyone
+//! who could reach the host spent its model credit, one run row per request. A caller is named
+//! or refused; a named caller's turn with no coworker (which has no key of its own to meter) is
+//! bounded by a per-account budget instead.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -25,6 +28,7 @@ use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::id::AccountId;
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
+use opengrok_server::auth::budget::AGUI_UNSCOPED;
 use opengrok_server::auth::password::hash_password;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
@@ -105,7 +109,17 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         .expect("migrations");
     let store = PgStore::new(pool);
     let email = format!("nameless-{}@og.local", now_ms());
-    seed_account(&store, &email).await;
+    let account = seed_account(&store, &email).await;
+    let access = TokenMinter::new(b"nameless-secret")
+        .mint_access(
+            account.as_str(),
+            "s1",
+            &email,
+            "ultra",
+            now_ms() / 1_000,
+            3_600,
+        )
+        .expect("mint access");
     let agui = AgUiState {
         auth: AuthState::new(
             store,
@@ -163,8 +177,8 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         "a missing credential must not be dressed as a spend limit, got: {said}"
     );
 
-    // The other half of the claim: an anonymous turn that names nobody is still served, so this
-    // refusal narrows exactly one shape rather than closing the anonymous door.
+    // An unsigned turn naming nobody is refused too: it had no payer, so it ran on the
+    // deployment's key with no meter and no limit.
     let res = client
         .post(format!("{base}/ag-ui"))
         .header("content-type", "application/json")
@@ -172,9 +186,76 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         .send()
         .await
         .expect("post");
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "an anonymous turn naming nobody is still allowed"
+    assert_eq!(res.status().as_u16(), 401, "an unsigned turn is refused");
+    let said = res.text().await.expect("body");
+    assert!(said.contains("sign in"), "say what to do, got: {said}");
+    assert!(
+        !said.to_ascii_lowercase().contains("limit"),
+        "a missing credential is not a spend limit, got: {said}"
+    );
+
+    // A bearer we did not issue, or one that expired, is refused — never downgraded to
+    // anonymous. That downgrade is how a Bot holding a stale key "worked" on 1 Sep while
+    // owning nothing (ROADMAP 10.3): the empty success, not an error anybody could see.
+    let expired = TokenMinter::new(b"nameless-secret")
+        .mint_access(
+            account.as_str(),
+            "s1",
+            &email,
+            "ultra",
+            now_ms() / 1_000 - 7_200,
+            3_600,
+        )
+        .expect("mint expired");
+    for bearer in ["not-a-jwt", expired.as_str()] {
+        let res = client
+            .post(format!("{base}/ag-ui"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {bearer}"))
+            .body(turn(None).to_string())
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(res.status().as_u16(), 401, "a bad bearer is not anonymous");
+        let said = res.text().await.expect("body");
+        assert!(said.contains("sign in again"), "got: {said}");
+    }
+
+    // A signed-in turn with no coworker has a payer but no key of its own to meter it, so it
+    // is bounded per account instead: served up to the budget, then a readable 429.
+    for n in 0..AGUI_UNSCOPED.per_window {
+        let res = client
+            .post(format!("{base}/ag-ui"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {access}"))
+            .body(turn(None).to_string())
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(res.status().as_u16(), 200, "turn {n} is inside the budget");
+        let _ = res.bytes().await;
+    }
+    let res = client
+        .post(format!("{base}/ag-ui"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {access}"))
+        .body(turn(None).to_string())
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(res.status().as_u16(), 429, "past the budget");
+    let retry_after: u64 = res
+        .headers()
+        .get("retry-after")
+        .expect("Retry-After")
+        .to_str()
+        .expect("ascii")
+        .parse()
+        .expect("seconds");
+    assert!(retry_after >= 1, "a spent budget never says retry now");
+    let said = res.text().await.expect("body");
+    assert!(
+        said.contains("coworker"),
+        "the refusal names the way round it: {said}"
     );
 }

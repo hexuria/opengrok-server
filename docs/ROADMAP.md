@@ -199,6 +199,12 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   `X-Forwarded-For` from the HTTPS front, else one shared `unknown` bucket.
   `tests/against_rate_limits.rs` walks all four over a socket. Per replica on purpose: a limit
   that costs a database write per unauthenticated request defeats itself.
+- [x] **12.limits-agui** `POST /ag-ui` names its caller or refuses (25 Sep 2026): no bearer, or
+  one that is expired, foreign or the wrong kind, is 401 — it used to run anonymous on the
+  deployment's gateway key, unmetered. A signed-in turn with no coworker has no key of its own
+  to meter, so it is bounded at 60/hour per account (`budget::AGUI_UNSCOPED`, 429 +
+  `Retry-After`). `tests/against_a_nameless_caller.rs`. Metering those turns on a per-account
+  key is still open.
 
 ## Slice 13 — Web console
 
