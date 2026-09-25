@@ -586,6 +586,42 @@ every record that sharing would otherwise break carry whose it is.
   learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
   are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
+  **Re-landed on the AG-UI door, 25 Sep 2026 (#175).** P0-E deleted `roster_for` and
+  `tests/against_visibility.rs` with the seam-A door that called them, and the AG-UI door had
+  never honoured sharing: `GET /coworkers` listed `coworkers_for`, and the run gate asked
+  `policy_for`, which only the hirer ever has a row in — so `PATCH visibility=org` answered 200
+  and shared nothing. `roster_for` is back and feeds `GET /coworkers`, whose rows carry `mine`,
+  `canManage` and `owner` again (built by `coworker_row`, the same row the PATCH reply is). A turn
+  runs under `policy_to_use`: the caller's own grant, else the OWNER's grant addressed to them
+  when the coworker is org-visible and they share its owner's non-empty org — derived on every
+  read, never copied into a grant row, so unsharing, leaving the org and the owner's own
+  revocation all bite on the next turn. `policy_for` stays strict, because `set_approvals`,
+  connections and routines ask it and a member must not mint a grant through them. A member may
+  PATCH `hiddenFromSidebar` on a shared coworker (their own sidebar) and gets a 403 with a
+  sentence for anything else; an owner in no org is refused `org` with a sentence. In the default
+  per-account box mode a member's tools run on the member's OWN computer, not the owner's — the
+  scope is resolved from whoever is asking, and a member with no computer yet talks without
+  tools. `tests/against_visibility.rs`.
+
+  What a member reaches, and what answers them, stated so nobody has to rediscover it. A coworker
+  that is not on the caller's roster answers **404 on every coworker route**, the run door
+  (`POST /ag-ui`) and `POST /coworkers/{id}/approvals` included. Those two used to say 403 "no
+  grant lets …": identical for an unknown id, so it confirmed nothing, but unlike every other
+  route; `refuse_use` now decides both. So it does for `POST /schedules` and `POST /monitors`,
+  which name the coworker in the body and used to answer an unknown id 404 but a real one 403,
+  which told a stranger which ids exist. One that is on their roster and still refused (the owner
+  revoked their own grant) is a 403 with the rule's sentence. The member's turn is billed to the member
+  (`spend_actor`, and the per-person key for coworker × member), and `GET
+  /ag-ui/threads/gateway-{id}` shows each person only their own runs of the one shared thread id.
+  **Sharing lends the coworker's `bot`-scoped connections:** `connections_for(member, coworker)`
+  includes the rows owned by the coworker, and those were OAuth'd by the owner, so a member's turn
+  can act through an account the owner connected *as the coworker*. The owner's `user`-scoped and
+  lent connections are not included. Connect a personal account as `user`, never as `bot`, on a
+  coworker you will share. The owner-only routes (`/computer`, `/screen`, `/usage`, `/tools`, keys,
+  limits) answer a member 404, because `owned_coworker` gates them — the client's Open button on a
+  shared row therefore has nothing to open, and the row says so: a member's `boxId` is null, not
+  the owner's computer.
+
 ## Phase 0
 
 - [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.

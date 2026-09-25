@@ -145,6 +145,12 @@ impl Harness {
     }
 
     async fn hire(&self, access: &str, name: &str) -> String {
+        let body = self.hire_reply(access, name).await;
+        body["id"].as_str().expect("id").to_string()
+    }
+
+    /// The whole 201 body, for the tests that hold it against the roster row.
+    async fn hire_reply(&self, access: &str, name: &str) -> Value {
         let res = self
             .client
             .post(format!("{}/coworkers", self.base))
@@ -154,8 +160,7 @@ impl Harness {
             .await
             .expect("hire");
         assert_eq!(res.status().as_u16(), 201, "hire {name}");
-        let body: Value = res.json().await.expect("hire body");
-        body["id"].as_str().expect("id").to_string()
+        res.json().await.expect("hire body")
     }
 
     async fn patch(&self, access: &str, id: &str, body: Value) -> (u16, Value) {
@@ -385,4 +390,136 @@ async fn a_wrong_typed_or_unknown_field_is_refused_like_the_others() {
         "Ada",
         "every refusal above stored nothing"
     );
+}
+
+/// The roster answers the same resource the PATCH reply does, in the same spelling.
+///
+/// It used to serialize the core `CoworkerView` straight onto the wire: `box_id`,
+/// `updated_at_ms`, `retired`, `members`, and none of the decoration the PATCH had just stored.
+/// The app overwrites its row from the PATCH reply, then relaunches onto the roster — and a
+/// snake_case key is one it silently reads as absent (#27), so the sort key, the title and the
+/// avatar all went missing the first time it restarted.
+#[tokio::test]
+async fn the_roster_row_speaks_the_same_camelcase_as_the_patch_reply() {
+    let database_url = database_or_skip!();
+    let email = format!("roster-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let access = h.access(&email);
+    let agent = h.hire(&access, "Ada").await;
+
+    let (status, patched) = h
+        .patch(
+            &access,
+            &agent,
+            json!({
+                "title": "a release engineer",
+                "avatarShape": "hex",
+                "avatarColor": "amber",
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{patched}");
+
+    let row = h.row(&access, &agent).await;
+    let keys: Vec<&String> = row
+        .as_object()
+        .expect("a row is an object")
+        .keys()
+        .collect();
+    assert!(
+        keys.iter().all(|key| !key.contains('_')),
+        "a snake_case key on the roster is one the app reads as absent: {row}"
+    );
+    assert!(
+        row["updatedAtMs"].as_i64().is_some(),
+        "the client's sort key: {row}"
+    );
+    assert!(
+        row.as_object().is_some_and(|row| row.contains_key("boxId")),
+        "present even when null, so absent and unassigned read the same: {row}"
+    );
+    // The whole row, `updatedAtMs` included: a decoration-only PATCH appends no event, so the
+    // reply must carry the stored stamp, not the time of the PATCH, or the app reorders the
+    // sidebar on the reply and back again on the next roster read.
+    assert_eq!(
+        row, patched,
+        "the PATCH reply is the roster row, key for key and value for value"
+    );
+    assert_eq!(row["title"], "a release engineer", "{row}");
+    assert_eq!(row["avatarShape"], "hex", "{row}");
+    assert_eq!(row["visibility"], "private", "{row}");
+    assert_eq!(row["hiddenFromSidebar"], false, "{row}");
+    assert_eq!(row["isGroup"], false, "{row}");
+    assert_eq!(row["memberIds"], json!([]), "{row}");
+
+    // A coworker with no profile row still carries the keys, as null: a key that is sometimes
+    // missing is a shape the app has to guess about.
+    let bare = h.hire(&access, "Bob").await;
+    let row = h.row(&access, &bare).await;
+    for key in ["title", "avatarShape", "avatarColor"] {
+        assert!(
+            row.as_object().is_some_and(|row| row.contains_key(key)) && row[key].is_null(),
+            "{key} on an undecorated coworker: {row}"
+        );
+    }
+}
+
+/// The hire reply is the same row too, plus the two keys only a hire can answer.
+///
+/// It used to be hand-built as `{id, name, model, boxId, computerError, templateNote}`: no role,
+/// no decoration, no visibility, no sort key, no permission fields — so a freshly hired coworker
+/// changed shape the first time the app relaunched onto the roster.
+#[tokio::test]
+async fn the_hire_reply_is_the_roster_row_plus_what_only_a_hire_knows() {
+    let database_url = database_or_skip!();
+    let email = format!("hired-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let access = h.access(&email);
+
+    let hired = h.hire_reply(&access, "Ada").await;
+    let id = hired["id"].as_str().expect("id");
+    let row = h.row(&access, id).await;
+    assert!(row.is_object(), "the hire is on the roster: {row}");
+
+    let mut reply = hired.as_object().expect("a reply is an object").clone();
+    for only_a_hire in ["computerError", "templateNote"] {
+        assert!(
+            reply.remove(only_a_hire).is_some(),
+            "{only_a_hire} is always present, null when nothing to say: {hired}"
+        );
+    }
+    assert!(
+        reply.keys().all(|key| !key.contains('_')),
+        "a snake_case key is one the app reads as absent: {hired}"
+    );
+    let listed = row.as_object().expect("a row is an object");
+    let reply_keys: Vec<&String> = reply.keys().collect();
+    let row_keys: Vec<&String> = listed.keys().collect();
+    assert_eq!(reply_keys, row_keys, "the same keys: {hired} vs {row}");
+    assert_eq!(
+        Value::Object(reply),
+        row,
+        "and the same values, the sort key and the owner included"
+    );
+    for key in [
+        "role",
+        "title",
+        "avatarShape",
+        "avatarColor",
+        "visibility",
+        "hiddenFromSidebar",
+        "updatedAtMs",
+        "isGroup",
+        "memberIds",
+    ] {
+        assert!(
+            hired
+                .as_object()
+                .is_some_and(|hired| hired.contains_key(key)),
+            "{key} on the hire reply: {hired}"
+        );
+    }
+    assert_eq!(hired["mine"], true, "{hired}");
+    assert_eq!(hired["canManage"], true, "{hired}");
+    assert_eq!(hired["owner"]["name"], "Test User", "{hired}");
 }

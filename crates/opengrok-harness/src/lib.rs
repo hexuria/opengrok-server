@@ -9,6 +9,7 @@
 //! exhaustively) or in a door (isolated, swappable), which is what makes a run reproducible
 //! without a provider.
 
+mod budget;
 pub mod cloaked_door;
 pub mod gateway;
 mod intent;
@@ -20,6 +21,7 @@ pub mod review;
 mod timing;
 pub mod tools;
 
+pub use budget::RunBudget;
 pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
@@ -32,7 +34,8 @@ pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, judge_failure_streak, p
 pub use timing::RUN_TIMING_NAME;
 pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
-use futures::StreamExt;
+use std::collections::HashSet;
+
 use opengrok_wire::agui::Event;
 
 /// Run one turn and collect every event a client should see.
@@ -67,20 +70,32 @@ pub const MAX_COMPUTER_ROUNDS: usize = 24;
 /// that is not happening, and the honest thing is to say so rather than to keep looking.
 pub const SAME_SCREEN_LIMIT: usize = 4;
 
-/// Assistant text a tool-capable round may emit before a `ToolCallStart`.
+/// Withheld text a tool-capable round may pile up before a `ToolCallStart`.
 ///
 /// Seen live (NativeChat Shot A): a model offered tools wrote a plan of the work as
-/// `TEXT_MESSAGE` and never started a call. Words without a call are a reply; a flood of
-/// them is the model stalling. The bound is a couple of short paragraphs — enough for
-/// "I'll look that up" plus a real answer, not enough for a repeated plan of unused tools.
-/// The same lesson is a sentence in `computer_system_prompt`; this is the stop that
-/// prompt text alone did not provide.
+/// `TEXT_MESSAGE` and never started a call. A flood of plan is the model stalling, and this
+/// is the stop that prompt text alone did not provide.
 ///
-/// Short intent *before* a tool (`I'll probe…`) is a different bug: NativeChat paints
-/// every `TEXT_MESSAGE` as chat. Work-tool rounds drop that prose; a text-only round
-/// still drops it when it is intent/status/diary, and only flushes leftover facts.
-/// This bound still fires on the withheld bytes — a flood with no call is still a flood.
+/// IT COUNTS ONLY TEXT STILL WITHHELD, which after `LIVE_TEXT_AFTER` characters is only text
+/// that keeps opening with intent. It used to count every character, so any coworker with a
+/// computer that answered "explain X" or wrote a routine's briefing past ~250 words ended in
+/// RUN_ERROR, and the answer it had written was never shown (#178). A real answer goes live
+/// long before this bound; what reaches it is text that opens every sentence with intent.
+///
+/// THAT TEXT IS SHOWN AS WRITTEN BEFORE THE RUN STOPS. Filtered for intent it came to
+/// nothing, and "what would you do? just tell me" answered with "I'll install nginx… I'll
+/// then request a certificate…" ended in a RUN_ERROR with none of the answer on screen.
 pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
+
+/// Characters of non-intent text, past any opening intent, before a tool-capable round starts
+/// streaming its words.
+///
+/// Short intent *before* a tool (`I'll probe…`) is why text is withheld at all: NativeChat
+/// paints every `TEXT_MESSAGE` as a bubble, and a streamed preamble cannot be taken back when
+/// the tool call arrives. A preamble is short; an answer long enough to need streaming is not.
+/// Withholding the whole round instead brought back #61 for every coworker with a computer:
+/// the answer arrived in one burst at the end (#180).
+pub const LIVE_TEXT_AFTER: usize = 200;
 
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
@@ -150,29 +165,23 @@ fn looks_like_write(command: &str) -> bool {
     MARKERS.iter().any(|marker| command.contains(marker))
 }
 
+/// A read of the host app's catalog: `gpui-agent invoke profile.list`, `….search`, `….get`.
+///
+/// ONLY THE CATALOG. This used to count any command starting with `ls`, `cat`, `head`, `echo`
+/// and friends, or containing `.list`, and it applied to the box's own `shell`: after one `ls`
+/// succeeded, `cat README.md` got a synthetic "a listing already succeeded" and the file was
+/// never read (#183). The one-listing rule was written for the BIR host, where a second catalog
+/// read was the model stalling; on a computer, reading the next file is the work.
+///
+/// `gpui-agent hello` and `gpui-agent invoke --help` are probes, not reads. Counting either as
+/// the one listing made the following `profile.search` a synthetic skip, and the turn closed
+/// with no sentence (run 01a0c9ed).
 fn looks_like_listing_or_show(command: &str) -> bool {
-    let first = command.split_whitespace().next().unwrap_or("");
-    // `gpui-agent hello` and `gpui-agent invoke --help` are probes. Counting either
-    // as the one listing made the following `profile.search` a synthetic skip, and
-    // the turn closed with no sentence (run 01a0c9ed).
-    matches!(
-        first,
-        "ls" | "cat"
-            | "head"
-            | "tail"
-            | "pwd"
-            | "whoami"
-            | "date"
-            | "file"
-            | "stat"
-            | "echo"
-            | "printf"
-            | "type"
-    ) || command.contains("profile.list")
-        || command.contains("profile.search")
-        || command.contains("dues.list")
-        || command.contains("forms_set.get")
-        || command.contains(".list")
+    let name = intent::shell_action_key(command);
+    name != command
+        && [".list", ".search", ".get"]
+            .iter()
+            .any(|verb| name.ends_with(verb))
 }
 
 /// `find ~` and `find /Users/<name>` exited 0 after about 90s on the demo machine.
@@ -257,18 +266,123 @@ fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolRe
     )
 }
 
-/// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`).
+/// The recipe a `run_recipe` call names.
+fn recipe_of(call: &opengrok_tools::ToolCall) -> Option<String> {
+    if call.name != opengrok_tools::RUN_RECIPE {
+        return None;
+    }
+    call.arguments
+        .get("recipe")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// The recipe this call played, when the box played it: a success, or a run that stopped part
+/// way. A refusal before the box (a missing parameter, a recipe not granted, an unreachable box,
+/// a policy block) played nothing. Counting it made the corrected call a "replay" that was never
+/// run, and the search the person asked for never happened (#120). A connection lost after the
+/// request went out is part way (`BoxError::Interrupted`): the box may have been typing.
+fn played_recipe(
+    call: &opengrok_tools::ToolCall,
+    result: &opengrok_tools::ToolResult,
+) -> Option<String> {
+    (result.ok || result.stopped_part_way)
+        .then(|| recipe_of(call))
+        .flatten()
+}
+
+/// Which of one completion's calls replay a recipe: one this request already played, or one an
+/// earlier call in the same completion names. The second is not in `played` yet, because a round's
+/// recipes are added only after the round ran, and every call in a completion reaches `run_all`
+/// together. Checking `played` alone let two plays of one recipe in one reply both type the
+/// search (#120, the kabisado failure inside a single completion).
+fn replays(calls: &[opengrok_tools::ToolCall], played: &HashSet<String>) -> Vec<bool> {
+    let mut asked = played.clone();
+    calls
+        .iter()
+        .map(|call| recipe_of(call).is_some_and(|recipe| !asked.insert(recipe)))
+        .collect()
+}
+
+/// A call the loop answers itself instead of running: a home-directory walk, or a recipe replay
+/// (see `replays`). The answer is chosen before the round runs, so a replay of a call earlier
+/// in the same completion must not claim that call "already ran": it may yet be refused before
+/// the box, and the model, told it played, would report a search that never happened.
+fn answered_here(
+    call: &opengrok_tools::ToolCall,
+    replay: bool,
+    played: &HashSet<String>,
+) -> Option<opengrok_tools::ToolResult> {
+    if is_broad_walk_call(call) {
+        return Some(refused_broad_walk(call));
+    }
+    let recipe = recipe_of(call).filter(|_| replay)?;
+    let answer = if played.contains(&recipe) {
+        format!(
+            "Not played again: the recipe `{recipe}` already ran in this request, and a replay \
+             repeats what it did rather than correcting it. Say what its screenshot showed, \
+             finish by hand with `computer`, or ask."
+        )
+    } else {
+        format!(
+            "Not played twice: an earlier call in this reply already asks for the recipe \
+             `{recipe}`, and a recipe plays at most once per request. Read that call's result; \
+             if it was refused, correct it and ask once more."
+        )
+    };
+    Some(opengrok_tools::ToolResult::ok(&call.id, answer))
+}
+
+/// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`), on either shell.
 /// A host probe such as `gpui-agent hello` is not one: it must not consume the
-/// single listing this turn is allowed to run.
+/// single listing this turn is allowed to run. Neither is another program's `invoke x.list`:
+/// the one-listing rule was measured on the BIR host's binary, and anywhere else the second
+/// read is the work (#183).
 fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
     matches!(
         call.name.as_str(),
         "shell" | opengrok_tools::USER_MACHINE_SHELL
-    ) && {
-        let command = shell_command(&call.arguments).to_ascii_lowercase();
-        let trimmed = command.trim();
-        !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
+    ) && names_the_catalog(call)
+        && {
+            let command = shell_command(&call.arguments).to_ascii_lowercase();
+            let trimmed = command.trim();
+            !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
+        }
+}
+
+/// What makes two failures the same one: a shell's invoke name or whole command, and for any
+/// other tool its name and arguments. Two different files a `read_file` could not find are two
+/// failures, not a retry. That holds for a refusal as much as for a non-zero exit: the executor
+/// answers a missing file with a refusal (`cat` fails, the box says `Refused`), so a streak that
+/// counted every refusal ended the turn on the second file looked for (#183).
+fn failure_key(call: &opengrok_tools::ToolCall) -> String {
+    match shell_command(&call.arguments) {
+        "" => format!("{}:{}", call.name, call.arguments),
+        command => intent::shell_action_key(command),
     }
+}
+
+/// This call is the one that failed last round.
+fn repeats_last_failure(call: &opengrok_tools::ToolCall, last: Option<&str>) -> bool {
+    last.is_some_and(|last| failure_key(call) == last)
+}
+
+/// A command on the BIR host's catalog binary, from either shell.
+///
+/// THE DEMO'S QUIET-LOOP RULES STOP AT THIS LINE. A final answer filtered for intent, a diary
+/// swapped for the failure fact, a stalled "I'll look up the profiles." answered with the listing:
+/// all were written for this host. Applied to every coworker, they cut "Let me explain." off an
+/// explanation and showed "grep: no match" instead of the model's answer (#180).
+fn names_the_catalog(call: &opengrok_tools::ToolCall) -> bool {
+    shell_command(&call.arguments).contains("gpui-agent")
+}
+
+/// The host catalog's own binary is missing. No rewording finds it, so the turn stops on the
+/// first miss (the Hog Rider run burned all eight calls on it). Any OTHER missing command is an
+/// ordinary failure: `python` missing on the box is fixed by `python3`, and setting the streak
+/// to its ceiling on every exit 127 never let that retry be asked for (#183).
+fn is_missing_catalog_binary(call: &opengrok_tools::ToolCall, content: &str) -> bool {
+    names_the_catalog(call) && intent::is_unrecoverable_command_miss(content)
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -289,21 +403,24 @@ pub async fn run_turn_with_tools(
         request.tools = runner.tool_schemas();
     }
 
-    let mut stream = match door.stream(request).await {
+    let budget = RunBudget::default();
+    let mut stream = match budget.open(door, request).await {
         Ok(stream) => stream,
         // A door that will not open is a failed run, not a crash: the client gets an ending it can
         // render and reason about (CLAUDE.md #8, fail closed and say why).
         Err(error) => {
-            events.extend(projection.fail(error.to_string()));
+            tracing::warn!(%error, "the model door did not open");
+            events.extend(projection.fail(error.sentence()));
             return events;
         }
     };
 
-    while let Some(delta) = stream.next().await {
+    while let Some(delta) = budget.next(&mut stream).await {
         match delta {
             Ok(delta) => events.extend(projection.push(delta)),
             Err(error) => {
-                events.extend(projection.fail(error.to_string()));
+                tracing::warn!(%error, "the model stream broke");
+                events.extend(projection.fail(error.sentence()));
                 return events;
             }
         }
@@ -367,7 +484,14 @@ pub async fn run_conversation(
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
     converse(
-        door, tools, journal, request, projection, run_id, None, false,
+        door,
+        tools,
+        journal,
+        request,
+        projection,
+        run_id,
+        None,
+        Carried::default(),
     )
     .await
 }
@@ -396,7 +520,37 @@ pub async fn run_conversation_streaming(
         projection,
         run_id,
         Some(sink),
-        false,
+        Carried::default(),
+    )
+    .await
+}
+
+/// `run_conversation`, held to `budget` rather than the default, with an optional live sink.
+///
+/// The door a routine or a schedule would give its own limits through; every other entry point
+/// runs on `RunBudget::default()`.
+pub async fn run_conversation_within(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    context: RunContext,
+    budget: RunBudget,
+    sink: Option<&dyn EventSink>,
+) -> Vec<Event> {
+    let projection = Projection::new(&context.thread_id, &context.run_id, context.at_ms);
+    converse(
+        door,
+        tools,
+        journal,
+        request,
+        projection,
+        &context.run_id,
+        sink,
+        Carried {
+            budget,
+            ..Carried::default()
+        },
     )
     .await
 }
@@ -533,6 +687,7 @@ pub async fn resume_conversation(
 
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
+    let approved_ran = matches!(outcome, ResumeOutcome::Approved);
     let results = match outcome {
         ResumeOutcome::Approved => {
             // The person may have answered the card long after the box went to sleep.
@@ -595,6 +750,15 @@ pub async fn resume_conversation(
     // The first half already recorded ToolCallStart (that is why this run is
     // resuming). converse_raw would otherwise start with started_a_tool = false
     // and treat a long post-HITL summary as a plan-only flood.
+    let carried = Carried {
+        started_a_tool: true,
+        played: results
+            .iter()
+            .filter(|result| approved_ran && result.call_id == approved.id)
+            .filter_map(|result| played_recipe(&approved, result))
+            .collect(),
+        ..Carried::default()
+    };
     let mut rest = converse(
         door,
         Some(tools),
@@ -603,26 +767,49 @@ pub async fn resume_conversation(
         projection,
         &run_id,
         None,
-        true,
+        carried,
     )
     .await;
     all.append(&mut rest);
     all
 }
 
+/// Paint what a round that never finished its answer withheld (a chart round, a broken stream,
+/// a plan past its bound): the text past its opening intent, or the last failure fact. `blank`
+/// is what to show when that leaves nothing — `None` where the run already said something or
+/// ends with its own sentence. A round that called no tool is not this: it is painted as written.
 async fn flush_withheld_text(
     projection: &mut Projection,
     sink: Option<&dyn EventSink>,
     withheld: &mut String,
     round_events: &mut Vec<Event>,
     last_failure: Option<&str>,
+    blank: Option<String>,
 ) {
-    let Some(visible) = intent::visible_chat(&std::mem::take(withheld), last_failure) else {
+    let withheld = std::mem::take(withheld);
+    let Some(visible) = intent::visible_chat(&withheld, last_failure).or(blank) else {
         return;
     };
-    let produced = projection.push(ModelDelta::Text(visible));
-    emit_live(sink, &produced).await;
-    round_events.extend(produced);
+    emit_visible_text(projection, sink, round_events, visible).await;
+}
+
+/// What a round shows when stripping its intent leaves nothing and the run has said nothing
+/// yet: the listing it read, else the model's own words.
+///
+/// NEVER AN EMPTY SUCCESS (CLAUDE.md, three facts №3). A turn that said "I'll pull the profile"
+/// and stopped used to finish with no text at all, which the person blames on the app.
+fn blank_turn_text(
+    all: &[Event],
+    round_events: &[Event],
+    last_listing: Option<&str>,
+    withheld: &str,
+) -> Option<String> {
+    if round_has_assistant_text(all) || round_has_assistant_text(round_events) {
+        return None;
+    }
+    last_listing
+        .map(str::to_string)
+        .or_else(|| Some(withheld.trim().to_string()).filter(|text| !text.is_empty()))
 }
 
 async fn emit_visible_text(
@@ -785,6 +972,20 @@ async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
     }
 }
 
+/// What a run segment inherits from the segment before it. A resumed run is a new
+/// `converse_raw`, and each of these used to start from nothing there.
+#[derive(Debug, Default)]
+struct Carried {
+    /// The first half already recorded a `ToolCallStart`, so a long summary after the card is
+    /// work, not a plan-only flood.
+    started_a_tool: bool,
+    /// Recipes this request already played. A replay repeats what the recipe did rather than
+    /// correcting it (#120), and the approved call a resume runs is one of them.
+    played: HashSet<String>,
+    /// What the segment may spend.
+    budget: RunBudget,
+}
+
 /// The loop both entry points share.
 #[allow(clippy::too_many_arguments)]
 /// What a run emitted, with streamed secret-bearing tool arguments assembled and scrubbed.
@@ -799,18 +1000,11 @@ async fn converse(
     projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
+    carried: Carried,
 ) -> Vec<Event> {
     scrub_streamed_tool_args(
         converse_raw(
-            door,
-            tools,
-            journal,
-            request,
-            projection,
-            run_id,
-            sink,
-            already_started_a_tool,
+            door, tools, journal, request, projection, run_id, sink, carried,
         )
         .await,
     )
@@ -825,8 +1019,13 @@ async fn converse_raw(
     mut projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
+    carried: Carried,
 ) -> Vec<Event> {
+    let Carried {
+        started_a_tool: already_started_a_tool,
+        mut played,
+        budget,
+    } = carried;
     let mut all = Vec::new();
 
     // Advertise the run's tools to the model — the offering half of tool use. Set once; every round
@@ -868,8 +1067,18 @@ async fn converse_raw(
     let mut any_delta = false;
     let mut last_failure: Option<String> = None;
     let mut work_fail_streak: u32 = 0;
+    // What the last failed command was, by `intent::shell_action_key`. A non-zero exit adds to
+    // the streak only when it repeats the command that failed last time.
+    let mut last_failed_key: Option<String> = None;
+    // The calls that succeeded last round, by `failure_key`. Running one of them again is not
+    // progress: a read repeated beside the same failing test changes nothing the test sees.
+    let mut last_ok_keys: HashSet<String> = HashSet::new();
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
+    // This run called the BIR host's catalog, so its final answer keeps the demo's filter.
+    let mut on_the_catalog = false;
+    // A recipe replay was already answered without playing; asking again ends the turn.
+    let mut skipped_replay = false;
     // The catalog sentence to show if a later round only repeats the listing.
     // Without it the early finish below closes the run with no TEXT_MESSAGE.
     let mut last_listing: Option<String> = None;
@@ -878,7 +1087,9 @@ async fn converse_raw(
     // what the chat shows if that action is asked again or spends the last call.
     let mut opened: Option<(String, String)> = None;
     let mut timing = timing::TurnTiming::new();
+    timing.budget(&budget);
     let verbose_timing = timing::verbose_from_env();
+    let run_clock = std::time::Instant::now();
 
     // EVERY EXIT OF THIS LOOP IS `close`. Returning any other way is how one exit ended a run with
     // no terminal event and others wrote their ending in two halves; this keeps the one way out
@@ -903,6 +1114,31 @@ async fn converse_raw(
         }};
     }
 
+    // THE LAST CALL, WHEN A BUDGET IS SPENT: no tools, and a request to say what was done. The
+    // round before it is already durable, so this is a round of its own, and its ending goes
+    // down with it in one write like every other. A Stop pressed by now wins — the person asked
+    // for nothing more — and a wrap-up that fails or says nothing ends the run with `$why`, the
+    // RUN_ERROR every cap used to end with.
+    macro_rules! wrap_up {
+        ($why:expr) => {{
+            let why: String = $why;
+            if journal.stopped(run_id).await {
+                end_run!(Vec::new(), Ending::Stop);
+            }
+            let (round, ending) = wrap_up(
+                door,
+                &request,
+                &budget,
+                &mut projection,
+                sink,
+                &mut timing,
+                why,
+            )
+            .await;
+            end_run!(round, ending);
+        }};
+    }
+
     let mut opening = projection.start();
     let opened_ok = journal.record(run_id, &opening).await;
     emit_live(sink, &opening).await;
@@ -917,7 +1153,7 @@ async fn converse_raw(
         );
     }
 
-    for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
+    for round in 0..(budget.max_rounds + budget.max_computer_rounds) {
         let mut round_events = Vec::new();
 
         // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
@@ -925,101 +1161,153 @@ async fn converse_raw(
         if journal.stopped(run_id).await {
             end_run!(round_events, Ending::Stop);
         }
+        // The first round always runs; after it, past the wall clock no new work starts.
+        if round > 0 && run_clock.elapsed() >= budget.max_wall() {
+            wrap_up!(format!(
+                "this run reached its time limit of {}",
+                budget::spoken(budget.max_wall())
+            ));
+        }
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let model_started = std::time::Instant::now();
-        let stream = match door.stream(request.clone()).await {
+        let stream = match budget.open(door, request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
                 timing.record_model(timing::elapsed_ms(model_started));
-                end_run!(round_events, Ending::Fail(error.to_string()));
+                // The detail for the log; the person gets the sentence (#185).
+                tracing::warn!(%error, run_id, "the model door did not open");
+                end_run!(round_events, Ending::Fail(error.sentence()));
             }
         };
 
+        // The words the person saw this round, which the next request must carry. F8: text
+        // that was withheld and dropped is not among them — replaying a discarded preamble as
+        // an assistant message re-billed the diary on every hop.
         let mut said = String::new();
         let mut withheld = String::new();
+        // A round with no work tool on offer streams from its first word. One with a work tool
+        // withholds until `intent::goes_live` says the words are an answer, not a preamble.
+        let mut text_live = !tools_offered;
+        let mut round_tool = false;
         let mut round_work_tool = false;
         if let Some(mut stream) = stream {
-            while let Some(delta) = stream.next().await {
+            while let Some(delta) = budget.next(&mut stream).await {
                 match delta {
                     Ok(delta) => {
-                        any_delta = true;
-                        if let ModelDelta::Text(text) = &delta {
-                            // F8: discarded intent must not land on `said`. The next
-                            // hop would append it as an assistant message and re-bill
-                            // the diary. Count plan-only from the bytes; keep them off
-                            // the next request.
-                            if !tools_offered {
-                                said.push_str(text);
-                            }
-                            if tools_offered && !started_a_tool {
-                                plan_only_chars =
-                                    plan_only_chars.saturating_add(text.chars().count());
-                            }
-                            if tools_offered {
-                                withheld.push_str(text);
-                            }
+                        // Whitespace is not something produced: a reply of "\n\n" finished
+                        // RUN_FINISHED with an empty bubble, the empty success of CLAUDE.md
+                        // fact 3, instead of saying the model returned no text.
+                        if !matches!(&delta, ModelDelta::Text(text) if text.trim().is_empty()) {
+                            any_delta = true;
                         }
                         if let ModelDelta::ToolCallStart { name, .. } = &delta {
                             started_a_tool = true;
+                            round_tool = true;
                             if !is_client_render_tool(name) {
                                 round_work_tool = true;
                             }
                         }
-                        // Work-tool rounds withhold TEXT until ToolCallStart / finalization
-                        // so NativeChat does not paint "I'll probe…" as chat. Reasoning and
-                        // tool frames still stream. A text-only round flushes below.
-                        let withhold_text = tools_offered && matches!(delta, ModelDelta::Text(_));
-                        if !withhold_text {
-                            let produced = projection.push(delta);
-                            // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
-                            // adds a second reader that does not have to wait for the run to end.
-                            // Through `emit_live`, never `sink.emit` directly, so the live
-                            // delta path meets `scrub_event_secrets` like every other path.
-                            // Without it a model that smuggled a `values.password` into its
-                            // own tool args reached NativeChat verbatim.
-                            emit_live(sink, &produced).await;
-                            round_events.extend(produced);
-                        }
-                        if tools_offered
-                            && !started_a_tool
-                            && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
+                        if let ModelDelta::Text(text) = &delta
+                            && !text_live
                         {
-                            timing.record_model(timing::elapsed_ms(model_started));
-                            end_run!(
-                                round_events,
-                                Ending::Fail(format!(
-                                    "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
-                                ))
-                            );
+                            withheld.push_str(text);
+                            if !started_a_tool {
+                                plan_only_chars =
+                                    plan_only_chars.saturating_add(text.chars().count());
+                            }
+                            // ALL OF IT, OPENING INTENT INCLUDED. This is an answer now, and a
+                            // round that ends without a tool call must reach the person as the
+                            // model wrote it: "Let me explain." is part of the explanation.
+                            if intent::goes_live(&withheld, LIVE_TEXT_AFTER) {
+                                text_live = true;
+                                let shown = std::mem::take(&mut withheld);
+                                said.push_str(&shown);
+                                emit_visible_text(&mut projection, sink, &mut round_events, shown)
+                                    .await;
+                            } else if !started_a_tool && plan_only_chars > PLAN_ONLY_TEXT_LIMIT {
+                                timing.record_model(timing::elapsed_ms(model_started));
+                                let written = std::mem::take(&mut withheld);
+                                emit_visible_text(
+                                    &mut projection,
+                                    sink,
+                                    &mut round_events,
+                                    written,
+                                )
+                                .await;
+                                end_run!(
+                                    round_events,
+                                    Ending::Fail(format!(
+                                        "the coworker described {plan_only_chars} characters of work without starting any of it, so the turn was stopped"
+                                    ))
+                                );
+                            }
+                            continue;
                         }
+                        if let ModelDelta::Text(text) = &delta {
+                            said.push_str(text);
+                        }
+                        let produced = projection.push(delta);
+                        // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
+                        // adds a second reader that does not have to wait for the run to end.
+                        // Through `emit_live`, never `sink.emit` directly, so the live
+                        // delta path meets `scrub_event_secrets` like every other path.
+                        // Without it a model that smuggled a `values.password` into its
+                        // own tool args reached NativeChat verbatim.
+                        emit_live(sink, &produced).await;
+                        round_events.extend(produced);
                     }
                     Err(error) => {
                         timing.record_model(timing::elapsed_ms(model_started));
-                        if !round_work_tool {
+                        // Once live, the round has shown its own words; a failure fact after
+                        // them would read as the answer.
+                        //
+                        // Before that, the exit flushes what was withheld (#178): the words past
+                        // their intent, else the failure fact, else the words as written. No tool
+                        // call follows them now to make "I'll check the logs." a preamble.
+                        if !round_work_tool && !text_live {
+                            let written = (!round_tool)
+                                .then(|| withheld.trim().to_string())
+                                .filter(|text| !text.is_empty());
                             flush_withheld_text(
                                 &mut projection,
                                 sink,
                                 &mut withheld,
                                 &mut round_events,
                                 last_failure.as_deref(),
+                                written,
                             )
                             .await;
                         }
-                        end_run!(round_events, Ending::Fail(error.to_string()));
+                        tracing::warn!(%error, run_id, "the model stream broke");
+                        end_run!(round_events, Ending::Fail(error.sentence()));
                     }
                 }
             }
             timing.record_model(timing::elapsed_ms(model_started));
             if round_work_tool {
                 withheld.clear();
-            } else {
+            } else if !text_live && !round_tool && !on_the_catalog && !withheld.trim().is_empty() {
+                // A ROUND THAT CALLED NO TOOL IS THE ANSWER, shown as written (#180). Filtered,
+                // an answer lost its opening "Let me explain.", and one that opened with "I'll"
+                // was swapped for the last failure fact: "grep: no match".
+                let answer = std::mem::take(&mut withheld);
+                emit_visible_text(&mut projection, sink, &mut round_events, answer).await;
+            } else if !text_live {
+                // A chart round has shown the chart: its "I'll draw a chart" is the preamble
+                // bubble 83f09fe removed, not words the run would otherwise lack.
+                let blank = (!round_tool)
+                    .then(|| {
+                        blank_turn_text(&all, &round_events, last_listing.as_deref(), &withheld)
+                    })
+                    .flatten();
                 flush_withheld_text(
                     &mut projection,
                     sink,
                     &mut withheld,
                     &mut round_events,
                     last_failure.as_deref(),
+                    blank,
                 )
                 .await;
             }
@@ -1036,6 +1324,7 @@ async fn converse_raw(
                 calls.retain(|call| !is_client_render_tool(&call.name));
                 calls.push(ui);
             }
+            on_the_catalog |= calls.iter().any(names_the_catalog);
             if let (Some(runner), false) = (tools, calls.is_empty()) {
                 // WHERE A STOP LANDS, THE SECOND AND MORE USEFUL PLACE. The model has just
                 // asked to do something to the world — play the recipe again, type into the
@@ -1071,10 +1360,37 @@ async fn converse_raw(
                 if same_open && let Some((_, sentence)) = opened.clone() {
                     end_run!(round_events, Ending::Finish(Some(sentence)));
                 }
+                // Read before `played` takes this round's recipes, or every recipe that just
+                // played would look like one the loop answered itself.
+                let replays = replays(&calls, &played);
+                let replayed = replays.contains(&true);
+                let replay_only = replayed
+                    && calls
+                        .iter()
+                        .zip(&replays)
+                        .all(|(call, replay)| is_client_render_tool(&call.name) || *replay);
+                if replay_only && skipped_replay {
+                    let recipe = calls.iter().find_map(recipe_of).unwrap_or_default();
+                    end_run!(
+                        round_events,
+                        Ending::Finish(Some(format!(
+                            "The recipe {recipe} already ran for this request, so it was not played again."
+                        )))
+                    );
+                }
                 let waking = box_wake_frame(runner, &mut projection, &calls).await;
                 emit_live(sink, &waking).await;
                 round_events.extend(waking);
                 let skip_listing = had_successful_listing && listing_only;
+                let answers: Vec<Option<opengrok_tools::ToolResult>> = calls
+                    .iter()
+                    .zip(&replays)
+                    .map(|(call, replay)| answered_here(call, *replay, &played))
+                    .collect();
+                let loop_answered: Vec<bool> = answers
+                    .iter()
+                    .map(|answer| skip_listing || answer.is_some())
+                    .collect();
                 let tool_started = std::time::Instant::now();
                 let ((results, per_tool), auto_review_ms) = if skip_listing {
                     skipped_redundant_listing = true;
@@ -1089,11 +1405,12 @@ async fn converse_raw(
                         .collect();
                     let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
                     ((results, times), 0)
-                } else if calls.iter().any(is_broad_walk_call) {
+                } else if answers.iter().any(Option::is_some) {
                     let runnable: Vec<_> = calls
                         .iter()
-                        .filter(|call| !is_broad_walk_call(call))
-                        .cloned()
+                        .zip(&answers)
+                        .filter(|(_, answer)| answer.is_none())
+                        .map(|(call, _)| call.clone())
                         .collect();
                     let (ran, ran_times, review_ms) = if runnable.is_empty() {
                         (Vec::new(), Vec::new(), 0)
@@ -1104,29 +1421,29 @@ async fn converse_raw(
                     };
                     let mut ran = ran.into_iter();
                     let mut ran_times = ran_times.into_iter();
+                    let times = calls
+                        .iter()
+                        .zip(&answers)
+                        .map(|(call, answer)| {
+                            if answer.is_some() {
+                                (call.name.clone(), 0)
+                            } else {
+                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
+                            }
+                        })
+                        .collect();
                     let results = calls
                         .iter()
-                        .map(|call| {
-                            if is_broad_walk_call(call) {
-                                refused_broad_walk(call)
-                            } else {
+                        .zip(answers)
+                        .map(|(call, answer)| {
+                            answer.unwrap_or_else(|| {
                                 ran.next().unwrap_or_else(|| {
                                     opengrok_tools::ToolResult::refused(
                                         &call.id,
                                         "the tool did not run",
                                     )
                                 })
-                            }
-                        })
-                        .collect();
-                    let times = calls
-                        .iter()
-                        .map(|call| {
-                            if is_broad_walk_call(call) {
-                                (call.name.clone(), 0)
-                            } else {
-                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
-                            }
+                            })
                         })
                         .collect();
                     ((results, times), review_ms)
@@ -1141,17 +1458,28 @@ async fn converse_raw(
                     timing::elapsed_ms(tool_started),
                     auto_review_ms,
                 );
+                skipped_replay |= replayed;
+                // Only calls the box really ran. A replay the loop answered is an `ok` result
+                // too, so taking it counted the recipe as played when the earlier call in the
+                // same completion was refused before the box: the corrected call next round
+                // became a "replay" and the search never ran (#120 again, from one reply).
+                played.extend(
+                    calls
+                        .iter()
+                        .zip(results.iter())
+                        .zip(loop_answered.iter())
+                        .filter(|(_, answered)| !**answered)
+                        .filter_map(|((call, result), _)| played_recipe(call, result)),
+                );
 
                 // THE MODEL SEES WHAT IT CALLED (#189): its own message naming this round's
                 // calls, then one `tool` message per result below, each keyed by the id it gave.
                 // Without the first, a result arrived answering a call the model could not see.
-                // A work round's words stay out (F8: withheld intent is not replayed).
+                // Before the results, where the words came: the model said them, then asked.
+                // `said` holds only the words the person was shown, so withheld intent stays out
+                // (F8: a discarded preamble is not replayed).
                 request.messages.push(ChatMessage::calls(
-                    if round_work_tool {
-                        String::new()
-                    } else {
-                        std::mem::take(&mut said)
-                    },
+                    std::mem::take(&mut said),
                     calls.iter().map(tool_call_ref).collect(),
                 ));
                 for (result, call) in results.iter().zip(calls.iter()) {
@@ -1172,8 +1500,8 @@ async fn converse_raw(
                         message.content.push_str(intent::READONLY_SHELL_NUDGE);
                     } else if shell_failed && !result.awaiting_approval {
                         last_failure = Some(intent::short_failure_fact(&result.content));
-                        if work_fail_streak == 0
-                            && !intent::is_unrecoverable_command_miss(&result.content)
+                        if !repeats_last_failure(call, last_failed_key.as_deref())
+                            && !is_missing_catalog_binary(call, &result.content)
                             && !is_broad_walk_call(call)
                         {
                             message.content.push_str("\n\n");
@@ -1211,9 +1539,27 @@ async fn converse_raw(
                         && result.ok
                         && !intent::counts_as_work_failure(true, &result.content)
                 });
+                // Work that moved this round: a call the loop really ran, that succeeded, and
+                // that is not last round's success again. A synthetic answer ("already
+                // listed", "not played again") ran nothing and moves nothing.
+                let ok_keys: HashSet<String> = calls
+                    .iter()
+                    .zip(results.iter())
+                    .zip(loop_answered.iter())
+                    .filter(|((call, result), answered)| {
+                        !**answered
+                            && !is_client_render_tool(&call.name)
+                            && result.ok
+                            && !result.awaiting_approval
+                            && !intent::counts_as_work_failure(true, &result.content)
+                    })
+                    .map(|((call, _), _)| failure_key(call))
+                    .collect();
+                let progressed = ok_keys.iter().any(|key| !last_ok_keys.contains(key));
+                last_ok_keys = ok_keys;
                 if work_failed {
-                    // A missing binary is not fixed by rewording the same command. Stop
-                    // this round. A home-directory find is refused once so the model can
+                    // A missing catalog binary is not fixed by rewording the same command.
+                    // Stop this round. A home-directory find is refused once so the model can
                     // call the catalog; a second find reaches the streak ceiling below.
                     // A rejected `--arg` (missing year, a JSON blob as a positional) is
                     // the host's sentence for the model to correct. It must not spend
@@ -1222,19 +1568,59 @@ async fn converse_raw(
                         !intent::counts_as_work_failure(result.ok, &result.content)
                             || intent::is_invoke_argv_mistake(&result.content)
                     });
-                    if results
+                    let failed: Vec<(&opengrok_tools::ToolCall, &opengrok_tools::ToolResult)> =
+                        calls
+                            .iter()
+                            .zip(results.iter())
+                            .filter(|(call, result)| {
+                                !is_client_render_tool(&call.name)
+                                    && !result.awaiting_approval
+                                    && intent::counts_as_work_failure(result.ok, &result.content)
+                            })
+                            .collect();
+                    // A failure counts only when it is the call that failed last time, by
+                    // `failure_key`: a grep with no match, then a failing test run, is two
+                    // outcomes of ordinary work, not a retry diary — and ending the turn on the
+                    // second one showed the person the first line of the test output as the
+                    // answer (#183). A refusal is held to the same test. The executor refuses a
+                    // file that is not there, and counting every refusal ended the turn on the
+                    // second, different file; the SAME refusal twice is already stopped by the
+                    // refused-the-same-way-twice check below.
+                    //
+                    // Two exceptions still count every refusal. A call on the BIR host's catalog
+                    // (the demo's quiet-loop rule, see `names_the_catalog`): a refused port, then
+                    // a refused listing, is the retry diary it was written to stop. And a
+                    // home-directory walk, which the loop itself refuses: the second one, however
+                    // it is spelled, ends the turn rather than walking again.
+                    //
+                    // No failure counts when the same round also moved: an edit, then the test
+                    // that still fails, is the fix-then-test loop. Counting it ended a coding
+                    // coworker's turn on "test result: FAILED" one edit before the pass. What
+                    // bounds that loop is the run's budget, which ends in the model's words.
+                    let repeated_or_refused = !progressed
+                        && failed.iter().any(|(call, result)| {
+                            (!result.ok && (names_the_catalog(call) || is_broad_walk_call(call)))
+                                || repeats_last_failure(call, last_failed_key.as_deref())
+                        });
+                    if failed
                         .iter()
-                        .any(|result| intent::is_unrecoverable_command_miss(&result.content))
+                        .any(|(call, result)| is_missing_catalog_binary(call, &result.content))
                     {
                         work_fail_streak = intent::MAX_FAILED_WORK_ROUNDS;
                     } else if !argv_mistake {
-                        work_fail_streak = work_fail_streak.saturating_add(1);
+                        work_fail_streak = if repeated_or_refused {
+                            work_fail_streak.saturating_add(1)
+                        } else {
+                            1
+                        };
                     }
+                    last_failed_key = failed.last().map(|(call, _)| failure_key(call));
                 } else if work_ok && !skip_listing {
                     // A synthetic "already listed" ok is not a catalog read. Clearing
                     // last_failure here is how a later skip finished with a blank chat.
                     work_fail_streak = 0;
                     last_failure = None;
+                    last_failed_key = None;
                 }
 
                 let waiting: Vec<Waiting> = results
@@ -1344,13 +1730,15 @@ async fn converse_raw(
                 } else {
                     spoken_rounds += 1;
                 }
-                let over = if spoken_rounds >= MAX_ROUNDS {
+                let over = if spoken_rounds >= budget.max_rounds {
                     Some(format!(
-                        "this run reached its limit of {MAX_ROUNDS} model calls"
+                        "this run reached its limit of {} model calls",
+                        budget.max_rounds
                     ))
-                } else if computer_rounds >= MAX_COMPUTER_ROUNDS {
+                } else if computer_rounds >= budget.max_computer_rounds {
                     Some(format!(
-                        "this run reached its limit of {MAX_COMPUTER_ROUNDS} looks and actions on its computer"
+                        "this run reached its limit of {} looks and actions on its computer",
+                        budget.max_computer_rounds
                     ))
                 } else {
                     None
@@ -1358,11 +1746,19 @@ async fn converse_raw(
                 if let Some(why) = over {
                     // An opened target or editor is the answer, so spending the last call on it
                     // finishes with its sentence rather than failing.
-                    let ending = match opened.clone() {
-                        Some((_, sentence)) => Ending::Finish(Some(sentence)),
-                        None => Ending::Fail(why),
-                    };
-                    end_run!(round_events, ending);
+                    if let Some((_, sentence)) = opened.clone() {
+                        end_run!(round_events, Ending::Finish(Some(sentence)));
+                    }
+                    // DURABLE BEFORE THE WRAP-UP CALL, as before any call.
+                    if let Err(error) = record_round(journal, run_id, &round_events).await {
+                        all.append(&mut round_events);
+                        end_run!(
+                            Vec::new(),
+                            Ending::Fail(format!("the run could not be recorded: {error}"))
+                        );
+                    }
+                    all.append(&mut round_events);
+                    wrap_up!(why);
                 }
 
                 // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
@@ -1411,9 +1807,58 @@ async fn converse_raw(
         Vec::new(),
         Ending::Fail(format!(
             "this run reached its loop bound of {} rounds",
-            MAX_ROUNDS + MAX_COMPUTER_ROUNDS
+            budget.max_rounds + budget.max_computer_rounds
         ))
     );
+}
+
+/// The wrap-up call itself: the conversation so far, a harness line saying why this is the last
+/// call, and no tools. Only words and reasoning are painted — a model that asks for a tool
+/// anyway is not given one. Returns the round and how it ends.
+async fn wrap_up(
+    door: &dyn ModelDoor,
+    request: &ModelRequest,
+    budget: &RunBudget,
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    timing: &mut timing::TurnTiming,
+    why: String,
+) -> (Vec<Event>, Ending) {
+    let mut ask = request.clone();
+    ask.tools.clear();
+    ask.messages.push(ChatMessage::text(
+        "user",
+        format!(
+            "[harness] {why}, so this is the last call and no tools are offered. In two or three \
+             sentences, tell the person what was done and what is left. Do not ask for a tool."
+        ),
+    ));
+    keep_recent_images(&mut ask.messages, RECENT_IMAGES);
+    let started = std::time::Instant::now();
+    let mut round = Vec::new();
+    let streamed: Result<(), ModelError> = async {
+        let mut stream = budget.open(door, ask).await?;
+        while let Some(delta) = budget.next(&mut stream).await {
+            let delta = delta?;
+            if matches!(delta, ModelDelta::Text(_) | ModelDelta::Reasoning(_)) {
+                let produced = projection.push(delta);
+                emit_live(sink, &produced).await;
+                round.extend(produced);
+            }
+        }
+        Ok(())
+    }
+    .await;
+    timing.record_model(timing::elapsed_ms(started));
+    if let Err(error) = &streamed {
+        tracing::warn!(%error, "the wrap-up call failed; the run ends on its budget");
+    }
+    if streamed.is_ok() && round_has_assistant_text(&round) {
+        timing.wrapped_up(&why);
+        (round, Ending::Finish(None))
+    } else {
+        (round, Ending::Fail(why))
+    }
 }
 
 /// Computer-step shots are `agent`: live SSE may carry the PNG for the Computer pane, but the

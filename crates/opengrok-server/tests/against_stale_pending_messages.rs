@@ -557,7 +557,8 @@ async fn a_refused_turn_leaves_the_queued_send_alone() {
                 "forbidden",
                 json!({"pendingId": id, "coworkerId": ungranted}),
             ),
-            403,
+            // Not on the caller's roster, so the run door answers as for any unknown coworker.
+            404,
         ),
         (None, turn("anonymous", json!({"pendingId": id})), 401),
         (

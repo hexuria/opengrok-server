@@ -129,6 +129,10 @@ impl ModelDoor for CloakedDoor {
         let inner = self.inner.stream(request).await?;
         Ok(Box::pin(restoring(inner, session)))
     }
+
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        self.inner.ready().await
+    }
 }
 
 /// The conversation key, mirroring the gateway's spend pin.
