@@ -1155,9 +1155,8 @@ pub async fn repin_coworker(
         }
     }
     // `notifyOnUpdates` arrives from the app and is READ NOWHERE, deliberately. Nothing on this
-    // server stores it: the seam-B roster answers a constant `true` (`gateway/summaries.rs`) and
-    // the desktop client keeps the real answer in its own settings file
-    // (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
+    // server stores it, `coworker_row` never answers it, and the desktop client keeps the real
+    // answer in its own settings file (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
     // inventing one to make a toggle look persistent is worse than the toggle not persisting.
     //
     // So a body naming nothing this route can change — including one carrying only that toggle —
@@ -1278,34 +1277,56 @@ pub async fn repin_coworker(
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
         }
     }
+    // The same row the roster lists, by construction: the app overwrites its row from this reply
+    // and relaunches onto `GET /coworkers`, so two spellings of one coworker is a coworker that
+    // changes shape on restart.
+    Json(coworker_row(&view, Some(&profile), hidden_from_sidebar)).into_response()
+}
+
+/// One coworker, as every route that answers with one spells it — the roster and the PATCH reply.
+///
+/// camelCase throughout, because that is what the app's `Coworker` deserialises: a snake_case
+/// key is a field it silently reads as absent, which is how #27 lost a whole reply, and how the
+/// roster (which serialized the core `CoworkerView` as-is) lost the sort key, the title and the
+/// avatar on every relaunch. `title`, `avatarShape`, `avatarColor`, `isGroup` and `memberIds` are
+/// the desktop roster's names (`docs/research/client-grok-bot.md` §8.1, from
+/// `source/host/extensions/session/session-summaries.ts:13-16`); `updatedAtMs` and `boxId` are
+/// the spellings the hire and PATCH replies already answer with.
+///
+/// Every key is always present, null when unset: a key that is sometimes missing is a shape the
+/// app has to guess about. `retired` is not a key because a retired coworker is never a row.
+/// `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant would
+/// overwrite the toggle the person just moved.
+pub(crate) fn coworker_row(
+    view: &opengrok_core::coworker::CoworkerView,
+    profile: Option<&serde_json::Value>,
+    hidden_from_sidebar: bool,
+) -> serde_json::Value {
     // Blank reads as absent, the way `Persona::compose` reads the same blob: a cleared title is
     // a coworker with no title, not one called "".
     let decorated = |key: &str| {
         profile
-            .get(key)
+            .and_then(|profile| profile.get(key))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string)
     };
-    // camelCase throughout, because that is what the app's `Coworker` deserialises — a
-    // snake_case key here is a field it silently reads as absent, which is how #27 lost a whole
-    // reply. `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant
-    // would overwrite the toggle the person just moved.
-    Json(serde_json::json!({
-        "id": coworker_id.as_str(),
-        "name": after.name,
-        "model": after.model,
-        "role": after.role,
+    serde_json::json!({
+        "id": view.id.as_str(),
+        "name": view.name,
+        "model": view.model,
+        "role": view.role,
         "title": decorated("title"),
         "avatarShape": decorated("avatarShape"),
         "avatarColor": decorated("avatarColor"),
-        "visibility": after.visibility.as_str(),
+        "visibility": view.visibility.as_str(),
         "hiddenFromSidebar": hidden_from_sidebar,
-        "updatedAtMs": at_ms,
-        "boxId": after.box_id.as_ref().map(|id| id.as_str()),
-    }))
-    .into_response()
+        "updatedAtMs": view.updated_at_ms,
+        "boxId": view.box_id.as_ref().map(|id| id.as_str()),
+        "isGroup": !view.members.is_empty(),
+        "memberIds": view.members.iter().map(CoworkerId::as_str).collect::<Vec<_>>(),
+    })
 }
 
 /// `DELETE /coworkers/{id}` — retire this coworker. Same ownership 404 as every other
@@ -1648,19 +1669,23 @@ pub async fn list_coworkers(
         Ok(ids) => ids,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    // A 503 rather than rows without their decoration: a roster that answers 200 with every
+    // title and avatar quietly gone is the app repainting a correct sidebar as a wrong one.
+    let ids: Vec<CoworkerId> = coworkers.iter().map(|view| view.id.clone()).collect();
+    let profiles = match state.auth.store.seamb_profiles(&ids).await {
+        Ok(profiles) => profiles,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
     // An ARRAY, always. An empty roster is a valid answer and must not become null or an
     // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
     let rows: Vec<serde_json::Value> = coworkers
-        .into_iter()
-        .map(|coworker| {
-            let mut row = serde_json::to_value(&coworker).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(object) = row.as_object_mut() {
-                object.insert(
-                    "hiddenFromSidebar".to_string(),
-                    serde_json::json!(hidden.contains(coworker.id.as_str())),
-                );
-            }
-            row
+        .iter()
+        .map(|view| {
+            coworker_row(
+                view,
+                profiles.get(view.id.as_str()),
+                hidden.contains(view.id.as_str()),
+            )
         })
         .collect();
     Json(rows).into_response()

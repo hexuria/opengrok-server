@@ -386,3 +386,85 @@ async fn a_wrong_typed_or_unknown_field_is_refused_like_the_others() {
         "every refusal above stored nothing"
     );
 }
+
+/// The roster answers the same resource the PATCH reply does, in the same spelling.
+///
+/// It used to serialize the core `CoworkerView` straight onto the wire: `box_id`,
+/// `updated_at_ms`, `retired`, `members`, and none of the decoration the PATCH had just stored.
+/// The app overwrites its row from the PATCH reply, then relaunches onto the roster — and a
+/// snake_case key is one it silently reads as absent (#27), so the sort key, the title and the
+/// avatar all went missing the first time it restarted.
+#[tokio::test]
+async fn the_roster_row_speaks_the_same_camelcase_as_the_patch_reply() {
+    let database_url = database_or_skip!();
+    let email = format!("roster-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let access = h.access(&email);
+    let agent = h.hire(&access, "Ada").await;
+
+    let (status, patched) = h
+        .patch(
+            &access,
+            &agent,
+            json!({
+                "title": "a release engineer",
+                "avatarShape": "hex",
+                "avatarColor": "amber",
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{patched}");
+
+    let row = h.row(&access, &agent).await;
+    let keys: Vec<&String> = row
+        .as_object()
+        .expect("a row is an object")
+        .keys()
+        .collect();
+    assert!(
+        keys.iter().all(|key| !key.contains('_')),
+        "a snake_case key on the roster is one the app reads as absent: {row}"
+    );
+    assert!(
+        row["updatedAtMs"].as_i64().is_some(),
+        "the client's sort key: {row}"
+    );
+    assert!(
+        row.as_object().is_some_and(|row| row.contains_key("boxId")),
+        "present even when null, so absent and unassigned read the same: {row}"
+    );
+    for key in [
+        "id",
+        "name",
+        "model",
+        "role",
+        "title",
+        "avatarShape",
+        "avatarColor",
+        "visibility",
+        "hiddenFromSidebar",
+        "boxId",
+    ] {
+        assert_eq!(
+            row[key], patched[key],
+            "{key}: roster {row} vs reply {patched}"
+        );
+    }
+    assert_eq!(row["title"], "a release engineer", "{row}");
+    assert_eq!(row["avatarShape"], "hex", "{row}");
+    assert_eq!(row["visibility"], "private", "{row}");
+    assert_eq!(row["hiddenFromSidebar"], false, "{row}");
+    assert_eq!(row["isGroup"], false, "{row}");
+    assert_eq!(row["memberIds"], json!([]), "{row}");
+
+    // A coworker with no profile row still carries the keys, as null: a key that is sometimes
+    // missing is a shape the app has to guess about.
+    let bare = h.hire(&access, "Bob").await;
+    let row = h.row(&access, &bare).await;
+    for key in ["title", "avatarShape", "avatarColor"] {
+        assert!(
+            row.as_object().is_some_and(|row| row.contains_key(key)) && row[key].is_null(),
+            "{key} on an undecorated coworker: {row}"
+        );
+    }
+}
