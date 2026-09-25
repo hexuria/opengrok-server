@@ -9,7 +9,7 @@
 //! CLOSED BY DEFAULT. The default mode is `Never` (the channel is off), an unknown command in `Ask`
 //! mode is `Ask` (a person decides, never a silent yes), and deny always beats allow. The only path
 //! to an automatic yes is an explicit allowlist rule under `Ask`, or the deliberately-enabled
-//! `Bypass`. See `docs/reverse-exec-design.md`.
+//! `Bypass`. See `docs/archive/reverse-exec-design.md`.
 
 pub mod broker;
 mod wire;
@@ -90,9 +90,11 @@ fn first_command(pattern: &str) -> &str {
 /// `sudo.exe`, any path, any arguments) is refused, because a standing allow
 /// on `sudo` would silently cover `sudo rm -rf /`.
 ///
-/// Both writers go through this: `POST /local-exec/policy/rule` and the
-/// Always/Never card in `conversation`. The store itself is not a writer of
-/// policy, only of rows.
+/// The one writer of standing rules is `POST /local-exec/policy/rule`. The
+/// AG-UI card's answer is only `approved: bool` (`agui::routes::AnswerRequest`)
+/// and writes no rule; a client's Always/Never must post to that endpoint, so
+/// any future writer goes through this function too. The store writes rows,
+/// never policy.
 pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> {
     if kind != "allow" {
         return None;
@@ -722,7 +724,7 @@ async fn run_on_machine(
     {
         Ok(rx) => rx,
         Err(DispatchError::NoDaemon) => {
-            let out = ExecOutcome::malformed("the daemon for this machine is not connected");
+            let out = ExecOutcome::offline("the daemon for this machine is not connected");
             let _ = state
                 .store
                 .finish_local_exec_audit(request_id, &out.case, out.exit_code, now_ms())
@@ -922,7 +924,10 @@ async fn post_responses(
                     }
                     // streamClose / heartbeat carry no result — nothing to resolve.
                 }
-                // hello / ping / file / messages-* — acknowledged, nothing to resolve.
+                // hello / ping / file / messages-* — acknowledged, nothing to resolve. `hello`
+                // is known (`hello{localRoot, terminalsFolder, computerId, label, …}`) but its
+                // macOS `grants` are not built on either side yet: storing them waits on #147
+                // stage 5, whose shape must be transcribed from the client, not guessed here.
                 _ => {}
             }
         }

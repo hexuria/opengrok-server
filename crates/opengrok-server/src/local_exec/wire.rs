@@ -64,7 +64,9 @@ pub fn shell_server_message(
     })
 }
 
-/// The six ShellResult oneof cases, in field order — the vocabulary the audit's `outcome` records.
+/// The six ShellResult oneof cases, in field order — what a daemon may report. The audit's
+/// `outcome` also holds the server's own `offline` (`ExecOutcome::offline`), which is kept out of
+/// this list so no daemon frame can claim it.
 const RESULT_CASES: &[&str] = &[
     "success",
     "failure",

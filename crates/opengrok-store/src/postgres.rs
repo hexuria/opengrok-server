@@ -1966,8 +1966,8 @@ impl PgStore {
     }
 
     /// Record a command's result on its audit row: the ShellResult `outcome` case (success /
-    /// failure / timeout / rejected / spawnError / permissionDenied) and, when there is one, the
-    /// process exit code. A refusal is a case with no exit code, not a non-zero exit.
+    /// failure / timeout / rejected / spawnError / permissionDenied, or `offline`) and, when there
+    /// is one, the process exit code. A refusal is a case with no exit code, not a non-zero exit.
     pub async fn finish_local_exec_audit(
         &self,
         id: &str,

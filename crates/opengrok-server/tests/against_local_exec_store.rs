@@ -381,5 +381,21 @@ async fn an_allowed_command_with_no_daemon_is_refused_not_hung() {
         .await
         .expect("log");
     assert_eq!(log[0]["decision"], "allow");
-    assert_eq!(log[0]["outcome"], "spawnError");
+    // A Mac that is asleep or signed out is not a command that failed to spawn. The audit keeps
+    // the two apart so "what happened on my laptop" does not read as a broken daemon.
+    assert_eq!(log[0]["outcome"], "offline");
+}
+
+#[test]
+fn offline_outcome_is_its_own_case() {
+    let offline = ExecOutcome::offline("the daemon for this machine is not connected");
+    assert_eq!(offline.case, "offline");
+    assert_eq!(offline.exit_code, None);
+    assert!(!offline.succeeded());
+    assert_eq!(
+        offline.render(),
+        "offline: the daemon for this machine is not connected"
+    );
+    // A garbled reply is still spawnError: offline is only for a machine nobody could reach.
+    assert_eq!(ExecOutcome::malformed("garbled").case, "spawnError");
 }
