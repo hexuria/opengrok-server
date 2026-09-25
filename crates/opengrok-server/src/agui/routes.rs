@@ -1374,15 +1374,25 @@ async fn hide_shared(
 /// roster (which serialized the core `CoworkerView` as-is) lost the sort key, the title and the
 /// avatar on every relaunch.
 ///
-/// Provenance, key by key, because no NativeChat source is in this checkout and the struct that
-/// decodes this row is its `Coworker`: `title`, `avatarShape`, `avatarColor`, `isGroup` and
-/// `memberIds` are the Electron host's roster names (`docs/research/client-grok-bot.md` §8.1,
-/// transcribed from `source/host/extensions/session/session-summaries.ts:13-16`). §8.1 spells
-/// the sort key `updatedAt` and the hide flag `isHiddenFromSidebar`; this row keeps
-/// `updatedAtMs`, `hiddenFromSidebar` and `boxId`, the spellings the hire and PATCH replies
-/// already answered NativeChat with before this row existed, so renaming one to match §8.1
-/// would break the client that reads it today. The permission keys are server precedent (below).
-/// Checking these against NativeChat's `Coworker` is the client's half.
+/// Provenance, key by key. The decoder of this row is NativeChat's `Coworker`, hexuria/nativechat
+/// `src/opengrok/types.rs:54-79` (at 2af9e60), `#[serde(rename_all = "camelCase")]`; the roster is
+/// its `Vec<Coworker>` and the hire and PATCH replies one `Coworker` (`src/opengrok/client.rs`
+/// `list_coworkers`, `hire`, `patch_coworker`). `id` is its one required key. `name`, `model`
+/// (`String`), `updatedAtMs` (`i64`, aliases `updated_at_ms` and `updatedAt`) and
+/// `hiddenFromSidebar` (`bool`) are `#[serde(default)]`, which covers a missing key and not a null
+/// one: a null in any of them fails the decode (on the roster, one row's null fails the whole
+/// array), so the row never sends one. `hiddenFromSidebar`'s only alias is its own spelling, so
+/// `hidden_from_sidebar` or §8.1's `isHiddenFromSidebar` would be skipped and read as false — every
+/// hidden coworker back in the sidebar. `role`, `title`, `avatarShape`, `avatarColor` and `boxId`
+/// (aliases `boxId` and `box_id`) are `Option<String>`, null reading as unset. The struct has no
+/// `deny_unknown_fields`, so `visibility`, `isGroup`, `memberIds`, `mine`, `canManage` and `owner`
+/// (and the hire reply's extras) are ignored by it, not refused. `title`, `avatarShape`,
+/// `avatarColor`, `isGroup` and `memberIds` are also the Electron host's roster names
+/// (`docs/research/client-grok-bot.md` §8.1, transcribed from
+/// `source/host/extensions/session/session-summaries.ts:13-16`). §8.1 spells the sort key
+/// `updatedAt` and the hide flag `isHiddenFromSidebar`; this row keeps NativeChat's primary
+/// spellings, because the second of those is not an alias its decoder accepts. The permission keys
+/// are server precedent (below).
 ///
 /// Every key is always present, null when unset: a key that is sometimes missing is a shape the
 /// app has to guess about. `retired` is not a key because a retired coworker is never a row.
