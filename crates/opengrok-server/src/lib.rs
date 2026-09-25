@@ -150,7 +150,11 @@ async fn trace_request(
     use tracing::Instrument as _;
 
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    // A screen-proxy path carries its ticket, and the page's query the box's VNC password.
+    let uri = match req.uri().path().split_once("/computer/vnc/") {
+        Some((head, _)) => format!("{head}/computer/vnc/<ticket>"),
+        None => req.uri().to_string(),
+    };
     let id = request_id(req.headers());
     let has_origin = req.headers().contains_key(axum::http::header::ORIGIN);
     let auth_len = req

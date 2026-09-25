@@ -881,6 +881,7 @@ pub async fn scoped_box_row_for(
 /// omitted on pure `state: absent` (no scoped computer); NativeChat hides the control then.
 pub async fn coworker_screen(
     state: &AgUiState,
+    headers: &axum::http::HeaderMap,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Value {
@@ -957,7 +958,7 @@ pub async fn coworker_screen(
         .state(&box_id)
         .await
         .unwrap_or_else(|_| "unknown".to_string());
-    let (vnc_url, image) = if live_state == "running" {
+    let (mut vnc_url, image) = if live_state == "running" {
         (
             provider.screen_url(&box_id).await.ok().flatten(),
             provider.image_status(&box_id).await.ok(),
@@ -965,6 +966,24 @@ pub async fn coworker_screen(
     } else {
         (None, None)
     };
+    // A Local VM's page is on this host's loopback, which the person's app — on another machine
+    // whenever the gateway is not loopback — cannot open; it is served through this server. No
+    // reachable origin means no live screen rather than a URL that cannot load.
+    if kind == "local-docker" {
+        vnc_url = vnc_url.and_then(|local| {
+            let origin = super::screen_proxy::public_origin(&state.auth.public_url, headers)?;
+            let now = chrono::Utc::now().timestamp();
+            super::screen_proxy::proxied_page(
+                &state.auth.minter,
+                &origin,
+                account_id,
+                coworker_id,
+                &box_id,
+                &local,
+                now,
+            )
+        });
+    }
     // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself.
     let cap = provider.egress_tunnel(&box_id).await;
     let mut screen = json!({

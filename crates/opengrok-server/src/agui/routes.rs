@@ -937,6 +937,10 @@ pub fn router(state: AgUiState) -> Router {
             get(computer_status).post(ensure_computer),
         )
         .route("/coworkers/{coworker_id}/screen", get(computer_screen))
+        .route(
+            "/coworkers/{coworker_id}/computer/vnc/{ticket}/{*rest}",
+            get(super::screen_proxy::serve),
+        )
         .route("/coworkers/{coworker_id}/tools", get(list_tools))
         .route(
             "/coworkers/{coworker_id}/computer/update",
@@ -1848,7 +1852,8 @@ async fn computer_status(
         Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
         Err(refusal) => return refusal,
     }
-    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
+    Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await)
+        .into_response()
 }
 
 /// The person's standing answer, for this coworker's computer, to the tunnel's card.
@@ -2066,7 +2071,7 @@ async fn computer_update(
     }
     (
         StatusCode::ACCEPTED,
-        Json(provision::coworker_screen(&state, &account_id, &coworker_id).await),
+        Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await),
     )
         .into_response()
 }
@@ -2095,7 +2100,8 @@ async fn computer_reset(
         )
             .into_response();
     }
-    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
+    Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await)
+        .into_response()
 }
 
 /// `POST /coworkers/{id}/computer` — ensure the box is running, then return the same status.
@@ -2145,7 +2151,8 @@ async fn ensure_computer(
         }
     }
     provision::wake_coworker_computer(&state, &account_id, &coworker_id).await;
-    Json(provision::coworker_screen(&state, &account_id, &coworker_id).await).into_response()
+    Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await)
+        .into_response()
 }
 
 /// `GET /coworkers/{id}/spend` — the coworker's three meters and the limits it is under.

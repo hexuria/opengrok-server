@@ -2044,6 +2044,8 @@ dependencies = [
  "cred-swap-core",
  "futures",
  "hickory-resolver",
+ "hyper 1.11.1",
+ "hyper-util",
  "jsonwebtoken",
  "opengrok-box",
  "opengrok-core",
