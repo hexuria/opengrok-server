@@ -50,6 +50,8 @@ pub struct AuthState {
     /// The Resend API key, if configured. `None` ⇒ no mailer, so signup auto-verifies (Uriah's
     /// "if we have set resend api ... if not skip it"). The key never leaves the server.
     pub resend_api_key: Option<String>,
+    /// Where a mail is sent (`resend::ENDPOINT`); a test points it at a stand-in mailbox.
+    pub resend_endpoint: String,
     /// The base URL a verification link points back at (this server, as the client reaches it).
     pub public_url: String,
     /// The reverse-exec transport broker — the live meeting point of a machine's daemon stream and
@@ -114,6 +116,7 @@ impl AuthState {
             minter,
             login_email,
             resend_api_key: None,
+            resend_endpoint: super::resend::ENDPOINT.to_string(),
             public_url: String::new(),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
@@ -155,6 +158,24 @@ impl AuthState {
         self.resend_api_key = key.filter(|k| !k.is_empty());
         self.public_url = public_url;
         self
+    }
+
+    /// Send mail somewhere other than Resend — a test's stand-in mailbox.
+    #[must_use]
+    pub fn with_resend_endpoint(mut self, endpoint: String) -> Self {
+        self.resend_endpoint = endpoint;
+        self
+    }
+
+    /// The mailer, when this deployment has one.
+    #[must_use]
+    pub fn mailer(&self) -> Option<super::resend::Mailer> {
+        self.resend_api_key
+            .as_ref()
+            .map(|key| super::resend::Mailer {
+                endpoint: self.resend_endpoint.clone(),
+                key: key.clone(),
+            })
     }
 
     /// Point the catalogue at an explicit gateway — what a test uses to stand in for a real one
@@ -203,6 +224,13 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/refresh", post(refresh_cookie))
         .route("/auth/signup", post(super::identity::signup))
         .route("/auth/verify", get(super::identity::verify_email))
+        // A link that expired or never arrived: the styled card the sign-in page links to, and the
+        // JSON the console's login page calls. Budgeted and constant, like a reset.
+        .route("/auth/verify/resend", post(super::identity::resend_json))
+        .route(
+            "/resend-verification",
+            get(super::identity::resend_page).post(super::identity::resend_form),
+        )
         .route(
             "/signup",
             get(super::identity::signup_page).post(super::identity::signup_form),
@@ -375,8 +403,8 @@ pub(crate) async fn authenticate(
         Err(AccountError::NotVerified) => {
             return Err((
                 StatusCode::FORBIDDEN,
-                "Your email is not verified yet. Check your inbox for the link, or ask your \
-                 administrator to verify it."
+                "Your email is not verified yet. Open the link we emailed you, ask for a new one \
+                 (Resend verification email), or ask your administrator to verify it."
                     .to_string(),
             ));
         }

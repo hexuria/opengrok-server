@@ -172,7 +172,10 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   ready test identity (the multi-account-under-a-different-name need).
 - [x] **12.4** HTTP — `POST /auth/signup` (both gates), the credential form at `/loginDeepControl`
   (superseding 9.1b's opener-is-host), `GET /auth/verify`. Resend behind `OG_RESEND_API_KEY`:
-  set ⇒ send + require verification, unset ⇒ auto-verify.
+  set ⇒ send + require verification, unset ⇒ auto-verify. A link that expired or never arrived is
+  re-sent on request (`POST /auth/verify/resend`, the styled `/resend-verification` card the
+  sign-in page links to): a constant `202`, budgeted per peer and per mailbox like a reset. The
+  binary warns at boot when a key is set with no `RESEND_FROM_EMAIL` of the operator's own.
 - [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
   verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
 - [x] **12.later** Domain OWNERSHIP proof + password reset. Two ways a domain gets in, one meaning

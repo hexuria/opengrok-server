@@ -760,3 +760,178 @@ async fn a_member_whose_verification_mail_never_arrived_can_be_verified_by_their
     assert!(page.contains("could not be sent"), "{page}");
     assert!(page.contains("administrator"), "{page}");
 }
+
+/// A stand-in for Resend's send endpoint: every body posted to it, in order.
+async fn spawn_mailbox() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    let mail = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inbox = mail.clone();
+    let app = axum::Router::new().route(
+        "/emails",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let inbox = inbox.clone();
+            async move {
+                inbox.lock().expect("inbox").push(body);
+                axum::Json(serde_json::json!({ "id": "stand-in" }))
+            }
+        }),
+    );
+    let base = spawn(app).await;
+    (format!("{base}/emails"), mail)
+}
+
+/// Wait for the mailbox to hold `count` mails — the send is on its own task by design.
+async fn mail_count_reaches(mail: &std::sync::Mutex<Vec<serde_json::Value>>, count: usize) -> bool {
+    for _ in 0..100 {
+        if mail.lock().expect("inbox").len() >= count {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The `token=` a mail's link carries.
+fn token_in(mail: &serde_json::Value) -> String {
+    let html = mail["html"].as_str().expect("html");
+    let start = html.find("token=").expect("a link") + "token=".len();
+    html[start..].split('"').next().expect("token").to_string()
+}
+
+/// A LINK THAT EXPIRED OR NEVER ARRIVED HAD NO WAY BACK but the admin. The person asks for a new
+/// one: a waiting account gets a fresh 24-hour link that works; an unknown or already-verified
+/// address gets the same 202 and no mail; and the door is budgeted per mailbox (so one inbox
+/// cannot be flooded from many peers) and per peer (so one peer cannot walk the address book).
+#[tokio::test]
+async fn a_waiting_member_can_ask_for_a_new_verification_link_and_the_reply_never_says_who() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let stamp = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("resend-{stamp}.test");
+    let (_org, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let (endpoint, mail) = spawn_mailbox().await;
+    let auth = AuthState::new(
+        store.clone(),
+        Arc::new(TokenMinter::new(b"verify-resend-secret")),
+        "host@og.local".to_string(),
+    )
+    .with_resend(
+        Some("re_stand_in".to_string()),
+        "http://og.test".to_string(),
+    )
+    .with_resend_endpoint(endpoint);
+    let base = spawn(router_for(auth)).await;
+    let client = reqwest::Client::new();
+    let cookie = cookie_login(&client, &base, &admin_email, "adminpass1").await;
+
+    // Jo signs up; the first mail goes out and is lost.
+    let code = issue_invite(&client, &base, &cookie).await;
+    let jo = format!("jo@{domain}");
+    let res = client
+        .post(format!("{base}/auth/signup"))
+        .json(&serde_json::json!({ "email": jo, "password": "password1", "code": code }))
+        .send()
+        .await
+        .expect("signup");
+    assert_eq!(res.status(), 201);
+    assert!(mail_count_reaches(&mail, 1).await, "the signup mail");
+
+    let resend = |email: &str, peer: &str| {
+        client
+            .post(format!("{base}/auth/verify/resend"))
+            .header("x-forwarded-for", peer)
+            .json(&serde_json::json!({ "email": email }))
+            .send()
+    };
+    let constant = serde_json::json!({ "accepted": true, "mailer": true });
+
+    // Jo asks again and gets a second, working link.
+    let res = resend(&jo, "10.1.1.1").await.expect("resend");
+    assert_eq!(res.status(), 202);
+    assert_eq!(
+        res.json::<serde_json::Value>().await.expect("json"),
+        constant
+    );
+    assert!(mail_count_reaches(&mail, 2).await, "the resent mail");
+    let second = mail.lock().expect("inbox")[1].clone();
+    assert_eq!(second["to"], serde_json::json!([jo]));
+    let page = client
+        .get(format!("{base}/auth/verify?token={}", token_in(&second)))
+        .send()
+        .await
+        .expect("verify");
+    assert_eq!(page.status(), 200);
+    assert!(page.text().await.expect("page").contains("verified"));
+    let jo_view = store
+        .account_by_email(&jo)
+        .await
+        .expect("read")
+        .expect("jo");
+    assert!(jo_view.verified, "the resent link verified the address");
+
+    // A verified address and a stranger's guess: the same reply, and no mail for either.
+    for email in [jo.clone(), format!("nobody-{stamp}@{domain}")] {
+        let res = resend(&email, "10.1.1.1").await.expect("resend");
+        assert_eq!(res.status(), 202);
+        assert_eq!(
+            res.json::<serde_json::Value>().await.expect("json"),
+            constant
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        mail.lock().expect("inbox").len(),
+        2,
+        "no mail to a verified or unknown address"
+    );
+
+    // Per mailbox: five from five peers, then the sixth is refused whoever sends it.
+    let target = format!("target-{stamp}@{domain}");
+    for n in 1..=5 {
+        let res = resend(&target, &format!("10.2.0.{n}"))
+            .await
+            .expect("resend");
+        assert_eq!(res.status(), 202, "hit {n}");
+    }
+    let res = resend(&target, "10.2.0.6").await.expect("resend");
+    assert_eq!(res.status(), 429, "one mailbox, many peers");
+    assert!(res.headers().contains_key(reqwest::header::RETRY_AFTER));
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert!(
+        body["retryAfterSecs"].as_u64().is_some_and(|secs| secs > 0),
+        "{body}"
+    );
+
+    // Per peer: five mailboxes from one address, then the sixth is refused.
+    for n in 1..=5 {
+        let res = resend(&format!("walk-{n}-{stamp}@{domain}"), "10.3.0.1")
+            .await
+            .expect("resend");
+        assert_eq!(res.status(), 202, "mailbox {n}");
+    }
+    let res = resend(&format!("walk-6-{stamp}@{domain}"), "10.3.0.1")
+        .await
+        .expect("resend");
+    assert_eq!(res.status(), 429, "one peer, many mailboxes");
+
+    // The sign-in card links to the styled resend card, which is a form while a mailer is wired.
+    let login = client
+        .get(format!(
+            "{base}/loginDeepControl?challenge=c&uuid=u-{stamp}"
+        ))
+        .send()
+        .await
+        .expect("login page")
+        .text()
+        .await
+        .expect("text");
+    assert!(login.contains("/resend-verification"), "{login}");
+    let card = client
+        .get(format!("{base}/resend-verification"))
+        .send()
+        .await
+        .expect("card")
+        .text()
+        .await
+        .expect("text");
+    assert!(card.contains("action=\"/resend-verification\""), "{card}");
+}

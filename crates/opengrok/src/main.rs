@@ -81,6 +81,20 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .or_else(|| std::env::var("RESEND_API").ok())
         .filter(|key| !key.is_empty());
+    // A Resend key with no sender of our own sends from the built-in default, whose domain the
+    // operator's Resend account has almost certainly never verified — so EVERY verification mail
+    // is refused, and each signup is an account stranded until someone resends or vouches for it.
+    if resend_key.is_some()
+        && std::env::var("RESEND_FROM_EMAIL")
+            .map(|from| from.trim().is_empty())
+            .unwrap_or(true)
+    {
+        tracing::warn!(
+            default = opengrok_server::auth::resend::DEFAULT_FROM_EMAIL,
+            "OG_RESEND_API_KEY is set but RESEND_FROM_EMAIL is not; mail goes out from the default \
+             sender, and Resend refuses every send unless that domain is verified in your account"
+        );
+    }
     let dev_sign_in = std::env::var("OG_DEV_SIGN_IN").as_deref() == Ok("1");
     if dev_sign_in {
         tracing::warn!(

@@ -1,6 +1,6 @@
 //! Budgets for the doors anybody on the network can call in a loop.
 //!
-//! Password-reset mail, dynamic client registration, the credential forms and a domain lookup
+//! Password-reset and verification mail, dynamic client registration, the credential forms and a domain lookup
 //! take no credential (or take one they are about to check), so nothing else bounds what they
 //! cost: a mail per call, a row per call, a hash per call, a DNS query per call. Each gets a
 //! budget — so many hits per key per window — and once it is spent the door answers 429 with a
@@ -41,6 +41,13 @@ pub struct Budget {
 /// either way, so the budget discloses nothing about whether the address has an account.
 pub const FORGOT: Budget = Budget {
     name: "forgot",
+    per_window: 5,
+    window_ms: HOUR_MS,
+};
+/// `POST /auth/verify/resend` (both bodies): a mail per call, budgeted exactly like `FORGOT` and
+/// for the same reasons — per address and per mailbox, with a reply that never changes.
+pub const VERIFY_RESEND: Budget = Budget {
+    name: "verify-resend",
     per_window: 5,
     window_ms: HOUR_MS,
 };
