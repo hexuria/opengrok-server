@@ -34,10 +34,11 @@ pub mod skills;
 pub mod spend;
 pub mod templates;
 pub mod vault;
+pub mod vault_rows;
 
 pub use autonomy::{DueSchedule, FiredBy, HookRow, LogEvent};
 pub use gateway::{
-    CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
+    CoworkerKeyView, KeyRefusal, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
 };
 pub use pending::{
@@ -56,6 +57,7 @@ pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersion
 pub use spend::{SpendLimit, SpendScope};
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
+pub use vault_rows::{ResealReport, VaultCheck};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -65,6 +67,10 @@ pub enum StoreError {
     Database(String),
     #[error("a stored event could not be read back: {0}")]
     Corrupt(String),
+    /// A sealed credential that will not open. Its own variant because the cure is a key, not a
+    /// database: folded into `Corrupt` it read as "store unavailable" to the person revealing it.
+    #[error("{0}")]
+    Unopenable(String),
     #[error("the store's lock was poisoned")]
     Poisoned,
 }

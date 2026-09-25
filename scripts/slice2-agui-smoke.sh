@@ -13,6 +13,11 @@ ok()   { echo "  ok: $*"; }
 
 command -v jq >/dev/null || fail "jq is required"
 
+# A Bot is added with a credential (a bot key, or a signed-in token): an unsigned turn ran on the
+# deployment's gateway key with no payer and no meter, so it is refused (25 Sep 2026).
+TOKEN=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=agui-$(date +%s)-$$@og.local" | jq -r '.accessToken')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || fail "dev sign-in returned no token"
+
 THREAD="thread-$(date +%s)"
 # The process id as well as the second: a run id is one run, and two smokes started in the
 # same second used to share one (slice2's run got slice3's turn appended to it).
@@ -22,17 +27,24 @@ BODY=$(cat <<JSON
 JSON
 )
 
+echo "0. an unsigned turn is refused, and says why"
+anon=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui" \
+  -H 'content-type: application/json' -d "${BODY/$RUN/$RUN-anon}" --max-time 10)
+[ "$anon" = "401" ] || fail "an unsigned turn answered $anon, expected 401"
+ok "unsigned → 401"
+
 echo "1. the endpoint streams server-sent events"
 # Its own run id: a run id is used once, and a second POST with one that already has a run is
-# answered with that run (its owner) or refused (anybody else, and an anonymous caller owns
-# nothing). This check only wants the headers of a fresh run.
-headers=$(curl -sS -o /dev/null -D - -X POST "$BASE/ag-ui" \
+# answered with that run (its owner) or refused (anybody else). This check only wants the
+# headers of a fresh run.
+headers=$(curl -sS -o /dev/null -D - -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d "${BODY/$RUN/$RUN-headers}" --max-time 10)
 echo "$headers" | grep -qi "content-type: text/event-stream" \
   || fail "not an event stream: $(echo "$headers" | head -5)"
 ok "content-type is text/event-stream"
 
-raw=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' -d "$BODY" --max-time 10)
+raw=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d "$BODY" --max-time 10)
 events=$(echo "$raw" | sed -n 's/^data: //p')
 [ -n "$events" ] || fail "no data frames in the response"
 

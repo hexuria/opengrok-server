@@ -14,6 +14,10 @@ ok()   { echo "  ok: $*"; }
 
 command -v jq >/dev/null || fail "jq is required"
 
+# Signed in: an unsigned turn is refused (25 Sep 2026) — it had no payer and no meter.
+TOKEN=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=harness-$(date +%s)-$$@og.local" | jq -r '.accessToken')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || fail "dev sign-in returned no token"
+
 # The process id as well as the second: a run id is one run, and two smokes started in the
 # same second used to share one (slice2's run got slice3's turn appended to it).
 RUN="run-$(date +%s)-$$"
@@ -24,7 +28,8 @@ BODY=$(cat <<JSON
 JSON
 )
 
-raw=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' -d "$BODY" --max-time 60)
+raw=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d "$BODY" --max-time 60)
 events=$(echo "$raw" | sed -n 's/^data: //p')
 [ -n "$events" ] || fail "no data frames"
 

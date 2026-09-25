@@ -171,12 +171,15 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   open-code gate and the domain-match gate atomically, each refusal distinguishable.
 - [x] **12.2** `account` extended — argon2id password, name, org, `verified` (Resend-driven),
   `enabled` (admin-flipped); credential login checks all three in order.
-- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account create`) — the
+- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account verify / account create`) — the
   operator bootstraps the first org from shell; no HTTP admin surface. `account create` mints a
   ready test identity (the multi-account-under-a-different-name need).
 - [x] **12.4** HTTP — `POST /auth/signup` (both gates), the credential form at `/loginDeepControl`
   (superseding 9.1b's opener-is-host), `GET /auth/verify`. Resend behind `OG_RESEND_API_KEY`:
-  set ⇒ send + require verification, unset ⇒ auto-verify.
+  set ⇒ send + require verification, unset ⇒ auto-verify. A link that expired or never arrived is
+  re-sent on request (`POST /auth/verify/resend`, the styled `/resend-verification` card the
+  sign-in page links to): a constant `202`, budgeted per peer and per mailbox like a reset. The
+  binary warns at boot when a key is set with no `RESEND_FROM_EMAIL` of the operator's own.
 - [x] **12.v** `slice17-identity-smoke.sh` — CLI bootstrap → invite → domain-gated signup →
   verify → enable → credential login → token; verified live over the LAN. (`796bf61`)
 - [x] **12.later** Domain OWNERSHIP proof + password reset. Two ways a domain gets in, one meaning
@@ -203,6 +206,22 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   `X-Forwarded-For` from the HTTPS front, else one shared `unknown` bucket.
   `tests/against_rate_limits.rs` walks all four over a socket. Per replica on purpose: a limit
   that costs a database write per unauthenticated request defeats itself.
+- [x] **12.limits-agui** `POST /ag-ui` names its caller or refuses (25 Sep 2026): no bearer, or
+  one that is expired, foreign or the wrong kind, is 401 `{"error": …}` — it used to run
+  anonymous on the deployment's gateway key, unmetered. A signed-in turn with no coworker has no
+  key of its own to meter, so it is bounded at 60/hour per account (`budget::AGUI_UNSCOPED`, 429
+  + `Retry-After`); a POST that starts nothing (a retry reattaching to its own run, a stale
+  queued send) is refunded, and a reattach is answered even with the budget spent.
+  `tests/against_a_nameless_caller.rs`.
+- [ ] **12.limits-agui-meter** A signed-in turn with no coworker still runs UNSCOPED on the
+  deployment's key — bounded, not metered, and absent from anybody's usage and pool. #207's
+  "refused or metered against the caller's pool" needs either a per-account gateway key (a new
+  key kind and mint path beside the coworker's) or refusing coworker-less turns outright, which
+  the smokes and several tests drive today. Left open deliberately, not forgotten.
+- [ ] **12.keys-mint-probe** Refuse to mint a coworker key whose org route reaches no provider
+  credential (#208's first box). Waits on a principal-aware probe from open-ai-gateway — the
+  `credentials` count on `GET /admin/api/routes` is blind to the principal (`known-gaps.md` §2).
+  Until then the refusal is found at the first turn and named in the console.
 
 ## Slice 13 — Web console
 

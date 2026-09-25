@@ -99,7 +99,8 @@ pub fn login(challenge: &str, uuid: &str, error: Option<&str>) -> Response {
   <input id=password name=password type=password autocomplete=current-password required>
   <button type=submit>Sign in <span aria-hidden=true>&rarr;</span></button>
 </form>
-<p class=foot><a href="/forgot-password">Forgot your password?</a></p>"##,
+<p class=foot><a href="/forgot-password">Forgot your password?</a>
+ &middot; <a href="/resend-verification">Resend verification email</a></p>"##,
         challenge = escape(challenge),
         uuid = escape(uuid),
     );
@@ -167,6 +168,29 @@ Ask your administrator to reset your password — they can do it from the server
     html(
         StatusCode::OK,
         shell("Forgot password", "Reset your Open Grok password.", &body),
+    )
+}
+
+/// The "send my verification link again" card. `mailer` false ⇒ this server sends no mail, so
+/// the card names the person who can vouch for the address instead of promising a link.
+pub fn resend_verification(mailer: bool) -> Response {
+    let body = if mailer {
+        r##"<form method=post action="/resend-verification">
+  <label for=email>Email</label>
+  <input id=email name=email type=email autocomplete=username required autofocus>
+  <button type=submit>Send a new link <span aria-hidden=true>&rarr;</span></button>
+</form>
+<p class=foot>The new link expires in 24 hours. If it never arrives, your administrator can
+verify your address from the console.</p>"##
+            .to_string()
+    } else {
+        r##"<p class=msg>This server is not set up to send email, so it cannot mail a verification
+link. Ask your administrator to verify your address — they can do it from the console.</p>"##
+            .to_string()
+    };
+    html(
+        StatusCode::OK,
+        shell("Verify your email", "Get a new verification link.", &body),
     )
 }
 

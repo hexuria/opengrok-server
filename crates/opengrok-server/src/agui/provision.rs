@@ -61,26 +61,27 @@ pub async fn lookup_provider(
     org_id: Option<&str>,
     kind: &str,
 ) -> ProviderLookup {
-    // The deployment's own local-docker provider (OG_COMPUTER at boot; a stand-in in tests)
-    // serves that kind directly: a Docker provider carries no per-org state, so this is the same
-    // computer the arm below would build, and a test can hand the run path one that records what
-    // ran. NEVER for "ascii": that provider is built from the ORG's sealed key, and the boot-time
-    // one (from OG_BOX_API_KEY) would silently run one org's boxes on another's account.
-    if let Some(computer) = state.computer.as_ref()
-        && kind == "local-docker"
-        && computer.kind() == kind
-    {
-        return ProviderLookup {
-            computer: Some(computer.clone()),
-            error: None,
+    // "local-docker" is served ONLY by the deployment's own Docker provider (OG_COMPUTER at boot;
+    // a stand-in in tests). Until 25 Sep 2026 this built a DockerComputer unconditionally, so a
+    // hosted server (where boot installs none) or `OG_COMPUTER=none` still ran a bot container on
+    // the API host whenever box.ascii.dev refused and the takeover asked for one. "Hosted",
+    // "none" and "ascii-only" are now one fact a test can hand in; `OG_HOSTED` is not settable
+    // from a test (`set_var` is unsafe). NEVER the boot provider for "ascii": that one is built
+    // from the ORG's sealed key, and OG_BOX_API_KEY would run one org's boxes on another's account.
+    if kind == "local-docker" {
+        return match state.computer.as_ref() {
+            Some(computer) if computer.kind() == kind && local_docker_allowed() => ProviderLookup {
+                computer: Some(computer.clone()),
+                error: None,
+            },
+            _ => ProviderLookup {
+                computer: None,
+                error: Some(("not_supported".into(), NO_LOCAL_VM.into())),
+            },
         };
     }
     match kind {
         "ascii" => lookup_ascii(state, org_id).await,
-        "local-docker" => ProviderLookup {
-            computer: Some(Arc::new(opengrok_box::DockerComputer::new())),
-            error: None,
-        },
         _ => ProviderLookup {
             computer: None,
             error: Some((
@@ -90,6 +91,11 @@ pub async fn lookup_provider(
         },
     }
 }
+
+/// Why a Local VM is unavailable: the pane shows it for a row recorded before the server stopped
+/// serving them, and the model reads it when a refused box has nothing to fall back on.
+pub const NO_LOCAL_VM: &str = "this server does not run Local VMs on its own host, so this \
+computer cannot be used here — an admin can set up box.ascii.dev on the dashboard";
 
 async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup {
     let Some(org) = org_id else {
@@ -116,7 +122,9 @@ async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup
         .await
     {
         Ok(Some(key)) => ProviderLookup {
-            computer: Some(Arc::new(opengrok_box::AsciiBoxes::new(key))),
+            computer: Some(Arc::new(
+                opengrok_box::AsciiBoxes::new(key).with_base_url(state.auth.ascii_base_url.clone()),
+            )),
             error: None,
         },
         Ok(None) => ascii_missing(),
@@ -125,7 +133,7 @@ async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup
 }
 
 /// The provider for a computer of `kind` in this org: an AsciiBoxes built from the org's sealed
-/// box.ascii.dev key for `"ascii"`, or a fresh server-host Docker for `"local-docker"`. `None`
+/// box.ascii.dev key for `"ascii"`, or the deployment's own Docker for `"local-docker"`. `None`
 /// when the kind cannot be served (e.g. `"ascii"` but the org has no key or the vault is absent).
 /// The SAME provider must create and run a box, so both paths call this.
 pub async fn provider_for(
@@ -136,31 +144,49 @@ pub async fn provider_for(
     lookup_provider(state, org_id, kind).await.computer
 }
 
-/// When the stored ascii box refuses this key, give the account a local Docker box instead.
-/// NativeChat on a laptop still gets Shell/Read without vendoring hexuria/box.
+/// When box.ascii.dev refuses or fails, give the scope a Local VM instead — a SELF-HOST
+/// convenience (NativeChat on a laptop still gets Shell/Read), so only where the deployment
+/// brought a Docker provider: never hosted, never `OG_COMPUTER=none` (see `lookup_provider`).
+///
+/// THE SWAP IS STAMPED on the account's `computerError`, with the upstream code. It moves the
+/// coworker from its desktop to a different, often headless, machine: files seem to vanish and
+/// screen tools disappear, and until this stamp nothing said why.
 pub async fn take_over_with_local_docker(
     state: &AgUiState,
+    account_id: &AccountId,
     scope: &str,
     scope_id: &str,
     org_id: Option<&str>,
+    refused: &opengrok_box::BoxError,
 ) -> Option<(Arc<dyn Computer>, String)> {
-    let computer = provider_for(state, org_id, "local-docker").await?;
-    tracing::info!(
-        scope,
-        scope_id,
-        "computer: ascii box forbidden, asking local Docker"
-    );
+    let Some(computer) = provider_for(state, org_id, "local-docker").await else {
+        tracing::warn!(scope, scope_id, %refused, "computer: the provider refused and this server runs no Local VM to fall back on");
+        return None;
+    };
+    tracing::warn!(scope, scope_id, %refused, "computer: the provider refused; asking local Docker");
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
-    state
-        .auth
-        .store
+    let store = &state.auth.store;
+    store
         .set_scoped_computer(scope, scope_id, &box_id, "local-docker", org_id, at_ms)
         .await
         .ok()?;
-    tracing::info!(scope, scope_id, box_id = %box_id, "computer: local Docker box is this scope's computer");
+    let why = format!("{FELL_BACK} ({refused})");
+    // The stamp is the only thing that tells the person the box changed; a lost one is logged
+    // rather than failing a takeover that already happened.
+    if let Err(error) = store
+        .set_account_computer_error(account_id.as_str(), refused.code(), &why, at_ms)
+        .await
+    {
+        tracing::warn!(scope, scope_id, %error, "computer: the takeover could not be stamped on the account; the pane will not say the box changed");
+    }
+    tracing::warn!(scope, scope_id, box_id = %box_id, "computer: local Docker box is this scope's computer");
     Some((computer, box_id))
 }
+
+/// What the stamp says after a takeover. The pane shows it beside the new box.
+pub const FELL_BACK: &str = "box.ascii.dev refused this computer, so it now runs as a Local VM \
+on this server — files on the old computer are not on this one";
 
 /// The provider for an account's existing computer of `kind`, resolving the account's org itself.
 /// The run path uses this so tools execute on the same provider that created the box.
@@ -422,6 +448,7 @@ pub async fn ensure_computer_for(
         Ok(None) => Ok(None),
         Err(error) => Err(error),
     };
+    let mut fell_back = false;
     let box_id = match recorded {
         Ok(Some(box_id)) => box_id,
         Ok(None) => {
@@ -474,10 +501,17 @@ pub async fn ensure_computer_for(
                 }
                 Err(error) => {
                     if kind == "ascii"
-                        && let Some((_, docker_id)) =
-                            take_over_with_local_docker(state, scope, &scope_id, org_id.as_deref())
-                                .await
+                        && let Some((_, docker_id)) = take_over_with_local_docker(
+                            state,
+                            account_id,
+                            scope,
+                            &scope_id,
+                            org_id.as_deref(),
+                            &error,
+                        )
+                        .await
                     {
+                        fell_back = true;
                         docker_id
                     } else {
                         return record_error(
@@ -498,7 +532,7 @@ pub async fn ensure_computer_for(
     };
 
     let box_id = BoxId::from_stored(box_id);
-    match coworker.decide(CoworkerCommand::AssignComputer {
+    let events = match coworker.decide(CoworkerCommand::AssignComputer {
         box_id: box_id.clone(),
         mode: box_mode,
         at_ms,
@@ -507,31 +541,28 @@ pub async fn ensure_computer_for(
             for event in &events {
                 coworker.apply(event);
             }
-            let _ = store
-                .clear_account_computer_error(account_id.as_str())
-                .await;
-            Provisioned {
-                events,
-                box_id: Some(box_id),
-                error: None,
-            }
+            events
         }
         // A coworker that ALREADY has a box (a re-provision after reset) cannot be re-assigned — the
         // aggregate forbids it so a previous box is never silently stranded. That is not a failure
         // here: the scope's box was just (re)created and recorded, and the run path binds the SCOPE's
         // live box, not this frozen aggregate id, so the coworker follows the new box regardless. Keep
         // the existing assignment, report success with the scope's box.
-        Err(CoworkerError::AlreadyHasComputer) => {
-            let _ = store
-                .clear_account_computer_error(account_id.as_str())
-                .await;
-            Provisioned {
-                events: Vec::new(),
-                box_id: Some(box_id),
-                error: None,
-            }
+        Err(CoworkerError::AlreadyHasComputer) => Vec::new(),
+        Err(error) => {
+            return record_error(state, account_id, "unknown", &error.to_string(), at_ms).await;
         }
-        Err(error) => record_error(state, account_id, "unknown", &error.to_string(), at_ms).await,
+    };
+    // A takeover's stamp IS the news about this box; clearing it on success kept the swap silent.
+    if !fell_back {
+        let _ = store
+            .clear_account_computer_error(account_id.as_str())
+            .await;
+    }
+    Provisioned {
+        events,
+        box_id: Some(box_id),
+        error: None,
     }
 }
 
@@ -599,7 +630,16 @@ async fn destroy_and_clear(
     box_id: &str,
     kind: &str,
 ) {
-    if let Some(provider) = provider_for(state, org_id, kind).await
+    // A Local VM recorded before this server stopped serving them (OG_HOSTED=1 set later, or a
+    // switch to box.ascii.dev) is still a container on this host; removing it is the one Docker
+    // call such a server still makes, so teardown does not strand it running and unmanaged.
+    let provider = match provider_for(state, org_id, kind).await {
+        None if kind == "local-docker" => {
+            Some(Arc::new(opengrok_box::DockerComputer::new()) as Arc<dyn Computer>)
+        }
+        provider => provider,
+    };
+    if let Some(provider) = provider
         && let Err(error) = provider.destroy(box_id).await
     {
         tracing::warn!(%error, box_id, "could not destroy a box on teardown; clearing the mapping anyway");
@@ -848,6 +888,7 @@ pub async fn scoped_box_row_for(
 /// omitted on pure `state: absent` (no scoped computer); NativeChat hides the control then.
 pub async fn coworker_screen(
     state: &AgUiState,
+    headers: &axum::http::HeaderMap,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Value {
@@ -924,7 +965,7 @@ pub async fn coworker_screen(
         .state(&box_id)
         .await
         .unwrap_or_else(|_| "unknown".to_string());
-    let (vnc_url, image) = if live_state == "running" {
+    let (mut vnc_url, image) = if live_state == "running" {
         (
             provider.screen_url(&box_id).await.ok().flatten(),
             provider.image_status(&box_id).await.ok(),
@@ -932,6 +973,24 @@ pub async fn coworker_screen(
     } else {
         (None, None)
     };
+    // A Local VM's page is on this host's loopback, which the person's app — on another machine
+    // whenever the gateway is not loopback — cannot open; it is served through this server. No
+    // reachable origin means no live screen rather than a URL that cannot load.
+    if kind == "local-docker" {
+        vnc_url = vnc_url.and_then(|local| {
+            let origin = super::screen_proxy::public_origin(&state.auth.public_url, headers)?;
+            let now = chrono::Utc::now().timestamp();
+            super::screen_proxy::proxied_page(
+                &state.auth.minter,
+                &origin,
+                account_id,
+                coworker_id,
+                &box_id,
+                &local,
+                now,
+            )
+        });
+    }
     // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself.
     let cap = provider.egress_tunnel(&box_id).await;
     let mut screen = json!({
@@ -948,6 +1007,20 @@ pub async fn coworker_screen(
             "stale": image.stale(),
         })),
     });
+    // A Local VM with a TAKEOVER stamp beside it is a takeover's box: the stamp says the box
+    // changed and why. Only that stamp — the account's error row also holds other scopes' failed
+    // hires (a per-bot quota refusal), which beside a healthy Local VM would read as its fault.
+    // Additive — `agentId`/`state`/`vncUrl` are what the renderer validates.
+    if kind == "local-docker"
+        && let Ok(Some((code, message, at_ms))) = state
+            .auth
+            .store
+            .account_computer_error(account_id.as_str())
+            .await
+        && message.starts_with(FELL_BACK)
+    {
+        screen["computerError"] = json!({ "code": code, "message": message, "updatedAtMs": at_ms });
+    }
     stamp_egress_fields(&mut screen, host_wants, cap);
     stamp_share_scope(&mut screen, scope, &scope_id);
     stamp_egress_policy(state, &mut screen, scope, &scope_id).await;

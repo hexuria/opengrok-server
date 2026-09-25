@@ -139,4 +139,12 @@ async fn a_live_store_still_answers_ok() {
         body["isBusy"].is_boolean(),
         "the busy flag must survive the refactor as a real boolean: {body}"
     );
+    // Additive, never a change to `ok`: the vault verdict rides alongside it. This state has no
+    // vault, so it must say so rather than claim one it does not have.
+    assert!(body["vault"]["ok"].is_boolean(), "{body}");
+    assert_eq!(
+        body["vault"]["configured"],
+        serde_json::json!(false),
+        "{body}"
+    );
 }

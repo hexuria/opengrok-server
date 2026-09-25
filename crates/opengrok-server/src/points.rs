@@ -282,10 +282,23 @@ pub async fn limit_for(
                 .to_string(),
         );
     }
-    let metered = key.is_some() && admin.is_some();
+    // A key the gateway refuses counts nothing of this coworker's turns, so its (near-empty)
+    // meter is not read as the coworker's usage; the reason replaces every softer note.
+    let refused = match key {
+        Some(_) => crate::spend::cannot_serve(store, coworker_id, account_id).await?,
+        None => None,
+    };
+    let metered = key.is_some() && admin.is_some() && refused.is_none();
     if key.is_none() && note.is_none() {
         note = Some("this coworker has no key of its own yet, so it is not metered".to_string());
     }
+    let key = match refused {
+        Some(reason) => {
+            note = Some(reason);
+            None
+        }
+        None => key,
+    };
     let (mut used_points, mut used_today, mut day_frees_at, mut resets_at) =
         (None, None, None, None);
     if let (Some(admin), Some(key), Some(_)) = (admin, key.as_ref(), reference.as_ref()) {
@@ -590,6 +603,12 @@ pub async fn usage_for(
             "this coworker has no key of its own yet, so it is not metered".to_string(),
         ));
     };
+    if let Some(reason) = crate::spend::cannot_serve(store, coworker_id, account_id)
+        .await
+        .map_err(|error| (503, error))?
+    {
+        return Ok(unmetered(reason));
+    }
     let Some(admin) = state.auth.gateway_admin.as_ref() else {
         return Ok(unmetered(
             "no gateway admin connection; usage cannot be read".to_string(),
