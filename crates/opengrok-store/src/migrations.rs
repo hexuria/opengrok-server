@@ -581,8 +581,8 @@ create index if not exists local_exec_audit_acct_idx
     on local_exec_audit (account_id, machine_id, requested_at_ms desc);
 
 -- The command's OUTCOME (the ShellResult oneof case: success / failure / timeout / rejected /
--- spawnError / permissionDenied), distinct from `decision` (the gate's verdict at enqueue). A
--- refusal is a case, not a non-zero exit, so the two are recorded separately.
+-- spawnError / permissionDenied, or the server's `offline` for a machine with no daemon), distinct
+-- from `decision` (the gate's verdict at enqueue). A refusal is a case, not a non-zero exit.
 alter table local_exec_audit add column if not exists outcome text;
 
 -- Registered devices for the passkey step-up (reverse-exec slice 7). Each row is ONE WebAuthn
