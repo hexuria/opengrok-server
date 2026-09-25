@@ -47,10 +47,6 @@ use crate::agui::routes::owned_coworker;
 use crate::jev::{Answer, Ask, JevError, JsonContent, NoulCriteria, Question};
 use crate::recipes::{Action, StoreRecipes, org_of, permitted};
 
-/// How many runs of one version the history keeps — the same five a recipe keeps, because it is
-/// the same table and the same page.
-const RUNS_KEPT_PER_VERSION: i64 = 5;
-
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -492,23 +488,92 @@ async fn run(
                 .to_string(),
         ),
     };
+    #[cfg(not(feature = "jev"))]
+    let judge: Result<(), String> = match jev_wanted_on_this_build(request.jev) {
+        Ok(()) => Err("Jev was switched off for this run".to_string()),
+        Err(why) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+        }
+    };
+
+    // The walk is written down as a run of this row, under the same table a recipe's runs use, so
+    // one history shows both and the artifact and pruning rules already written apply unchanged.
+    // Minted and WRITTEN before the first step, for the reason `recipes::begin_run` gives.
+    let run_id = format!("rrun_{}", uuid::Uuid::now_v7());
+    if let Err(refusal) =
+        crate::recipes::begin_run(&store, &run_id, &id, version.version, &coworker).await
+    {
+        return refusal;
+    }
+    let walking = tokio::spawn(walk(Walked {
+        store,
+        provider,
+        box_id,
+        workflow_id: id.clone(),
+        run_id: run_id.clone(),
+        version: version.version,
+        coworker,
+        allowed,
+        judge,
+        name: recipe.name.clone(),
+        workflow,
+        bound,
+    }));
+    if crate::recipes::wants_async(&headers) {
+        return crate::recipes::accepted(json!({
+            "workflow": id, "version": version.version, "runId": run_id, "state": "running",
+        }));
+    }
+    crate::recipes::joined(walking, &run_id).await
+}
+
+/// Everything a detached walk owns: `Walker` borrows, and a walk outlives the request.
+struct Walked {
+    store: opengrok_store::PgStore,
+    provider: std::sync::Arc<dyn opengrok_box::Computer>,
+    box_id: String,
+    workflow_id: String,
+    run_id: String,
+    version: i32,
+    coworker: CoworkerId,
+    allowed: BTreeSet<String>,
+    #[cfg(feature = "jev")]
+    judge: Result<JevJudge, String>,
+    #[cfg(not(feature = "jev"))]
+    judge: Result<(), String>,
+    name: String,
+    workflow: Workflow,
+    bound: Values,
+}
+
+/// Walk the tree and finish its row, detached from the request for the reason `recipes::play`
+/// gives: a closed tab used to take the walk's history with it while the box kept clicking.
+async fn walk(walked: Walked) -> Response {
+    let Walked {
+        store,
+        provider,
+        box_id,
+        workflow_id: id,
+        run_id,
+        version,
+        coworker,
+        allowed,
+        judge,
+        name,
+        workflow,
+        bound,
+    } = walked;
+    let _lease = crate::recipes::hold_run(store.clone(), run_id.clone());
     #[cfg(feature = "jev")]
     let judging = match &judge {
         Ok(judge) => Judging::Ask(judge),
         Err(because) => Judging::Off(because.clone()),
     };
     #[cfg(not(feature = "jev"))]
-    let judging = match jev_wanted_on_this_build(request.jev) {
-        Ok(()) => Judging::Off("Jev was switched off for this run".to_string()),
-        Err(why) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
-        }
-    };
-
+    let judging = Judging::Off(judge.err().unwrap_or_default());
     let recipes = StoreRecipes {
         store: store.clone(),
     };
-    let name = recipe.name.clone();
     let walker = Walker {
         computer: provider.as_ref(),
         box_id: &box_id,
@@ -523,15 +588,12 @@ async fn run(
     };
     let walk = walker.walk(&workflow, &bound).await;
 
-    // The walk is written down as a run of this row, under the same table a recipe's runs use, so
-    // one history shows both and the artifact and pruning rules already written apply unchanged.
-    let run_id = format!("rrun_{}", uuid::Uuid::now_v7());
     let receipt = walk.receipt();
-    let _ = store
+    let written = store
         .record_recipe_run(
             &run_id,
             &id,
-            version.version,
+            version,
             coworker.as_str(),
             Some(&run_id),
             walk.ok(),
@@ -546,13 +608,11 @@ async fn run(
             now_ms(),
         )
         .await;
-    let _ = store
-        .prune_recipe_runs(&id, version.version, RUNS_KEPT_PER_VERSION)
-        .await;
+    crate::recipes::tidy_history(&store, &id, version).await;
 
     let mut body = json!({
         "workflow": id,
-        "version": version.version,
+        "version": version,
         "runId": run_id,
         "at": ending_step(&walk.ending),
     });
@@ -561,7 +621,23 @@ async fn run(
             body.insert(key.clone(), value.clone());
         }
     }
-    Json(body).into_response()
+    match written {
+        Ok(()) => Json(body).into_response(),
+        // The walk happened and its history does not say so: an error to the caller, with the
+        // receipt riding along, as `recipes::play` does for one recipe.
+        Err(error) => {
+            tracing::warn!(run = %run_id, %error, "a workflow walked but was not written down");
+            if let Some(object) = body.as_object_mut() {
+                object.insert(
+                    "historyMissed".to_string(),
+                    json!(format!(
+                        "the walk ran but could not be written to the workflow's history: {error}"
+                    )),
+                );
+            }
+            (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+        }
+    }
 }
 
 /// The step a walk was on when it ended, for the endings that did not get to take one. `None` for

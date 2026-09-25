@@ -2609,7 +2609,23 @@ pub struct RecipeRunRow {
     pub ok: bool,
     pub stopped_at: Option<i32>,
     pub receipt: serde_json::Value,
+    /// When the run was written: when it started, for one the server played.
     pub at_ms: i64,
+    /// Set while the run is playing and renewed as it plays; null once it has finished.
+    #[serde(default)]
+    pub lease_until_ms: Option<i64>,
+}
+
+impl RecipeRunRow {
+    /// `finished`, `running`, or `interrupted` — a row whose lease ran out with nobody finishing
+    /// it, because the process playing it stopped. What the box did then is not known.
+    pub fn state(&self, now_ms: i64) -> &'static str {
+        match self.lease_until_ms {
+            None => "finished",
+            Some(until) if until > now_ms => "running",
+            Some(_) => "interrupted",
+        }
+    }
 }
 
 fn recipe_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRow> {
@@ -3178,6 +3194,50 @@ impl PgStore {
         rows.iter().map(recipe_row).collect()
     }
 
+    /// Write a run down BEFORE the box is asked to play it: not ok yet, and leased until
+    /// `lease_until_ms`. Writes nothing and answers false when this bot already has a run whose
+    /// lease is live, because two recipes clicking on one screen at once is neither's recipe.
+    pub async fn start_recipe_run(
+        &self,
+        id: &str,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &str,
+        lease_until_ms: i64,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "insert into recipe_run
+                 (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms, lease_until_ms)
+             select $1, $2, $3, $4, $1, false, null, '{\"ok\": false, \"running\": true}'::jsonb, $5, $6
+              where not exists (
+                  select 1 from recipe_run where coworker_id = $4 and lease_until_ms > $5)",
+        )
+        .bind(id)
+        .bind(recipe_id)
+        .bind(version)
+        .bind(coworker_id)
+        .bind(at_ms)
+        .bind(lease_until_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Push a playing run's lease out. A finished row is left alone.
+    pub async fn hold_recipe_run(&self, id: &str, lease_until_ms: i64) -> StoreResult<()> {
+        sqlx::query(
+            "update recipe_run set lease_until_ms = $2 where id = $1 and lease_until_ms is not null",
+        )
+        .bind(id)
+        .bind(lease_until_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Write a finished run: a new row, or the one `start_recipe_run` wrote, finished in place.
+    /// A finished row keeps the time it started, so history does not reorder as runs land.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_recipe_run(
         &self,
@@ -3193,7 +3253,10 @@ impl PgStore {
     ) -> StoreResult<()> {
         sqlx::query(
             "insert into recipe_run (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             on conflict (id) do update set
+               run_id = excluded.run_id, ok = excluded.ok, stopped_at = excluded.stopped_at,
+               receipt = excluded.receipt, lease_until_ms = null",
         )
         .bind(id)
         .bind(recipe_id)
@@ -3209,8 +3272,6 @@ impl PgStore {
         Ok(())
     }
 
-    /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
-    /// long-lived recipe cannot grow an unbounded history nobody reads.
     /// Drop the artifacts of runs that are no longer there.
     ///
     /// Called after pruning, because an artifact outliving its run is a megabyte nobody can
@@ -3233,15 +3294,22 @@ impl PgStore {
         Ok(done.rows_affected())
     }
 
+    /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
+    /// long-lived recipe cannot grow an unbounded history nobody reads.
+    ///
+    /// A run still playing is never pruned: its row is what keeps the orphan sweep off the
+    /// screenshots it is filing, and the receipt it is about to write needs somewhere to land.
     pub async fn prune_recipe_runs(
         &self,
         recipe_id: &str,
         version: i32,
         keep: i64,
+        now_ms: i64,
     ) -> StoreResult<u64> {
         let done = sqlx::query(
             "delete from recipe_run
               where recipe_id = $1 and version = $2
+                and (lease_until_ms is null or lease_until_ms <= $4)
                 and id not in (
                     select id from recipe_run
                      where recipe_id = $1 and version = $2
@@ -3252,6 +3320,7 @@ impl PgStore {
         .bind(recipe_id)
         .bind(version)
         .bind(keep)
+        .bind(now_ms)
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected())
@@ -3259,7 +3328,8 @@ impl PgStore {
 
     pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
         let rows = sqlx::query(
-            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms
+            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms,
+                    lease_until_ms
                from recipe_run where recipe_id = $1 order by at_ms desc limit $2",
         )
         .bind(recipe_id)
@@ -3278,6 +3348,7 @@ impl PgStore {
                     stopped_at: row.try_get("stopped_at")?,
                     receipt: row.try_get("receipt")?,
                     at_ms: row.try_get("at_ms")?,
+                    lease_until_ms: row.try_get("lease_until_ms")?,
                 })
             })
             .collect()

@@ -60,7 +60,8 @@ const RAW_EVENTS_SENT: usize = 2_000;
 
 /// How many runs of one version the history keeps. Older ones are dropped as new ones land,
 /// so the page's five rows per version are the whole table, not a window onto an endless one.
-const RUNS_KEPT_PER_VERSION: i64 = 5;
+/// Workflows keep the same five: it is the same table and the same page.
+pub(crate) const RUNS_KEPT_PER_VERSION: i64 = 5;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -529,27 +530,28 @@ async fn create(
     {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
-    let _ = store
-        .add_recipe_version(
-            &id,
-            "raw",
-            &raw,
-            "the tape as taught",
-            account.as_str(),
-            at_ms,
-        )
-        .await;
     let body = json!({ "steps": steps, "stop_on_error": true, "screenshot": "end" });
-    let _ = store
-        .add_recipe_version(
-            &id,
-            "filtered",
-            &body,
-            "the tape filtered into steps",
-            account.as_str(),
-            at_ms,
-        )
-        .await;
+    for (kind, version, note) in [
+        ("raw", &raw, "the tape as taught"),
+        ("filtered", &body, "the tape filtered into steps"),
+    ] {
+        // A RECIPE WITHOUT ITS VERSIONS IS NOT A RECIPE, and it used to come back behind a 200:
+        // a row with no tape, or with a tape and nothing to run. The row goes, and the refusal
+        // says which half the store would not take.
+        if let Err(error) = store
+            .add_recipe_version(&id, kind, version, note, account.as_str(), at_ms)
+            .await
+        {
+            if let Err(also) = store.soft_delete_recipe(&id, now_ms()).await {
+                tracing::warn!(recipe = %id, error = %also, "a half-written recipe could not be removed");
+            }
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the recipe was not kept: its {kind} version could not be stored: {error}"),
+            )
+                .into_response();
+        }
+    }
     detail_body(&state, &account, org.as_deref(), &id).await
 }
 
@@ -591,6 +593,7 @@ pub(crate) async fn detail_body(
     // A run carries what it produced, so the history can show a step's picture and play a
     // recording without a second round trip per row. The bytes themselves are never in here —
     // these are ids the page turns into URLs.
+    let now = now_ms();
     let mut runs_with_artifacts = Vec::with_capacity(runs.len());
     for run in &runs {
         let of_run = store
@@ -599,6 +602,9 @@ pub(crate) async fn detail_body(
             .unwrap_or_default();
         let mut row = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
         if let Some(object) = row.as_object_mut() {
+            // `running`, `finished`, or `interrupted`. A run is a row before the box answers, so
+            // `ok: false` alone cannot tell a failure from a run still playing.
+            object.insert("state".to_string(), json!(run.state(now)));
             object.insert(
                 "artifacts".to_string(),
                 json!(
@@ -1127,9 +1133,191 @@ async fn run(
         );
     }
 
+    match begin_run(&state.auth.store, &run_id, &id, version, &coworker).await {
+        Ok(()) => {}
+        Err(refusal) => return refusal,
+    }
+    let played = tokio::spawn(play(Played {
+        state: state.clone(),
+        account,
+        provider,
+        box_id,
+        recipe_id: id.clone(),
+        run_id: run_id.clone(),
+        version,
+        coworker,
+        body,
+    }));
+    if wants_async(&headers) {
+        return accepted(json!({
+            "recipe": recipe.id, "version": version, "runId": run_id, "state": "running",
+        }));
+    }
+    joined(played, &run_id).await
+}
+
+/// How long a run row's lease is good for, and how it is renewed: `recovery`'s, for `recovery`'s
+/// reason — long enough that a slow box does not lose its own run, short enough that a run whose
+/// process died reads as interrupted while somebody still cares.
+pub(crate) const RUN_LEASE_MS: i64 = crate::recovery::LEASE_MS;
+
+/// Write the run row before anything is played, or refuse to play.
+///
+/// A RUN THAT CANNOT BE WRITTEN DOWN IS NOT STARTED. The row is what survives a closed tab, keeps
+/// the orphan sweep off the screenshots being filed, and says "interrupted" after a restart; a run
+/// played without one is the run this exists to stop losing.
+pub(crate) async fn begin_run(
+    store: &PgStore,
+    run_id: &str,
+    recipe_id: &str,
+    version: i32,
+    coworker: &CoworkerId,
+) -> Result<(), Response> {
+    let at_ms = now_ms();
+    match store
+        .start_recipe_run(
+            run_id,
+            recipe_id,
+            version,
+            coworker.as_str(),
+            at_ms + RUN_LEASE_MS,
+            at_ms,
+        )
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err((
+            StatusCode::CONFLICT,
+            "this bot is already playing a recipe; wait for that run to finish",
+        )
+            .into_response()),
+        Err(error) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the run could not be written down, so nothing was played: {error}"),
+        )
+            .into_response()),
+    }
+}
+
+/// Renew a playing run's lease until the returned guard is dropped.
+pub(crate) fn hold_run(store: PgStore, run_id: String) -> crate::recovery::Lease {
+    crate::recovery::Lease::new(tokio::spawn(async move {
+        let every = std::time::Duration::from_millis((RUN_LEASE_MS / 3).max(1_000) as u64);
+        loop {
+            tokio::time::sleep(every).await;
+            if let Err(error) = store
+                .hold_recipe_run(&run_id, now_ms() + RUN_LEASE_MS)
+                .await
+            {
+                tracing::warn!(run = %run_id, %error, "could not renew a recipe run's lease");
+            }
+        }
+    }))
+}
+
+/// Whether the caller asked not to wait (RFC 7240 `Prefer: respond-async`).
+///
+/// OPT-IN, NOT THE DEFAULT, because the page that starts a run reads the receipt out of this
+/// response today. A caller that waits gets exactly the body it always did — the run just no
+/// longer depends on it waiting — and one that says so gets the run id at once and reads the
+/// history. The default can turn over once the client asks.
+pub(crate) fn wants_async(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::HeaderName::from_static("prefer"))
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|preference| preference.trim().eq_ignore_ascii_case("respond-async"))
+}
+
+/// The 202 for a caller that preferred not to wait.
+pub(crate) fn accepted(body: Value) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        [("preference-applied", "respond-async")],
+        Json(body),
+    )
+        .into_response()
+}
+
+/// The detached run's answer, for a caller that waited for it. The run is not this future: a
+/// caller that hangs up drops only the wait.
+pub(crate) async fn joined(played: tokio::task::JoinHandle<Response>, run_id: &str) -> Response {
+    match played.await {
+        Ok(response) => response,
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("run {run_id} stopped before it answered ({error}); its history row says what is known"),
+        )
+            .into_response(),
+    }
+}
+
+/// History is for reading, not for keeping: five runs per version is what the page shows, and
+/// whatever the pruned runs produced goes with them — an artifact with no run has no page.
+/// Best effort and said in the log: a missed prune leaves one run too many for the next to take.
+pub(crate) async fn tidy_history(store: &PgStore, recipe_id: &str, version: i32) {
+    if let Err(error) = store
+        .prune_recipe_runs(recipe_id, version, RUNS_KEPT_PER_VERSION, now_ms())
+        .await
+    {
+        tracing::warn!(recipe = %recipe_id, %error, "could not prune a recipe's run history");
+    }
+    if let Err(error) = store
+        .orphan_artifacts_of_gone_runs(recipe_id, now_ms())
+        .await
+    {
+        tracing::warn!(recipe = %recipe_id, %error, "could not sweep a pruned run's artifacts");
+    }
+}
+
+/// Everything a detached run owns, so nothing in it borrows from the request that started it.
+struct Played {
+    state: AgUiState,
+    account: AccountId,
+    provider: Arc<dyn opengrok_box::Computer>,
+    box_id: String,
+    recipe_id: String,
+    run_id: String,
+    version: i32,
+    coworker: CoworkerId,
+    body: Value,
+}
+
+/// Play the recipe, keep what it made, finish its row. Spawned, because Axum drops a handler's
+/// future when its client goes away, and everything after the box's answer used to go with it:
+/// the box finished clicking while the server kept no run, no screenshots and no error.
+async fn play(run: Played) -> Response {
+    let Played {
+        state,
+        account,
+        provider,
+        box_id,
+        recipe_id,
+        run_id,
+        version,
+        coworker,
+        body,
+    } = run;
+    let _lease = hold_run(state.auth.store.clone(), run_id.clone());
+    let source = StoreRecipes {
+        store: state.auth.store.clone(),
+    };
     let receipt = match provider.run_recipe(&box_id, &body).await {
         Ok(raw) => RecipeReceipt::from_value(raw),
-        Err(error) => return (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+        Err(error) => {
+            // A box that would not answer still ends the row, as a failed run that says why,
+            // rather than leaving it to read as interrupted.
+            let why = error.to_string();
+            let failed = RecipeReceipt::from_value(json!({ "ok": false, "ran": 0, "error": why }));
+            if let Err(error) = source
+                .record_run_as(&run_id, &recipe_id, version, &coworker, &failed)
+                .await
+            {
+                tracing::warn!(run = %run_id, %error, "could not write a failed recipe run");
+            }
+            return (StatusCode::BAD_GATEWAY, why).into_response();
+        }
     };
 
     // Pull what the box made onto the server while the box is still around. A box can be reset
@@ -1139,29 +1327,18 @@ async fn run(
         &account,
         &provider,
         &box_id,
-        &id,
+        &recipe_id,
         &run_id,
         &receipt.raw,
     )
     .await;
 
-    source
-        .record_run_as(&run_id, &id, version, &coworker, &receipt)
+    let written = source
+        .record_run_as(&run_id, &recipe_id, version, &coworker, &receipt)
         .await;
-    // History is for reading, not for keeping: five runs per version is what the page shows.
-    let _ = state
-        .auth
-        .store
-        .prune_recipe_runs(&id, version, RUNS_KEPT_PER_VERSION)
-        .await;
-    // Whatever those runs produced goes with them; an artifact with no run has no page.
-    let _ = state
-        .auth
-        .store
-        .orphan_artifacts_of_gone_runs(&id, now_ms())
-        .await;
-    Json(json!({
-        "recipe": recipe.id,
+    tidy_history(&state.auth.store, &recipe_id, version).await;
+    let mut out = json!({
+        "recipe": recipe_id,
         "version": version,
         "runId": run_id,
         "ok": receipt.ok,
@@ -1176,8 +1353,25 @@ async fn run(
         // Said out loud rather than swallowed: a run whose recording did not survive looks
         // identical to one that was never recorded, and the difference matters when debugging.
         "artifactsMissed": missed,
-    }))
-    .into_response()
+    });
+    match written {
+        Ok(()) => Json(out).into_response(),
+        // THE CLICKS HAPPENED AND THE HISTORY DOES NOT SAY SO, which is an error to the caller and
+        // not a 200: the receipt rides along so they know what the box did, and the row reads as
+        // interrupted once its lease runs out rather than as a run that never was.
+        Err(error) => {
+            tracing::warn!(run = %run_id, %error, "a recipe run played but was not written down");
+            if let Some(object) = out.as_object_mut() {
+                object.insert(
+                    "historyMissed".to_string(),
+                    json!(format!(
+                        "the run played but could not be written to the recipe's history: {error}"
+                    )),
+                );
+            }
+            (StatusCode::SERVICE_UNAVAILABLE, Json(out)).into_response()
+        }
+    }
 }
 
 /// The executor's view of the registry: steps out, runs in.
@@ -1243,9 +1437,18 @@ impl RecipeSource for StoreRecipes {
         receipt: &RecipeReceipt,
     ) -> Option<String> {
         let id = format!("rrun_{}", uuid::Uuid::now_v7());
-        self.write_run(&id, recipe_id, version, coworker_id, receipt)
-            .await;
-        Some(id)
+        match self
+            .write_run(&id, recipe_id, version, coworker_id, receipt)
+            .await
+        {
+            Ok(()) => Some(id),
+            // `None` is "there is no run to point at", which is now the truth; the trail and the
+            // model's result carry on, and the log says why the history is short.
+            Err(error) => {
+                tracing::warn!(recipe = %recipe_id, %error, "a recipe run played but was not written down");
+                None
+            }
+        }
     }
 
     /// The grant read again, through the same query that built the turn's offers, so a share taken
@@ -1275,9 +1478,9 @@ impl StoreRecipes {
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
-    ) {
+    ) -> opengrok_store::StoreResult<()> {
         self.write_run(run_id, recipe_id, version, coworker_id, receipt)
-            .await;
+            .await
     }
 
     async fn write_run(
@@ -1287,7 +1490,7 @@ impl StoreRecipes {
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
-    ) {
+    ) -> opengrok_store::StoreResult<()> {
         // The receipt is kept without its picture: the picture rode the tool result; the
         // history shows what happened, not a gallery.
         let mut receipt_json = receipt.raw.clone();
@@ -1300,8 +1503,7 @@ impl StoreRecipes {
         // URLs would make sharing a recipe a way to read a colleague's screen back to its author.
         // What it cost to look is kept; what it saw is not.
         opengrok_tools::observe::strip_observations(&mut receipt_json);
-        let _ = self
-            .store
+        self.store
             .record_recipe_run(
                 id,
                 recipe_id,
@@ -1313,7 +1515,7 @@ impl StoreRecipes {
                 &receipt_json,
                 now_ms(),
             )
-            .await;
+            .await
     }
 }
 

@@ -294,7 +294,10 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
             .await
             .expect("record");
     }
-    let dropped = store.prune_recipe_runs(&id, 3, 5).await.expect("prune");
+    let dropped = store
+        .prune_recipe_runs(&id, 3, 5, now_ms())
+        .await
+        .expect("prune");
     assert_eq!(dropped, 3, "eight runs of v3, five kept");
     let kept: Vec<_> = store
         .recipe_runs(&id, 50)
@@ -807,4 +810,121 @@ async fn unsharing_or_declining_takes_the_recipe_back_from_the_recipients_bots()
     );
     assert!(!listed(bot_c).await);
     assert_eq!(offered(bot_o).await, 1, "the owner still holds their own");
+}
+
+/// A RUN IS A ROW BEFORE THE BOX ANSWERS, and the row says whether anybody is still finishing it.
+///
+/// The lease is the whole mechanism: renewed while the server plays, it reads `running`; run out
+/// with nobody finishing the row, it reads `interrupted`, with no sweep and no replica to ask. A
+/// playing run is never pruned — its row is what keeps the orphan sweep off the screenshots it is
+/// filing — and a bot plays one recipe at a time.
+#[tokio::test]
+async fn a_run_is_a_row_before_the_box_answers_and_says_when_nobody_finished_it() {
+    let Some(store) = connect().await else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let stamp = now_ms();
+    let owner = format!("acct_owner_{stamp}_r");
+    let bot = format!("cw_runner_{stamp}");
+    let id = format!("rcp_{stamp}_r");
+    store
+        .create_recipe(&id, &owner, None, "Close the books", "", (1280, 800), stamp)
+        .await
+        .expect("create");
+
+    let playing = format!("rrun_{stamp}_playing");
+    assert!(
+        store
+            .start_recipe_run(&playing, &id, 1, &bot, stamp + 60_000, stamp)
+            .await
+            .expect("start")
+    );
+    assert!(
+        !store
+            .start_recipe_run(
+                &format!("rrun_{stamp}_second"),
+                &id,
+                1,
+                &bot,
+                stamp + 60_000,
+                stamp + 1
+            )
+            .await
+            .expect("start"),
+        "one bot, one recipe at a time"
+    );
+    // Six finished runs of the same version, all newer than the one still playing.
+    for n in 1..=6 {
+        store
+            .record_recipe_run(
+                &format!("rrun_{stamp}_done_{n}"),
+                &id,
+                1,
+                &format!("cw_other_{stamp}"),
+                None,
+                true,
+                None,
+                &json!({"ok": true}),
+                stamp + n,
+            )
+            .await
+            .expect("record");
+    }
+    store
+        .prune_recipe_runs(&id, 1, 5, stamp + 10)
+        .await
+        .expect("prune");
+    let runs = store.recipe_runs(&id, 50).await.expect("runs");
+    let row = runs
+        .iter()
+        .find(|run| run.id == playing)
+        .expect("a run still playing is never pruned");
+    assert_eq!(row.state(stamp + 10), "running");
+    assert!(!row.ok, "nothing is ok until the box says so");
+    assert_eq!(
+        row.state(stamp + 60_001),
+        "interrupted",
+        "a lease run out with nobody finishing the row"
+    );
+
+    // Finished in place: the same row, the time it started, and no lease.
+    store
+        .record_recipe_run(
+            &playing,
+            &id,
+            1,
+            &bot,
+            Some(&playing),
+            true,
+            None,
+            &json!({"ok": true, "ran": 1}),
+            stamp + 30_000,
+        )
+        .await
+        .expect("finish");
+    let row = store
+        .recipe_runs(&id, 50)
+        .await
+        .expect("runs")
+        .into_iter()
+        .find(|run| run.id == playing)
+        .expect("still there");
+    assert_eq!(row.state(stamp + 60_001), "finished");
+    assert!(row.ok);
+    assert_eq!(row.at_ms, stamp, "a finished run keeps the time it started");
+    assert!(
+        store
+            .start_recipe_run(
+                &format!("rrun_{stamp}_third"),
+                &id,
+                1,
+                &bot,
+                stamp + 60_000,
+                stamp + 2
+            )
+            .await
+            .expect("start"),
+        "and the bot is free again"
+    );
 }

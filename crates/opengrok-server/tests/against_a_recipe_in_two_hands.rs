@@ -2,7 +2,8 @@
 //!
 //! `against_a_shared_recipe` proves the rows; this file proves what a person and a bot see through
 //! the routes and through a turn's offers, because the bugs here were all in what one person's
-//! action left behind for the other: a share taken back that the colleague's bot kept running.
+//! action left behind for the other: a share taken back that the colleague's bot kept running, and
+//! a run whose caller hung up before the box answered.
 //!
 //! NOT ONE BYTE LEAVES THE MACHINE: the box is a stand-in. Needs Postgres, and skips loudly
 //! without OG_DATABASE_URL, the same bargain the other integration tests make.
@@ -40,9 +41,14 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// A box that plays every recipe.
+/// A box that plays every recipe, leaves one screenshot per run where it was told to write
+/// them, and — when gated — holds each play until the test lets it finish, which is how a test
+/// hangs up on a run that is still going.
 #[derive(Default)]
-struct StubBox;
+struct StubBox {
+    gate: Option<tokio::sync::Semaphore>,
+    started: tokio::sync::Notify,
+}
 
 #[async_trait]
 impl Computer for StubBox {
@@ -97,8 +103,22 @@ impl Computer for StubBox {
     async fn state(&self, _box_id: &str) -> BoxResult<String> {
         Ok("running".to_string())
     }
-    async fn run_recipe(&self, _box_id: &str, _request: &Value) -> BoxResult<Value> {
-        Ok(json!({ "ok": true, "ran": 1 }))
+    async fn run_recipe(&self, _box_id: &str, request: &Value) -> BoxResult<Value> {
+        self.started.notify_one();
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.expect("gate").forget();
+        }
+        let artifacts = match request["artifact_dir"].as_str() {
+            Some(dir) => json!([{
+                "path": format!("{dir}/step-0.png"), "kind": "screenshot",
+                "mime": "image/png", "step_index": 0
+            }]),
+            None => json!([]),
+        };
+        Ok(json!({ "ok": true, "ran": 1, "artifacts": artifacts }))
+    }
+    async fn read_file_bytes(&self, _box_id: &str, _path: &str) -> BoxResult<Vec<u8>> {
+        Ok(vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
     }
 }
 
@@ -143,6 +163,7 @@ struct Harness {
     base: String,
     agui: AgUiState,
     store: PgStore,
+    stub: Arc<StubBox>,
     client: reqwest::Client,
     org: String,
 }
@@ -154,6 +175,23 @@ struct Person {
 }
 
 async fn harness(database_url: &str) -> Harness {
+    harness_with(database_url, StubBox::default()).await
+}
+
+/// A harness whose box holds every recipe until the test adds a permit.
+async fn gated(database_url: &str) -> Harness {
+    harness_with(
+        database_url,
+        StubBox {
+            gate: Some(tokio::sync::Semaphore::new(0)),
+            ..StubBox::default()
+        },
+    )
+    .await
+}
+
+async fn harness_with(database_url: &str, stub: StubBox) -> Harness {
+    let stub = Arc::new(stub);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -173,7 +211,7 @@ async fn harness(database_url: &str) -> Harness {
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: Some(Arc::new(StubBox)),
+        computer: Some(stub.clone()),
         vault: None,
         connectors: Connectors {
             providers: Arc::new(BTreeMap::new()),
@@ -195,6 +233,7 @@ async fn harness(database_url: &str) -> Harness {
         base: format!("http://127.0.0.1:{}", addr.port()),
         agui,
         store,
+        stub,
         client: reqwest::Client::new(),
         org: format!("org_two_hands_{}", uuid::Uuid::now_v7().simple()),
     }
@@ -297,6 +336,49 @@ impl Harness {
             .await
             .expect("version");
         id
+    }
+
+    /// Start a request and hang up on it once the box has started playing: the tab closed, the
+    /// proxy timed out, the laptop lid came down.
+    async fn hang_up_on(&self, who: &Person, path: &str, body: Value) {
+        let request = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .header("authorization", format!("Bearer {}", who.token))
+            .json(&body)
+            .send();
+        let call = tokio::spawn(request);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.stub.started.notified(),
+        )
+        .await
+        .expect("the box was asked to play");
+        call.abort();
+        // Long enough for the server to read the closed socket and drop the handler's future.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    /// Let one held play finish.
+    fn let_one_play(&self) {
+        self.stub.gate.as_ref().expect("a gated box").add_permits(1);
+    }
+
+    /// The runs of a recipe once every one of them has finished, or a panic after ten seconds.
+    async fn finished_runs(&self, who: &Person, id: &str, count: usize) -> Vec<Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (_, detail) = self.call(who, "GET", &format!("/recipes/{id}"), None).await;
+            let runs = detail["runs"].as_array().cloned().unwrap_or_default();
+            if runs.len() == count && runs.iter().all(|run| run["state"] == "finished") {
+                return runs;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{count} finished runs never appeared: {detail}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// What a turn with this bot would offer `run_recipe`, by recipe id.
@@ -450,4 +532,207 @@ async fn a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route() {
     assert!(status == 403 || status == 404, "{status} {why}");
     let (_, detail) = h.call(&owner, "GET", &format!("/recipes/{id}"), None).await;
     assert_eq!(granted_bots(&detail), vec![owners_bot]);
+}
+
+#[tokio::test]
+async fn a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures() {
+    let database_url = database_or_skip!();
+    let h = gated(&database_url).await;
+    let owner = h.person().await;
+    let bot = h.hire(&owner).await;
+    let id = h.taught(&owner, "Export the ledger").await;
+
+    h.hang_up_on(
+        &owner,
+        &format!("/recipes/{id}/run"),
+        json!({ "coworkerId": bot }),
+    )
+    .await;
+    // The box is still playing and nobody is listening, and the run is already a row.
+    let (_, detail) = h.call(&owner, "GET", &format!("/recipes/{id}"), None).await;
+    let runs = detail["runs"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        runs.len(),
+        1,
+        "a run is a row before the box answers: {detail}"
+    );
+    assert_eq!(runs[0]["state"], "running", "{detail}");
+    let run_id = runs[0]["id"].as_str().expect("run id").to_string();
+    let (status, why) = h
+        .call(
+            &owner,
+            "POST",
+            &format!("/recipes/{id}/run"),
+            Some(json!({ "coworkerId": bot })),
+        )
+        .await;
+    assert_eq!(
+        status, 409,
+        "one bot plays one recipe at a time, and says so: {why}"
+    );
+
+    h.let_one_play();
+    let runs = h.finished_runs(&owner, &id, 1).await;
+    assert_eq!(runs[0]["id"], run_id.as_str(), "the same row, finished");
+    assert_eq!(runs[0]["ok"], true);
+    let pictures = runs[0]["artifacts"].as_array().expect("artifacts");
+    assert_eq!(
+        pictures.len(),
+        1,
+        "the screenshot was pulled with nobody listening"
+    );
+    let kept = h
+        .store
+        .artifacts_for_run(&id, &run_id)
+        .await
+        .expect("artifacts");
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].deleted_at_ms.is_none(), "and nothing swept it away");
+}
+
+#[tokio::test]
+async fn a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once() {
+    let database_url = database_or_skip!();
+    let h = gated(&database_url).await;
+    let owner = h.person().await;
+    let bot = h.hire(&owner).await;
+    let id = h.taught(&owner, "Export the ledger").await;
+
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        h.client
+            .post(format!("{}/recipes/{id}/run", h.base))
+            .header("authorization", format!("Bearer {}", owner.token))
+            .header("prefer", "respond-async")
+            .json(&json!({ "coworkerId": bot }))
+            .send(),
+    )
+    .await
+    .expect("answered while the box is still playing")
+    .expect("send");
+    assert_eq!(answer.status().as_u16(), 202);
+    assert_eq!(
+        answer
+            .headers()
+            .get("preference-applied")
+            .and_then(|value| value.to_str().ok()),
+        Some("respond-async")
+    );
+    let accepted: Value = answer.json().await.expect("json");
+    let run_id = accepted["runId"].as_str().expect("run id").to_string();
+    assert_eq!(accepted["state"], "running");
+
+    h.let_one_play();
+    let runs = h.finished_runs(&owner, &id, 1).await;
+    assert_eq!(runs[0]["id"], run_id.as_str());
+    assert_eq!(runs[0]["artifacts"].as_array().map(Vec::len), Some(1));
+
+    // A caller that waits still gets the whole receipt, as before.
+    h.let_one_play();
+    let (status, ran) = h
+        .call(
+            &owner,
+            "POST",
+            &format!("/recipes/{id}/run"),
+            Some(json!({ "coworkerId": bot })),
+        )
+        .await;
+    assert_eq!(status, 200, "{ran}");
+    assert_eq!(ran["ok"], true);
+    assert_eq!(ran["ran"], 1);
+    assert_eq!(ran["artifacts"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn a_workflow_walk_survives_its_caller_hanging_up() {
+    let database_url = database_or_skip!();
+    let h = gated(&database_url).await;
+    let owner = h.person().await;
+    let bot = h.hire(&owner).await;
+    let tape = h.taught(&owner, "Export the ledger").await;
+    let (status, made) = h
+        .call(
+            &owner,
+            "POST",
+            "/workflows",
+            Some(json!({ "name": "Month end", "workflow": {
+                "workflow": 1, "start": "export",
+                "steps": {
+                    "export": { "do": "run", "recipe": tape, "then": "done" },
+                    "done": { "do": "stop", "outcome": "done" }
+                }
+            }})),
+        )
+        .await;
+    assert_eq!(status, 200, "{made}");
+    let id = made["recipe"]["id"].as_str().expect("id").to_string();
+
+    h.hang_up_on(
+        &owner,
+        &format!("/workflows/{id}/run"),
+        json!({ "coworkerId": bot, "jev": false }),
+    )
+    .await;
+    let (_, detail) = h.call(&owner, "GET", &format!("/recipes/{id}"), None).await;
+    assert_eq!(
+        detail["runs"][0]["state"], "running",
+        "the walk is a row before its first recipe answers: {detail}"
+    );
+
+    h.let_one_play();
+    let runs = h.finished_runs(&owner, &id, 1).await;
+    assert_eq!(runs[0]["ok"], true, "{runs:?}");
+    assert_eq!(runs[0]["receipt"]["outcome"], "done");
+    assert_eq!(
+        h.finished_runs(&owner, &tape, 1).await.len(),
+        1,
+        "and the recipe it played is written down under its own row"
+    );
+}
+
+#[tokio::test]
+async fn a_recipe_whose_tape_cannot_be_stored_is_not_a_200() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let owner = h.person().await;
+    let name = format!("Unstorable {}", uuid::Uuid::now_v7().simple());
+    // Postgres refuses a NUL in jsonb, so the tape as taught cannot be kept — while the steps
+    // filtered off it carry no key code and could be.
+    let (status, body) = h
+        .call(
+            &owner,
+            "POST",
+            "/recipes",
+            Some(json!({ "name": name, "raw": [
+                { "kind": "down", "x": 5, "y": 5, "at": 0, "code": "\u{0}" },
+                { "kind": "up", "x": 5, "y": 5, "at": 80 }
+            ]})),
+        )
+        .await;
+    if status == 200 {
+        let kinds: Vec<&str> = body["versions"]
+            .as_array()
+            .expect("versions")
+            .iter()
+            .filter_map(|version| version["kind"].as_str())
+            .collect();
+        assert!(
+            kinds.contains(&"raw") && kinds.contains(&"filtered"),
+            "a 200 is a recipe with both of its versions: {body}"
+        );
+    } else {
+        assert!(
+            status >= 500,
+            "the store refused, and said so: {status} {body}"
+        );
+        let (_, mine) = h.call(&owner, "GET", "/recipes?filter=mine", None).await;
+        assert!(
+            mine["recipes"]
+                .as_array()
+                .expect("recipes")
+                .iter()
+                .all(|row| row["name"] != name.as_str()),
+            "and no half-written recipe is left in the list: {mine}"
+        );
+    }
 }
