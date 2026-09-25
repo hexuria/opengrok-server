@@ -165,7 +165,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         401,
         "a named coworker needs a caller"
     );
-    let said = res.text().await.expect("body");
+    let said = error_of(res).await;
     assert!(
         said.contains("names a coworker"),
         "the refusal must say what to do about it, got: {said}"
@@ -187,7 +187,7 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         .await
         .expect("post");
     assert_eq!(res.status().as_u16(), 401, "an unsigned turn is refused");
-    let said = res.text().await.expect("body");
+    let said = error_of(res).await;
     assert!(said.contains("sign in"), "say what to do, got: {said}");
     assert!(
         !said.to_ascii_lowercase().contains("limit"),
@@ -217,13 +217,34 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
             .await
             .expect("post");
         assert_eq!(res.status().as_u16(), 401, "a bad bearer is not anonymous");
-        let said = res.text().await.expect("body");
+        let said = error_of(res).await;
         assert!(said.contains("sign in again"), "got: {said}");
     }
 
     // A signed-in turn with no coworker has a payer but no key of its own to meter it, so it
     // is bounded per account instead: served up to the budget, then a readable 429.
-    for n in 0..AGUI_UNSCOPED.per_window {
+    //
+    // A RETRY THAT REATTACHES IS NOT A TURN. The first turn's body is POSTed again (a dropped
+    // stream does exactly this); each answer is its run, and none of them spends the budget —
+    // so all of the budget's new turns still fit after them.
+    let first = turn(None).to_string();
+    for attempt in 0..4 {
+        let res = client
+            .post(format!("{base}/ag-ui"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {access}"))
+            .body(first.clone())
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(
+            res.status().as_u16(),
+            200,
+            "attempt {attempt} of the first turn"
+        );
+        let _ = res.bytes().await;
+    }
+    for n in 1..AGUI_UNSCOPED.per_window {
         let res = client
             .post(format!("{base}/ag-ui"))
             .header("content-type", "application/json")
@@ -258,4 +279,29 @@ async fn a_turn_that_names_a_coworker_needs_a_caller_we_can_name_back() {
         said.contains("coworker"),
         "the refusal names the way round it: {said}"
     );
+
+    // And a spent budget still lets the person reach the run they already started.
+    let res = client
+        .post(format!("{base}/ag-ui"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {access}"))
+        .body(first)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "a reattach is answered, not 429'd"
+    );
+}
+
+/// A refusal of the caller is `{"error": …}`, the shape the desktop's error helper reads first,
+/// and the sentence is in it.
+async fn error_of(res: reqwest::Response) -> String {
+    let body: Value = res.json().await.expect("a JSON refusal");
+    body["error"]
+        .as_str()
+        .expect("an error sentence")
+        .to_string()
 }

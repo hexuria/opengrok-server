@@ -2428,9 +2428,7 @@ pub async fn run(
         Ok(None) => (None, None),
         // A bad bearer refuses; downgrading to anonymous would make revocation invisible and a
         // stale key look like success.
-        Err(refusal) => {
-            return (StatusCode::UNAUTHORIZED, refusal.sentence()).into_response();
-        }
+        Err(refusal) => return unauthorized(refusal.sentence()),
     };
     // A BOT KEY NAMES THE COWORKER. barok-works registers a Bot with an endpoint and a header —
     // it has no forwardedProps to send — so the key itself carries which coworker the Bot IS.
@@ -2453,26 +2451,34 @@ pub async fn run(
     // — never saw it: anyone who could reach the host spent its model credit, one run row per
     // request. Refused here, before any journal write.
     let Some(caller) = account_id.clone() else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            if run_coworker.is_some() {
-                "that turn names a coworker, so it needs a signed-in caller; sign in and send it \
-                 again"
-            } else {
-                "a turn needs a signed-in caller; sign in and send it again"
-            },
-        )
-            .into_response();
+        return unauthorized(if run_coworker.is_some() {
+            "that turn names a coworker, so it needs a signed-in caller; sign in and send it again"
+        } else {
+            "a turn needs a signed-in caller; sign in and send it again"
+        });
     };
     // A named caller with no coworker has a payer but no key of its own to meter it, so it runs
     // on the deployment's key: bounded per account instead. Charged BEFORE the queued send below
-    // is drained, so a refusal here never costs the person a queued message.
-    if run_coworker.is_none()
-        && let Err(spent) = state.auth.budgets.take(
-            &crate::auth::budget::AGUI_UNSCOPED,
-            &format!("account:{}", caller.as_str()),
-        )
+    // is drained, so a refusal here never costs the person a queued message — and refunded when
+    // the POST turns out to start nothing (a stale queued send, a retry that reattaches), so a
+    // client reconnecting to its own run does not spend the hour's turns doing it.
+    let unscoped_charge = run_coworker
+        .is_none()
+        .then(|| format!("account:{}", caller.as_str()));
+    if let Some(charge) = &unscoped_charge
+        && let Err(spent) = state
+            .auth
+            .budgets
+            .take(&crate::auth::budget::AGUI_UNSCOPED, charge)
     {
+        // A spent budget still lets the person reach a run they already started: a dropped
+        // stream re-POSTs its own run id, and answering that 429 would strand the turn it paid
+        // for. Nothing new starts on this path, so nothing is charged.
+        if let Some(answer) =
+            answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
+        {
+            return answer;
+        }
         return crate::auth::budget::too_many(
             spent,
             "too many turns without a coworker this hour; hire or pick a coworker, whose turns \
@@ -2525,10 +2531,11 @@ pub async fn run(
         if let Err(refusal) =
             crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
         {
+            refund_unscoped(&state, unscoped_charge.as_deref());
             return refusal;
         }
     } else if crate::agui::pending::pending_id_from(&input).is_some() {
-        return (StatusCode::UNAUTHORIZED, "sign in to send a queued message").into_response();
+        return unauthorized("sign in to send a queued message");
     }
 
     // PAST THE CLAIM, A HANG-UP MUST NOT CANCEL THE TURN. The queued send is drained now, and the
@@ -2543,6 +2550,7 @@ pub async fn run(
         model,
         coworker_name,
         coworker_role,
+        unscoped_charge,
     ));
     match turn.await {
         Ok(response) => response,
@@ -2557,7 +2565,29 @@ pub async fn run(
     }
 }
 
+/// The 401 every refusal of an unnamed or unrecognised caller answers with: `{"error": …}`, the
+/// shape the `/api/{method}` seam already guarantees and the desktop's error helper reads first
+/// (`docs/known-gaps.md` §4), so the sentence reaches the person rather than "failed (401)".
+fn unauthorized(sentence: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": sentence })),
+    )
+        .into_response()
+}
+
+/// Give back an `AGUI_UNSCOPED` hit taken for a POST that started no turn.
+fn refund_unscoped(state: &AgUiState, charge: Option<&str>) {
+    if let Some(charge) = charge {
+        state
+            .auth
+            .budgets
+            .refund(&crate::auth::budget::AGUI_UNSCOPED, charge);
+    }
+}
+
 /// Everything a turn does once any queued send it fires has been claimed.
+#[allow(clippy::too_many_arguments)]
 async fn start_claimed_turn(
     gateway: crate::host_state::HostState,
     input: RunAgentInput,
@@ -2566,6 +2596,7 @@ async fn start_claimed_turn(
     model: String,
     coworker_name: String,
     coworker_role: Option<String>,
+    unscoped_charge: Option<String>,
 ) -> Response {
     let state = gateway.agui.clone();
     // A RUN ID THAT ALREADY HAS A RUN IS NOT A NEW TURN. A client retrying its POST — its stream
@@ -2577,6 +2608,7 @@ async fn start_claimed_turn(
     // The claim further down is what makes it exact: two POSTs at once can both get past this.
     if let Some(answer) = answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
     {
+        refund_unscoped(&state, unscoped_charge.as_deref());
         return answer;
     }
     if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
@@ -2768,6 +2800,7 @@ async fn start_claimed_turn(
     match journal.claim(&input.run_id).await {
         Ok(true) => {}
         Ok(false) => {
+            refund_unscoped(&state, unscoped_charge.as_deref());
             return answer_for_existing_run(&state, account_id.as_ref(), &input.run_id)
                 .await
                 .unwrap_or_else(run_taken);

@@ -171,7 +171,8 @@ adopted the same rule, so the majority of what it refuses arrives at the desktop
 wrong", "you are not in an organization", "no such account".
 
 **Status:** the desktop shipped a helper that falls back to raw text on a non-JSON body, so this
-is invisible to users today. It remains an inconsistency between two of our own surfaces, and the
+is invisible to users today. `POST /ag-ui`'s refusals of an unnamed caller (no bearer, a bearer
+that names nobody, an unsigned queued send) answer `{"error": …}` since 25 Sep 2026. It remains an inconsistency between two of our own surfaces, and the
 next person to add a refusal has two conventions to choose from.
 
 ---
