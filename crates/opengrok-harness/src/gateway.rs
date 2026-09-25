@@ -43,6 +43,51 @@ pub struct GatewayDoor {
     /// `reqwest::Client::new()` panics on the same TLS or resolver failure the builder reports,
     /// so the door says the gateway cannot be reached, and says it on every call.
     http: Result<reqwest::Client, String>,
+    /// The last readiness answer and when it was had. See `READY_FOR`.
+    ready_seen: Mutex<Option<(std::time::Instant, Probed)>>,
+}
+
+/// How long one readiness answer about the gateway stands.
+///
+/// `/ready` is unauthenticated, and every call to it was a `GET /v1/models` on the gateway: a
+/// prober asking in a tight loop drove the gateway's catalogue at the prober's rate. Five
+/// seconds is shorter than any supervisor's interval, so a revoked token still reads false on
+/// the next probe that matters.
+const READY_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A probe's outcome, kept so it can be answered again. `ModelError` is not `Clone`.
+enum Probed {
+    Ok,
+    Refused(u16),
+    Unreachable(String),
+    TimedOut(String),
+    Other(String),
+}
+
+impl Probed {
+    fn of(probed: &Result<(), ModelError>) -> Self {
+        match probed {
+            Ok(()) => Self::Ok,
+            Err(ModelError::Refused { status, .. }) => Self::Refused(*status),
+            Err(ModelError::Unreachable(detail)) => Self::Unreachable(detail.clone()),
+            Err(ModelError::TimedOut(sentence)) => Self::TimedOut(sentence.clone()),
+            Err(other) => Self::Other(other.to_string()),
+        }
+    }
+
+    fn again(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Ok => Ok(()),
+            Self::Refused(status) => Err(ModelError::Refused {
+                status: *status,
+                body: String::new(),
+                retry_after_s: None,
+            }),
+            Self::Unreachable(detail) => Err(ModelError::Unreachable(detail.clone())),
+            Self::TimedOut(sentence) => Err(ModelError::TimedOut(sentence.clone())),
+            Self::Other(detail) => Err(ModelError::Stream(detail.clone())),
+        }
+    }
 }
 
 impl std::fmt::Debug for GatewayDoor {
@@ -98,6 +143,7 @@ impl GatewayDoor {
             base_url: base_url.into(),
             key: key.into(),
             http,
+            ready_seen: Mutex::new(None),
         }
     }
 
@@ -456,8 +502,22 @@ fn message_content(message: &ChatMessage) -> serde_json::Value {
 
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
+    /// `probe`, answered from the last one while it is younger than `READY_FOR`. Boot calls
+    /// `probe` itself and always asks.
     async fn ready(&self) -> Option<Result<(), ModelError>> {
-        Some(self.probe().await)
+        let recent = self.ready_seen.lock().ok().and_then(|seen| {
+            seen.as_ref()
+                .filter(|(at, _)| at.elapsed() < READY_FOR)
+                .map(|(_, probed)| probed.again())
+        });
+        if let Some(recent) = recent {
+            return Some(recent);
+        }
+        let probed = self.probe().await;
+        if let Ok(mut seen) = self.ready_seen.lock() {
+            *seen = Some((std::time::Instant::now(), Probed::of(&probed)));
+        }
+        Some(probed)
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
@@ -629,6 +689,7 @@ mod tests {
             base_url: "http://gateway.invalid".to_string(),
             key: "k".to_string(),
             http: Err("no TLS backend".to_string()),
+            ready_seen: Mutex::new(None),
         };
         let error = door
             .stream(ModelRequest::default())
@@ -641,6 +702,52 @@ mod tests {
             door.probe().await,
             Err(ModelError::Unreachable(_))
         ));
+    }
+
+    /// A gateway that answers every request with `status_line`, counting the requests.
+    async fn a_gateway_answering(status_line: &'static str) -> (String, Arc<Mutex<usize>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let asked = Arc::new(Mutex::new(0usize));
+        let counted = asked.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0u8; 4096];
+                let _ = socket.read(&mut buffer).await;
+                *counted.lock().unwrap() += 1;
+                let reply = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                     content-length: 11\r\nconnection: close\r\n\r\n{{\"data\":[]}}"
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        (url, asked)
+    }
+
+    /// `/ready` asks through `ready`, and a tight prober must not become the gateway's traffic:
+    /// a second ask inside `READY_FOR` is answered from the first, refusal included. Boot's
+    /// `probe` always asks.
+    #[tokio::test]
+    async fn readiness_is_asked_of_the_gateway_once_per_window() {
+        let (url, asked) = a_gateway_answering("200 OK").await;
+        let door = GatewayDoor::new(url, "k");
+        assert!(matches!(door.ready().await, Some(Ok(()))));
+        assert!(matches!(door.ready().await, Some(Ok(()))));
+        assert_eq!(*asked.lock().unwrap(), 1);
+        assert!(door.probe().await.is_ok());
+        assert_eq!(*asked.lock().unwrap(), 2);
+
+        let (url, asked) = a_gateway_answering("401 Unauthorized").await;
+        let door = GatewayDoor::new(url, "k");
+        for _ in 0..3 {
+            assert!(matches!(
+                door.ready().await,
+                Some(Err(ModelError::Refused { status: 401, .. }))
+            ));
+        }
+        assert_eq!(*asked.lock().unwrap(), 1);
     }
 
     /// The internal gateway address is not the person's business. An unreachable gateway used

@@ -75,8 +75,8 @@ fn a_store_that_cannot_answer() -> PgStore {
     PgStore::new(pool)
 }
 
-/// A gateway that answers every request with 401, the way it answers a revoked key.
-async fn a_gateway_that_refuses_the_key() -> String {
+/// A gateway that answers every request with `response`, whole.
+async fn a_gateway_answering(response: &'static [u8]) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -86,14 +86,45 @@ async fn a_gateway_that_refuses_the_key() -> String {
         while let Ok((mut socket, _)) = listener.accept().await {
             let mut buffer = [0u8; 4096];
             let _ = socket.read(&mut buffer).await;
-            let _ = socket
-                .write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await;
+            let _ = socket.write_all(response).await;
         }
     });
     url
+}
+
+/// A gateway that answers every request with 401, the way it answers a revoked key.
+async fn a_gateway_that_refuses_the_key() -> String {
+    a_gateway_answering(
+        b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+    )
+    .await
+}
+
+/// A gateway that takes the key and lists its (empty) catalogue.
+async fn a_gateway_that_takes_the_key() -> String {
+    a_gateway_answering(
+        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\n\
+          connection: close\r\n\r\n{\"data\":[]}",
+    )
+    .await
+}
+
+/// The store half of the ready tests, or `None` (and a loud skip) without Postgres.
+async fn a_live_store() -> Option<PgStore> {
+    let Ok(database_url) = std::env::var("OG_DATABASE_URL") else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return None;
+    };
+    let database_url = opengrok_store::gate_database_or_panic(database_url);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
+    Some(PgStore::new(pool))
 }
 
 /// Through the spend guard, as `main` wires it, so the guard's forwarding is what is tested.
@@ -136,25 +167,32 @@ async fn an_unreachable_gateway_is_not_ready() {
 
 #[tokio::test]
 async fn a_live_store_and_a_door_with_no_gateway_are_ready() {
-    let Ok(database_url) = std::env::var("OG_DATABASE_URL") else {
-        eprintln!("skipping: OG_DATABASE_URL is not set");
+    let Some(store) = a_live_store().await else {
         return;
     };
-    let database_url = opengrok_store::gate_database_or_panic(database_url);
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&database_url)
-        .await
-        .expect("connect to Postgres");
-    opengrok_store::migrations::run(&pool)
-        .await
-        .expect("migrations");
-
-    let (status, body) =
-        ready_through_the_router(PgStore::new(pool), Arc::new(MockDoor::echoing())).await;
+    let (status, body) = ready_through_the_router(store, Arc::new(MockDoor::echoing())).await;
 
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], serde_json::json!(true), "{body}");
     assert_eq!(body["store"], "ok", "{body}");
     assert_eq!(body["gateway"], "unused", "{body}");
+}
+
+/// The case the other tests leave out: the store answers and the gateway takes our key, through
+/// the spend guard as `main` wires it. `gateway: "ok"` is the only answer a supervisor should
+/// route traffic on.
+#[tokio::test]
+async fn a_live_store_and_a_gateway_that_takes_the_key_are_ready() {
+    let Some(store) = a_live_store().await else {
+        return;
+    };
+    let url = a_gateway_that_takes_the_key().await;
+    let door = guarded(GatewayDoor::new(url, "oag_live_k"), &store);
+    let (status, body) = ready_through_the_router(store, door).await;
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], serde_json::json!(true), "{body}");
+    assert_eq!(body["store"], "ok", "{body}");
+    assert_eq!(body["gateway"], "ok", "{body}");
+    assert_eq!(body["gatewayStatus"], serde_json::Value::Null, "{body}");
 }
