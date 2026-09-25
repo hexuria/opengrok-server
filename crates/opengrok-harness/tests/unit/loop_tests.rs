@@ -2506,6 +2506,38 @@ async fn non_zero_exits_from_normal_commands_do_not_end_the_turn() {
     assert!(!text.contains("test result: FAILED"), "{text:?}");
 }
 
+/// #183's own case: a grep with no match, then the same search case-insensitive, is a new
+/// command and not the retry diary. The second grep runs, and so does the read after it.
+#[tokio::test]
+async fn a_grep_with_no_match_then_grep_i_does_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "grep -rn todo src"),
+            shell_deltas("c2", "grep -rni todo src"),
+            shell_deltas("c3", "cat src/lib.rs"),
+        ],
+        "src/lib.rs:3 has the TODO.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("grep -rn todo src", "[exit code 1]"),
+        ("grep -rni todo src", "[exit code 1]"),
+        ("cat src/lib.rs", "// TODO: parse\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("where is the todo?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 3, "{ran:?}");
+    assert_eq!(assistant_text(&events), "src/lib.rs:3 has the TODO.");
+}
+
 /// `python` missing on the box is fixed by `python3`. Exit 127 used to set the failure streak
 /// straight to its ceiling, so the retry was never asked for.
 #[tokio::test]
