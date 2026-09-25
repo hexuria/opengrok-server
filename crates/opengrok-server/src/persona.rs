@@ -381,13 +381,14 @@ pub fn chosen_skill_line(name: &str, body: &str, marker: &str, author: SkillAuth
 
 /// Where a chosen skill's bundled files are, placed after the quote and before
 /// [`SKILL_CLOSING_LINE`], which stays the last word. OUR SENTENCE: it names the directory — built
-/// from the checked name and the version — and counts files, but never quotes a bundle path. The
-/// paths are the author's text, and listed out here they would speak in our voice.
+/// from the checked name, the skill id and the version — and counts files, but never quotes a
+/// bundle path. The paths are the author's text, and listed out here they would speak in our voice.
 #[must_use]
 pub fn skill_files_line(
     dir: &str,
     copied: usize,
     not_copied: usize,
+    not_executable: usize,
     author: SkillAuthor,
 ) -> String {
     let mut line = format!(
@@ -398,6 +399,12 @@ pub fn skill_files_line(
         line.push_str(&format!(
             " {not_copied} more could not be copied (not plain text, or not a plain file name): \
              if the instructions need one, say so rather than guess what it holds."
+        ));
+    }
+    if not_executable > 0 {
+        line.push_str(&format!(
+            " {not_executable} script(s) there could not be marked executable: run one through \
+             the interpreter its first line names, not directly."
         ));
     }
     if author == SkillAuthor::Colleague {

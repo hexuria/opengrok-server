@@ -91,6 +91,35 @@ fn said(stdout: &str) -> CommandOutput {
     }
 }
 
+/// `cd '<dir>' && sha256sum -c --status .bundle && cat .bundle`, as a shell would answer it.
+fn checked_manifest(files: &BTreeMap<String, String>, dir: &str) -> CommandOutput {
+    use sha2::{Digest, Sha256};
+    let hex = |text: &str| -> String {
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let manifest = files.get(&format!("{dir}/.bundle"));
+    let intact = manifest.is_some_and(|manifest| {
+        !manifest.is_empty()
+            && manifest.lines().all(|line| {
+                line.split_once("  ").is_some_and(|(hash, path)| {
+                    files
+                        .get(&format!("{dir}/{path}"))
+                        .is_some_and(|text| hex(text) == hash)
+                })
+            })
+    });
+    match manifest {
+        Some(manifest) if intact => said(manifest),
+        _ => CommandOutput {
+            exit_code: 1,
+            ..said("")
+        },
+    }
+}
+
 #[async_trait]
 impl Computer for DiskBox {
     async fn create(&self, _ttl_seconds: Option<u64>) -> BoxResult<String> {
@@ -101,13 +130,12 @@ impl Computer for DiskBox {
         if command.contains("$HOME") {
             return Ok(said("/home/box"));
         }
-        if let Some(path) = command
-            .strip_prefix("cat '")
+        if let Some(dir) = command
+            .strip_prefix("cd '")
             .and_then(|rest| rest.split_once('\''))
-            .map(|(path, _)| path)
+            .map(|(dir, _)| dir)
         {
-            let files = self.files.lock().unwrap();
-            return Ok(said(files.get(path).map(String::as_str).unwrap_or("")));
+            return Ok(checked_manifest(&self.files.lock().unwrap(), dir));
         }
         if let Some(dir) = command
             .strip_prefix("rm -rf '")
@@ -365,7 +393,7 @@ async fn a_chosen_skills_files_are_on_the_computer_before_the_model_reads_it() {
 
     let system = h.turn(&coworker, &id).await;
 
-    let dir = format!("/home/box/.skills/{name}/v1");
+    let dir = format!("/home/box/.skills/{name}/{id}/v1");
     let script = format!("{dir}/scripts/check.sh");
     assert_eq!(
         disk.read_file("bx", &script)

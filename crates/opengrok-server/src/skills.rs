@@ -416,7 +416,10 @@ pub(crate) async fn files_line_for_turn(
         .into_iter()
         .partition(|file| check_path(&file.path).is_ok());
     let plain: Vec<(String, Vec<u8>)> = plain.into_iter().map(|f| (f.path, f.bytes)).collect();
-    let under = format!(".skills/{}/v{}", skill.name, skill.version);
+    // THE SKILL ID IS IN THE PATH. By name alone, two skills called the same (a person's own and
+    // a colleague's, on a per-org box) shared one directory, and two turns using them at once
+    // raced on its `rm -rf` and each other's writes.
+    let under = format!(".skills/{}/{}/v{}", skill.name, skill.id, skill.version);
     match opengrok_box::bundle::place(computer.as_ref(), &box_id, &under, &plain).await {
         Ok(placed) if placed.written.is_empty() => Some(unavailable(
             "none of them is a plain text file with a plain name",
@@ -425,6 +428,7 @@ pub(crate) async fn files_line_for_turn(
             &placed.dir,
             placed.written.len(),
             placed.skipped.len() + refused.len(),
+            placed.not_executable.len(),
             skill.author,
         )),
         Err(error) => {

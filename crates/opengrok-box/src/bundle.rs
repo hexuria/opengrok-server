@@ -8,21 +8,27 @@
 //! would run on the box of whoever invoked the skill. Every component must be `[A-Za-z0-9._-]`,
 //! not `.`/`..`, not starting with `-`; anything else is skipped with the reason, never quoted.
 //!
-//! ONCE PER CONTENT. A `.bundle` file in the directory holds the digest of what was written; a
-//! later turn that finds the same digest writes nothing. A different digest (a new version, or
-//! another skill of the same name on a shared box) clears the directory first, so no file of the
+//! ONCE PER CONTENT, CHECKED AGAINST THE DISK. A `.bundle` file in the directory is a
+//! `sha256sum` manifest of what was written, and a later turn writes nothing only when that
+//! manifest is the one it would write AND `sha256sum -c` still passes on the box. It used to hold
+//! one digest of what had been written, so a file a turn edited or deleted stayed that way for
+//! every later turn of the same version, and the model was told it held the author's words. A
+//! box with no `sha256sum` fails the check and is rewritten each turn: slower, never wrong.
+//! Anything else (a new set, an edited file) clears the directory first, so no file of the
 //! previous set is left beside the new one.
 
 use sha2::{Digest, Sha256};
 
 use crate::{BoxError, BoxResult, Computer};
 
-/// What was placed, and what was not and why. Paths are relative to `dir`.
+/// What was placed, and what was not and why. Paths are relative to `dir`. `not_executable` are
+/// written scripts whose `chmod +x` failed: they are there, but only run through an interpreter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placed {
     pub dir: String,
     pub written: Vec<String>,
     pub skipped: Vec<(String, String)>,
+    pub not_executable: Vec<String>,
 }
 
 const MARKER: &str = ".bundle";
@@ -41,17 +47,17 @@ pub fn plain_path(path: &str) -> bool {
         })
 }
 
-fn digest(files: &[(String, Vec<u8>)]) -> String {
-    let mut hash = Sha256::new();
-    for (path, bytes) in files {
-        hash.update(path.as_bytes());
-        hash.update([0]);
-        hash.update((bytes.len() as u64).to_be_bytes());
-        hash.update(bytes);
-    }
-    hash.finalize()
+/// The `.bundle` manifest for `texts`: one `sha256sum` line per file, in the order given.
+fn manifest(texts: &[(&str, &str)]) -> String {
+    texts
         .iter()
-        .map(|byte| format!("{byte:02x}"))
+        .map(|(path, text)| {
+            let hex: String = Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("{hex}  {path}\n")
+        })
         .collect()
 }
 
@@ -96,6 +102,7 @@ pub async fn place(
         dir: dir.clone(),
         written: Vec::new(),
         skipped: Vec::new(),
+        not_executable: Vec::new(),
     };
     let mut texts = Vec::new();
     for (path, bytes) in files {
@@ -111,11 +118,15 @@ pub async fn place(
                 .push((path.clone(), "not a text file".into()));
         }
     }
-    let want = digest(files);
+    let want = manifest(&texts);
     let have = computer
-        .run(box_id, &format!("cat '{dir}/{MARKER}' 2>/dev/null"), 30)
+        .run(
+            box_id,
+            &format!("cd '{dir}' 2>/dev/null && sha256sum -c --status {MARKER} && cat {MARKER}"),
+            30,
+        )
         .await?;
-    if have.stdout.trim() == want {
+    if have.exit_code == 0 && !want.is_empty() && have.stdout.trim_end() == want.trim_end() {
         placed.written = texts.iter().map(|(path, _)| path.to_string()).collect();
         return Ok(placed);
     }
@@ -134,7 +145,7 @@ pub async fn place(
         {
             Ok(()) => {
                 if text.starts_with("#!") {
-                    runnable.push(format!("'{dir}/{path}'"));
+                    runnable.push(path);
                 }
                 placed.written.push(path.to_string());
             }
@@ -145,10 +156,20 @@ pub async fn place(
         }
     }
     // A script arrives without its mode bit; a shebang is the author saying it is meant to run.
+    // A chmod that fails is said, not swallowed: the model would otherwise be told the script is
+    // there to run and meet "permission denied" — and the next turn tries again.
     if !runnable.is_empty() {
-        let _ = computer
-            .run(box_id, &format!("chmod +x {}", runnable.join(" ")), 30)
+        let quoted: Vec<String> = runnable
+            .iter()
+            .map(|path| format!("'{dir}/{path}'"))
+            .collect();
+        let marked = computer
+            .run(box_id, &format!("chmod +x {}", quoted.join(" ")), 30)
             .await;
+        if !matches!(marked, Ok(ref output) if output.exit_code == 0) {
+            complete = false;
+            placed.not_executable = runnable.iter().map(|path| path.to_string()).collect();
+        }
     }
     // A write that failed is tried again next turn; a file that can never be written is not.
     if complete {

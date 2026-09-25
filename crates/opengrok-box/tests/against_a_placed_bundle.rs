@@ -14,6 +14,8 @@ use opengrok_box::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand}
 struct Disk {
     files: Mutex<BTreeMap<String, String>>,
     commands: Mutex<Vec<String>>,
+    /// A box whose `chmod` fails (a read-only or noexec mount).
+    chmod_fails: bool,
 }
 
 fn out(stdout: &str) -> CommandOutput {
@@ -27,6 +29,42 @@ fn out(stdout: &str) -> CommandOutput {
     }
 }
 
+fn failed(stderr: &str) -> CommandOutput {
+    CommandOutput {
+        exit_code: 1,
+        stderr: stderr.to_string(),
+        ..out("")
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `cd '<dir>' && sha256sum -c --status .bundle && cat .bundle`, as a shell would answer it.
+fn checked_manifest(files: &BTreeMap<String, String>, dir: &str) -> CommandOutput {
+    let Some(manifest) = files.get(&format!("{dir}/.bundle")) else {
+        return failed("sha256sum: .bundle: No such file or directory");
+    };
+    let intact = !manifest.is_empty()
+        && manifest.lines().all(|line| {
+            line.split_once("  ").is_some_and(|(hash, path)| {
+                files
+                    .get(&format!("{dir}/{path}"))
+                    .is_some_and(|text| sha256_hex(text) == hash)
+            })
+        });
+    if intact {
+        out(manifest)
+    } else {
+        failed("sha256sum: WARNING: 1 computed checksum did NOT match")
+    }
+}
+
 #[async_trait]
 impl Computer for Disk {
     async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
@@ -37,12 +75,14 @@ impl Computer for Disk {
         if command.contains("$HOME") {
             return Ok(out("/root/\n"));
         }
-        if let Some((path, _)) = command
-            .strip_prefix("cat '")
+        if let Some((dir, _)) = command
+            .strip_prefix("cd '")
             .and_then(|rest| rest.split_once('\''))
         {
-            let files = self.files.lock().unwrap();
-            return Ok(out(files.get(path).map(String::as_str).unwrap_or("")));
+            return Ok(checked_manifest(&self.files.lock().unwrap(), dir));
+        }
+        if command.starts_with("chmod") && self.chmod_fails {
+            return Ok(failed("chmod: Operation not permitted"));
         }
         if let Some((dir, _)) = command
             .strip_prefix("rm -rf '")
@@ -163,6 +203,29 @@ async fn files_land_under_home_and_the_same_set_is_written_once() {
         "an unchanged set is not rewritten: {after:?}"
     );
 
+    // A turn that edited a file on the box does not leave it for the next: the manifest no longer
+    // checks, so the set is written again as the author made it.
+    disk.files.lock().unwrap().insert(
+        "/root/.skills/review/v2/scripts/check.sh".to_string(),
+        "#!/bin/sh\necho tampered\n".to_string(),
+    );
+    let before = disk.commands.lock().unwrap().len();
+    place(&disk, "bx", ".skills/review/v2", &files)
+        .await
+        .expect("placed");
+    let after: Vec<String> = disk.commands.lock().unwrap()[before..].to_vec();
+    assert!(
+        after.iter().any(|c| c.starts_with("rm -rf")),
+        "an edited file is noticed: {after:?}"
+    );
+    assert_eq!(
+        disk.read_file("bx", "/root/.skills/review/v2/scripts/check.sh")
+            .await
+            .expect("written"),
+        "#!/bin/sh\necho ok\n",
+        "the author's script is back"
+    );
+
     // A different set in the same directory clears the old one first.
     let other = vec![file("other.md", b"new")];
     place(&disk, "bx", ".skills/review/v2", &other)
@@ -182,4 +245,29 @@ async fn a_directory_that_is_not_plain_is_refused_before_anything_runs() {
     let refused = place(&disk, "bx", ".skills/x';id;'/v1", &[file("a.md", b"x")]).await;
     assert!(refused.is_err());
     assert!(disk.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_script_that_cannot_be_marked_executable_is_said_and_tried_again() {
+    let disk = Disk {
+        chmod_fails: true,
+        ..Disk::default()
+    };
+    let files = vec![
+        file("scripts/check.sh", b"#!/bin/sh\necho ok\n"),
+        file("notes.md", b"read me"),
+    ];
+
+    let placed = place(&disk, "bx", ".skills/review/v1", &files)
+        .await
+        .expect("placed");
+
+    assert_eq!(placed.written, vec!["scripts/check.sh", "notes.md"]);
+    assert_eq!(placed.not_executable, vec!["scripts/check.sh"]);
+    assert!(
+        disk.read_file("bx", "/root/.skills/review/v1/.bundle")
+            .await
+            .is_err(),
+        "no manifest, so the next turn tries again rather than trusting a half-done copy"
+    );
 }
