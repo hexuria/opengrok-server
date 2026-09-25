@@ -32,6 +32,8 @@ pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
 pub use timing::RUN_TIMING_NAME;
 pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
+use std::collections::HashSet;
+
 use futures::StreamExt;
 use opengrok_wire::agui::Event;
 
@@ -259,6 +261,41 @@ fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolRe
     )
 }
 
+/// The recipe a `run_recipe` call names.
+fn recipe_of(call: &opengrok_tools::ToolCall) -> Option<String> {
+    if call.name != opengrok_tools::RUN_RECIPE {
+        return None;
+    }
+    call.arguments
+        .get("recipe")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn is_replay(call: &opengrok_tools::ToolCall, played: &HashSet<String>) -> bool {
+    recipe_of(call).is_some_and(|recipe| played.contains(&recipe))
+}
+
+/// A call the loop answers itself instead of running: a home-directory walk, or a recipe this
+/// request already played.
+fn answered_here(
+    call: &opengrok_tools::ToolCall,
+    played: &HashSet<String>,
+) -> Option<opengrok_tools::ToolResult> {
+    if is_broad_walk_call(call) {
+        return Some(refused_broad_walk(call));
+    }
+    let recipe = recipe_of(call).filter(|recipe| played.contains(recipe))?;
+    Some(opengrok_tools::ToolResult::ok(
+        &call.id,
+        format!(
+            "Not played again: the recipe `{recipe}` already ran in this request, and a replay \
+             repeats what it did rather than correcting it. Say what its screenshot showed, \
+             finish by hand with `computer`, or ask."
+        ),
+    ))
+}
+
 /// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`), on either shell.
 /// A host probe such as `gpui-agent hello` is not one: it must not consume the
 /// single listing this turn is allowed to run.
@@ -383,7 +420,14 @@ pub async fn run_conversation(
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
     converse(
-        door, tools, journal, request, projection, run_id, None, false,
+        door,
+        tools,
+        journal,
+        request,
+        projection,
+        run_id,
+        None,
+        Carried::default(),
     )
     .await
 }
@@ -412,7 +456,7 @@ pub async fn run_conversation_streaming(
         projection,
         run_id,
         Some(sink),
-        false,
+        Carried::default(),
     )
     .await
 }
@@ -549,6 +593,9 @@ pub async fn resume_conversation(
 
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
+    let played_now = matches!(outcome, ResumeOutcome::Approved)
+        .then(|| recipe_of(&approved))
+        .flatten();
     let results = match outcome {
         ResumeOutcome::Approved => {
             // The person may have answered the card long after the box went to sleep.
@@ -611,6 +658,14 @@ pub async fn resume_conversation(
     // The first half already recorded ToolCallStart (that is why this run is
     // resuming). converse_raw would otherwise start with started_a_tool = false
     // and treat a long post-HITL summary as a plan-only flood.
+    let carried = Carried {
+        started_a_tool: true,
+        played: results
+            .iter()
+            .filter(|result| result.call_id == approved.id && !result.awaiting_approval)
+            .filter_map(|_| played_now.clone())
+            .collect(),
+    };
     let mut rest = converse(
         door,
         Some(tools),
@@ -619,7 +674,7 @@ pub async fn resume_conversation(
         projection,
         &run_id,
         None,
-        true,
+        carried,
     )
     .await;
     all.append(&mut rest);
@@ -823,6 +878,18 @@ async fn emit_live(sink: Option<&dyn EventSink>, events: &[Event]) {
     }
 }
 
+/// What a run segment inherits from the segment before it. A resumed run is a new
+/// `converse_raw`, and each of these used to start from nothing there.
+#[derive(Debug, Default)]
+struct Carried {
+    /// The first half already recorded a `ToolCallStart`, so a long summary after the card is
+    /// work, not a plan-only flood.
+    started_a_tool: bool,
+    /// Recipes this request already played. A replay repeats what the recipe did rather than
+    /// correcting it (#120), and the approved call a resume runs is one of them.
+    played: HashSet<String>,
+}
+
 /// The loop both entry points share.
 #[allow(clippy::too_many_arguments)]
 /// What a run emitted, with streamed secret-bearing tool arguments assembled and scrubbed.
@@ -837,18 +904,11 @@ async fn converse(
     projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
+    carried: Carried,
 ) -> Vec<Event> {
     scrub_streamed_tool_args(
         converse_raw(
-            door,
-            tools,
-            journal,
-            request,
-            projection,
-            run_id,
-            sink,
-            already_started_a_tool,
+            door, tools, journal, request, projection, run_id, sink, carried,
         )
         .await,
     )
@@ -863,8 +923,12 @@ async fn converse_raw(
     mut projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
+    carried: Carried,
 ) -> Vec<Event> {
+    let Carried {
+        started_a_tool: already_started_a_tool,
+        mut played,
+    } = carried;
     let mut all = Vec::new();
 
     // Advertise the run's tools to the model — the offering half of tool use. Set once; every round
@@ -911,6 +975,8 @@ async fn converse_raw(
     let mut last_failed_key: Option<String> = None;
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
+    // A recipe replay was already answered without playing; asking again ends the turn.
+    let mut skipped_replay = false;
     // The catalog sentence to show if a later round only repeats the listing.
     // Without it the early finish below closes the run with no TEXT_MESSAGE.
     let mut last_listing: Option<String> = None;
@@ -1128,6 +1194,20 @@ async fn converse_raw(
                 if same_open && let Some((_, sentence)) = opened.clone() {
                     end_run!(round_events, Ending::Finish(Some(sentence)));
                 }
+                let replayed = calls.iter().any(|call| is_replay(call, &played));
+                let replay_only = replayed
+                    && calls
+                        .iter()
+                        .all(|call| is_client_render_tool(&call.name) || is_replay(call, &played));
+                if replay_only && skipped_replay {
+                    let recipe = calls.iter().find_map(recipe_of).unwrap_or_default();
+                    end_run!(
+                        round_events,
+                        Ending::Finish(Some(format!(
+                            "The recipe {recipe} already ran for this request, so it was not played again."
+                        )))
+                    );
+                }
                 let waking = box_wake_frame(runner, &mut projection, &calls).await;
                 emit_live(sink, &waking).await;
                 round_events.extend(waking);
@@ -1146,10 +1226,13 @@ async fn converse_raw(
                         .collect();
                     let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
                     ((results, times), 0)
-                } else if calls.iter().any(is_broad_walk_call) {
+                } else if calls
+                    .iter()
+                    .any(|call| answered_here(call, &played).is_some())
+                {
                     let runnable: Vec<_> = calls
                         .iter()
-                        .filter(|call| !is_broad_walk_call(call))
+                        .filter(|call| answered_here(call, &played).is_none())
                         .cloned()
                         .collect();
                     let (ran, ran_times, review_ms) = if runnable.is_empty() {
@@ -1164,22 +1247,20 @@ async fn converse_raw(
                     let results = calls
                         .iter()
                         .map(|call| {
-                            if is_broad_walk_call(call) {
-                                refused_broad_walk(call)
-                            } else {
+                            answered_here(call, &played).unwrap_or_else(|| {
                                 ran.next().unwrap_or_else(|| {
                                     opengrok_tools::ToolResult::refused(
                                         &call.id,
                                         "the tool did not run",
                                     )
                                 })
-                            }
+                            })
                         })
                         .collect();
                     let times = calls
                         .iter()
                         .map(|call| {
-                            if is_broad_walk_call(call) {
+                            if answered_here(call, &played).is_some() {
                                 (call.name.clone(), 0)
                             } else {
                                 ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
@@ -1197,6 +1278,16 @@ async fn converse_raw(
                         .collect(),
                     timing::elapsed_ms(tool_started),
                     auto_review_ms,
+                );
+                skipped_replay |= replayed;
+                // Played whether it succeeded or stopped part way: either way a replay repeats
+                // it. A call still waiting on a card has not played.
+                played.extend(
+                    calls
+                        .iter()
+                        .zip(results.iter())
+                        .filter(|(_, result)| !result.awaiting_approval)
+                        .filter_map(|(call, _)| recipe_of(call)),
                 );
 
                 // Before the results, where the words came: the model said them, then asked.

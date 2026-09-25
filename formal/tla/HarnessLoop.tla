@@ -144,8 +144,8 @@ Call ==
                                       /\ UNCHANGED endVars
     /\ UNCHANGED <<loopVars, stop, toolRuns, toolRunsAfterStop>>
 
-\* lib.rs:1018-1103 — stop check #2, then the two early finishes that run no tool
-\* (a repeated listing, the same open action again).
+\* lib.rs:1018-1103 — stop check #2, then the early finishes that run no tool
+\* (a repeated listing, the same open action again, a recipe replay asked for twice — #120).
 Check2 ==
     /\ pc = "check2"
     /\ IF stop THEN EndWith("stopped")

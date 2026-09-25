@@ -2306,6 +2306,135 @@ async fn the_same_command_failing_twice_still_ends_the_turn() {
     );
 }
 
+fn recipe_deltas(id: &str, recipe: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: opengrok_tools::RUN_RECIPE.to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "recipe": recipe }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A `run_recipe` that counts its plays.
+fn recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(&call.id, "played 4 steps; the results page is open")
+        }),
+    );
+    (runner, plays)
+}
+
+/// #120, the kabisado run: asked to search YouTube, the coworker played its recipe again and
+/// again — typing the same words into a field that already held them. "Run a recipe at most
+/// once per request" was a line in the prompt; the loop now keeps it. A replay is answered
+/// without touching the box, and asking a second time ends the turn.
+#[tokio::test]
+async fn a_recipe_is_played_at_most_once_per_request() {
+    struct AlwaysRecipe(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for AlwaysRecipe {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = recipe_deltas(&format!("c{round}"), "search-youtube");
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let door = AlwaysRecipe(Mutex::new(0));
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "the box played it once");
+    assert!(*door.0.lock().unwrap() <= 3, "a replay ends the turn");
+    let second = events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallResult)
+        .nth(1)
+        .and_then(|event| event.extra.get("content"))
+        .and_then(|content| content.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(second.starts_with("Not played again"), "{second:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        assistant_text(&events).contains("search-youtube"),
+        "the turn says which recipe it did not replay: {events:?}"
+    );
+}
+
+/// A different recipe is a different task and still runs.
+#[tokio::test]
+async fn a_second_recipe_in_the_same_request_still_plays() {
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_deltas("c2", "open-inbox"),
+        ],
+        "Searched, then opened the inbox.",
+    );
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube, then open my inbox"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// The approved recipe ran in the resumed half's first step; the model asking for it again
+/// in that same request is a replay too, although it is a new `converse_raw`.
+#[tokio::test]
+async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
+    let door = Rounds::new(
+        vec![recipe_deltas("c2", "search-youtube")],
+        "The results page is open.",
+    );
+    let (runner, plays) = recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "search-youtube" }),
+    };
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
 /// profile.list then profile.search: one real read, then a facts hop — not a second invoke.
 #[tokio::test]
 async fn a_second_profile_search_after_list_is_not_executed() {
