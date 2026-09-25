@@ -87,6 +87,11 @@ pub struct AuthState {
     /// Told the id of every account created here. The binary listens and warms the account's
     /// computer (`provision::warm_scope_for_account`); auth itself knows nothing about boxes.
     pub account_created: Option<tokio::sync::mpsc::UnboundedSender<opengrok_core::id::AccountId>>,
+    /// The box.ascii.dev API an ORG's sealed key is used against. Always the vendor's own in
+    /// production — there is deliberately no variable for it, since a key sent to the wrong host
+    /// is a key given away. It is a seam, like `dns`: a test points it at a stand-in so a hosted
+    /// hire whose create answers 429 or 5xx can be driven end to end without dialling the vendor.
+    pub ascii_base_url: String,
     /// Just-rotated-away refresh plaintext, held for `REFRESH_GRACE_MS` so a concurrent refresh
     /// with the old cookie can reuse the current pair. See `refresh_grace`.
     refresh_grace: std::sync::Arc<super::refresh_grace::RefreshGrace>,
@@ -119,8 +124,16 @@ impl AuthState {
             cimd_cache: Arc::new(Mutex::new(HashMap::new())),
             cimd_allow_loopback: false,
             account_created: None,
+            ascii_base_url: opengrok_box::ascii::DEFAULT_BASE_URL.to_string(),
             refresh_grace: std::sync::Arc::new(super::refresh_grace::RefreshGrace::default()),
         }
+    }
+
+    /// Tests only: where an org's box.ascii.dev key is used (see `ascii_base_url`).
+    #[must_use]
+    pub fn with_ascii_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.ascii_base_url = base_url.into();
+        self
     }
 
     /// Tests only: allow a client id metadata document on a loopback address.

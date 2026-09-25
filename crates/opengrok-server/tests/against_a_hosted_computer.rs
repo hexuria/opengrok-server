@@ -11,11 +11,16 @@
 //! own Docker provider, `AgUiState::computer`, which boot never installs when hosted. No provider,
 //! or a box.ascii.dev one, is what a hosted server (and `OG_COMPUTER=none`) looks like from here.
 //!
+//! The org's box.ascii.dev is a stand-in on loopback (`AuthState::with_ascii_base_url`) that
+//! answers a create with 429 or 503, or every box call with 403 — what a hosted server meets when
+//! the vendor limits, fails or revokes. The vendor itself is never dialled.
+//!
 //! The first two need nothing; the rest need Postgres and skip loudly without OG_DATABASE_URL.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -30,7 +35,7 @@ use opengrok_server::agui::provision::{
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
-use opengrok_store::PgStore;
+use opengrok_store::{PgStore, Vault};
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
@@ -173,6 +178,10 @@ async fn an_ascii_deployment_never_falls_back_to_docker() {
 }
 
 async fn seed_account(store: &PgStore, email: &str) -> AccountId {
+    seed_member(store, email, None).await
+}
+
+async fn seed_member(store: &PgStore, email: &str, org: Option<&str>) -> AccountId {
     let id = AccountId::new();
     let at_ms = chrono::Utc::now().timestamp_millis();
     let events = Account::default()
@@ -181,7 +190,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
             password_hash: "x".to_string(),
             first_name: "Hosted".to_string(),
             last_name: String::new(),
-            org_id: String::new(),
+            org_id: org.unwrap_or_default().to_string(),
             plan: Plan::Ultra,
             verified: true,
             enabled: true,
@@ -197,7 +206,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         password_hash: Some("x".to_string()),
         first_name: "Hosted".to_string(),
         last_name: String::new(),
-        org_id: None,
+        org_id: org.map(str::to_string),
         verified: true,
         enabled: true,
         avatar_url: None,
@@ -401,13 +410,39 @@ async fn a_self_hosted_takeover_keeps_the_fallback_and_says_so() {
 }
 
 #[tokio::test]
+async fn a_healthy_local_vm_does_not_wear_another_scopes_failure() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let coworker = h.hire().await;
+    // The account's error row is shared by its scopes: in per-bot mode another bot's failed hire
+    // lands here too. Only a takeover's own stamp belongs beside a running Local VM.
+    h.state
+        .auth
+        .store
+        .set_account_computer_error(
+            h.account.as_str(),
+            "quota_exceeded",
+            "box.ascii.dev refused (429): box creation rate limit reached",
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("stamp another scope's failure");
+
+    let screen = h.screen(&coworker).await;
+    assert_eq!(screen["state"], json!("running"), "{screen}");
+    assert!(
+        screen.get("computerError").is_none(),
+        "a failure that is not this box's must not be shown as its own: {screen}"
+    );
+}
+
+#[tokio::test]
 async fn a_turn_whose_box_refuses_is_told_so_and_gets_no_new_box() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let coworker = h.hire().await;
-    // A Local VM that refuses stands in for a refusing ascii box: the ascii provider is built
-    // from an org key against box.ascii.dev itself, which no test dials. What is asserted is the
-    // same either way — nothing replaces the refused box, and the model hears the refusal.
+    // A Local VM that refuses is never "taken over" by another Local VM. The refusing ascii box
+    // on a hosted server has its own test below, against a stand-in box.ascii.dev.
     h.record("bx_refused", "local-docker").await;
     h.stub
         .refuses
@@ -447,4 +482,255 @@ async fn a_turn_whose_box_refuses_is_told_so_and_gets_no_new_box() {
         "the tool must answer with the refusal, not vanish or run elsewhere: {sse}"
     );
     assert!(!sse.contains("ran-on-a-box"), "{sse}");
+}
+
+const KEK: &str = "rIeYsJHlXEYIoRjZQfL73u7UuVMYxIrdlDT5tndh/kY=";
+const ORG_KEY: &str = "box_org_key_for_the_stand_in";
+
+/// box.ascii.dev as a hosted server meets it on a bad day. `POST /boxes` answers `create` (200
+/// is a box); every other call answers `other`. Each request is kept as "METHOD /path bearer".
+#[derive(Clone)]
+struct StandInAscii {
+    create: Arc<AtomicU16>,
+    other: Arc<AtomicU16>,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl StandInAscii {
+    async fn start(create: u16, other: u16) -> (String, Self) {
+        let stand_in = Self {
+            create: Arc::new(AtomicU16::new(create)),
+            other: Arc::new(AtomicU16::new(other)),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let serving = stand_in.clone();
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let serving = serving.clone();
+            async move {
+                let bearer = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                let path = request.uri().path().to_string();
+                let method = request.method().to_string();
+                serving
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .push(format!("{method} {path} {bearer}"));
+                let creating = method == "POST" && path.ends_with("/boxes");
+                let status = if creating {
+                    serving.create.load(Ordering::SeqCst)
+                } else {
+                    serving.other.load(Ordering::SeqCst)
+                };
+                let status = axum::http::StatusCode::from_u16(status).unwrap();
+                let body = match status.as_u16() {
+                    200 => json!({ "id": "box_hosted_1" }),
+                    429 => json!({ "error": "box creation rate limit reached" }),
+                    403 => json!({ "error": "forbidden: this key was revoked" }),
+                    _ => json!({ "error": "upstream unavailable" }),
+                };
+                (status, axum::Json(body))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/api/box/v1"), stand_in)
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn creates(&self) -> usize {
+        self.seen()
+            .iter()
+            .filter(|line| line.starts_with("POST ") && line.contains("/boxes "))
+            .count()
+    }
+}
+
+/// A hosted server: its boot provider is box.ascii.dev (`OG_BOX_API_KEY`), so there is no Docker
+/// to fall back on, and an org member whose org has sealed its own key. Returns the server's
+/// base URL, its state, the member and the member's token.
+async fn hosted(database_url: &str, ascii: &str) -> (String, AgUiState, AccountId, String) {
+    let store = a_real_store(database_url).await;
+    let vault = Arc::new(Vault::from_base64_key(KEK).expect("vault"));
+    let org = format!("org_hosted_{}", uuid::Uuid::now_v7().simple());
+    store
+        .set_org_computer_secret(&vault, &org, "ascii", ORG_KEY, 1)
+        .await
+        .expect("seal the org's key");
+    let email = format!("hosted-org-{}@og.local", uuid::Uuid::now_v7().simple());
+    let account = seed_member(&store, &email, Some(&org)).await;
+    let boot = opengrok_box::AsciiBoxes::new("box_boot_key_never_for_an_org").with_base_url(ascii);
+    let mut state = state_with(store, Some(Arc::new(boot)));
+    state.auth = state.auth.with_ascii_base_url(ascii);
+    state.vault = Some(vault);
+    let token = state
+        .auth
+        .minter
+        .mint_access(
+            account.as_str(),
+            "sess-hosted-org",
+            &email,
+            "ultra",
+            chrono::Utc::now().timestamp(),
+            3600,
+        )
+        .expect("mint access");
+    let gateway = HostState::new(state.clone(), None);
+    let app = opengrok_server::router(state.clone(), gateway);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    (
+        format!("http://127.0.0.1:{}", addr.port()),
+        state,
+        account,
+        token,
+    )
+}
+
+async fn hire_at(base: &str, token: &str) -> String {
+    let response = reqwest::Client::new()
+        .post(format!("{base}/coworkers"))
+        .bearer_auth(token)
+        .json(&json!({ "name": "Hosted" }))
+        .send()
+        .await
+        .expect("hire");
+    assert_eq!(
+        response.status().as_u16(),
+        201,
+        "a boxless hire still stands"
+    );
+    let body: Value = response.json().await.expect("hire body");
+    body["id"].as_str().expect("id").to_string()
+}
+
+#[tokio::test]
+async fn a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box() {
+    let database_url = database_or_skip!();
+    for (status, code) in [(429, "quota_exceeded"), (503, "provider_error")] {
+        let (ascii, stand_in) = StandInAscii::start(status, 500).await;
+        let (base, state, account, token) = hosted(&database_url, &ascii).await;
+
+        let coworker = hire_at(&base, &token).await;
+
+        assert_eq!(
+            stand_in.creates(),
+            1,
+            "{status}: box.ascii.dev was asked once, and nothing else was: {:?}",
+            stand_in.seen()
+        );
+        assert!(
+            stand_in
+                .seen()
+                .iter()
+                .all(|line| line.ends_with(&format!("Bearer {ORG_KEY}"))),
+            "{status}: only the org's own key is ever sent: {:?}",
+            stand_in.seen()
+        );
+        assert_eq!(
+            state
+                .auth
+                .store
+                .scoped_computer("account", account.as_str())
+                .await
+                .expect("row"),
+            None,
+            "{status}: no box of any kind is recorded for the scope"
+        );
+        let screen: Value = reqwest::Client::new()
+            .get(format!("{base}/coworkers/{coworker}/computer"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .expect("screen")
+            .json()
+            .await
+            .expect("screen body");
+        assert_eq!(screen["state"], json!("absent"), "{status}: {screen}");
+        assert_eq!(
+            screen["computerError"]["code"],
+            json!(code),
+            "{status}: the upstream code reaches the pane: {screen}"
+        );
+        assert!(
+            screen["computerError"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&status.to_string())),
+            "{status}: the message carries what box.ascii.dev said: {screen}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_hosted_turn_whose_ascii_box_answers_403_is_told_so_and_gets_no_box() {
+    let database_url = database_or_skip!();
+    let (ascii, stand_in) = StandInAscii::start(200, 403).await;
+    let (base, state, account, token) = hosted(&database_url, &ascii).await;
+    let coworker = hire_at(&base, &token).await;
+    assert_eq!(
+        state
+            .auth
+            .store
+            .scoped_computer("account", account.as_str())
+            .await
+            .expect("row"),
+        Some(("box_hosted_1".to_string(), "ascii".to_string())),
+        "the hire made its box on box.ascii.dev"
+    );
+    // From here the key is revoked: every box call answers 403, and so would a new create.
+    stand_in.create.store(403, Ordering::SeqCst);
+
+    let sse = reqwest::Client::new()
+        .post(format!("{base}/ag-ui"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "threadId": format!("thr-{}", uuid::Uuid::now_v7()),
+            "runId": uuid::Uuid::now_v7().to_string(),
+            "messages": [{ "id": "m1", "role": "user", "content": "check the box" }],
+            "forwardedProps": { "coworkerId": coworker },
+        }))
+        .send()
+        .await
+        .expect("turn")
+        .text()
+        .await
+        .expect("sse");
+
+    assert!(
+        sse.contains(opengrok_tools::COMPUTER_DOWN) && sse.contains("403"),
+        "the tool answers with the refusal, a result the model can relay: {sse}"
+    );
+    assert_eq!(
+        stand_in.creates(),
+        1,
+        "no second box is asked for: {:?}",
+        stand_in.seen()
+    );
+    assert_eq!(
+        state
+            .auth
+            .store
+            .scoped_computer("account", account.as_str())
+            .await
+            .expect("row"),
+        Some(("box_hosted_1".to_string(), "ascii".to_string())),
+        "the refused box stays the scope's computer; no Local VM takes its place"
+    );
 }

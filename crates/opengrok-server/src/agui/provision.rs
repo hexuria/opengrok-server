@@ -122,7 +122,9 @@ async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup
         .await
     {
         Ok(Some(key)) => ProviderLookup {
-            computer: Some(Arc::new(opengrok_box::AsciiBoxes::new(key))),
+            computer: Some(Arc::new(
+                opengrok_box::AsciiBoxes::new(key).with_base_url(state.auth.ascii_base_url.clone()),
+            )),
             error: None,
         },
         Ok(None) => ascii_missing(),
@@ -170,9 +172,14 @@ pub async fn take_over_with_local_docker(
         .await
         .ok()?;
     let why = format!("{FELL_BACK} ({refused})");
-    let _ = store
+    // The stamp is the only thing that tells the person the box changed; a lost one is logged
+    // rather than failing a takeover that already happened.
+    if let Err(error) = store
         .set_account_computer_error(account_id.as_str(), refused.code(), &why, at_ms)
-        .await;
+        .await
+    {
+        tracing::warn!(scope, scope_id, %error, "computer: the takeover could not be stamped on the account; the pane will not say the box changed");
+    }
     tracing::warn!(scope, scope_id, box_id = %box_id, "computer: local Docker box is this scope's computer");
     Some((computer, box_id))
 }
@@ -1000,14 +1007,17 @@ pub async fn coworker_screen(
             "stale": image.stale(),
         })),
     });
-    // A Local VM with an account stamp beside it is a takeover's box: the stamp says the box
-    // changed and why. Additive — `agentId`/`state`/`vncUrl` are what the renderer validates.
+    // A Local VM with a TAKEOVER stamp beside it is a takeover's box: the stamp says the box
+    // changed and why. Only that stamp — the account's error row also holds other scopes' failed
+    // hires (a per-bot quota refusal), which beside a healthy Local VM would read as its fault.
+    // Additive — `agentId`/`state`/`vncUrl` are what the renderer validates.
     if kind == "local-docker"
         && let Ok(Some((code, message, at_ms))) = state
             .auth
             .store
             .account_computer_error(account_id.as_str())
             .await
+        && message.starts_with(FELL_BACK)
     {
         screen["computerError"] = json!({ "code": code, "message": message, "updatedAtMs": at_ms });
     }
