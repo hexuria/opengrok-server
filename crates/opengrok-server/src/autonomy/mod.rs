@@ -95,7 +95,10 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
-        None,
+        Some(&crate::persona::routine_line(
+            &crate::persona::caller(&state, &account_id).await,
+            chrono::Utc::now(),
+        )),
     );
     let journal = StoreJournal {
         state: state.clone(),

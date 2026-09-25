@@ -712,4 +712,12 @@ async fn an_allowed_card_continues_with_the_request_it_was_asked() {
         resumed.system, asked[0].system,
         "a resume speaks with the system message the turn opened with"
     );
+    assert!(
+        asked[0]
+            .system
+            .as_deref()
+            .is_some_and(|system| system.contains("You are talking with Host. Today is")),
+        "the speaker line is in it, so the resume repeats it byte for byte (#193): {:?}",
+        asked[0].system
+    );
 }

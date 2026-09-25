@@ -569,6 +569,65 @@ pub fn system_message(name: &str, persona: &Persona, tail: Option<&str>) -> Stri
     blocks.join("\n\n")
 }
 
+/// Who the coworker is talking with and what day it is, opening the tail (#193).
+///
+/// FROM THE BEARER'S ACCOUNT, NEVER FROM THE BODY (CLAUDE.md #7): an org-shared coworker holds a
+/// conversation with each member, and the only thing that may say which member this is is the
+/// token. THE DAY, NOT THE TIME: the line is captured in `Started.system`, so a run resumed
+/// tomorrow keeps the day it began on, and a clock would change the system message — and every
+/// provider's prompt cache with it — on every turn. The zone is said out loud because "today" is
+/// only true somewhere, and nothing on an account says where a person is yet.
+#[must_use]
+pub fn speaker_line(who: &str, today: chrono::NaiveDate, zone: &str) -> String {
+    let day = today.format("%Y-%m-%d, %A");
+    match who {
+        "" => format!("Today is {day} ({zone})."),
+        who => format!("You are talking with {who}. Today is {day} ({zone})."),
+    }
+}
+
+/// What a person is called here: the name on their account, or the address they signed in with.
+/// On one line and bounded, because it lands in a system message and a name is not a place to
+/// open a paragraph of instructions.
+#[must_use]
+pub fn called(first: &str, last: &str, email: &str) -> String {
+    let name = format!("{first} {last}");
+    let name = if name.trim().is_empty() { email } else { &name };
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// A routine's opening line: nobody is talking, the coworker acts for whoever hired it, and the
+/// moment it fired is the "now" its instruction means.
+#[must_use]
+pub fn routine_line(hirer: &str, fired: chrono::DateTime<chrono::Utc>) -> String {
+    let hirer = match hirer {
+        "" => "the person who hired you".to_string(),
+        who => format!("{who}, who hired you"),
+    };
+    format!(
+        "Nobody is talking with you: this turn is a routine you run on your own schedule for \
+         {hirer}. It fired at {} UTC.",
+        fired.format("%Y-%m-%d %H:%M, %A")
+    )
+}
+
+/// What the bearer is called, read from their account. A read that fails names nobody — the
+/// date still goes — rather than costing the turn.
+pub async fn caller(state: &AgUiState, account: &opengrok_core::id::AccountId) -> String {
+    match state.auth.store.load_account(account).await {
+        Ok((account, _)) => called(&account.first_name, &account.last_name, &account.email),
+        Err(error) => {
+            tracing::warn!(%error, "could not read who is speaking for the system message");
+            String::new()
+        }
+    }
+}
+
 /// The room's transcribed prompt with the standing role appended. The transcription is returned
 /// unchanged when there is no role, and never edited when there is: the role is a new paragraph
 /// after it, so a diff of the transcribed text stays empty.
@@ -600,6 +659,29 @@ pub async fn of(state: &AgUiState, coworker: &CoworkerId, role: Option<String>) 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_speaker_line_names_the_person_and_the_day() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 25).unwrap();
+        assert_eq!(
+            speaker_line(&called("", "", "ada@og.local"), day, "UTC"),
+            "You are talking with ada@og.local. Today is 2026-09-25, Friday (UTC)."
+        );
+        assert_eq!(
+            called(" Juana ", "dela\nCruz", "j@og.local"),
+            "Juana dela Cruz"
+        );
+        assert_eq!(
+            speaker_line("", day, "UTC"),
+            "Today is 2026-09-25, Friday (UTC)."
+        );
+        let fired = day.and_hms_opt(7, 5, 0).unwrap().and_utc();
+        assert_eq!(
+            routine_line("Ada Owner", fired),
+            "Nobody is talking with you: this turn is a routine you run on your own schedule for \
+             Ada Owner, who hired you. It fired at 2026-09-25 07:05, Friday UTC."
+        );
+    }
 
     fn persona(title: Option<&str>, role: Option<&str>) -> Persona {
         Persona {

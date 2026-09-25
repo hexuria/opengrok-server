@@ -2632,11 +2632,18 @@ async fn start_claimed_turn(
             let (skill_line, skill_id) =
                 skill_line_for_turn(&state, account_id, &input.thread_id, &input).await;
             recorded_skill = skill_id;
+            // Who is speaking and what day it is, from the token's account: FIRST in the tail,
+            // and so never after the skill line, which must stay last.
+            let speaker = crate::persona::speaker_line(
+                &crate::persona::caller(&state, account_id).await,
+                chrono::Utc::now().date_naive(),
+                "UTC",
+            );
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
