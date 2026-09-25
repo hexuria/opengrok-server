@@ -86,8 +86,10 @@ impl TurnTiming {
         elapsed_ms(self.started)
     }
 
-    /// The run's own record of what it spent. `budget` and `wrapped_up` are present only when
-    /// set, so a frame from a run that had neither reads exactly as it always did.
+    /// The run's own record of what it spent. Every frame from the loop now carries `budget`;
+    /// `wrapped_up` only when the run ended on its wrap-up call. Both are keys a reader that
+    /// does not know them skips, and a frame that set neither (a resume stopped before its
+    /// approved call) reads as it always did.
     pub fn value(&self) -> Value {
         let mut value = json!({
             "model_ms": self.model_ms,
