@@ -95,6 +95,7 @@ struct Harness {
     client: reqwest::Client,
     store: PgStore,
     agui: AgUiState,
+    host: HostState,
     account: AccountId,
     email: String,
 }
@@ -129,7 +130,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         host_settings: None,
     };
     let host = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
-    let app = opengrok_server::router(agui.clone(), host);
+    let app = opengrok_server::router(agui.clone(), host.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -142,6 +143,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         client: reqwest::Client::new(),
         store,
         agui,
+        host,
         account,
         email: email.to_string(),
     }
@@ -273,7 +275,7 @@ async fn tick_until_past(h: &Harness) {
         .try_get("end")
         .expect("end");
     for _ in 0..50 {
-        opengrok_server::autonomy::sweep::monitor_tick(&h.agui)
+        opengrok_server::autonomy::sweep::monitor_tick(&h.host)
             .await
             .expect("a monitor tick");
         let cursor: i64 = sqlx::query("select last_event_id from monitor_cursor where id = 1")
@@ -337,12 +339,46 @@ async fn a_foreign_failed_run_fires_nothing_and_ones_own_fires_once() {
         "a run with no owner belongs to nobody — it must match no monitor, not every monitor"
     );
 
-    seed_failed_run(&h.store, Some(&h.account), "thr-alice").await;
+    let own = seed_failed_run(&h.store, Some(&h.account), "thr-alice").await;
     tick_until_past(&h).await;
     assert_eq!(
         firings(&h, &monitor).await,
         1,
         "Alice's own failed run fires her monitor, exactly once"
+    );
+
+    // What the approvals queue reads as a card's `origin`: the fired run is the monitor's by its
+    // own log, and a run on the monitor's thread that it never fired is not.
+    let mut fired = None;
+    for _ in 0..40 {
+        if let Some(run) = h
+            .store
+            .runs_for_thread(monitor.as_str(), 1)
+            .await
+            .expect("thread")
+            .into_iter()
+            .next()
+        {
+            fired = Some(run.id);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let fired = fired.expect("the monitor's run journaled under its id");
+    assert_eq!(
+        h.store
+            .run_fired_by(monitor.as_str(), &fired)
+            .await
+            .expect("origin"),
+        Some(opengrok_store::FiredBy::Monitor)
+    );
+    assert_eq!(
+        h.store
+            .run_fired_by(monitor.as_str(), &own)
+            .await
+            .expect("origin"),
+        None,
+        "a thread id spelled like a monitor's is not the monitor's word"
     );
 
     delete_monitor(&h, &monitor).await;

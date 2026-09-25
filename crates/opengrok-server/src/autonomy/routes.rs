@@ -146,6 +146,10 @@ struct RoutineRow<'a> {
     webhook_key: &'a str,
     active: bool,
     next_due_ms: Option<i64>,
+    /// `autonomy::last_run`: what the newest run came to. `None` on create, and for a routine
+    /// that has never run — `null` on the wire, never an empty object a client would read as a
+    /// run with no status.
+    last_run: Option<serde_json::Value>,
 }
 
 impl RoutineRow<'_> {
@@ -168,6 +172,7 @@ impl RoutineRow<'_> {
             "kind": self.kind.as_str(),
             "active": self.active,
             "nextDueMs": self.next_due_ms,
+            "lastRun": self.last_run,
         });
         if self.kind == WakeKind::Webhook {
             row["webhook"] =
@@ -282,6 +287,7 @@ async fn create_schedule(
                 webhook_key: &state_after.webhook_key,
                 active: true,
                 next_due_ms: opengrok_core::schedule::next_fire_ms(&state_after.cron, at_ms),
+                last_run: None,
             }
             .json(&state),
         ),
@@ -332,6 +338,22 @@ async fn list_schedules(
                 }
             }
         };
+        // NOT `null` ON A FAILED READ. `null` means "never ran", and a routine that ran and
+        // spent points must not be shown as one that never did.
+        let last_run = match crate::autonomy::last_run(
+            &state.agui,
+            &account_id,
+            &view.id,
+            &view.name,
+        )
+        .await
+        {
+            Ok(last_run) => last_run,
+            Err(error) => {
+                tracing::error!(%error, routine = %view.id, "could not read a routine's last run");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+            }
+        };
         rows.push(
             RoutineRow {
                 id: &view.id,
@@ -344,6 +366,7 @@ async fn list_schedules(
                 webhook_key: &key,
                 active: view.active,
                 next_due_ms: view.next_due_ms,
+                last_run,
             }
             .json(&state),
         );

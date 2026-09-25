@@ -2,8 +2,8 @@
 //!
 //! THIS IS NOT Box `/webhooks`. Those docs under `docs/box/` are outbound lifecycle callbacks
 //! on the coworker's computer. A routine webhook is the other direction: an external app POSTs
-//! here, we check a bearer we minted, and we fire the same `autonomy::fire` path Test run and
-//! the cron sweep already use.
+//! here, we check a bearer we minted, and we fire the same `autonomy::fire` path the cron sweep
+//! already uses.
 //!
 //! The route is deliberately NOT behind any account token: the caller is a todo app (or a curl),
 //! not a signed-in person. Auth is the hook's own key.
@@ -287,7 +287,7 @@ async fn inbound(
     };
     let prompt = wake_prompt(&after.prompt, payload.as_ref());
     tokio::spawn(crate::autonomy::fire(
-        state.agui.clone(),
+        state.clone(),
         crate::autonomy::Firing {
             origin: format!("automation {schedule_id} (webhook)"),
             account_id: account_id.clone(),
@@ -295,10 +295,6 @@ async fn inbound(
             prompt,
             thread_id: schedule_id.as_str().to_string(),
             run_id: run_id.clone(),
-            announce: Some(crate::autonomy::Announce {
-                gateway: state.clone(),
-                name: after.name.clone(),
-            }),
         },
     ));
     (

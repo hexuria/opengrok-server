@@ -40,8 +40,8 @@ fn now_ms() -> i64 {
 }
 
 /// Fire due schedules forever. Started by the binary; stops when the process does. Takes the
-/// host state rather than the bare AG-UI state because a routine's finished run is posted into
-/// the coworker's chat, and the chat's live stream belongs to the host state.
+/// host state rather than the bare AG-UI state because a fired run that stops on a form mints its
+/// card through it (`autonomy::fire`).
 pub async fn schedules_forever(gateway: crate::host_state::HostState) {
     loop {
         if let Err(error) = schedule_tick(&gateway).await {
@@ -96,7 +96,7 @@ pub async fn schedule_tick(
 
         // The run itself takes as long as a model takes; it must not hold up the other firings.
         tokio::spawn(crate::autonomy::fire(
-            state.clone(),
+            gateway.clone(),
             crate::autonomy::Firing {
                 origin: format!("schedule {}", schedule.id),
                 account_id: schedule.account_id.clone(),
@@ -106,10 +106,6 @@ pub async fn schedule_tick(
                 // continuing conversation rather than a pile of orphans.
                 thread_id: schedule.id.as_str().to_string(),
                 run_id,
-                announce: Some(crate::autonomy::Announce {
-                    gateway: gateway.clone(),
-                    name: schedule.name.clone(),
-                }),
             },
         ));
         fired += 1;
@@ -117,10 +113,11 @@ pub async fn schedule_tick(
     Ok(fired)
 }
 
-/// Match new log events against active monitors, forever.
-pub async fn monitors_forever(state: AgUiState) {
+/// Match new log events against active monitors, forever. The host state for the same reason
+/// as `schedules_forever`: a monitor's run can stop on a form too.
+pub async fn monitors_forever(gateway: crate::host_state::HostState) {
     loop {
-        if let Err(error) = monitor_tick(&state).await {
+        if let Err(error) = monitor_tick(&gateway).await {
             tracing::warn!(%error, "a monitor tick failed; will try again");
         }
         tokio::time::sleep(MONITOR_INTERVAL).await;
@@ -134,7 +131,10 @@ pub async fn monitors_forever(state: AgUiState) {
 /// account that owns the monitor. Before #179 the match was on event type alone: Alice's
 /// `run-failed` monitor woke her coworker, on her points, for every other tenant's failed run,
 /// and its prompt quoted their stream id.
-pub async fn monitor_tick(state: &AgUiState) -> Result<usize, opengrok_store::StoreError> {
+pub async fn monitor_tick(
+    gateway: &crate::host_state::HostState,
+) -> Result<usize, opengrok_store::StoreError> {
+    let state: &AgUiState = &gateway.agui;
     let span = state.auth.store.next_log_span(MONITOR_BATCH).await?;
     if span.is_empty() {
         return Ok(0);
@@ -239,7 +239,7 @@ pub async fn monitor_tick(state: &AgUiState) -> Result<usize, opengrok_store::St
                 event.event_type, event.stream_id
             );
             tokio::spawn(crate::autonomy::fire(
-                state.clone(),
+                gateway.clone(),
                 crate::autonomy::Firing {
                     origin: format!("monitor {monitor_id}"),
                     account_id: account_id.clone(),
@@ -247,8 +247,6 @@ pub async fn monitor_tick(state: &AgUiState) -> Result<usize, opengrok_store::St
                     prompt,
                     thread_id: monitor_id.as_str().to_string(),
                     run_id,
-                    // Monitors predate the Routines pane; nothing renders their runs yet.
-                    announce: None,
                 },
             ));
             fired += 1;

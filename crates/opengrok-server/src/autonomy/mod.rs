@@ -9,6 +9,20 @@
 //! `StoreJournal`, is owned by the account that created the schedule or monitor, holds a recovery
 //! lease while it works, and is replayable at `GET /ag-ui/runs/{id}` — which is exactly how a
 //! client that was away catches up on what its coworkers did alone.
+//!
+//! HOW THE PERSON LEARNS WHAT A ROUTINE DID (#177). There is no live channel to push on: the
+//! desktop's `agents-automation` frame and the seam-A transcript a routine used to post into went
+//! with P0-E, and this server does not know which thread a client paints as a coworker's chat.
+//! So the answer is read, not pushed, from three places a client already reaches:
+//! - `GET /schedules` — every routine row carries `lastRun {runId, status, startedAtMs,
+//!   finishedAtMs, summary}`, built from the run journal on each read (`last_run`). A client
+//!   polls it and compares `lastRun.runId` / `status` with what it last showed; the summary is the
+//!   sentence to show ("Routine Inbox ran: …", "… is waiting for you: …", "… failed: …").
+//! - `GET /ag-ui/threads/{scheduleId}` (or `/ag-ui/runs/{lastRun.runId}`) — the whole run, as the
+//!   same AG-UI history a chat turn replays.
+//! - `GET /ag-ui/approvals` — a card a routine raised, with `coworkerId` and `origin` so it can be
+//!   put beside the right coworker; a form's card is minted exactly as a chat turn's is, so
+//!   `POST /ag-ui/user-form/submit` answers it.
 
 pub mod routes;
 pub mod sweep;
@@ -17,15 +31,7 @@ use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
 
 use crate::agui::routes::{AgUiState, StoreJournal};
-
-/// Where a routine's run shows up for the person: the coworker's own chat, as a message from the
-/// coworker, sent live. The run keeps its own thread (the schedule's id) for the pane's history;
-/// this is the part a person actually reads. `None` for firings nobody needs told about.
-pub(crate) struct Announce {
-    pub gateway: crate::host_state::HostState,
-    /// The routine's name — the message opens with it so the chat says WHY the coworker spoke.
-    pub name: String,
-}
+use crate::host_state::HostState;
 
 /// How many runs one routine or one monitor may have in flight before another wake is refused.
 ///
@@ -40,16 +46,15 @@ fn now_ms() -> i64 {
 }
 
 /// One run nobody asked for, described: who it is for, which coworker takes it, what it opens
-/// with, which thread journals it, and whether the person is told when it ends.
+/// with, and which thread journals it.
 pub(crate) struct Firing {
-    /// For the log line: `schedule …`, `monitor …`, `automation … (run now)`.
+    /// For the log line: `schedule …`, `monitor …`, `automation … (webhook)`.
     pub origin: String,
     pub account_id: AccountId,
     pub coworker_id: CoworkerId,
     pub prompt: String,
     pub thread_id: String,
     pub run_id: RunId,
-    pub announce: Option<Announce>,
 }
 
 /// Fire one run as this coworker, for this account, and see it through to its ending.
@@ -57,7 +62,12 @@ pub(crate) struct Firing {
 /// POLICY IS CHECKED AT FIRE TIME, NOT AT CREATION. A schedule written while permission existed
 /// must stop the moment permission is revoked — the grant is asked the same question a client's
 /// own request would be asked, every single firing.
-pub(crate) async fn fire(state: AgUiState, firing: Firing) {
+///
+/// TAKES THE HOST STATE because a firing can stop on a card, and a card is minted through it
+/// (`emit_user_form_suspensions`) exactly as a chat turn's is. Without that the run parks with no
+/// `entryId`, and the form nobody was watching for can never be submitted.
+pub(crate) async fn fire(host: HostState, firing: Firing) {
+    let state = host.agui.clone();
     let Firing {
         origin,
         account_id,
@@ -65,7 +75,6 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
         prompt,
         thread_id,
         run_id,
-        announce,
     } = firing;
     let policy = state
         .auth
@@ -149,60 +158,132 @@ pub(crate) async fn fire(state: AgUiState, firing: Firing) {
 
     tracing::info!(%origin, run = %run_id, events = events.len(), "fired a run nobody asked for");
 
-    if let Some(announce) = announce {
-        announce_finished(&announce, &coworker_id, &account_id, &events).await;
+    // Form cards only, as `continue_run` mints them: any other pause is answered from
+    // `GET /ag-ui/approvals` over `/ag-ui/runs/{id}/answer` and needs no transcript card, and a
+    // card nobody settles would sit pending for good.
+    crate::agui::resume::emit_user_form_suspensions(
+        &host,
+        &coworker_id,
+        &account_id,
+        coworker_id.as_str(),
+        &events,
+    )
+    .await;
+}
+
+/// A routine's newest run, as its row on `GET /schedules` carries it: `null` for a routine that
+/// has never run.
+///
+/// READ FROM THE JOURNAL ON EVERY LISTING, NOT WRITTEN WHEN THE RUN ENDS. A routine that stops on
+/// a card finishes on a different code path days later (`continue_run`, a form's submit), and a
+/// sentence written at the end of `fire` would say "waiting" forever. Reading it follows the run
+/// wherever it ends. Owner-scoped and hidden-aware like `GET /ag-ui/threads/{id}`, so a run the
+/// person hid is not summarised back at them.
+pub(crate) async fn last_run(
+    state: &AgUiState,
+    account_id: &AccountId,
+    schedule_id: &str,
+    name: &str,
+) -> Result<Option<serde_json::Value>, opengrok_store::StoreError> {
+    let Some(newest) = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(schedule_id, account_id, 1)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let (run, _) = state.auth.store.load_run(&newest.id).await?;
+    Ok(Some(serde_json::json!({
+        "runId": newest.id.as_str(),
+        "status": run.status.as_str(),
+        "startedAtMs": newest.started_at_ms,
+        "finishedAtMs": run.status.is_terminal().then_some(newest.updated_at_ms),
+        "summary": run_summary(name, &run),
+    })))
+}
+
+/// What a routine's run came to, in one sentence that opens with the routine's name — so a
+/// person reading it knows WHY the coworker spoke.
+///
+/// A RUN WAITING ON A CARD IS NOT A RUN THAT SAID NOTHING. It used to be announced as "ran and
+/// produced no answer", which sends the person to a log instead of to the card that is waiting
+/// for them; it now says it is waiting, and on what.
+pub(crate) fn run_summary(name: &str, run: &opengrok_core::run::Run) -> String {
+    use opengrok_core::run::RunStatus;
+    match run.status {
+        RunStatus::Running => format!("Routine {name} is running."),
+        RunStatus::AwaitingApproval => match run.pending.as_ref() {
+            Some(pending) => format!(
+                "Routine {name} is waiting for you: {}",
+                crate::agui::routes::waiting_why(run, pending)
+            ),
+            None => format!("Routine {name} is waiting for you."),
+        },
+        RunStatus::Stopped => format!("Routine {name} was stopped before it finished."),
+        RunStatus::Failed => {
+            let frames: Vec<opengrok_wire::agui::Event> = run
+                .emitted
+                .iter()
+                .filter_map(|frame| serde_json::from_value(frame.clone()).ok())
+                .collect();
+            match crate::agui::resume::failure_sentence(&frames).or_else(|| run.failure.clone()) {
+                Some(why) => format!("Routine {name} failed: {why}"),
+                None => format!("Routine {name} failed. Its run log has the reason."),
+            }
+        }
+        RunStatus::Finished => {
+            let text = last_answer(&run.emitted);
+            let text = text.trim();
+            let head: String = text.chars().take(200).collect();
+            if head.is_empty() {
+                format!("Routine {name} ran and produced no answer. Its run log has the reason.")
+            } else if head.chars().count() < text.chars().count() {
+                format!("Routine {name} ran: {head}…")
+            } else {
+                format!("Routine {name} ran: {head}")
+            }
+        }
     }
 }
 
-/// Post the finished routine into the coworker's chat. The chat line carries the routine's name
-/// and the answer's head (the run's own thread has the whole thing); it is appended to the
-/// transcript like any coworker message.
-async fn announce_finished(
-    announce: &Announce,
-    coworker_id: &CoworkerId,
-    account_id: &AccountId,
-    events: &[opengrok_wire::agui::Event],
-) {
-    let gateway = &announce.gateway;
-    let mut text = String::new();
-    for event in events {
-        if event.event_type == opengrok_wire::agui::EventType::TextMessageContent
-            && let Some(delta) = event.extra.get("delta").and_then(serde_json::Value::as_str)
-        {
-            text.push_str(delta);
-        }
-    }
-    let head: String = text.trim().chars().take(200).collect();
-    let content = if head.is_empty() {
-        match crate::agui::resume::failure_sentence(events) {
-            Some(why) => format!("Routine {} failed: {why}", announce.name),
-            None => format!(
-                "Routine {} ran and produced no answer. Its run log has the reason.",
-                announce.name
-            ),
-        }
-    } else if head.chars().count() < text.trim().chars().count() {
-        format!("Routine {} ran: {head}…", announce.name)
-    } else {
-        format!("Routine {} ran: {head}", announce.name)
+/// The text of the run's LAST assistant message. A routine that stopped on a card and carried on
+/// said something before the card ("I need you to sign in") and its answer after it; the answer
+/// is what the person needs, and a prompt the journal replays as a user message is never it.
+fn last_answer(emitted: &[serde_json::Value]) -> String {
+    let field = |frame: &serde_json::Value, key: &str| {
+        frame
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
     };
-    let at_ms = now_ms();
-    let entry = serde_json::json!({
-        "kind": "send-message",
-        "id": format!("e_{}", uuid::Uuid::now_v7()),
-        "message": { "type": "text", "content": content },
-        "timestampMs": at_ms,
-    });
-    match gateway
-        .agui
-        .auth
-        .store
-        .append_gateway_entry(coworker_id, account_id, &entry, at_ms)
-        .await
-    {
-        Ok(_) => {}
-        Err(error) => {
-            tracing::error!(%error, coworker = %coworker_id, "could not post a routine's result");
+    let mut from_the_person = std::collections::HashSet::new();
+    let mut current: Option<String> = None;
+    let mut text = String::new();
+    for frame in emitted {
+        match field(frame, "type").as_deref() {
+            Some("TEXT_MESSAGE_START") if field(frame, "role").as_deref() == Some("user") => {
+                if let Some(id) = field(frame, "messageId") {
+                    from_the_person.insert(id);
+                }
+            }
+            Some("TEXT_MESSAGE_CONTENT") => {
+                let id = field(frame, "messageId");
+                if id.as_ref().is_some_and(|id| from_the_person.contains(id)) {
+                    continue;
+                }
+                if id.is_some() && id != current {
+                    text.clear();
+                    current = id;
+                }
+                if let Some(delta) = field(frame, "delta") {
+                    text.push_str(&delta);
+                }
+            }
+            _ => {}
         }
     }
+    text
 }

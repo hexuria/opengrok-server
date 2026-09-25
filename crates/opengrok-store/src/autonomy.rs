@@ -18,6 +18,16 @@ use sqlx::Row;
 use crate::postgres::PgStore;
 use crate::{StoreError, StoreResult, monitor_stream, schedule_stream};
 
+/// What started a run nobody asked for (`PgStore::run_fired_by`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FiredBy {
+    /// A schedule's clock, or a person's "run now" on it.
+    Schedule,
+    /// `POST /hooks/{id}` on a webhook routine.
+    Webhook,
+    Monitor,
+}
+
 /// A schedule the sweep has claimed and must now fire.
 #[derive(Debug, Clone)]
 pub struct DueSchedule {
@@ -535,6 +545,41 @@ impl PgStore {
         .fetch_optional(self.pool())
         .await?;
         Ok(row.is_some())
+    }
+
+    /// What started this run, as the log says it: a firing on a schedule's or a monitor's own
+    /// stream that names it. `None` is a run nothing fired — a person's turn.
+    ///
+    /// THE THREAD ID SAYS WHERE TO LOOK, NEVER WHAT THE ANSWER IS. A routine's runs journal under
+    /// its id, but a thread id is whatever a client sent, and a chat turn sent on a thread spelled
+    /// `sched_…` is still a chat. Only the routine's own `Fired` event makes it the routine's.
+    pub async fn run_fired_by(&self, thread_id: &str, run: &RunId) -> StoreResult<Option<FiredBy>> {
+        if self
+            .was_fired_by(&MonitorId::from_stored(thread_id), run)
+            .await?
+        {
+            return Ok(Some(FiredBy::Monitor));
+        }
+        let row = sqlx::query(
+            "select payload from events
+             where stream_id = $1 and event_type = 'schedule-fired' and payload->>'run_id' = $2
+             limit 1",
+        )
+        .bind(schedule_stream(&ScheduleId::from_stored(thread_id)))
+        .bind(run.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let payload: serde_json::Value = row.try_get("payload")?;
+        match serde_json::from_value(payload)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?
+        {
+            ScheduleEvent::Fired { webhook: true, .. } => Ok(Some(FiredBy::Webhook)),
+            ScheduleEvent::Fired { .. } => Ok(Some(FiredBy::Schedule)),
+            _ => Ok(None),
+        }
     }
 
     /// The one account a log stream belongs to, or `None` when no single account does.

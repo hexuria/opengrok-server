@@ -35,7 +35,7 @@ pub mod spend;
 pub mod templates;
 pub mod vault;
 
-pub use autonomy::{DueSchedule, HookRow, LogEvent};
+pub use autonomy::{DueSchedule, FiredBy, HookRow, LogEvent};
 pub use gateway::{
     CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,

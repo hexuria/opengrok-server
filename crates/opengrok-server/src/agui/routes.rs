@@ -3874,9 +3874,13 @@ fn resume_outcome(
     match pending.reason {
         // Re-running `request_user_form` would raise the card again. Submit/dismiss synthesise
         // the tool result; `/answer` is the fallback and must do the same.
+        //
+        // `/answer` CARRIES NO VALUES, so its yes typed nothing. It used to tell the model the
+        // form "was filled into the page", and a coworker told a login is in carries on as if it
+        // were — into a page that is still asking. Submit is the door that types (#177).
         opengrok_core::run::SuspendReason::UserForm => {
             opengrok_harness::ResumeOutcome::Settled(if approved {
-                "The person submitted the form. It was filled into the page. Secret field values were typed into the page and never shown to you.".to_string()
+                "The person answered the form card without entering anything: nothing was typed into the page. If you still need those details, ask again with `request_user_form`; otherwise continue without them, and do not type secrets with `computer`.".to_string()
             } else {
                 "The person dismissed the form without filling anything. Continue without those credentials; do not type secrets with `computer`.".to_string()
             })
@@ -4434,9 +4438,24 @@ pub async fn list_awaiting(
                 if let Ok((run, _)) = state.auth.store.load_run(&run_id).await
                     && let Some(pending) = run.pending.clone()
                 {
+                    let origin = match state.auth.store.run_fired_by(&run.thread_id, &run_id).await
+                    {
+                        Ok(fired_by) => serde_json::json!(origin_word(fired_by)),
+                        // Unknown, and said so: "chat" here would put a routine's card in a
+                        // conversation the person never had.
+                        Err(error) => {
+                            tracing::error!(%error, run = %run_id, "could not read what started a waiting run");
+                            serde_json::Value::Null
+                        }
+                    };
                     waiting.push(serde_json::json!({
                         "runId": run_id.as_str(),
                         "threadId": run.thread_id,
+                        // WHOSE CARD THIS IS, and what started the run. A routine's thread is its
+                        // own id and names no chat, so without these a client cannot put the card
+                        // beside any coworker (#177). Additive: every field above keeps its shape.
+                        "coworkerId": run.coworker_id.as_ref().map(|id| id.as_str()),
+                        "origin": origin,
                         "callId": pending.call_id,
                         "tool": pending.tool,
                         // What is actually being approved. A person asked to approve "shell"
@@ -4448,8 +4467,8 @@ pub async fn list_awaiting(
                         // only offer one word for all four. The run's own word, not a new one.
                         "reason": pending.reason.as_str(),
                         // And why, in a sentence: the ask's own words when the run journalled
-                        // them, else a sentence built from the reason — see `why_of`.
-                        "why": journalled_why(&run, &pending).unwrap_or_else(|| why_of(&pending)),
+                        // them, else a sentence built from the reason — see `waiting_why`.
+                        "why": waiting_why(&run, &pending),
                     }));
                 }
             }
@@ -4458,6 +4477,26 @@ pub async fn list_awaiting(
         }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
+}
+
+/// `origin` on an approvals row: what started the run, from the log (`run_fired_by`).
+fn origin_word(fired_by: Option<opengrok_store::FiredBy>) -> &'static str {
+    match fired_by {
+        Some(opengrok_store::FiredBy::Schedule) => "schedule",
+        Some(opengrok_store::FiredBy::Webhook) => "webhook",
+        Some(opengrok_store::FiredBy::Monitor) => "monitor",
+        None => "chat",
+    }
+}
+
+/// Why this run is waiting, in a sentence: the ask's own words when the run journalled them,
+/// else one built from the reason. The approvals queue and a routine's `lastRun` say the same
+/// thing about the same card.
+pub(crate) fn waiting_why(
+    run: &opengrok_core::run::Run,
+    pending: &opengrok_core::run::PendingApproval,
+) -> String {
+    journalled_why(run, pending).unwrap_or_else(|| why_of(pending))
 }
 
 /// The ask's own sentence, as the run journalled it on its `run-awaiting-approval` event for
@@ -4499,6 +4538,30 @@ fn journalled_why(
 /// writes the rest, the same words the card itself uses for what is about to happen.
 fn why_of(pending: &opengrok_core::run::PendingApproval) -> String {
     use opengrok_core::run::SuspendReason;
+    // A form is named by its own title and instruction — the words on the card. The generic
+    // tool summary would print its field list as a plugin call's arguments.
+    if pending.reason == SuspendReason::UserForm {
+        let said = |key: &str| {
+            pending
+                .arguments
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| text.chars().take(160).collect::<String>())
+        };
+        return match (said("title"), said("instruction")) {
+            (Some(title), Some(instruction)) => {
+                format!(
+                    "The coworker is asking you to fill in \u{201c}{title}\u{201d}: {instruction}"
+                )
+            }
+            (Some(title), None) => {
+                format!("The coworker is asking you to fill in \u{201c}{title}\u{201d}.")
+            }
+            _ => "The coworker is asking you to fill something in.".to_string(),
+        };
+    }
     let what = crate::cards::summary_for(&pending.tool, &pending.arguments);
     let asking = match pending.reason {
         SuspendReason::PolicyApproval => crate::cards::POLICY_ASK_REASON,
@@ -5055,6 +5118,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `/answer` carries no values. A yes on a form through it typed nothing, and the model must
+    /// not be told a login was filled in when the page is still empty (#177).
+    #[test]
+    fn a_yes_on_a_form_through_answer_claims_nothing_was_typed() {
+        let pending = opengrok_core::run::PendingApproval {
+            call_id: "call-1".to_string(),
+            tool: opengrok_tools::REQUEST_USER_FORM.to_string(),
+            arguments: json!({ "title": "Google account" }),
+            reason: opengrok_core::run::SuspendReason::UserForm,
+        };
+        let said = match resume_outcome(true, &pending) {
+            opengrok_harness::ResumeOutcome::Settled(said) => said,
+            _ => String::new(),
+        };
+        assert!(!said.is_empty(), "a yes on a form still settles the call");
+        let lower = said.to_ascii_lowercase();
+        assert!(!lower.contains("filled into the page"), "{said}");
+        assert!(!lower.contains("were typed"), "{said}");
+        assert!(lower.contains("nothing"), "{said}");
     }
 
     #[test]

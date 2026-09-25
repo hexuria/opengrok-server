@@ -2500,3 +2500,405 @@ async fn collect_network_off_still_waits_and_submits_without_computer_effects() 
     assert_eq!(h.stub.shots(), 0);
     assert_eq!(*h.stub.resumes.lock().expect("resumes"), resumes);
 }
+
+/// `GET /ag-ui/approvals`, polled until a row for this run is waiting.
+async fn wait_for_approval(h: &Harness, token: &str, run_id: &str) -> Value {
+    for _ in 0..100 {
+        let rows: Value = h
+            .client
+            .get(format!("{}/ag-ui/approvals", h.base))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("approvals")
+            .json()
+            .await
+            .expect("approvals json");
+        if let Some(row) = rows
+            .as_array()
+            .expect("the queue is an array")
+            .iter()
+            .find(|row| row["runId"] == json!(run_id))
+        {
+            return row.clone();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("run {run_id} never reached the approvals queue");
+}
+
+/// The routine's row on `GET /schedules`, polled until its `lastRun` satisfies `done`.
+async fn wait_for_routine(
+    h: &Harness,
+    token: &str,
+    id: &str,
+    done: impl Fn(&Value) -> bool,
+) -> Value {
+    let mut row = Value::Null;
+    for _ in 0..100 {
+        let rows: Value = h
+            .client
+            .get(format!("{}/schedules", h.base))
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("schedules")
+            .json()
+            .await
+            .expect("schedules json");
+        row = rows
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|row| row["id"] == json!(id))
+            .cloned()
+            .unwrap_or(Value::Null);
+        if done(&row["lastRun"]) {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the routine's lastRun never settled: {row}");
+}
+
+/// A ROUTINE THAT NEEDS A LOGIN MUST BE ABLE TO GET ONE (#177). Nobody is watching a 9am run, so
+/// its card is the only way the person learns it is stuck — and before this, a routine's form
+/// had no card at all: no `entryId` to submit to, a queue row no client could place, and a
+/// routine announced as "produced no answer" while it sat waiting.
+#[tokio::test]
+async fn a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-routine-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Nine").await;
+
+    let (status, created) = h
+        .agui(
+            &token,
+            "/schedules",
+            json!({ "coworkerId": agent, "kind": "webhook", "name": "Inbox", "prompt": "sign in" }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let schedule = created["id"].as_str().expect("routine id").to_string();
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+    let hook = created["webhook"]["url"]
+        .as_str()
+        .expect("url")
+        .rsplit('/')
+        .next()
+        .expect("hook id")
+        .to_string();
+    let fired: Value = h
+        .client
+        .post(format!("{}/hooks/{hook}", h.base))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("fire the hook")
+        .json()
+        .await
+        .expect("hook json");
+    let run_id = fired["runId"].as_str().expect("run id").to_string();
+
+    // The queue says whose card this is and where it came from. The thread id is the routine's,
+    // which names no chat, so without these a client has nowhere to put it.
+    let row = wait_for_approval(&h, &token, &run_id).await;
+    assert_eq!(row["reason"], "user-form", "{row}");
+    assert_eq!(row["coworkerId"], json!(agent), "{row}");
+    assert_eq!(row["origin"], "webhook", "{row}");
+
+    // The routine's row says it is waiting, and on what — not that it produced nothing.
+    let routine = wait_for_routine(&h, &token, &schedule, |last| {
+        last["status"] == "awaiting-approval"
+    })
+    .await;
+    let summary = routine["lastRun"]["summary"].as_str().expect("summary");
+    assert!(
+        summary.starts_with("Routine Inbox is waiting for you"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Google account"),
+        "the card is named: {summary}"
+    );
+    assert!(!summary.contains("produced no answer"), "{summary}");
+    assert_eq!(routine["lastRun"]["runId"], json!(run_id), "{routine}");
+    assert_eq!(routine["lastRun"]["finishedAtMs"], Value::Null, "{routine}");
+
+    // The card exists, with an id submit can name — minted exactly as a chat turn's is.
+    let card = h.wait_for_form(&agent).await;
+    assert_eq!(card["callId"], row["callId"], "{card}");
+    let entry_id = card["id"].as_str().expect("entry id").to_string();
+    assert!(entry_id.starts_with("e_"), "{card}");
+
+    // And the routine's own thread replays the pause with that id on it, so a client that opens
+    // the run from `lastRun` can submit from the history it painted.
+    let thread: Value = h
+        .client
+        .get(format!("{}/ag-ui/threads/{schedule}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("thread")
+        .json()
+        .await
+        .expect("thread json");
+    let stamped = thread["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|run| run["events"].as_array().into_iter().flatten())
+        .any(|event| {
+            event["name"] == "run-awaiting-approval" && event["entryId"] == json!(entry_id)
+        });
+    assert!(
+        stamped,
+        "the replayed pause carries the card's entryId: {thread}"
+    );
+
+    let (status, settled) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": entry_id,
+                "agentId": agent,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{settled}");
+    assert_eq!(settled["formResolution"], "submitted", "{settled}");
+
+    // And once answered, the routine carries on and its row says how it ended.
+    let routine =
+        wait_for_routine(&h, &token, &schedule, |last| last["status"] == "finished").await;
+    let summary = routine["lastRun"]["summary"].as_str().expect("summary");
+    assert!(summary.starts_with("Routine Inbox ran: "), "{summary}");
+    assert!(!summary.contains(SECRET), "{summary}");
+}
+
+/// A card raised by a person's own chat turn says so, and names its coworker too.
+///
+/// ORIGIN IS READ FROM THE LOG, NOT FROM THE THREAD ID. A thread id is whatever the client sent,
+/// and this turn is sent on one spelled like a routine's: it is still a chat.
+#[tokio::test]
+async fn a_chat_turns_card_is_placed_by_its_coworker() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-chat-origin-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Chatty").await;
+    let res = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "threadId": format!("sched_{}", uuid::Uuid::now_v7()),
+            "runId": uuid::Uuid::now_v7().to_string(),
+            "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+            "forwardedProps": { "coworkerId": agent },
+        }))
+        .send()
+        .await
+        .expect("post ag-ui");
+    assert_eq!(res.status().as_u16(), 200);
+    res.text().await.expect("sse");
+    let run_id = h
+        .store
+        .awaiting_approval(&h.account)
+        .await
+        .expect("awaiting")
+        .into_iter()
+        .next()
+        .expect("a waiting run")
+        .as_str()
+        .to_string();
+    let row = wait_for_approval(&h, &token, &run_id).await;
+    assert_eq!(row["coworkerId"], json!(agent), "{row}");
+    assert_eq!(row["origin"], "chat", "{row}");
+}
+
+/// Asks for a login on every fresh conversation, with a call id of its own each time — as a real
+/// model does — and answers once its tool result is in. The stock mock reuses one call id, which
+/// would make two parked forms indistinguishable by the one thing that tells them apart.
+///
+/// Two fresh conversations meet at a barrier before either asks, so both have been handed their
+/// tools before either form exists. That is the race a real 9am routine and a person's chat run:
+/// the screen hold a pending form raises (`tools_for_coworker`) only reaches runs that start after
+/// it, so two runs already under way can both park on a form.
+struct EachAskDoor {
+    both_asking: tokio::sync::Barrier,
+}
+
+#[async_trait]
+impl ModelDoor for EachAskDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| message.content.contains("[tool "));
+        let deltas = if answered {
+            vec![ModelDelta::Text("Signed in; carrying on.".into())]
+        } else {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(10), self.both_asking.wait())
+                    .await;
+            let id = format!("form-{}", uuid::Uuid::now_v7().simple());
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: "request_user_form".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: json!({
+                        "title": "Google account",
+                        "fields": [
+                            {"id": "email", "label": "Email", "type": "email", "required": true},
+                            {"id": "password", "label": "Password", "type": "password", "required": true}
+                        ],
+                        "liveHost": "accounts.google.com"
+                    })
+                    .to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
+/// A CARD ANSWERS ITS OWN RUN. A coworker's chat turn and one of its routines can both be parked
+/// on a form now that a routine mints its card, and the submit used to resume whichever run had
+/// waited longest — so the other run's card settled, the call ids disagreed, and the run the
+/// person actually answered stayed parked for good with its card already marked submitted.
+#[tokio::test]
+async fn a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-two-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(EachAskDoor {
+        both_asking: tokio::sync::Barrier::new(2),
+    });
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Both").await;
+
+    let (status, created) = h
+        .agui(
+            &token,
+            "/schedules",
+            json!({ "coworkerId": agent, "kind": "webhook", "name": "Inbox", "prompt": "sign in" }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let schedule = created["id"].as_str().expect("routine id").to_string();
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+    let hook = created["webhook"]["url"]
+        .as_str()
+        .expect("url")
+        .rsplit('/')
+        .next()
+        .expect("hook id")
+        .to_string();
+
+    // The person's chat turn and the routine, under way together.
+    let chat = tokio::spawn({
+        let client = h.client.clone();
+        let url = format!("{}/ag-ui", h.base);
+        let token = token.clone();
+        let agent = agent.clone();
+        async move {
+            client
+                .post(url)
+                .header("authorization", format!("Bearer {token}"))
+                .json(&json!({
+                    "threadId": format!("gateway-{agent}"),
+                    "runId": uuid::Uuid::now_v7().to_string(),
+                    "messages": [{ "id": "m1", "role": "user", "content": "sign in" }],
+                    "forwardedProps": { "coworkerId": agent },
+                }))
+                .send()
+                .await
+                .expect("chat turn")
+                .text()
+                .await
+                .expect("sse")
+        }
+    });
+    let fired: Value = h
+        .client
+        .post(format!("{}/hooks/{hook}", h.base))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("fire the hook")
+        .json()
+        .await
+        .expect("hook json");
+    let routine_run = fired["runId"].as_str().expect("run id").to_string();
+    chat.await.expect("the chat turn parks");
+    wait_for_approval(&h, &token, &routine_run).await;
+    let cards = h.wait_for_forms(&agent, 2).await;
+
+    // Answer the run that has NOT waited longest: the one a first-come lookup would pass over.
+    let waiting = h
+        .store
+        .awaiting_approval(&h.account)
+        .await
+        .expect("awaiting");
+    assert_eq!(waiting.len(), 2, "both runs are parked on a form");
+    let (longest, answered) = (waiting[0].clone(), waiting[1].clone());
+    let row = wait_for_approval(&h, &token, answered.as_str()).await;
+    let card = cards
+        .iter()
+        .find(|card| card["callId"] == row["callId"])
+        .expect("the answered run's own card");
+
+    let (status, settled) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"],
+                "agentId": agent,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{settled}");
+
+    let mut resumed = false;
+    for _ in 0..100 {
+        let still = h
+            .store
+            .awaiting_approval(&h.account)
+            .await
+            .expect("awaiting");
+        if !still.contains(&answered) {
+            resumed = true;
+            assert!(
+                still.contains(&longest),
+                "the run whose card was not answered is still waiting on it"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(resumed, "the run whose card was submitted carried on");
+    if answered.as_str() == routine_run {
+        let routine =
+            wait_for_routine(&h, &token, &schedule, |last| last["status"] == "finished").await;
+        assert_eq!(routine["lastRun"]["runId"], json!(routine_run), "{routine}");
+    }
+}
