@@ -28,6 +28,10 @@ license = "MIT"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }
+# Already in the tree under axum; named for the screen proxy's websocket splice, which needs the
+# upgraded connection's types. Declared here so the workspace has one line to move with axum.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 tower-http = { version = "0.6", features = ["catch-panic", "trace", "limit", "request-id", "timeout", "cors", "fs"] }
 # 0.13 to match rmcp's, so the binary carries ONE http client and one TLS stack rather than two.
 # Its feature names differ from 0.12: `rustls-tls` became `rustls`, and `form` and `query` are now
