@@ -86,7 +86,15 @@ pub(crate) async fn for_turn(
             from_client: true,
         };
     }
-    let mut messages = thread_messages(runs);
+    // A client's `system` message is configuration, not history, and keeps the one rule it had:
+    // the turn drops it when the server composed a system message of its own.
+    let mut messages: Vec<ChatMessage> = input
+        .messages
+        .iter()
+        .filter(|message| message.role == "system")
+        .filter_map(|message| chat_message(message, &input.messages))
+        .collect();
+    messages.extend(thread_messages(runs));
     messages.extend(
         new.iter()
             .filter_map(|message| chat_message(message, &input.messages)),

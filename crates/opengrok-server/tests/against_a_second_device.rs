@@ -457,3 +457,37 @@ async fn a_message_sent_twice_under_one_id_is_said_once() {
         "the second run keeps only what was new to it: {second:?}"
     );
 }
+
+/// A client's `system` message is configuration, not history: on a turn with no coworker, where
+/// the server composes none of its own, it still reaches the model as it always did.
+#[tokio::test]
+async fn a_client_system_message_still_reaches_a_turn_with_no_coworker() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let juana = h.person().await;
+    let response = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("authorization", format!("Bearer {}", juana.token))
+        .json(&json!({
+            "threadId": thread_id(),
+            "runId": uuid::Uuid::now_v7().to_string(),
+            "messages": [
+                { "id": "s0", "role": "system", "content": "answer in one word" },
+                { "id": "m1", "role": "user", "content": "hi" },
+            ],
+        }))
+        .send()
+        .await
+        .expect("ag-ui turn");
+    assert_eq!(response.status().as_u16(), 200);
+    let sse = response.text().await.expect("sse");
+    assert!(sse.contains("RUN_FINISHED"), "{sse}");
+    let asked = h.asked();
+    let roles: Vec<(&str, &str)> = asked[0]
+        .messages
+        .iter()
+        .map(|message| (message.role.as_str(), message.content.as_str()))
+        .collect();
+    assert_eq!(roles, [("system", "answer in one word"), ("user", "hi")]);
+}
