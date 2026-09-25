@@ -287,6 +287,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(opengrok_server::autonomy::sweep::schedules_forever(
         gateway.clone(),
     ));
+    // A form or handoff left unanswered past its deadline is timed out from the log, so a restart
+    // inside the deadline does not leave the run parked and the screen held for good.
+    tokio::spawn(opengrok_server::agui::user_form::hold_deadlines_forever(
+        gateway.clone(),
+    ));
 
     let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)

@@ -82,6 +82,16 @@ for those two tools entirely (NativeChat paints those cards from the CUSTOM + ca
 
 ## [SEVERITY: high] [CONFIDENCE: high] `POST /ag-ui/runs/{id}/stop` on a parked form leaves the card unresolved forever, and the self-heal path is guarded off — every screen tool for that coworker is then refused permanently
 
+> **Fixed (#186).** `stop_run` now lives on the host router and, once the Stop is in the log,
+> settles every card no parked run waits on any more (`settle_dead_holds`: the stopped run's forms
+> dismissed, a live handoff declined) before it answers; the note says the card is closed only when
+> it was. `interrupt_parked_hitl` runs the same settle on every new turn, with or without a stop of
+> its own, so a card an older stop or a dead process left open is closed before the turn builds its
+> tools. There is no separate credential card left on main (the gateway's went with seam A). Tests:
+> `stopping_a_run_parked_on_a_form_closes_its_card_and_frees_the_screen`,
+> `stopping_a_run_whose_form_was_escalated_declines_its_handoff`,
+> `a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart`.
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2995` (`stop_run`), and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/conversation.rs:355-370` (`interrupt_parked_hitl`'s `if stopped > 0` guard)
 
 **What's wrong:** `stop_run` stops the run aggregate only. Unlike `interrupt_agent_run` /
@@ -299,6 +309,16 @@ when the heuristic overrides the model.
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: high] Form / handoff / credential hold timeouts are bare `tokio::spawn` sleeps that do not survive a restart, and the recovery sweep deliberately skips parked runs
+
+> **Fixed (#186).** The sleeping tasks are gone. The deadline is the card's own `timestampMs`:
+> `settle_dead_holds` times out a form or live handoff older than `FORM_HOLD_TIMEOUT` (form settled
+> dismissed + timedOut, its run resumed on its own call; handoff timed_out, its escalated form's run
+> resumed) on every new turn and on every stop, and `hold_deadlines_forever` (spawned by the binary)
+> walks the runs parked past the deadline across all accounts (`PgStore::parked_between`, one
+> window per tick) so a run nobody writes to still times out after a restart. The recovery sweep
+> still leaves parked runs alone. Tests: `a_form_past_its_deadline_times_out_on_the_next_turn_after_a_restart`,
+> `the_deadline_sweep_times_out_a_parked_form_after_a_restart`,
+> `a_live_handoff_past_its_deadline_times_out_and_resumes_its_run`.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:365-387`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/credential.rs:194-204`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/recovery.rs:99-102`
 

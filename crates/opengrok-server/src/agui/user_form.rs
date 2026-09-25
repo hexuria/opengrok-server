@@ -46,10 +46,27 @@ use serde_json::{Value, json};
 use super::resume;
 use crate::host_state::HostState;
 
-/// How long an unanswered form or live handoff may block the turn. Tests call the settlers
-/// directly rather than waiting this out. Facebook hang: password fill reported submitted and
-/// the OTP wait never ended.
+/// How long an unanswered form or live handoff may block the turn, counted from the card's own
+/// `timestampMs`. Tests pass a later `now` to the settlers rather than waiting this out. Facebook
+/// hang: password fill reported submitted and the OTP wait never ended.
 pub const FORM_HOLD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How far the deadline sweep's window trails the deadline. A run's park is written a moment
+/// before its card, so by the time the park is this far past the deadline its cards are too.
+const MINT_LAG_MS: i64 = 60_000;
+
+fn hold_ms() -> i64 {
+    i64::try_from(FORM_HOLD_TIMEOUT.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// When a card was put up. A card with no stamp never reaches its deadline; if it is dead, its
+/// run says so.
+fn minted_at(entry: &Value) -> i64 {
+    entry
+        .get("timestampMs")
+        .and_then(Value::as_i64)
+        .unwrap_or(i64::MAX)
+}
 
 pub fn agui_router(state: HostState) -> Router {
     Router::new()
@@ -115,7 +132,7 @@ pub async fn submit_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
@@ -126,7 +143,7 @@ pub async fn submit_user_form(
         return (400, json!({ "error": "that entry is not a user-form" }));
     }
     if !is_unresolved(&entry) {
-        return heal_or_already(state, account_id, &coworker_id, &agent_id, &entry).await;
+        return heal_or_already(state, account_id, &coworker_id, &entry).await;
     }
 
     let form = form_request_from(&entry);
@@ -263,7 +280,6 @@ pub async fn submit_user_form(
         state,
         account_id,
         &coworker_id,
-        &agent_id,
         content,
         call_id_of(&settled),
     )
@@ -278,7 +294,7 @@ pub async fn dismiss_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let mode = args.get("mode").and_then(Value::as_str).unwrap_or_default();
@@ -304,9 +320,9 @@ pub async fn dismiss_user_form(
         // live sand://box sibling still holds the screen. heal_or_already would
         // no-op because the form is already escalated.
         if resolution == FormResolution::Dismissed && is_escalated_form(&entry) {
-            return abandon_escalated_form(state, account_id, &coworker_id, &agent_id, entry).await;
+            return abandon_escalated_form(state, account_id, &coworker_id, entry).await;
         }
-        return heal_or_already(state, account_id, &coworker_id, &agent_id, &entry).await;
+        return heal_or_already(state, account_id, &coworker_id, &entry).await;
     }
 
     let form = form_request_from(&entry);
@@ -324,7 +340,7 @@ pub async fn dismiss_user_form(
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     if resolution == FormResolution::Escalated {
-        let handoff = start_box_handoff(state, account_id, &coworker_id, &agent_id, &form).await;
+        let handoff = start_box_handoff(state, account_id, &coworker_id, &form).await;
         let mut response = settled;
         if let Some(id) = handoff
             .as_ref()
@@ -343,7 +359,6 @@ pub async fn dismiss_user_form(
         state,
         account_id,
         &coworker_id,
-        &agent_id,
         content,
         call_id_of(&settled),
     )
@@ -361,7 +376,7 @@ pub async fn resolve_box_handoff(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let word = args
@@ -414,15 +429,7 @@ pub async fn resolve_box_handoff(
     let settled_siblings =
         settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
     if let Some(call_id) = answers {
-        resume_user_form(
-            state,
-            account_id,
-            &coworker_id,
-            &agent_id,
-            content,
-            call_id.as_deref(),
-        )
-        .await;
+        resume_user_form(state, account_id, &coworker_id, content, call_id.as_deref()).await;
     }
 
     if posted_live {
@@ -443,151 +450,66 @@ pub async fn resolve_box_handoff(
     (200, json!({ "alreadyAnswered": true }))
 }
 
-/// Spawned when a user-form card is minted. No-ops if the form already settled (including
-/// escalate — that wait is the handoff timer).
-pub fn spawn_form_hold_timeout(
-    state: HostState,
-    account_id: AccountId,
-    coworker_id: CoworkerId,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(FORM_HOLD_TIMEOUT).await;
-        timeout_unresolved_form(&state, &account_id, &coworker_id, &agent_id).await;
-    });
-}
-
-pub fn spawn_handoff_hold_timeout(
-    state: HostState,
-    account_id: AccountId,
-    coworker_id: CoworkerId,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(FORM_HOLD_TIMEOUT).await;
-        timeout_live_handoff(&state, &account_id, &coworker_id, &agent_id).await;
-    });
-}
-
-/// Settle every still-unresolved user-form as `dismissed` + `timedOut` and resume. Idempotent.
-pub async fn timeout_unresolved_form(
-    state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    agent_id: &str,
-) -> bool {
-    let Ok(entries) = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker_id, account_id)
-        .await
-    else {
-        return false;
-    };
-    let mut settled_any = false;
-    let mut settled_for_result: Option<Value> = None;
-    for entry in entries {
-        if !is_unresolved(&entry) {
-            continue;
-        }
-        let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(Some((seq, current))) = state
+/// The durable half of the hold deadline: every `SWEEP_INTERVAL`, time out the forms and
+/// handoffs of runs parked past `FORM_HOLD_TIMEOUT`, across every account.
+///
+/// IT USED TO BE A SLEEPING TASK PER CARD, and a deploy inside those ten minutes left the run
+/// parked and the screen held with nothing left to wake either. The deadline is the card's own
+/// `timestampMs`; the log only says which coworkers to look at. Each tick reads the runs whose
+/// last write crossed the deadline since the last tick — the first tick after a start reads them
+/// all, which is the restart's backlog — so a run a person is slow to answer is looked at once, not
+/// on every tick for as long as it waits.
+pub async fn hold_deadlines_forever(state: HostState) {
+    let mut after_ms = i64::MIN;
+    loop {
+        let now = now_ms();
+        let before_ms = now - hold_ms() - MINT_LAG_MS;
+        match state
             .agui
             .auth
             .store
-            .find_gateway_entry(coworker_id, account_id, entry_id)
-            .await
-        else {
-            continue;
-        };
-        if !is_unresolved(&current) {
-            continue;
-        }
-        let settled = settle_entry(
-            current,
-            FormResolution::Dismissed,
-            &BTreeMap::new(),
-            true,
-            &[],
-            true,
-        );
-        if let Err(error) = state
-            .agui
-            .auth
-            .store
-            .update_gateway_entry(coworker_id, account_id, seq, &settled)
+            .parked_between(after_ms, before_ms)
             .await
         {
-            tracing::error!(%error, "could not time out a user-form");
-            continue;
-        }
-        journal_settled_form(state, account_id, coworker_id, &settled).await;
-        settled_for_result = Some(settled);
-        settled_any = true;
-    }
-    if settled_any {
-        let content = match settled_for_result {
-            Some(entry) => {
-                let form = form_request_from(&entry);
-                model_facing_result(
-                    &entry,
-                    &form,
-                    FormResolution::Dismissed,
-                    &BTreeMap::new(),
-                    true,
-                )
+            Ok(runs) => {
+                expire_parked_forms(&state, &runs, now).await;
+                after_ms = before_ms;
             }
-            None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
-        };
-        // `None` on purpose: every unresolved form just timed out, so the parked
-        // call is one of them, and the run should resume with a timed-out result.
-        // Naming the last-settled entry here would make `resume_settled` refuse
-        // whenever that entry is not the pending one, and the run would stay
-        // parked with nothing left to wake it.
-        resume_user_form(state, account_id, coworker_id, agent_id, content, None).await;
+            Err(error) => tracing::warn!(%error, "the form-hold sweep could not read the log"),
+        }
+        tokio::time::sleep(crate::recovery::SWEEP_INTERVAL).await;
     }
-    settled_any
 }
 
-/// Stamp `boxResolution: timed_out` on a live handoff and resume. Idempotent.
-pub async fn timeout_live_handoff(
+/// Time out what the coworkers of these parked runs have held past its deadline at `now_ms`. The
+/// runs only say whom to look at; each card's own stamp decides.
+pub async fn expire_parked_forms(
     state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    agent_id: &str,
-) -> bool {
-    let Ok(entries) = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker_id, account_id)
-        .await
-    else {
-        return false;
-    };
-    let Some(entry) = entries.into_iter().find(is_live_handoff) else {
-        return false;
-    };
-    let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
-        return false;
-    };
-    let args = json!({
-        "entryId": entry_id,
-        "agentId": agent_id,
-        "resolution": "timed_out",
-    });
-    let (code, _) = resolve_box_handoff(state, &args, account_id).await;
-    code == 200
+    runs: &[(opengrok_core::id::RunId, AccountId)],
+    now_ms: i64,
+) {
+    let mut looked = BTreeSet::new();
+    for (run_id, account_id) in runs {
+        let Ok((run, _)) = state.agui.auth.store.load_run(run_id).await else {
+            continue;
+        };
+        let on_a_form = matches!(
+            run.pending.as_ref().map(|pending| pending.reason),
+            Some(opengrok_core::run::SuspendReason::UserForm)
+        );
+        let Some(coworker_id) = resume::coworker_of(&run).filter(|_| on_a_form) else {
+            continue;
+        };
+        if looked.insert((account_id.to_string(), coworker_id.to_string())) {
+            settle_dead_holds(state, account_id, &coworker_id, now_ms).await;
+        }
+    }
 }
 
 async fn start_box_handoff(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     form: &FormRequest,
 ) -> Option<Value> {
     let card = crate::cards::computer_handoff_card(
@@ -606,18 +528,12 @@ async fn start_box_handoff(
         tracing::error!(%error, "could not append the box handoff entry");
         return None;
     }
-    spawn_handoff_hold_timeout(
-        state.clone(),
-        account_id.clone(),
-        coworker_id.clone(),
-        agent_id.to_string(),
-    );
     Some(card)
 }
 
-/// Settle what holds this coworker's screen that no run will ever answer, without resuming
-/// anything. `false` when it could not tell or could not write, so a caller that promises a card
-/// is closed can say it is not.
+/// Settle what holds this coworker's screen that no run will ever answer, and time out what has
+/// held it past its deadline at `now_ms`. `false` when it could not tell or could not write, so a
+/// caller that promises a card is closed can say it is not.
 ///
 /// DEAD IS DECIDED BY THE RUN, NOT THE CARD. A card is minted only once its run's suspension is in
 /// the log, so an unresolved card whose `callId` no parked run waits on belongs to a run that was
@@ -629,10 +545,15 @@ async fn start_box_handoff(
 ///
 /// A handoff card carries no `callId` — the transcribed shape has none — so it lives as long as an
 /// escalated form's run still waits.
-pub(crate) async fn settle_dead_holds(
+///
+/// A dead card is settled dismissed and nothing resumes: there is no run to resume. A card past
+/// its deadline is settled dismissed and timed out, and its run resumes with that answer; a
+/// handoff past its deadline is timed out and its escalated form's run resumes.
+pub async fn settle_dead_holds(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
+    now_ms: i64,
 ) -> bool {
     let Some(waiting) = waiting_calls(state, account_id, coworker_id).await else {
         return false;
@@ -646,21 +567,56 @@ pub(crate) async fn settle_dead_holds(
     else {
         return false;
     };
+    let expired = |entry: &Value| minted_at(entry) <= now_ms.saturating_sub(hold_ms());
+    // Still to be answered when this pass began: an open sibling either times out below and
+    // answers its own call or is the person's, and an escalated one is answered by its handoff.
+    let open: BTreeSet<&str> = entries
+        .iter()
+        .filter(|entry| is_unresolved(entry) || is_escalated_form(entry))
+        .filter_map(call_id_of)
+        .collect();
     let mut written = true;
     for entry in &entries {
-        if is_unresolved(entry) && call_id_of(entry).is_some_and(|call| !waiting.contains(call)) {
-            written &= settle_open_form(state, account_id, coworker_id, entry, false)
-                .await
-                .is_ok();
+        let dead = call_id_of(entry).is_some_and(|call| !waiting.contains_key(call));
+        if !is_unresolved(entry) || !(dead || expired(entry)) {
+            continue;
+        }
+        match settle_open_form(state, account_id, coworker_id, entry, !dead).await {
+            Ok(Some(settled)) if !dead => {
+                let form = form_request_from(&settled);
+                let none = BTreeMap::new();
+                let content =
+                    model_facing_result(&settled, &form, FormResolution::Dismissed, &none, true);
+                // Its own call; or, when its run is parked on a sibling from the same completion
+                // whose card is no longer open (so nothing else will answer it), the sibling's —
+                // a timed-out form must not leave its run parked with nothing left to wake it.
+                let call_id = call_id_of(&settled).map(|call| match waiting.get(call) {
+                    Some(pending) if !open.contains(pending.as_str()) => pending.as_str(),
+                    _ => call,
+                });
+                resume_user_form(state, account_id, coworker_id, content, call_id).await;
+            }
+            Ok(_) => {}
+            Err(()) => written = false,
         }
     }
-    let live = entries
+    let live: Vec<&Value> = entries
         .iter()
         .filter(|entry| is_live_handoff(entry))
-        .count();
-    if live > 0 && handoff_call(&entries, &waiting).is_none() {
-        let settled = settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
-        written &= settled.len() >= live;
+        .collect();
+    if let Some(first) = live.first() {
+        if handoff_call(&entries, &waiting).is_none() {
+            let settled =
+                settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
+            written &= settled.len() >= live.len();
+        } else if live.iter().any(|handoff| expired(handoff)) {
+            let args = json!({
+                "entryId": first.get("id"),
+                "agentId": coworker_id.as_str(),
+                "resolution": "timed_out",
+            });
+            written &= resolve_box_handoff(state, &args, account_id).await.0 == 200;
+        }
     }
     written
 }
@@ -668,31 +624,36 @@ pub(crate) async fn settle_dead_holds(
 /// The call a live handoff answers, which is its escalated form's: `Some(Some(call))` for the
 /// form whose run still waits, `Some(None)` for a form written before cards carried a call (the
 /// first parked form run is all there is to go on), `None` when no escalated form's run waits.
-fn handoff_call(entries: &[Value], waiting: &BTreeSet<String>) -> Option<Option<String>> {
+fn handoff_call(entries: &[Value], waiting: &BTreeMap<String, String>) -> Option<Option<String>> {
     entries
         .iter()
         .rev()
         .filter(|entry| is_escalated_form(entry))
         .find_map(|form| match call_id_of(form) {
-            Some(call) if waiting.contains(call) => Some(Some(call.to_string())),
+            Some(call) if waiting.contains_key(call) => Some(Some(call.to_string())),
             Some(_) => None,
             None => Some(None),
         })
 }
 
-/// Every call a parked run of this coworker waits on. `None` when the log cannot be read: a
-/// caller deciding which cards are dead must then decide nothing.
+/// Every call a parked run of this coworker waits on, with the call that run is parked on.
+/// `None` when the log cannot be read: a caller deciding which cards are dead must then decide
+/// nothing.
 async fn waiting_calls(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-) -> Option<BTreeSet<String>> {
+) -> Option<BTreeMap<String, String>> {
     let store = &state.agui.auth.store;
-    let mut calls = BTreeSet::new();
+    let mut calls = BTreeMap::new();
     for run_id in store.awaiting_approval(account_id).await.ok()? {
         let (run, _) = store.load_run(&run_id).await.ok()?;
-        if resume::run_belongs_to(&run, coworker_id) {
-            calls.extend(resume::parked_calls(&run));
+        if let Some(pending) = run.pending.as_ref()
+            && resume::run_belongs_to(&run, coworker_id)
+        {
+            for call in resume::parked_calls(&run) {
+                calls.insert(call, pending.call_id.clone());
+            }
         }
     }
     Some(calls)
@@ -782,7 +743,7 @@ async fn fills_a_dedicated_box(
         .unwrap_or(false)
 }
 
-fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
+fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
     let entry_id = args.get("entryId").and_then(Value::as_str)?;
     let agent_id = args
         .get("agentId")
@@ -791,11 +752,7 @@ fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
     if entry_id.is_empty() || agent_id.is_empty() {
         return None;
     }
-    Some((
-        entry_id.to_string(),
-        agent_id.to_string(),
-        CoworkerId::from_stored(agent_id),
-    ))
+    Some((entry_id.to_string(), CoworkerId::from_stored(agent_id)))
 }
 
 async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
@@ -951,7 +908,6 @@ async fn abandon_escalated_form(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     entry: Value,
 ) -> (u16, Value) {
     settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
@@ -961,7 +917,6 @@ async fn abandon_escalated_form(
         state,
         account_id,
         coworker_id,
-        agent_id,
         HANDOFF_DECLINED_TOOL_RESULT.to_string(),
         call_id_of(&entry),
     )
@@ -1042,7 +997,6 @@ async fn heal_or_already(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     entry: &Value,
 ) -> (u16, Value) {
     let form = form_request_from(entry);
@@ -1070,16 +1024,7 @@ async fn heal_or_already(
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
     let content = model_facing_result(entry, &form, resolution, &shared, timed_out);
-    if resume_user_form(
-        state,
-        account_id,
-        coworker_id,
-        agent_id,
-        content,
-        call_id_of(entry),
-    )
-    .await
-    {
+    if resume_user_form(state, account_id, coworker_id, content, call_id_of(entry)).await {
         return (200, entry.clone());
     }
     (200, json!({ "alreadyAnswered": true }))
@@ -1092,7 +1037,6 @@ async fn resume_user_form(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     content: String,
     call_id: Option<&str>,
 ) -> bool {
@@ -1100,7 +1044,6 @@ async fn resume_user_form(
         state,
         account_id,
         coworker_id,
-        agent_id,
         opengrok_core::run::SuspendReason::UserForm,
         content,
         call_id,
@@ -1112,7 +1055,6 @@ pub(crate) async fn resume_settled(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     reason: opengrok_core::run::SuspendReason,
     content: String,
     call_id: Option<&str>,
@@ -1168,14 +1110,12 @@ pub(crate) async fn resume_settled(
     let state = state.clone();
     let account_id = account_id.clone();
     let coworker_id = coworker_id.clone();
-    let agent_id = agent_id.to_string();
     tokio::spawn(resume::resume_where_it_lives(
         in_room,
         state,
         account_id,
         run_id,
         coworker_id,
-        agent_id,
         pending,
         resumed_seq,
         opengrok_harness::ResumeOutcome::Settled(content),

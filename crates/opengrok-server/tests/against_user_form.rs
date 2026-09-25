@@ -1050,11 +1050,15 @@ async fn an_unanswered_form_times_out_and_resumes() {
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
     assert!(h.pending_user_form_runs().await >= 1);
 
-    let settled = opengrok_server::agui::user_form::timeout_unresolved_form(
-        &h.gateway, &h.account, &coworker, &agent,
+    // Ten minutes on, as far as the card's own stamp is concerned.
+    let settled = opengrok_server::agui::user_form::settle_dead_holds(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        now_ms() + hold_ms() + 1_000,
     )
     .await;
-    assert!(settled, "timeout should settle the open form");
+    assert!(settled, "the timeout could read and write the transcript");
 
     let stored = h
         .store
@@ -2352,8 +2356,11 @@ async fn collect_dismiss_and_timeout_resume_without_fabricated_answers() {
         if timed_out {
             let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
             assert!(
-                opengrok_server::agui::user_form::timeout_unresolved_form(
-                    &h.gateway, &h.account, &coworker, &agent
+                opengrok_server::agui::user_form::settle_dead_holds(
+                    &h.gateway,
+                    &h.account,
+                    &coworker,
+                    now_ms() + hold_ms() + 1_000,
                 )
                 .await
             );
@@ -2882,4 +2889,368 @@ async fn a_twin_answered_after_its_run_moved_on_types_nothing() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "fill_failed", "{body}");
     assert_eq!(h.stub.acts().len(), typed, "the late twin typed nothing");
+}
+
+fn hold_ms() -> i64 {
+    i64::try_from(opengrok_server::agui::user_form::FORM_HOLD_TIMEOUT.as_millis()).expect("ms")
+}
+
+/// #186. Stopping a run parked on a form closes the form's card BEFORE the stop answers, so the
+/// answer's "the card is closed" is true, and the coworker's next turn may use its screen.
+#[tokio::test]
+async fn stopping_a_run_parked_on_a_form_closes_its_card_and_frees_the_screen() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-stop-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let a = thread("a");
+
+    h.turn_on(&token, &agent, &a, "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let runs = parked(&h).await;
+    assert_eq!(runs.len(), 1, "{runs:?}");
+
+    let (status, answer) = h
+        .agui(
+            &token,
+            &format!("/ag-ui/runs/{}/stop", runs[0].as_str()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 202, "{answer}");
+    assert_eq!(answer["takesEffect"], "immediately", "{answer}");
+    assert!(
+        answer["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("is closed")),
+        "{answer}"
+    );
+
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+    assert_eq!(card["widgetDismissed"], true, "{card}");
+    assert!(
+        card.get("timedOut").is_none(),
+        "a stop is not a timeout: {card}"
+    );
+    assert!(
+        !holds_any(&h.tail(&agent).await),
+        "nothing holds the screen"
+    );
+    assert!(h.stub.acts().is_empty(), "a stop types nothing");
+
+    let sse = h.turn_on(&token, &agent, &a, "look at the screen").await;
+    assert!(!sse.contains("handoff is open"), "{sse}");
+    assert!(h.stub.shots() >= 1, "the next turn has its screen: {sse}");
+}
+
+/// #186. A card whose run was stopped by something that did not close it — another replica, a
+/// process that died before it could, or this server before the fix — holds the screen for
+/// nobody. After a restart the next turn settles it, whichever conversation that turn is in, and
+/// the screen is the coworker's again.
+#[tokio::test]
+async fn a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-orphan-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let runs = parked(&h).await;
+    stop_in_store(&h, &runs[0]).await;
+    assert!(
+        holds_any(&h.tail(&agent).await),
+        "the stop left the card open"
+    );
+
+    let h2 = harness_on(
+        &database_url,
+        &email,
+        Arc::new(HoldDoor),
+        Some(h.account.clone()),
+    )
+    .await;
+    let sse = h2
+        .turn_on(&token, &agent, &thread("b"), "look at the screen")
+        .await;
+    assert!(!sse.contains("handoff is open"), "{sse}");
+    assert!(h2.stub.shots() >= 1, "the screen is free again: {sse}");
+    let card = stored_card(&h2, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+    assert!(card.get("timedOut").is_none(), "{card}");
+    assert!(h2.stub.acts().is_empty());
+}
+
+/// #186. The hold's deadline is the card's own timestamp, so a restart does not lose it. A form
+/// left past `FORM_HOLD_TIMEOUT` times out on the next turn — even one in another conversation —
+/// its run resumes with the timed-out answer rather than being stopped, and the screen is free.
+#[tokio::test]
+async fn a_form_past_its_deadline_times_out_on_the_next_turn_after_a_restart() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-deadline-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let run_a = parked(&h).await.remove(0);
+    let (seq, mut aged) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("load")
+        .expect("row");
+    aged["timestampMs"] = json!(now_ms() - hold_ms() - 1_000);
+    h.store
+        .update_gateway_entry(&coworker, &h.account, seq, &aged)
+        .await
+        .expect("age the card");
+
+    let h2 = harness_on(
+        &database_url,
+        &email,
+        Arc::new(HoldDoor),
+        Some(h.account.clone()),
+    )
+    .await;
+    let sse = h2
+        .turn_on(&token, &agent, &thread("b"), "look at the screen")
+        .await;
+    assert!(!sse.contains("handoff is open"), "{sse}");
+    assert!(h2.stub.shots() >= 1, "{sse}");
+    let card = stored_card(&h2, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+    assert_eq!(card["timedOut"], true, "{card}");
+    assert_eq!(
+        wait_for_status(&h2, &run_a, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished,
+        "a timed-out form resumes its run with the timeout; it does not stop it"
+    );
+}
+
+/// #186. And with nobody typing at all: the deadline sweep finds the parked run in the log after
+/// a restart, leaves it alone while a person may still answer, and times it out after.
+#[tokio::test]
+async fn the_deadline_sweep_times_out_a_parked_form_after_a_restart() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-sweep-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    let before = now_ms();
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let after = now_ms();
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let run_a = parked(&h).await.remove(0);
+
+    let h2 = harness_on(
+        &database_url,
+        &email,
+        Arc::new(HoldDoor),
+        Some(h.account.clone()),
+    )
+    .await;
+    let found = h2
+        .store
+        .parked_between(before - 1, after)
+        .await
+        .expect("parked runs");
+    assert!(
+        found
+            .iter()
+            .any(|(run, account)| run == &run_a && account == &h.account),
+        "the sweep's window finds the parked run and whose it is: {found:?}"
+    );
+    let mine = [(run_a.clone(), h.account.clone())];
+
+    opengrok_server::agui::user_form::expire_parked_forms(&h2.gateway, &mine, now_ms()).await;
+    assert!(
+        stored_card(&h2, &agent, &entry_id)
+            .await
+            .get("formResolution")
+            .is_none(),
+        "a form inside its deadline is the person's"
+    );
+    assert_eq!(
+        status_of(&h2, &run_a).await,
+        opengrok_core::run::RunStatus::AwaitingApproval
+    );
+
+    opengrok_server::agui::user_form::expire_parked_forms(
+        &h2.gateway,
+        &mine,
+        now_ms() + hold_ms() + 1_000,
+    )
+    .await;
+    let card = stored_card(&h2, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+    assert_eq!(card["timedOut"], true, "{card}");
+    assert_eq!(
+        wait_for_status(&h2, &run_a, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished
+    );
+}
+
+/// #186. "Open the screen" hands the computer to the person; the handoff's own timestamp is its
+/// deadline. Past it the next turn times the handoff out and resumes the escalated form's run.
+#[tokio::test]
+async fn a_live_handoff_past_its_deadline_times_out_and_resumes_its_run() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-handoff-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let run_a = parked(&h).await.remove(0);
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
+            json!({ "entryId": form["id"], "agentId": agent, "mode": "escalated" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff = h.wait_for_handoff(&agent).await;
+    let handoff_id = handoff["id"].as_str().expect("handoff id").to_string();
+
+    // Inside its deadline, another conversation's turn neither ends the handoff nor the run.
+    h.turn_on(&token, &agent, &thread("b"), "what is the time")
+        .await;
+    assert_eq!(parked(&h).await, vec![run_a.clone()]);
+    assert!(
+        stored_card(&h, &agent, &handoff_id)
+            .await
+            .get("boxResolution")
+            .is_none()
+    );
+
+    let (seq, mut aged) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &handoff_id)
+        .await
+        .expect("load")
+        .expect("row");
+    aged["timestampMs"] = json!(now_ms() - hold_ms() - 1_000);
+    h.store
+        .update_gateway_entry(&coworker, &h.account, seq, &aged)
+        .await
+        .expect("age the handoff");
+
+    h.turn_on(&token, &agent, &thread("b"), "what is the time now")
+        .await;
+    let settled = stored_card(&h, &agent, &handoff_id).await;
+    assert_eq!(settled["boxResolution"], "timed_out", "{settled}");
+    assert_eq!(
+        wait_for_status(&h, &run_a, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished
+    );
+}
+
+/// #186. A stop while the person is on the computer ("Open the screen") ends the handoff too:
+/// the run it would hand back to is gone, so the handoff reads declined and holds nothing.
+#[tokio::test]
+async fn stopping_a_run_whose_form_was_escalated_declines_its_handoff() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "hold-stop-handoff-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let run = parked(&h).await.remove(0);
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
+            json!({ "entryId": form["id"], "agentId": agent, "mode": "escalated" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff = h.wait_for_handoff(&agent).await;
+    let handoff_id = handoff["id"].as_str().expect("handoff id").to_string();
+
+    let (status, answer) = h
+        .agui(
+            &token,
+            &format!("/ag-ui/runs/{}/stop", run.as_str()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 202, "{answer}");
+    let settled = stored_card(&h, &agent, &handoff_id).await;
+    assert_eq!(settled["boxResolution"], "declined", "{settled}");
+    assert!(!holds_any(&h.tail(&agent).await));
+    assert_eq!(
+        status_of(&h, &run).await,
+        opengrok_core::run::RunStatus::Stopped
+    );
+}
+
+/// #186. Timing out one card of a pair raised in one completion wakes the run even when the run
+/// is parked on the OTHER card and that card was settled without its answer landing: nothing
+/// else would ever wake it, and it would hold the screen for good.
+#[tokio::test]
+async fn a_timed_out_twin_wakes_a_run_parked_on_a_settled_sibling() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "hold-twin-timeout-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_two_website_logins()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Twin").await;
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let cards = h.wait_for_forms(&agent, 2).await;
+    let run = parked(&h).await.remove(0);
+    let parked_on = cards
+        .iter()
+        .find(|card| card["callId"] == "call-42628be6-1")
+        .expect("the parked twin");
+    let entry_id = parked_on["id"].as_str().expect("entry id");
+    let (seq, mut settled) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, entry_id)
+        .await
+        .expect("load")
+        .expect("row");
+    settled["formResolution"] = json!("dismissed");
+    h.store
+        .update_gateway_entry(&coworker, &h.account, seq, &settled)
+        .await
+        .expect("settle without an answer");
+
+    opengrok_server::agui::user_form::settle_dead_holds(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        now_ms() + hold_ms() + 1_000,
+    )
+    .await;
+    assert_eq!(
+        wait_for_status(&h, &run, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished
+    );
 }

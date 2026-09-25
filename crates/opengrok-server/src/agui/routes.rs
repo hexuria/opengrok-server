@@ -881,17 +881,19 @@ async fn connect_plugins(
 /// `entryId` for NativeChat to submit to — its Log in button stayed grey (21 Sep 2026).
 /// Other AG-UI routes stay on `AgUiState`. The SSE still forwards CUSTOM
 /// `run-awaiting-approval`; the card is additive.
+/// The stop lives here too: a run parked on a form leaves a card that holds the coworker's
+/// screen, and the stop closes it before answering.
 pub fn run_router(state: crate::host_state::HostState) -> Router {
     Router::new()
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .with_state(state)
 }
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
-        .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
@@ -3936,6 +3938,12 @@ const STOP_ATTEMPTS: usize = 5;
 /// WHAT IT DOES NOT DO, AND THE ANSWER SAYS SO: it does not take back a step already under way. See
 /// `stopped_answer`.
 ///
+/// A RUN PARKED ON A FORM LEAVES A CARD, and the card holds the coworker's screen: every later turn
+/// was refused `computer`, `open_url`, `run_recipe` and `request_user_form` while the answer said
+/// the card was closed. So the cards no run waits on any more are settled before the answer is
+/// written, and the answer says whether they were. A stop of a run that had already ended does
+/// the same, which is how a card an older stop left open gets closed.
+///
 /// WHAT IT COSTS. A turn that is stopped keeps whatever it has already spent, and that is the
 /// correct outcome rather than an oversight: the model calls really happened and the gateway
 /// metered each one against the coworker's own key as it completed. Nothing here aborts a task or
@@ -3944,10 +3952,11 @@ const STOP_ATTEMPTS: usize = 5;
 /// actually lose money. The frames that spend bought are journaled too, including the round the
 /// turn was in the middle of, so `replay_run` still shows what was paid for.
 pub async fn stop_run(
-    State(state): State<AgUiState>,
+    State(host): State<crate::host_state::HostState>,
     headers: axum::http::HeaderMap,
     Path(run_id): Path<String>,
 ) -> Response {
+    let state = &host.agui;
     let run_id = RunId::from_stored(run_id);
 
     // `replay_run`'s check, byte for byte, and for the same reason: a run holds a whole
@@ -3955,7 +3964,7 @@ pub async fn stop_run(
     // logs. `NOT_FOUND` rather than `FORBIDDEN` for "no such run", "not yours" and "not signed in"
     // alike, so probing ids reveals nothing about which runs exist. The two answers have to be
     // indistinguishable down to the bytes, which is why this says the same words.
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
+    let Some(account_id) = account_from_bearer(state, &headers) else {
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     };
     match state.auth.store.run_owned_by(&run_id, &account_id).await {
@@ -3993,7 +4002,9 @@ pub async fn stop_run(
             // pressed a button asking for this run not to be running; whether they won the race
             // with the model is not their problem, and an error here would make a retry — a second
             // press, a client resending — look like a fault.
-            Err(_) => return stopped_answer(&run_id, was),
+            Err(_) => {
+                return stopped_answer(&run_id, was, close_cards(&host, &account_id, &run).await);
+            }
         };
 
         for event in &events {
@@ -4014,7 +4025,7 @@ pub async fn stop_run(
         {
             Ok(_) => {
                 tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
-                return stopped_answer(&run_id, was);
+                return stopped_answer(&run_id, was, close_cards(&host, &account_id, &run).await);
             }
             // Somebody wrote to this run between the read and the write. Re-read and decide again
             // against what is actually there: either the run is now ended, and the next pass
@@ -4033,6 +4044,21 @@ pub async fn stop_run(
         .into_response()
 }
 
+/// Settle the cards a stop leaves with nothing waiting on them. Once, after the stop is in the
+/// log, however many attempts writing it took: before it, the run still waits on them.
+async fn close_cards(
+    host: &crate::host_state::HostState,
+    account_id: &AccountId,
+    run: &opengrok_core::run::Run,
+) -> bool {
+    match crate::agui::resume::coworker_of(run) {
+        Some(coworker) => {
+            crate::agui::user_form::settle_dead_holds(host, account_id, &coworker, now_ms()).await
+        }
+        None => true,
+    }
+}
+
 /// The answer to a stop, and how honest it can be about when the stop takes hold.
 ///
 /// `202`, NOT `200`, AND THE DIFFERENCE IS THE POINT. The stop is durable by the time this is
@@ -4045,7 +4071,7 @@ pub async fn stop_run(
 /// outcome of the REQUEST and not the run's own status — the run's status is unchanged and
 /// `GET /ag-ui/runs/{id}` still reports it. `takesEffect: already-ended` is what distinguishes the
 /// two for a client that cares.
-fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
+fn stopped_answer(run_id: &RunId, was: RunStatus, cards_closed: bool) -> Response {
     let (takes_effect, note) = match was {
         // Nothing was running, and saying "stopped" is still the right answer: the person asked
         // for this run not to be running, and it is not.
@@ -4055,9 +4081,16 @@ fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
         ),
         // Waiting on a person is not working. No model call is in flight and no tool is running,
         // so the run is over the moment the log says so.
-        RunStatus::AwaitingApproval => (
+        RunStatus::AwaitingApproval if cards_closed => (
             "immediately",
             "That run was waiting on an approval, and the card it was waiting on is closed.",
+        ),
+        // Said rather than implied: the card still shows, and the coworker's next turn is what
+        // closes it.
+        RunStatus::AwaitingApproval => (
+            "immediately",
+            "That run is stopped, but the card it was waiting on could not be closed yet; the \
+             coworker's next turn closes it.",
         ),
         // THE HONEST ONE. The turn asks the log whether it has been stopped between steps: before
         // each model call, and again after the model has answered and before its tools are run. A
@@ -4411,9 +4444,7 @@ async fn continue_run(
     // The continued run may pause again — on a user form, a saved-login request — and that
     // pause needs its card in the transcript exactly as a fresh turn's does: without the
     // card there is no `entryId`, and NativeChat cannot submit what the person typed.
-    let agent_id = coworker_id.as_str().to_string();
-    super::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &agent_id, &events)
-        .await;
+    super::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &events).await;
 }
 
 /// Runs waiting on this person.
