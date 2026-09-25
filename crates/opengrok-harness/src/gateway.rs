@@ -39,7 +39,55 @@ fn logged_prefix(key: &str) -> String {
 pub struct GatewayDoor {
     base_url: String,
     key: String,
-    http: reqwest::Client,
+    /// `Err` holds why the client could not be built. There is no clockless fallback:
+    /// `reqwest::Client::new()` panics on the same TLS or resolver failure the builder reports,
+    /// so the door says the gateway cannot be reached, and says it on every call.
+    http: Result<reqwest::Client, String>,
+    /// The last readiness answer and when it was had. See `READY_FOR`.
+    ready_seen: Mutex<Option<(std::time::Instant, Probed)>>,
+}
+
+/// How long one readiness answer about the gateway stands.
+///
+/// `/ready` is unauthenticated, and every call to it was a `GET /v1/models` on the gateway: a
+/// prober asking in a tight loop drove the gateway's catalogue at the prober's rate. Five
+/// seconds is shorter than any supervisor's interval, so a revoked token still reads false on
+/// the next probe that matters.
+const READY_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A probe's outcome, kept so it can be answered again. `ModelError` is not `Clone`.
+enum Probed {
+    Ok,
+    Refused(u16),
+    Unreachable(String),
+    TimedOut(String),
+    Other(String),
+}
+
+impl Probed {
+    fn of(probed: &Result<(), ModelError>) -> Self {
+        match probed {
+            Ok(()) => Self::Ok,
+            Err(ModelError::Refused { status, .. }) => Self::Refused(*status),
+            Err(ModelError::Unreachable(detail)) => Self::Unreachable(detail.clone()),
+            Err(ModelError::TimedOut(sentence)) => Self::TimedOut(sentence.clone()),
+            Err(other) => Self::Other(other.to_string()),
+        }
+    }
+
+    fn again(&self) -> Result<(), ModelError> {
+        match self {
+            Self::Ok => Ok(()),
+            Self::Refused(status) => Err(ModelError::Refused {
+                status: *status,
+                body: String::new(),
+                retry_after_s: None,
+            }),
+            Self::Unreachable(detail) => Err(ModelError::Unreachable(detail.clone())),
+            Self::TimedOut(sentence) => Err(ModelError::TimedOut(sentence.clone())),
+            Self::Other(detail) => Err(ModelError::Stream(detail.clone())),
+        }
+    }
 }
 
 impl std::fmt::Debug for GatewayDoor {
@@ -52,14 +100,120 @@ impl std::fmt::Debug for GatewayDoor {
     }
 }
 
+/// How long a connection to the gateway may take. The gateway is on the same network; ten
+/// seconds is a gateway that is not there.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the gateway may send nothing at all, headers or body.
+///
+/// A READ TIMEOUT, NOT A TOTAL ONE: a total timeout would cut a long, healthy stream off at its
+/// deadline. The gateway sends a keep-alive every 10 s and ends an idle stream itself at 180 s
+/// with a `stream_idle` 504 (`gateway-open-ai-gateway.md` §2), so silence past this is a gateway
+/// that cannot answer, and the gateway's own sentence wins whenever it can still give one.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(200);
+
+/// How long listing the catalogue may take before the gateway counts as not answering.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl GatewayDoor {
     pub fn new(base_url: impl Into<String>, key: impl Into<String>) -> Self {
+        Self::with_timeouts(base_url, key, CONNECT_TIMEOUT, READ_TIMEOUT)
+    }
+
+    /// `new`, with its two clocks set by the caller.
+    ///
+    /// Before these existed the client had none (`reqwest::Client::new()`), so a gateway that
+    /// accepted the connection and never answered held the run for as long as the process
+    /// lived, its lease renewed the whole time (#93).
+    pub fn with_timeouts(
+        base_url: impl Into<String>,
+        key: impl Into<String>,
+        connect: std::time::Duration,
+        read: std::time::Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .read_timeout(read)
+            .build()
+            .map_err(|error| {
+                tracing::error!(%error, "the gateway client could not be built");
+                error.to_string()
+            });
         Self {
             base_url: base_url.into(),
             key: key.into(),
-            http: reqwest::Client::new(),
+            http,
+            ready_seen: Mutex::new(None),
         }
     }
+
+    /// The client, or the refusal every call gets when it could not be built. Nothing was sent,
+    /// so it is `Unreachable`; the person reads the unreachable sentence, the log the reason.
+    fn client(&self) -> Result<&reqwest::Client, ModelError> {
+        self.http.as_ref().map_err(|why| {
+            ModelError::Unreachable(format!("the gateway client could not start: {why}"))
+        })
+    }
+
+    /// Ask the gateway whether it will take this door's key, without asking a model anything:
+    /// `GET /v1/models`, which lists the catalogue and bills nothing.
+    ///
+    /// For boot and for `/ready`. `/health` answers for the event store and stays that way — it
+    /// is the supervisor's liveness check, and a gateway outage must not restart this server — so
+    /// a wrong OG_GATEWAY_TOKEN used to report ok:true until the first turn failed (#185).
+    ///
+    /// ITS OWN CLOCK, `PROBE_TIMEOUT`. On the door's 200 s read timeout a gateway that accepted
+    /// and hung held the boot, and would hold every readiness check, for as long.
+    pub async fn probe(&self) -> Result<(), ModelError> {
+        let response = self
+            .client()?
+            .get(format!("{}/v1/models", self.base_url))
+            .bearer_auth(&self.key)
+            .timeout(PROBE_TIMEOUT)
+            .send()
+            .await
+            .map_err(send_error)?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(ModelError::Refused {
+            status: status.as_u16(),
+            body: String::new(),
+            retry_after_s: None,
+        })
+    }
+}
+
+/// A request that did not come back, as the door reports it. The URL is dropped: it is the
+/// internal gateway's address, and this text used to reach the chat whole (#185).
+///
+/// ONLY A FAILED CONNECT IS `Unreachable`, because only then is it certain nothing was sent —
+/// which is what lets the loop ask again without billing twice. A request that went out and
+/// then lost its connection may have reached a model, so it is not retried.
+fn send_error(error: reqwest::Error) -> ModelError {
+    let connect = error.is_connect();
+    let timeout = error.is_timeout();
+    let detail = error.without_url().to_string();
+    if connect {
+        ModelError::Unreachable(detail)
+    } else if timeout {
+        tracing::warn!(%detail, "the model gateway timed out");
+        ModelError::TimedOut("the model gateway did not answer in time".to_string())
+    } else {
+        ModelError::Stream(detail)
+    }
+}
+
+/// The seconds in a `Retry-After`. The HTTP-date form is not read: the gateway sends seconds.
+fn retry_after_s(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The gateway's 402 names the scope in its own words ("the quota on this API key is
@@ -84,16 +238,7 @@ fn spend_cap_sentence(body: &str) -> String {
     )
 }
 
-/// One upstream sentence, on one line, short enough to read. See `spend_cap_sentence`.
-fn bounded(message: &str) -> String {
-    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 200 {
-        let kept: String = flat.chars().take(200).collect();
-        format!("{kept}…")
-    } else {
-        flat
-    }
-}
+use crate::model::bounded;
 
 /// One `data:` frame of an OpenAI-dialect stream. Only the fields we act on are named; the rest
 /// are ignored rather than rejected, because a provider adding a field must not break a run.
@@ -357,6 +502,24 @@ fn message_content(message: &ChatMessage) -> serde_json::Value {
 
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
+    /// `probe`, answered from the last one while it is younger than `READY_FOR`. Boot calls
+    /// `probe` itself and always asks.
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        let recent = self.ready_seen.lock().ok().and_then(|seen| {
+            seen.as_ref()
+                .filter(|(at, _)| at.elapsed() < READY_FOR)
+                .map(|(_, probed)| probed.again())
+        });
+        if let Some(recent) = recent {
+            return Some(recent);
+        }
+        let probed = self.probe().await;
+        if let Ok(mut seen) = self.ready_seen.lock() {
+            *seen = Some((std::time::Instant::now(), Probed::of(&probed)));
+        }
+        Some(probed)
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if let Some(system) = &request.system {
@@ -410,16 +573,17 @@ impl ModelDoor for GatewayDoor {
             }
         };
         let response = self
-            .http
+            .client()?
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(key)
             .json(&payload)
             .send()
             .await
-            .map_err(|error| ModelError::Unreachable(error.to_string()))?;
+            .map_err(send_error)?;
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after_s = retry_after_s(response.headers());
             let body = response.text().await.unwrap_or_default();
             // WHICH KEY WAS REFUSED, because nobody else can say. The gateway records nothing at
             // all for a rejected key — it proved that by presenting junk and watching its own log
@@ -448,6 +612,7 @@ impl ModelDoor for GatewayDoor {
                 status: status.as_u16(),
                 // Bounded: an upstream error page must not become a megabyte in our logs.
                 body: body.chars().take(500).collect(),
+                retry_after_s,
             });
         }
 
@@ -458,7 +623,12 @@ impl ModelDoor for GatewayDoor {
         let body_state = live.clone();
         let body = response.bytes_stream().flat_map(move |chunk| {
             let events = match chunk {
-                Err(error) => vec![Err(ModelError::Stream(error.to_string()))],
+                Err(error) => vec![Err(match send_error(error) {
+                    // A body that stopped arriving is the model going quiet, not a gateway
+                    // that could not be reached: nothing about the connect failed.
+                    ModelError::Unreachable(detail) => ModelError::Stream(detail),
+                    other => other,
+                })],
                 Ok(bytes) => {
                     let mut state = match body_state.lock() {
                         Ok(guard) => guard,
@@ -508,307 +678,5 @@ struct SseState {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    /// WHAT MAY BE WRITTEN DOWN ABOUT A REFUSED KEY. The gateway records nothing at all for a
-    /// key it rejects, so our log is the only place that can ever name the credential a 401 was
-    /// about — but a log that carried the whole key would trade one problem for a worse one.
-    #[test]
-    fn a_logged_key_names_its_row_and_nothing_else() {
-        // A real key: `oag_live_` plus seven characters is exactly `api_key.key_prefix` on the
-        // gateway, which is the whole question a 401 is asking.
-        let key = "oag_live_f69df82cafe1234567890abcdef";
-        assert_eq!(logged_prefix(key), "oag_live_f69df82");
-
-        // THE HALF THAT MATTERS: the secret does not travel. Asserted as "the tail is absent"
-        // rather than "the head is right", because a prefix that silently grew to swallow the
-        // whole key would still satisfy the equality above if that were the only check.
-        assert!(
-            !logged_prefix(key).contains("cafe1234567890abcdef"),
-            "the secret tail reached the log: {}",
-            logged_prefix(key)
-        );
-    }
-
-    /// A key is opaque to us: we neither mint it nor validate its shape. A byte-index slice would
-    /// panic on a multi-byte character, and losing a turn to a logging call is an absurd way to
-    /// fail — so the rule is defined on characters and every odd input has to survive it.
-    #[test]
-    fn logging_a_strange_key_cannot_panic() {
-        for odd in [
-            "",
-            "short",
-            "oag_live_",
-            "ключ-которого-не-бывает",
-            "🔑🔑🔑",
-        ] {
-            let logged = logged_prefix(odd);
-            assert!(
-                logged.chars().count() <= KEY_PREFIX_LEN,
-                "{odd:?} logged {} characters",
-                logged.chars().count()
-            );
-            assert!(
-                odd.starts_with(&logged),
-                "{odd:?} -> {logged:?} is not a prefix"
-            );
-        }
-    }
-
-    #[test]
-    fn a_tool_call_frame_becomes_start_args_end() {
-        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"ls\"}"}}]}}]}"#;
-        assert_eq!(
-            parse_sse_line(line).expect("a tool call frame is not an error"),
-            vec![
-                ModelDelta::ToolCallStart {
-                    id: "call_1".to_string(),
-                    name: "shell".to_string()
-                },
-                ModelDelta::ToolCallArgs {
-                    id: "call_1".to_string(),
-                    delta: "{\"command\":\"ls\"}".to_string()
-                },
-                ModelDelta::ToolCallEnd {
-                    id: "call_1".to_string()
-                },
-            ]
-        );
-    }
-
-    /// OpenAI-shaped streams name the call on the first chunk (often with empty
-    /// `arguments`) and send the JSON on later chunks that have `index` but no `id`.
-    /// Closing the call on that first chunk is how Hexuria Ask cards showed no command.
-    #[test]
-    fn streamed_tool_call_arguments_are_assembled_across_chunks() {
-        let mut parser = SseParser::default();
-        assert_eq!(
-            parser
-                .push_line(
-                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"user_machine_shell","arguments":""}}]}}]}"#
-                )
-                .expect("a tool call frame is not an error"),
-            vec![ModelDelta::ToolCallStart {
-                id: "call_1".to_string(),
-                name: "user_machine_shell".to_string()
-            }]
-        );
-        assert_eq!(
-            parser
-                .push_line(
-                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls /Volumes/goldcoders\"}"}}]}}]}"#
-                )
-                .expect("an arguments frame is not an error"),
-            vec![ModelDelta::ToolCallArgs {
-                id: "call_1".to_string(),
-                delta: "{\"command\":\"ls /Volumes/goldcoders\"}".to_string()
-            }]
-        );
-        assert_eq!(
-            parser
-                .push_line(r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#)
-                .expect("a finish frame is not an error"),
-            vec![ModelDelta::ToolCallEnd {
-                id: "call_1".to_string()
-            }]
-        );
-    }
-
-    #[test]
-    fn a_content_frame_becomes_a_text_delta() {
-        let line = r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#;
-        assert_eq!(
-            parse_sse_line(line).expect("a content frame is not an error"),
-            vec![ModelDelta::Text("hello".to_string())]
-        );
-    }
-
-    /// The sentinel is not JSON. Parsing it as JSON is the classic way to end a working stream
-    /// with a spurious error.
-    #[test]
-    fn the_done_sentinel_is_not_an_error() {
-        assert!(
-            parse_sse_line("data: [DONE]")
-                .expect("a sentinel")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn comments_and_blank_lines_are_ignored() {
-        assert!(parse_sse_line(": ping").expect("a comment").is_empty());
-        assert!(parse_sse_line("").expect("a blank line").is_empty());
-        assert!(parse_sse_line("data: ").expect("an empty frame").is_empty());
-    }
-
-    /// AN EMPTY SUCCESS IS THE DANGEROUS REPLY (CLAUDE.md). A gateway that answers 200 and puts
-    /// the error in the body left the run with no deltas at all, which reached the person as the
-    /// coworker having nothing to say.
-    #[test]
-    fn an_error_frame_breaks_the_stream_instead_of_being_skipped() {
-        let line = r#"data: {"error":{"message":"upstream provider is out of credit","type":"insufficient_quota"}}"#;
-        let error = parse_sse_line(line).expect_err("an error frame is not deltas");
-        assert!(
-            matches!(&error, ModelError::Stream(message) if message == "upstream provider is out of credit"),
-            "{error:?}"
-        );
-    }
-
-    /// The other shape, and the same reasoning: a bare string under `error`.
-    #[test]
-    fn an_error_frame_with_a_bare_string_still_breaks_the_stream() {
-        let error = parse_sse_line(r#"data: {"error":"model not found"}"#)
-            .expect_err("an error frame is not deltas");
-        assert!(
-            matches!(&error, ModelError::Stream(message) if message == "model not found"),
-            "{error:?}"
-        );
-    }
-
-    /// A 200 whose body is not SSE at all reaches the parser as ordinary lines.
-    #[test]
-    fn an_error_body_that_is_not_sse_breaks_the_stream() {
-        let error = parse_sse_line(r#"{"error":{"message":"bad request"}}"#)
-            .expect_err("an error body is not deltas");
-        assert!(
-            matches!(&error, ModelError::Stream(message) if message == "bad request"),
-            "{error:?}"
-        );
-    }
-
-    /// One bad frame must not discard the reply that came before it.
-    #[test]
-    fn a_malformed_frame_is_skipped_rather_than_fatal() {
-        assert!(
-            parse_sse_line("data: {not json")
-                .expect("a malformed frame")
-                .is_empty()
-        );
-    }
-
-    /// An empty content string is a keepalive, not a word — emitting it would open a message for
-    /// nothing.
-    #[test]
-    fn an_empty_content_delta_produces_nothing() {
-        let line = r#"data: {"choices":[{"delta":{"content":""}}]}"#;
-        assert!(parse_sse_line(line).expect("a keepalive").is_empty());
-    }
-
-    #[test]
-    fn a_frame_with_no_choices_produces_nothing() {
-        assert!(
-            parse_sse_line(r#"data: {"choices":[]}"#)
-                .expect("a frame")
-                .is_empty()
-        );
-        assert!(
-            parse_sse_line(r#"data: {"id":"x","object":"chunk"}"#)
-                .expect("a frame")
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn reasoning_arrives_before_the_content_of_the_same_frame() {
-        let line =
-            r#"data: {"choices":[{"delta":{"reasoning_content":"hmm","content":"answer"}}]}"#;
-        assert_eq!(
-            parse_sse_line(line).expect("a reasoning frame is not an error"),
-            vec![
-                ModelDelta::Reasoning("hmm".to_string()),
-                ModelDelta::Text("answer".to_string()),
-            ]
-        );
-    }
-
-    /// A field a provider adds tomorrow must not break a run today.
-    #[test]
-    fn unknown_fields_do_not_break_a_frame() {
-        let line = r#"data: {"choices":[{"delta":{"content":"hi","somethingNew":42}}],"extra":1}"#;
-        assert_eq!(
-            parse_sse_line(line).expect("an unknown field is not an error"),
-            vec![ModelDelta::Text("hi".to_string())]
-        );
-    }
-
-    fn pinned(scope: Option<&str>, actor: Option<&str>) -> Option<String> {
-        conversation_pin(&ModelRequest {
-            model: "m".to_string(),
-            messages: Vec::new(),
-            system: None,
-            tools: Vec::new(),
-            gateway_key: None,
-            spend_scope: scope.map(str::to_string),
-            spend_actor: actor.map(str::to_string),
-        })
-    }
-
-    /// The three properties the gateway's tier-1 affinity actually depends on.
-    ///
-    /// Stable, or it pins nothing and every turn picks a fresh credential. Distinct per
-    /// conversation, or two conversations share a credential and evict each other's prompt cache.
-    /// Absent when there is no pair, because falling back to the gateway's coarser per-caller tier
-    /// is the behaviour every request had before this existed, and is not a failure.
-    #[test]
-    fn the_conversation_pin_is_stable_distinct_and_optional() {
-        let a = pinned(Some("cw-1"), Some("acct-1")).expect("a pair pins");
-        assert_eq!(a, pinned(Some("cw-1"), Some("acct-1")).expect("stable"));
-
-        // A shared coworker holds one transcript PER PERSON, so those are two conversations with
-        // two prefixes; one pin between them would have each evicting the other's cache.
-        assert_ne!(
-            a,
-            pinned(Some("cw-1"), Some("acct-2")).expect("other person")
-        );
-        assert_ne!(
-            a,
-            pinned(Some("cw-2"), Some("acct-1")).expect("other coworker")
-        );
-
-        // The separator earns its place: without it these two would hash identically.
-        assert_ne!(pinned(Some("ab"), Some("c")), pinned(Some("a"), Some("bc")));
-
-        assert_eq!(pinned(None, Some("acct-1")), None);
-        assert_eq!(pinned(Some("cw-1"), None), None);
-
-        // It leaves our boundary, so it must not carry the ids themselves.
-        assert!(!a.contains("cw-1") && !a.contains("acct-1"), "{a}");
-    }
-
-    /// The key must not be printable, however it is logged.
-    #[test]
-    fn the_door_does_not_print_its_key() {
-        let door = GatewayDoor::new("http://localhost:29080", "oag_live_secret");
-        let printed = format!("{door:?}");
-        assert!(!printed.contains("oag_live_secret"), "{printed}");
-        assert!(printed.contains("<redacted>"), "{printed}");
-    }
-
-    #[test]
-    fn a_message_without_images_is_a_bare_string_on_the_wire() {
-        let message = ChatMessage {
-            role: "user".into(),
-            content: "hello".into(),
-            images: Vec::new(),
-        };
-        assert_eq!(message_content(&message), serde_json::json!("hello"));
-    }
-
-    #[test]
-    fn a_message_with_a_screenshot_is_text_then_image_url_parts() {
-        let message = ChatMessage {
-            role: "user".into(),
-            content: "[tool c1 result] screenshot attached".into(),
-            images: vec![crate::ImagePart {
-                mime: "image/png".into(),
-                base64: "AAAA".into(),
-            }],
-        };
-        let parts = message_content(&message);
-        assert_eq!(parts[0]["type"], "text");
-        assert_eq!(parts[0]["text"], "[tool c1 result] screenshot attached");
-        assert_eq!(parts[1]["type"], "image_url");
-        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
-    }
-}
+#[path = "../tests/unit/gateway_tests.rs"]
+mod tests;
