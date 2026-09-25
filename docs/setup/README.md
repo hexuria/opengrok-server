@@ -20,7 +20,7 @@ Postgres and local-Docker computers), `psql` and `jq`.
 
 `desktop-client.md` is no longer a step: the client it describes is discontinued and the two
 doors it used were deleted on 20 Sep 2026. It is kept as the record of how they were wired.
-Its replacement is step 7, [`nativechat.md`](nativechat.md), for the client served today.
+Its replacement is step 8, [`nativechat.md`](nativechat.md), for the client served today.
 
 The web console needs no separate build step for development: build it once
 (`cd web && bun install && bun run build`) and point `OG_WEB_CONSOLE_DIR=web/dist` at the
