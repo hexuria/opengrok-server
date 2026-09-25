@@ -1423,7 +1423,11 @@ pub(crate) fn coworker_row(
         "visibility": view.visibility.as_str(),
         "hiddenFromSidebar": hidden_from_sidebar,
         "updatedAtMs": view.updated_at_ms,
-        "boxId": view.box_id.as_ref().map(|id| id.as_str()),
+        // The hirer's computer, so null on a shared row: a member's turns resolve a box from
+        // the member's own scope, and every computer route answers them 404, so the owner's id
+        // here would name a machine the row's reader can neither open nor work on. Null is
+        // already the row's word for "no computer" (a hire with none answers it).
+        "boxId": view.box_id.as_ref().filter(|_| mine).map(|id| id.as_str()),
         "isGroup": !view.members.is_empty(),
         "memberIds": view.members.iter().map(CoworkerId::as_str).collect::<Vec<_>>(),
         "mine": mine,

@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_core::coworker::{BoxMode, CoworkerCommand, CoworkerView};
+use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use opengrok_harness::{DeltaStream, MockDoor, ModelDoor, ModelError, ModelRequest};
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
@@ -217,6 +218,46 @@ impl Harness {
             Some(json!({ "visibility": visibility })),
         )
         .await
+    }
+
+    /// Record a computer on the coworker the way provisioning does, without a provider: the
+    /// row's `boxId` is read from the aggregate, not from a live box.
+    async fn assign_box(&self, owner: &Person, id: &str) -> String {
+        let coworker_id = CoworkerId::from_stored(id.to_string());
+        let (loaded, seq) = self
+            .store
+            .load_coworker(&coworker_id)
+            .await
+            .expect("load the coworker");
+        let box_id = BoxId::from_stored(unique("box"));
+        let at_ms = chrono::Utc::now().timestamp_millis();
+        let events = loaded
+            .decide(CoworkerCommand::AssignComputer {
+                box_id: box_id.clone(),
+                mode: BoxMode::Dedicated,
+                at_ms,
+            })
+            .expect("assign a computer");
+        let mut after = loaded.clone();
+        for event in &events {
+            after.apply(event);
+        }
+        let view = CoworkerView {
+            id: coworker_id.clone(),
+            name: after.name.clone(),
+            model: after.model.clone(),
+            box_id: after.box_id.clone(),
+            retired: after.retired,
+            members: after.members.clone(),
+            updated_at_ms: at_ms,
+            role: after.role.clone(),
+            visibility: after.visibility,
+        };
+        self.store
+            .append_coworker(&coworker_id, &owner.id, seq, &events, &view)
+            .await
+            .expect("append the assignment");
+        box_id.as_str().to_string()
     }
 
     async fn roster(&self, who: &Person) -> Vec<Value> {
@@ -542,6 +583,44 @@ async fn an_org_visible_coworker_is_on_a_members_roster_and_answers_them() {
         strict.grant.is_none(),
         "sharing writes no grant row: {strict:?}"
     );
+}
+
+#[tokio::test]
+async fn a_members_row_names_no_computer_of_the_owners() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let org = unique("org");
+    let owner = h.person("Ann", "Owner", Some(&org)).await;
+    let member = h.person("Ben", "Member", Some(&org)).await;
+
+    let ada = h.hire(&owner, "Ada").await;
+    assert_eq!(h.share(&owner, &ada, "org").await.0, 200);
+    let box_id = h.assign_box(&owner, &ada).await;
+
+    let own = h.row(&owner, &ada).await.expect("the owner lists it");
+    assert_eq!(own["boxId"], box_id.as_str(), "{own}");
+    // The owner's computer is not the member's: their turns run on their own, and every
+    // computer route answers them 404, so the owner's id on their row names a machine they can
+    // neither open nor work on.
+    let row = h.row(&member, &ada).await.expect("the member lists it");
+    assert_eq!(row["boxId"], Value::Null, "{row}");
+    let (status, body) = h
+        .send(
+            &member,
+            reqwest::Method::PATCH,
+            &format!("/coworkers/{ada}"),
+            Some(json!({ "hiddenFromSidebar": true })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["boxId"],
+        Value::Null,
+        "the hide reply is the same row: {body}"
+    );
+    let (status, body) = h.share(&owner, &ada, "org").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["boxId"], box_id.as_str(), "{body}");
 }
 
 #[tokio::test]

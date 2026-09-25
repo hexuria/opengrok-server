@@ -600,7 +600,8 @@ every record that sharing would otherwise break carry whose it is.
   lent connections are not included. Connect a personal account as `user`, never as `bot`, on a
   coworker you will share. The owner-only routes (`/computer`, `/screen`, `/usage`, `/tools`, keys,
   limits) answer a member 404, because `owned_coworker` gates them — the client's Open button on a
-  shared row therefore has nothing to open.
+  shared row therefore has nothing to open, and the row says so: a member's `boxId` is null, not
+  the owner's computer.
 
 ## Phase 0
 
