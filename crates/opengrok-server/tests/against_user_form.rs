@@ -213,6 +213,17 @@ async fn harness(database_url: &str, email: &str) -> Harness {
 }
 
 async fn harness_with_door(database_url: &str, email: &str, door: Arc<dyn ModelDoor>) -> Harness {
+    harness_on(database_url, email, door, None).await
+}
+
+/// A server over the database. Given an account it is that account's server again, with none
+/// of the first one's memory — which is what a restart is.
+async fn harness_on(
+    database_url: &str,
+    email: &str,
+    door: Arc<dyn ModelDoor>,
+    account: Option<AccountId>,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -222,7 +233,10 @@ async fn harness_with_door(database_url: &str, email: &str, door: Arc<dyn ModelD
         .await
         .expect("migrations");
     let store = PgStore::new(pool);
-    let account = seed_account(&store, email).await;
+    let account = match account {
+        Some(account) => account,
+        None => seed_account(&store, email).await,
+    };
     let stub = Arc::new(FillStub::default());
     let auth = AuthState::new(
         store.clone(),
@@ -300,12 +314,18 @@ impl Harness {
     /// One turn on the AG-UI door. The reply is the whole SSE stream; a turn that pauses for a
     /// form ends it with `run-awaiting-approval`.
     async fn turn(&self, token: &str, agent: &str, prompt: &str) -> String {
+        self.turn_on(token, agent, &format!("gateway-{agent}"), prompt)
+            .await
+    }
+
+    /// One turn on a named thread, the way NativeChat sends each conversation.
+    async fn turn_on(&self, token: &str, agent: &str, thread: &str, prompt: &str) -> String {
         let res = self
             .client
             .post(format!("{}/ag-ui", self.base))
             .header("authorization", format!("Bearer {token}"))
             .json(&json!({
-                "threadId": format!("gateway-{agent}"),
+                "threadId": thread,
                 "runId": uuid::Uuid::now_v7().to_string(),
                 "messages": [{ "id": format!("m-{}", uuid::Uuid::now_v7().simple()), "role": "user", "content": prompt }],
                 "forwardedProps": { "coworkerId": agent },
@@ -2499,4 +2519,367 @@ async fn collect_network_off_still_waits_and_submits_without_computer_effects() 
     assert!(h.stub.acts().is_empty());
     assert_eq!(h.stub.shots(), 0);
     assert_eq!(*h.stub.resumes.lock().expect("resumes"), resumes);
+}
+
+// ---------------------------------------------------------------------------------------------
+// A card and the run that raised it are one thing (#186, #188). Park, stop, interrupt, submit,
+// time out and replay each used to find "the" card or "the" run by the coworker alone.
+// ---------------------------------------------------------------------------------------------
+
+/// A model that does what the prompt names, with a FRESH call id every time: "sign in" raises a
+/// form, "look" takes a screenshot, anything else is answered in words, and a round that can see
+/// its tool result answers. The fixed-id mock stamps `mock-form-1` on every run's card, so two
+/// runs' cards could not be told apart — and telling them apart is what these tests are about.
+struct HoldDoor;
+
+#[async_trait]
+impl ModelDoor for HoldDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let last = request
+            .messages
+            .last()
+            .map(|message| message.content.to_ascii_lowercase())
+            .unwrap_or_default();
+        let fresh = uuid::Uuid::now_v7().simple().to_string();
+        let call = |id: String, name: &str, args: Value| {
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: name.to_string(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: args.to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        let deltas = if last.contains("[tool ") {
+            vec![ModelDelta::Text("done".into())]
+        } else if last.contains("sign in") {
+            call(
+                format!("form-{fresh}"),
+                "request_user_form",
+                json!({
+                    "title": "Google account",
+                    "fields": [
+                        {"id": "email", "label": "Email", "type": "email", "required": true},
+                        {"id": "password", "label": "Password", "type": "password", "required": true}
+                    ],
+                    "liveHost": "accounts.google.com"
+                }),
+            )
+        } else if last.contains("look") {
+            call(
+                format!("look-{fresh}"),
+                "computer",
+                json!({"action": "screenshot"}),
+            )
+        } else {
+            vec![ModelDelta::Text("noted".into())]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
+fn thread(name: &str) -> String {
+    format!("thr-{name}-{}", uuid::Uuid::now_v7())
+}
+
+async fn stored_card(h: &Harness, agent: &str, entry_id: &str) -> Value {
+    h.store
+        .find_gateway_entry(
+            &opengrok_core::id::CoworkerId::from_stored(agent.to_string()),
+            &h.account,
+            entry_id,
+        )
+        .await
+        .expect("load card")
+        .expect("card row")
+        .1
+}
+
+async fn parked(h: &Harness) -> Vec<opengrok_core::id::RunId> {
+    h.store
+        .awaiting_approval(&h.account)
+        .await
+        .expect("awaiting")
+}
+
+async fn status_of(h: &Harness, run: &opengrok_core::id::RunId) -> opengrok_core::run::RunStatus {
+    h.store.load_run(run).await.expect("load run").0.status
+}
+
+/// Poll until the run reaches `want`, and say what it was when the wait ran out.
+async fn wait_for_status(
+    h: &Harness,
+    run: &opengrok_core::id::RunId,
+    want: opengrok_core::run::RunStatus,
+) -> opengrok_core::run::RunStatus {
+    for _ in 0..100 {
+        if status_of(h, run).await == want {
+            return want;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    status_of(h, run).await
+}
+
+/// Stop a run straight in the log, the way a stop written somewhere else lands: no route, so
+/// nothing settles its card. That is how a stop left a card open before a stop closed it, and
+/// how a card is left open when the process that stopped the run died before closing it.
+async fn stop_in_store(h: &Harness, run_id: &opengrok_core::id::RunId) {
+    use opengrok_core::run::{RunCommand, RunView};
+    let (mut run, seq) = h.store.load_run(run_id).await.expect("load run");
+    let at_ms = now_ms();
+    let events = run
+        .decide(RunCommand::Stop {
+            by: h.account.to_string(),
+            at_ms,
+        })
+        .expect("stop");
+    for event in &events {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    h.store
+        .append_run(run_id, seq, &events, &view, Some(&h.account))
+        .await
+        .expect("append stop");
+}
+
+fn holds_any(tail: &Value) -> bool {
+    tail["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(opengrok_tools::user_form::holds_the_screen)
+}
+
+/// #188. A message in one conversation is steer for THAT conversation. A sign-in waiting in
+/// another one is left exactly as it was — and, because the coworker has one computer, the other
+/// conversation may not use the screen meanwhile, and is told which conversation holds it.
+#[tokio::test]
+async fn a_message_in_another_thread_leaves_this_threads_form_open() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-threads-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let a = thread("a");
+    let b = thread("b");
+
+    h.turn_on(&token, &agent, &a, "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let run_a = parked(&h).await.remove(0);
+
+    h.turn_on(&token, &agent, &b, "what is the time").await;
+    assert_eq!(
+        parked(&h).await,
+        vec![run_a.clone()],
+        "thread A still waits"
+    );
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert!(card.get("formResolution").is_none(), "{card}");
+
+    let sse = h.turn_on(&token, &agent, &b, "look at the screen").await;
+    assert_eq!(
+        h.stub.shots(),
+        0,
+        "one computer, and a person is on it: {sse}"
+    );
+    assert!(
+        sse.contains(&a),
+        "the refusal names the conversation holding it: {sse}"
+    );
+    assert!(h.stub.acts().is_empty());
+
+    // And a message in A itself is still steer for A.
+    h.turn_on(&token, &agent, &a, "never mind").await;
+    assert!(parked(&h).await.is_empty());
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+}
+
+/// #188. The card names its call, and the call names its run: a submit resumes the run parked on
+/// THIS card, not whichever of the coworker's parked runs is oldest.
+#[tokio::test]
+async fn submit_resumes_the_run_parked_on_its_own_call_not_the_oldest() {
+    use opengrok_core::run::{Run, RunCommand, RunView, SuspendReason};
+    let database_url = database_or_skip!();
+    let email = format!("hold-decoy-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let real = parked(&h).await.remove(0);
+
+    // An older run of the same coworker, parked on a different form call in another thread.
+    let decoy = opengrok_core::id::RunId::new();
+    let at_ms = now_ms() - 60_000;
+    let mut run = Run::default();
+    let mut events = run
+        .decide(RunCommand::Start {
+            thread_id: thread("decoy"),
+            coworker_id: Some(opengrok_core::id::CoworkerId::from_stored(agent.clone())),
+            model: None,
+            system: None,
+            skill_id: None,
+            at_ms,
+        })
+        .expect("start");
+    for event in &events {
+        run.apply(event);
+    }
+    let suspended = run
+        .decide(RunCommand::Suspend {
+            call_id: "decoy-call".to_string(),
+            tool: "request_user_form".to_string(),
+            arguments: json!({}),
+            reason: SuspendReason::UserForm,
+            at_ms,
+        })
+        .expect("suspend");
+    for event in &suspended {
+        run.apply(event);
+    }
+    events.extend(suspended);
+    let view = RunView {
+        id: decoy.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: 0,
+        updated_at_ms: at_ms,
+    };
+    h.store
+        .append_run(&decoy, 0, &events, &view, Some(&h.account))
+        .await
+        .expect("seed decoy");
+    assert_eq!(
+        parked(&h).await[0],
+        decoy,
+        "the decoy is the oldest parked run"
+    );
+
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": entry_id, "agentId": agent, "values": { "email": EMAIL, "password": SECRET } }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert_eq!(
+        wait_for_status(&h, &real, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished,
+        "the card's own run resumed"
+    );
+    let (decoy_run, _) = h.store.load_run(&decoy).await.expect("load decoy");
+    assert_eq!(
+        decoy_run.status,
+        opengrok_core::run::RunStatus::AwaitingApproval
+    );
+    assert!(
+        !decoy_run
+            .emitted
+            .iter()
+            .any(|frame| frame["entryId"] == json!(entry_id)),
+        "the settled card is journaled onto its own run, not the decoy: {:?}",
+        decoy_run.emitted
+    );
+}
+
+/// #188. Submit types into a live page. A card whose run is no longer waiting on it — stopped by
+/// a process that did not close the card — types nothing, says the fill failed, and leaves no
+/// secret anywhere.
+#[tokio::test]
+async fn a_submit_for_a_card_whose_run_is_no_longer_parked_types_nothing() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-stale-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let runs = parked(&h).await;
+    stop_in_store(&h, &runs[0]).await;
+
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": form["id"], "agentId": agent, "values": { "email": EMAIL, "password": SECRET } }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "fill_failed", "{body}");
+    assert!(!body.to_string().contains(SECRET), "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed into the page");
+    assert!(!holds_any(&h.tail(&agent).await));
+}
+
+/// #188, the review's own case. Two cards from one completion; the parked one is answered first
+/// and the run moves on. The other card is still on screen, but its run no longer waits on it:
+/// answering it must not type an email into whatever the page now has focused.
+#[tokio::test]
+async fn a_twin_answered_after_its_run_moved_on_types_nothing() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-twin-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(MockDoor::asking_for_two_website_logins()),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Twin").await;
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let cards = h.wait_for_forms(&agent, 2).await;
+    let pending_twin = cards
+        .iter()
+        .find(|card| card["callId"] == "call-42628be6-1")
+        .expect("the parked twin");
+    let other_twin = cards
+        .iter()
+        .find(|card| card["callId"] == "call-42628be6")
+        .expect("the other twin");
+    let run = parked(&h).await.remove(0);
+
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": pending_twin["id"], "agentId": agent, "values": { "email": EMAIL, "password": SECRET } }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        wait_for_status(&h, &run, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished
+    );
+    let typed = h.stub.acts().len();
+    assert!(typed > 0, "the parked twin fills");
+
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": other_twin["id"], "agentId": agent, "values": { "email": EMAIL, "password": SECRET } }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "fill_failed", "{body}");
+    assert_eq!(h.stub.acts().len(), typed, "the late twin typed nothing");
 }

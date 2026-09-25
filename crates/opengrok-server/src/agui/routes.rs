@@ -560,8 +560,11 @@ pub(crate) async fn tools_for_coworker(
         // submit path still refuses to log secrets.
         Err(_) => false,
     };
-    context.screen_hold =
-        transcript_hold || pending_form_hold(state, account_id, &coworker_id).await;
+    // The coworker's one computer is held whichever conversation raised the form; the refusal
+    // names that conversation when a parked run ties the hold to one.
+    let held_in = form_hold_thread(state, account_id, &coworker_id).await;
+    context.screen_hold = transcript_hold || held_in.is_some();
+    context.screen_held_in = held_in;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -625,15 +628,15 @@ pub(crate) async fn tools_for_coworker(
     Some(ToolRunner::new(executor, context))
 }
 
-/// A run suspended on a user-form holds the screen whether or not the transcript has a card
-/// for it: the pending row is the truth, the card is chrome.
-async fn pending_form_hold(
+/// The conversation of a run suspended on a user-form: it holds the screen whether or not the
+/// transcript has a card for it — the pending row is the truth, the card is chrome.
+async fn form_hold_thread(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
-) -> bool {
+) -> Option<String> {
     let Ok(run_ids) = state.auth.store.awaiting_approval(account_id).await else {
-        return false;
+        return None;
     };
     for run_id in run_ids {
         let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
@@ -646,10 +649,10 @@ async fn pending_form_hold(
             run.pending.as_ref().map(|pending| pending.reason),
             Some(opengrok_core::run::SuspendReason::UserForm)
         ) {
-            return true;
+            return Some(run.thread_id);
         }
     }
-    false
+    None
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.
@@ -2541,6 +2544,7 @@ async fn start_claimed_turn(
             &gateway,
             account_id,
             coworker_id,
+            &input.thread_id,
             account_id.as_str(),
         )
         .await;
@@ -3391,7 +3395,9 @@ fn run_time_window(emitted: &[serde_json::Value]) -> (i64, i64) {
         .collect();
     match (times.first(), times.last()) {
         (Some(&first), Some(&last)) => (first, last),
-        _ => (0, i64::MAX),
+        // An empty window. "Everything" folded every card the coworker ever raised into a run
+        // that had not logged a timestamp yet.
+        _ => (i64::MAX, i64::MIN),
     }
 }
 
@@ -5406,9 +5412,9 @@ mod tests {
     }
 
     /// A RUN WITH NO FRAMES YET GETS NO CARDS. Hydration appends the transcript cards it cannot
-    /// place, and with nothing logged the run's window is everything, so every card this
-    /// coworker ever showed would reach an attached stream — and the next look would skip as
-    /// many real frames. Only the log's own frames go out.
+    /// place, and a run with no timestamps has no window to place them in — it used to be
+    /// "everything", so every card this coworker ever showed reached an attached stream, and the
+    /// next look skipped as many real frames. Only the log's own frames go out.
     #[test]
     fn an_attached_stream_sends_only_the_logs_own_frames() {
         let card = json!({
@@ -5427,14 +5433,36 @@ mod tests {
             from,
             to,
         );
-        assert_eq!(
-            hydrated.len(),
-            1,
-            "hydration invents a card for an empty run"
+        assert!(
+            hydrated.is_empty(),
+            "no card for an empty run: {hydrated:?}"
         );
         assert!(
             log_frames(hydrated, 0).is_empty(),
             "the attached stream sends none"
         );
+    }
+
+    /// #188. A run whose frames carry no timestamps is not a window onto the whole transcript.
+    #[test]
+    fn a_run_with_no_timestamps_gets_no_transcript_cards() {
+        let card = json!({
+            "kind": "send-message",
+            "id": "e_old",
+            "timestampMs": 5,
+            "message": {
+                "type": "user-form",
+                "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
+            }
+        });
+        let emitted = vec![json!({"type": "RUN_STARTED"})];
+        let (from, to) = run_time_window(&emitted);
+        let out = crate::agui::user_form::hydrate_agui_events(
+            emitted,
+            std::slice::from_ref(&card),
+            from,
+            to,
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
     }
 }

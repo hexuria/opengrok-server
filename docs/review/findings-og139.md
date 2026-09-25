@@ -144,6 +144,13 @@ asserts holds only for the first attempt. The same `None` is passed by `abandon_
 
 ## [SEVERITY: medium] [CONFIDENCE: high] `pending_suspended` returns the first parked run, not the one whose `pending.call_id` matches — a submit in a room with two parked forms settles the card and never resumes its run
 
+> **Fixed (#188).** `pending_suspended` takes the card's `callId` and returns the run whose parked
+> calls (every unanswered `run-awaiting-approval` it raised, not only `pending`) include it; `None`
+> is left only for cards written before cards carried a call. `resume_settled`,
+> `journal_agui_custom` (so a settled frame and the save-login offer land on the card's own run)
+> and the hand-back resume (a handoff card has no call; its escalated form's is used) all name it.
+> Test: `submit_resumes_the_run_parked_on_its_own_call_not_the_oldest`.
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:951-985`
 
 **What's wrong:** `pending_suspended` walks `awaiting_approval(account_id)` (ordered by
@@ -165,6 +172,13 @@ the 10-minute timeout. The card looks answered and the turn silently hangs.
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: high] The interrupt is coworker-scoped, not thread-scoped: a new message in one thread stops the parked run and dismisses the card of a different thread
+
+> **Fixed (#188).** `interrupt_parked_hitl` takes the incoming `threadId` and stops only that
+> thread's parked runs. The coworker-wide dismissal is gone: `settle_dead_holds` settles only
+> cards whose `callId` no parked run waits on any more. **The screen hold stays per computer**
+> (a coworker has one box; another conversation clicking on the page a person is signing in on is
+> the race the hold exists for), and the refusal now names the conversation holding it
+> (`ToolContext::screen_held_in`). Test: `a_message_in_another_thread_leaves_this_threads_form_open`.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/conversation.rs:346-371`, called from `crates/opengrok-server/src/agui/routes.rs:2107-2113`
 
@@ -331,6 +345,11 @@ credential, so it is worth fixing both together.)
 
 ## [SEVERITY: medium] [CONFIDENCE: medium] `hydrate_agui_events` can inject the same form card into several runs of a thread, and its time window degenerates to "everything" when a run has no timestamps
 
+> **Fixed (#188).** `run_time_window` falls back to an empty window, and the unplaced-card fallback
+> appends a card only to the run whose own frames carry its `callId`, so a card paints once. A
+> card with no `callId` (older rows) keeps the time-window rule. Tests:
+> `hydrate_does_not_inject_another_runs_form`, `a_run_with_no_timestamps_gets_no_transcript_cards`.
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:1325-1341` and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2561-2571` (`run_time_window`)
 
 **What's wrong:** The unmatched-form fallback appends `agui_user_form_frame(form)` to any run whose
@@ -380,6 +399,12 @@ suspension.
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: medium] Submit types into the live page with no check that the turn that raised the form is still the current one
+
+> **Fixed (#188).** Before anything touches the box (passkey, saved login or typed fill),
+> `submit_user_form` requires a parked run that still waits on the card's `callId`; otherwise the
+> card settles `fill_failed` with nothing typed. The remaining window is a stop landing between the
+> check and the typing. Tests: `a_submit_for_a_card_whose_run_is_no_longer_parked_types_nothing`,
+> `a_twin_answered_after_its_run_moved_on_types_nothing`.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:175` (`fill_on_box` runs before any resume check)
 

@@ -252,3 +252,32 @@ fn held_form_frames_do_not_go_out_after_a_stop() {
     assert!(stopped.push(notice).is_some(), "the notice itself goes out");
     assert!(stopped.release_at_end(true).is_empty());
 }
+
+/// #188. Two runs whose windows overlap — two turns a few seconds apart in one thread — each
+/// hydrate against the coworker's whole transcript. A card is appended only to the run that
+/// made its call, so it paints once, not once per run.
+#[test]
+fn hydrate_does_not_inject_another_runs_form() {
+    let mut theirs = email_form("e_theirs", Some("submitted"), 50);
+    theirs["callId"] = json!("c-theirs");
+    let mine = vec![
+        json!({"type": "TOOL_CALL_START", "toolCallId": "c-mine", "toolCallName": "request_user_form"}),
+        json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "hi"}),
+    ];
+    let out = hydrate_agui_events(mine.clone(), std::slice::from_ref(&theirs), 0, 100);
+    assert_eq!(
+        out.len(),
+        2,
+        "another run's card is not painted here: {out:?}"
+    );
+
+    let ours = vec![json!({
+        "type": "TOOL_CALL_START", "toolCallId": "c-theirs", "toolCallName": "request_user_form"
+    })];
+    let out = hydrate_agui_events(ours, std::slice::from_ref(&theirs), 0, 100);
+    assert!(
+        out.iter()
+            .any(|event| event["entryId"] == "e_theirs" && event["name"] == "user-form"),
+        "the run that made the call still gets its card: {out:?}"
+    );
+}

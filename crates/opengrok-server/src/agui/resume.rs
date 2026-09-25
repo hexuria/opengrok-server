@@ -22,12 +22,18 @@ fn entry_id() -> String {
     format!("e_{}", uuid::Uuid::now_v7())
 }
 
-/// Stop every parked HITL run for this coworker and settle unresolved user-form / live
-/// handoff chrome without resuming the model. New user text then starts a fresh turn.
+/// Stop this conversation's parked HITL runs for this coworker and settle the user-form / live
+/// handoff chrome they leave behind, without resuming the model. New user text then starts a
+/// fresh turn.
+///
+/// ONE CONVERSATION, NOT THE COWORKER. A message is steer for the conversation it was typed in.
+/// Stopping every parked run of the coworker ended a sign-in waiting in another conversation the
+/// moment the person typed anywhere else, and dismissed its card with nothing filled.
 pub(crate) async fn interrupt_parked_hitl(
     state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    thread_id: &str,
     by: &str,
 ) -> usize {
     let Ok(run_ids) = state.agui.auth.store.awaiting_approval(account_id).await else {
@@ -35,12 +41,12 @@ pub(crate) async fn interrupt_parked_hitl(
     };
     let mut stopped = 0usize;
     for run_id in run_ids {
-        if stop_parked_run(state, account_id, coworker_id, &run_id, by).await {
+        if stop_parked_run(state, account_id, coworker_id, thread_id, &run_id, by).await {
             stopped += 1;
         }
     }
     if stopped > 0 {
-        super::user_form::dismiss_unresolved_on_interrupt(state, account_id, coworker_id).await;
+        super::user_form::settle_dead_holds(state, account_id, coworker_id).await;
     }
     stopped
 }
@@ -49,6 +55,7 @@ async fn stop_parked_run(
     state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    thread_id: &str,
     run_id: &opengrok_core::id::RunId,
     by: &str,
 ) -> bool {
@@ -56,7 +63,7 @@ async fn stop_parked_run(
         let Ok((mut run, seq)) = state.agui.auth.store.load_run(run_id).await else {
             return false;
         };
-        if !run_belongs_to(&run, coworker_id) {
+        if !run_belongs_to(&run, coworker_id) || run.thread_id != thread_id {
             return false;
         }
         if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
@@ -509,6 +516,29 @@ pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) 
         .as_ref()
         .is_some_and(|owner| owner.as_str() == agent.as_str())
         || run.thread_id == format!("gateway-{}", agent.as_str())
+}
+
+/// The calls a parked run is waiting on: every `run-awaiting-approval` it raised and has not had
+/// answered, not only `pending`. Forms raised in one completion park together and `pending` is
+/// the last of them, so a card for an earlier one is still this run's to answer. Empty for a run
+/// that is not parked — a card's run that has moved on no longer waits on anything.
+pub(crate) fn parked_calls(run: &opengrok_core::run::Run) -> std::collections::BTreeSet<String> {
+    let mut calls = std::collections::BTreeSet::new();
+    if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
+        return calls;
+    }
+    for frame in &run.emitted {
+        if frame.get("type").and_then(Value::as_str) == Some("CUSTOM")
+            && frame.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
+            && let Some(call) = frame.get("callId").and_then(Value::as_str)
+            && !call.is_empty()
+        {
+            calls.insert(call.to_string());
+        }
+    }
+    calls.extend(run.pending.iter().map(|pending| pending.call_id.clone()));
+    calls.retain(|call| !run.answered.contains(call));
+    calls
 }
 
 /// A run answered under an agent that is not its owner is a member's run inside that room.
