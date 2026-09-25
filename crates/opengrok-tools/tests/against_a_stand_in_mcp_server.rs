@@ -18,7 +18,10 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
-use opengrok_tools::mcp::{Endpoint, Session};
+use opengrok_box::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand};
+use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_tools::Executor;
+use opengrok_tools::mcp::{Endpoint, McpTool, Session, advertised_parameters, within_budget};
 use serde_json::{Value, json};
 
 /// What the server saw, so a test can assert on the request rather than only the reply.
@@ -80,9 +83,19 @@ async fn start_server() -> (String, Seen) {
                             "tools": [{
                                 "name": "send",
                                 "description": "Send a message",
+                                // Shaped like a zod- or pydantic-generated schema: a
+                                // `$schema` line, a `required` list, and an identity
+                                // property a remote server has no business asking the model
+                                // for.
                                 "inputSchema": {
+                                    "$schema": "http://json-schema.org/draft-07/schema#",
                                     "type": "object",
-                                    "properties": { "to": { "type": "string" } }
+                                    "properties": {
+                                        "to": { "type": "string" },
+                                        "subject": { "type": "string" },
+                                        "coworkerId": { "type": "string" }
+                                    },
+                                    "required": ["to", "coworkerId"]
                                 }
                             }, {
                                 "name": "repos.list",
@@ -264,4 +277,232 @@ async fn an_unknown_tool_is_refused_by_the_server() {
     }
 
     session.close().await;
+}
+
+/// A computer nobody reaches: these tests are about what the model is TOLD, and a plugin tool never
+/// touches the box.
+struct NoBox;
+
+#[async_trait::async_trait]
+impl Computer for NoBox {
+    async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn run(&self, _b: &str, _c: &str, _t: u32) -> BoxResult<CommandOutput> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn stop(&self, _b: &str) -> BoxResult<()> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn resume(&self, _b: &str) -> BoxResult<()> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn destroy(&self, _b: &str) -> BoxResult<()> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn state(&self, _b: &str) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+}
+
+/// A coworker whose ceiling and grant let it run everything, so what reaches the model is decided
+/// by the schema alone.
+fn everything_allowed() -> opengrok_policy::Context {
+    opengrok_policy::Context {
+        grant: Some(opengrok_policy::Grant {
+            principal: AccountId::from_stored("acct_1"),
+            coworker: CoworkerId::from_stored("cw_1"),
+            profile: opengrok_policy::ToolSet::All,
+            needs_approval: opengrok_policy::ToolSet::None,
+            revoked: false,
+        }),
+        ceiling: Some(opengrok_policy::Ceiling {
+            coworker: CoworkerId::from_stored("cw_1"),
+            tools: opengrok_policy::ToolSet::All,
+        }),
+    }
+}
+
+/// The function definition the model is offered for `wire`, from a live listing.
+fn advertised(tools: Vec<opengrok_tools::mcp::McpTool>, wire: &str) -> Value {
+    let executor = Executor::with_policy(std::sync::Arc::new(NoBox), everything_allowed())
+        .with_plugin_tools(BTreeMap::new(), tools);
+    let schemas = executor.tool_schemas(
+        &AccountId::from_stored("acct_1"),
+        &CoworkerId::from_stored("cw_1"),
+    );
+    schemas
+        .into_iter()
+        .find(|schema| schema["function"]["name"] == wire)
+        .unwrap_or_else(|| panic!("{wire} was not offered"))
+}
+
+/// #196: THE MODEL IS TOLD WHAT THE SERVER ASKED FOR. An open object made it guess `to`, and a
+/// guess the server's own validation refuses costs a round.
+#[tokio::test]
+async fn a_tool_with_required_arguments_is_advertised_with_them() {
+    let (url, _) = start_server().await;
+    let session = Session::connect(endpoint(&url, &[]))
+        .await
+        .expect("connect");
+    let tools = session.tools().await.expect("list tools");
+    session.close().await;
+
+    // Carried as the server sent it: the cleaning is applied to what is advertised, never to what
+    // is kept.
+    let raw = tools
+        .iter()
+        .find(|tool| tool.remote_name == "send")
+        .and_then(|tool| tool.input_schema.clone())
+        .expect("the listing carries the server's inputSchema");
+    assert_eq!(raw["required"], json!(["to", "coworkerId"]));
+    assert!(raw.contains_key("$schema"), "{raw:?}");
+
+    let send = advertised(tools, "gmail_api_send");
+    let parameters = &send["function"]["parameters"];
+    assert_eq!(parameters["type"], "object", "{parameters}");
+    assert_eq!(parameters["required"], json!(["to"]), "{parameters}");
+    assert_eq!(
+        parameters["properties"]["to"]["type"], "string",
+        "{parameters}"
+    );
+    assert_eq!(
+        parameters["properties"]["subject"]["type"], "string",
+        "{parameters}"
+    );
+    // The identity is overwritten and then stripped before the call leaves: a property the server
+    // will never receive must not be something the model is asked to fill.
+    assert!(
+        parameters["properties"].get("coworkerId").is_none(),
+        "{parameters}"
+    );
+    assert!(parameters.get("$schema").is_none(), "{parameters}");
+}
+
+fn schema(value: Value) -> Option<serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(map) => Some(map),
+        _ => None,
+    }
+}
+
+fn tool_with(input_schema: Option<serde_json::Map<String, Value>>) -> McpTool {
+    McpTool {
+        qualified_name: "gmail.api.send".to_string(),
+        remote_name: "send".to_string(),
+        input_schema,
+        ..McpTool::default()
+    }
+}
+
+/// #196's fallback: whatever cannot be offered as the server's schema is offered as the open object,
+/// never dropped — a tool that runs but that nobody was told about is worse than a vague one.
+#[test]
+fn a_schema_that_cannot_be_offered_falls_back_to_the_open_object() {
+    let open = json!({ "type": "object" });
+
+    assert_eq!(tool_with(None).parameters(), open);
+    let not_an_object = schema(json!({ "type": "string" }));
+    let reason =
+        advertised_parameters(not_an_object.as_ref()).expect_err("a string is not arguments");
+    assert!(reason.contains("string"), "{reason}");
+    assert_eq!(tool_with(not_an_object).parameters(), open);
+
+    let broken_properties = schema(json!({ "type": "object", "properties": ["to"] }));
+    assert_eq!(tool_with(broken_properties).parameters(), open);
+
+    let huge: serde_json::Map<String, Value> = (0..2_000)
+        .map(|n| {
+            (
+                format!("field_{n}"),
+                json!({ "type": "string", "description": "x".repeat(16) }),
+            )
+        })
+        .collect();
+    let oversized = schema(json!({ "type": "object", "properties": huge }));
+    let reason = advertised_parameters(oversized.as_ref()).expect_err("over the cap");
+    assert!(reason.contains("cap"), "{reason}");
+    assert_eq!(tool_with(oversized).parameters(), open);
+}
+
+/// `{}` is how many servers spell "no arguments", and it is not an error: it becomes the object it
+/// always meant, with nothing logged against it.
+#[test]
+fn an_empty_schema_is_a_tool_with_no_arguments() {
+    let empty = schema(json!({}));
+    assert_eq!(
+        advertised_parameters(empty.as_ref()).expect("usable"),
+        json!({ "type": "object" })
+    );
+}
+
+/// The cleaning only ever LOOSENS what the model is told, and leaves the server's own vocabulary
+/// alone.
+#[test]
+fn the_root_is_cleaned_and_the_rest_passes_through() {
+    let raw = schema(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": ["object", "null"],
+        "anyOf": [{ "required": ["owner"] }, { "required": ["repo"] }],
+        "properties": {
+            "owner": { "type": "string", "x-vendor": true },
+            "repo": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "coworker_id": { "type": "string" },
+            "boxId": { "type": "string" }
+        },
+        "required": ["coworker_id", "boxId"],
+        "additionalProperties": false,
+        "$defs": { "Owner": { "type": "string" } }
+    }));
+    let offered = advertised_parameters(raw.as_ref()).expect("usable");
+
+    assert_eq!(offered["type"], "object");
+    assert!(offered.get("$schema").is_none(), "{offered}");
+    assert!(offered.get("anyOf").is_none(), "{offered}");
+    // Nothing left to require once the identity keys are gone, and an empty list is not sent.
+    assert!(offered.get("required").is_none(), "{offered}");
+    assert!(
+        offered["properties"].get("coworker_id").is_none(),
+        "{offered}"
+    );
+    assert!(offered["properties"].get("boxId").is_none(), "{offered}");
+    // Below the root, the server's schema is its own.
+    assert_eq!(offered["properties"]["owner"]["x-vendor"], true);
+    assert_eq!(
+        offered["properties"]["repo"]["anyOf"][1]["type"], "null",
+        "{offered}"
+    );
+    assert_eq!(offered["additionalProperties"], false);
+    assert_eq!(offered["$defs"]["Owner"]["type"], "string");
+}
+
+/// One request's plugin schemas share a budget; a tool past it keeps its place, as an open object.
+#[test]
+fn the_schema_budget_is_shared_and_spent_in_order() {
+    let parameters = json!({ "type": "object", "properties": { "to": { "type": "string" } } });
+    let size = serde_json::to_string(&parameters).expect("serialise").len();
+    let mut budget = size * 2;
+
+    assert_eq!(within_budget(parameters.clone(), &mut budget), parameters);
+    assert_eq!(within_budget(parameters.clone(), &mut budget), parameters);
+    assert_eq!(budget, 0);
+    assert_eq!(
+        within_budget(parameters, &mut budget),
+        json!({ "type": "object" })
+    );
 }

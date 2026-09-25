@@ -1389,6 +1389,7 @@ impl Executor {
             }));
         }
         let plugin_wires = self.plugin_wire_names();
+        let mut schema_budget = crate::mcp::MAX_ADVERTISED_SCHEMAS_BYTES;
         for tool in &self.plugin_tools {
             if permitted(&tool.qualified_name) {
                 let wire = plugin_wires
@@ -1401,9 +1402,9 @@ impl Executor {
                     "function": {
                         "name": wire,
                         "description": tool.description.clone().unwrap_or_default(),
-                        // The MCP server validates the real arguments; we advertise an open object so
-                        // the model can call it, rather than a schema we do not have here.
-                        "parameters": { "type": "object" },
+                        // The server's own schema, cleaned: an open object here had the model
+                        // guess argument names, and every wrong guess cost a round (#196).
+                        "parameters": crate::mcp::within_budget(tool.parameters(), &mut schema_budget),
                     },
                 }));
             }
@@ -2914,6 +2915,7 @@ mod tests {
                 qualified_name: "gmail.api.send".to_string(),
                 remote_name: "send".to_string(),
                 description: Some("Send a message".to_string()),
+                ..Default::default()
             }],
         );
 
@@ -2943,21 +2945,25 @@ mod tests {
                     qualified_name: "gmail.api.send".to_string(),
                     remote_name: "send".to_string(),
                     description: Some("Send a message".to_string()),
+                    ..Default::default()
                 },
                 crate::mcp::McpTool {
                     qualified_name: "a.b.c.d".to_string(),
                     remote_name: "c.d".to_string(),
                     description: None,
+                    ..Default::default()
                 },
                 crate::mcp::McpTool {
                     qualified_name: "a.b.c_d".to_string(),
                     remote_name: "c_d".to_string(),
                     description: None,
+                    ..Default::default()
                 },
                 crate::mcp::McpTool {
                     qualified_name: long.clone(),
                     remote_name: "t".to_string(),
                     description: None,
+                    ..Default::default()
                 },
             ],
         );
@@ -2998,6 +3004,7 @@ mod tests {
                 qualified_name: "gmail.api.send".to_string(),
                 remote_name: "send".to_string(),
                 description: None,
+                ..Default::default()
             }],
         );
         let result = executor
@@ -3026,11 +3033,13 @@ mod tests {
                     qualified_name: "a.b.c.d".to_string(),
                     remote_name: "c.d".to_string(),
                     description: None,
+                    ..Default::default()
                 },
                 crate::mcp::McpTool {
                     qualified_name: "a.b.c_d".to_string(),
                     remote_name: "c_d".to_string(),
                     description: None,
+                    ..Default::default()
                 },
             ],
         );
@@ -3060,6 +3069,7 @@ mod tests {
                 qualified_name: "gmail.api.send".to_string(),
                 remote_name: "send".to_string(),
                 description: None,
+                ..Default::default()
             }],
         );
 
@@ -3092,6 +3102,7 @@ mod tests {
                     qualified_name: "gmail.api.send".to_string(),
                     remote_name: "send".to_string(),
                     description: None,
+                    ..Default::default()
                 }],
             );
 

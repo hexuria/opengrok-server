@@ -33,7 +33,7 @@ pub enum McpError {
 }
 
 /// A tool a plugin's server offers, as the model will be told about it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpTool {
     /// `<plugin>.<server>.<tool>` — unique across every plugin installed.
     pub qualified_name: String,
@@ -41,6 +41,143 @@ pub struct McpTool {
     pub remote_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The server's `inputSchema`, EXACTLY AS SENT. The model is shown [`McpTool::parameters`],
+    /// which is derived from this; the copy here stays untouched so a change to the cleaning
+    /// works from what the server said rather than from an earlier edit of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The server's `annotations`, as sent. HINTS FROM A SERVER WE DO NOT CONTROL — rmcp's own
+    /// docs say a client must never decide on them — so policy and auto-review never read them:
+    /// a server claiming `readOnlyHint` must not be how a call skips its card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<serde_json::Value>,
+}
+
+impl McpTool {
+    /// What the model is offered for this tool's arguments: the server's schema made safe to
+    /// advertise, or the open object when it cannot be. Never drops the tool — the offered set
+    /// must equal the executed set, so a schema we cannot use costs the schema, not the tool.
+    pub fn parameters(&self) -> serde_json::Value {
+        advertised_parameters(self.input_schema.as_ref())
+            .unwrap_or_else(|_| serde_json::Value::Object(open_object()))
+    }
+}
+
+/// The most of ONE plugin tool's argument schema the model is shown, serialised. A remote schema
+/// is text from a server we do not control landing in every request's context; past this it is
+/// not worth the prompt it costs, and the server's own validation still answers a bad call.
+pub const MAX_ADVERTISED_SCHEMA_BYTES: usize = 16 * 1024;
+
+/// The most of ALL plugin tools' schemas one request carries. Per-tool capping alone lets one
+/// server with hundreds of tools spend the whole prompt on itself.
+pub const MAX_ADVERTISED_SCHEMAS_BYTES: usize = 64 * 1024;
+
+/// Removed from the ROOT of an advertised schema. The root of a function's parameters has to be
+/// a plain object to be offered at all, and these either describe the document rather than the
+/// arguments (`$schema`, `$id`, `$comment`) or make the root something other than one object.
+/// Dropping a root combinator only LOOSENS what the model is told; the server still validates.
+const ROOT_KEYWORDS_NOT_ADVERTISED: &[&str] = &[
+    "$schema", "$id", "$comment", "anyOf", "oneOf", "allOf", "not", "if", "then", "else", "enum",
+    "const",
+];
+
+/// `{"type":"object"}` — what a tool is offered as when its own schema cannot be. One definition
+/// for the executor and the MCP door, so the two cannot disagree about the fallback.
+pub fn open_object() -> serde_json::Map<String, serde_json::Value> {
+    let mut object = serde_json::Map::new();
+    object.insert("type".to_string(), serde_json::Value::from("object"));
+    object
+}
+
+/// The server's `inputSchema`, cleaned to be offered to a model, or the reason it cannot be.
+///
+/// THE IDENTITY KEYS ARE TAKEN OUT OF `properties` AND `required`. `strip_identity` removes them
+/// from every call before it leaves, so a remote schema that asks for `coworker_id` would have the
+/// model fill a value the server never receives — and a server that REQUIRES one would refuse
+/// every call for a reason the model cannot fix (CLAUDE.md #7: the model gets no say in identity).
+///
+/// Everything else passes through verbatim, unknown keywords included: the schema is the server's
+/// contract, and tidying it is how a tool ends up advertised with arguments it does not take.
+pub fn advertised_parameters(
+    raw: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+
+    let Some(raw) = raw else {
+        return Err("the server sent no input schema".to_string());
+    };
+    let mut schema = raw.clone();
+    match schema.get("type") {
+        // `{}` is how many servers spell "takes no arguments".
+        None => {}
+        Some(Value::String(kind)) if kind == "object" => {}
+        // `["object", "null"]` from a generator that marks everything nullable.
+        Some(Value::Array(kinds)) if kinds.iter().any(|kind| kind == "object") => {}
+        Some(other) => {
+            return Err(format!(
+                "its input schema has type {other}, and a tool's arguments must be an object"
+            ));
+        }
+    }
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    for keyword in ROOT_KEYWORDS_NOT_ADVERTISED {
+        schema.remove(*keyword);
+    }
+    match schema.get_mut("properties") {
+        None => {}
+        Some(Value::Object(properties)) => {
+            for key in crate::review::IDENTITY_KEYS {
+                properties.remove(*key);
+            }
+        }
+        Some(_) => return Err("its `properties` is not an object".to_string()),
+    }
+    let required = match schema.remove("required") {
+        Some(Value::Array(names)) => names
+            .into_iter()
+            .filter(|name| {
+                !name
+                    .as_str()
+                    .is_some_and(|name| crate::review::IDENTITY_KEYS.contains(&name))
+            })
+            .collect(),
+        // A `required` that is not a list says nothing a model can act on; the server still checks.
+        _ => Vec::new(),
+    };
+    // An EMPTY list is left out rather than sent: draft-04 requires at least one entry, and
+    // "nothing is required" is what its absence already means.
+    if !required.is_empty() {
+        schema.insert("required".to_string(), Value::Array(required));
+    }
+
+    let size = serialised_len(&Value::Object(schema.clone()));
+    if size > MAX_ADVERTISED_SCHEMA_BYTES {
+        return Err(format!(
+            "its input schema is {size} bytes, over the {MAX_ADVERTISED_SCHEMA_BYTES}-byte cap"
+        ));
+    }
+    Ok(Value::Object(schema))
+}
+
+/// Spend `budget` on `parameters`, or offer the open object once it is spent. The tool keeps its
+/// place either way: dropping it here would leave a tool that runs but that nobody was told about.
+pub fn within_budget(parameters: serde_json::Value, budget: &mut usize) -> serde_json::Value {
+    let size = serialised_len(&parameters);
+    if size <= *budget {
+        *budget -= size;
+        parameters
+    } else {
+        tracing::debug!(
+            size,
+            left = *budget,
+            "the plugin schema budget for this request is spent; offering an open object"
+        );
+        serde_json::Value::Object(open_object())
+    }
+}
+
+fn serialised_len(value: &serde_json::Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |text| text.len())
 }
 
 /// Everything needed to reach one server, with its credential already resolved.
@@ -357,14 +494,30 @@ impl Session {
                 detail: error.to_string(),
             })?;
 
-        Ok(tools
+        let tools: Vec<McpTool> = tools
             .into_iter()
             .map(|tool| McpTool {
                 qualified_name: self.endpoint.qualify(&tool.name),
                 remote_name: tool.name.to_string(),
                 description: tool.description.map(|text| text.to_string()),
+                input_schema: Some(std::sync::Arc::unwrap_or_clone(tool.input_schema)),
+                annotations: tool
+                    .annotations
+                    .and_then(|annotations| serde_json::to_value(annotations).ok()),
             })
-            .collect())
+            .collect();
+        // Said once per listing rather than once per request: the listing is where the schema
+        // arrived, and a warning on every model round would bury the one that matters.
+        for tool in &tools {
+            if let Err(reason) = advertised_parameters(tool.input_schema.as_ref()) {
+                tracing::warn!(
+                    tool = tool.qualified_name,
+                    reason,
+                    "a plugin tool is offered as an open object instead of its own schema"
+                );
+            }
+        }
+        Ok(tools)
     }
 
     /// Call a tool by its REMOTE name — the qualified name is ours, and the server has never heard
