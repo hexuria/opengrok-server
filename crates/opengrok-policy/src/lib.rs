@@ -227,6 +227,35 @@ pub fn decide(
     }
 }
 
+/// Whether ANY tool whose name starts with `prefix` could be run (or held for a yes) — so a
+/// caller can skip reaching a plugin server the coworker could use nothing from.
+///
+/// AN OPTIMISATION THAT CAN ONLY NARROW. It answers "is there any point asking", never "may this
+/// run": every tool is still put through [`decide`] by name. It shares `decide`'s refusals — no
+/// grant, a revoked one, one for somebody else, no ceiling — so an unknown answers no, and `All`
+/// answers yes because a set that admits whatever exists tomorrow cannot be ruled out by name.
+pub fn may_run_any_under(
+    principal: &AccountId,
+    coworker: &CoworkerId,
+    prefix: &str,
+    context: &Context,
+) -> bool {
+    if !decide(principal, coworker, Action::UseCoworker, context).is_allowed() {
+        return false;
+    }
+    let (Some(grant), Some(ceiling)) = (&context.grant, &context.ceiling) else {
+        return false;
+    };
+    if &ceiling.coworker != coworker {
+        return false;
+    }
+    match ceiling.tools.intersect(&grant.profile) {
+        ToolSet::All => true,
+        ToolSet::Only(names) => names.iter().any(|name| name.starts_with(prefix)),
+        ToolSet::None => false,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -565,5 +594,82 @@ mod tests {
                 "an empty context must never ask for approval either"
             );
         }
+    }
+
+    /// #199: a plugin server the coworker could use nothing from is not worth reaching — and the
+    /// answer to "is it worth it" can only ever be no where `decide` would say no.
+    #[test]
+    fn only_a_server_with_a_runnable_tool_is_worth_reaching() {
+        let only_gmail = granted(ToolSet::All, ToolSet::only(["shell", "gmail.api.send"]));
+        assert!(may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &only_gmail
+        ));
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "github.api.",
+            &only_gmail
+        ));
+        // A server name that merely starts the same way is a different server.
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.apix.",
+            &only_gmail
+        ));
+
+        // The PROFILE narrows too: intersection, never union.
+        let profile_without = granted(ToolSet::only(["shell"]), ToolSet::All);
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &profile_without
+        ));
+
+        // `All` cannot be ruled out by name.
+        let everything = granted(ToolSet::All, ToolSet::All);
+        assert!(may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &everything
+        ));
+
+        // Every unknown is a no, exactly as it is for `decide`.
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &Context::default()
+        ));
+        let mut revoked = everything.clone();
+        if let Some(grant) = revoked.grant.as_mut() {
+            grant.revoked = true;
+        }
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &revoked
+        ));
+        let mut ceilingless = everything.clone();
+        ceilingless.ceiling = None;
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &ceilingless
+        ));
+        let someone_else = AccountId::from_stored("acct_2");
+        assert!(!may_run_any_under(
+            &someone_else,
+            &coworker(),
+            "gmail.api.",
+            &everything
+        ));
     }
 }

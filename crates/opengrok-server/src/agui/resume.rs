@@ -644,12 +644,15 @@ async fn resume_suspended_run(
         return;
     };
     // A YES on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click. A no is not (see `continue_run`).
-    let runner = runner.with_egress_consented(
-        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
-            && pending.reason == opengrok_core::run::SuspendReason::AutoReview
-            && opengrok_tools::leaves_the_box(&pending.tool),
-    );
+    // rest of this run: one card per run, not one per click. A no is not (see `continue_run`),
+    // and neither is a yes to a screenshot, which never asked about the network.
+    let runner = runner
+        .with_egress_consented(
+            matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+                && pending.reason == opengrok_core::run::SuspendReason::AutoReview
+                && opengrok_tools::needs_egress_consent(&pending.tool, &pending.arguments),
+        )
+        .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person was answering the card must not change the coworker halfway through the
     // turn. A run journalled before this was captured has none and composes one, as before.

@@ -65,8 +65,10 @@ pub const DESKTOP_PORTS: &[u16] = &[6080, 1337, 1340];
 /// add a publish after create — a live box without this port must be recreated.
 pub const EGRESS_TUNNEL_PORT: u16 = 8790;
 
-/// x11vnc on grok-box uses the first 8 characters. Same value is put on the noVNC URL.
-const DESKTOP_VNC_PASSWORD: &str = "opengrok";
+/// x11vnc on grok-box reads only the first 8 characters of `BOX_VNC_PASSWORD`, so a box's password
+/// is exactly 8, all random. Until 25 Sep 2026 every box on every deployment shared the constant
+/// `opengrok`, riding in each noVNC URL.
+const VNC_PASSWORD_LEN: usize = 8;
 
 /// The label that names a box's data volumes, so a later `recreate` mounts the same ones.
 const VOLUMES_LABEL: &str = "dev.opengrok.volumes";
@@ -249,7 +251,9 @@ impl DockerComputer {
         }
         for port in self.published_ports() {
             // Bound to loopback: a coworker's box must not be reachable from the network by
-            // accident, and a person opening a preview is on this machine.
+            // accident. A person on another machine reaches the screen through the server's
+            // authenticated proxy (`/coworkers/{id}/computer/vnc/...`), never a widened bind —
+            // that would also expose exec, host and the egress bearer's socket.
             args.push("-p".to_string());
             args.push(format!("127.0.0.1::{port}"));
         }
@@ -258,7 +262,7 @@ impl DockerComputer {
             args.push("-e".to_string());
             args.push(format!("BOX_TOKEN=og-{}", secret_token()?));
             args.push("-e".to_string());
-            args.push(format!("BOX_VNC_PASSWORD={DESKTOP_VNC_PASSWORD}"));
+            args.push(format!("BOX_VNC_PASSWORD={}", vnc_password()?));
             args.push("-e".to_string());
             args.push("BOX_DESKTOP=1".to_string());
             args.push("-e".to_string());
@@ -467,8 +471,9 @@ impl Computer for DockerComputer {
     }
 
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()> {
-        // Written through stdin rather than interpolated into a shell string: content with a quote
-        // in it would otherwise become part of the command.
+        // Written through stdin, and the path handed over as `$1`, rather than either being
+        // interpolated into a shell string: a quote in the content or the path would otherwise
+        // become part of the command — and a skill's bundle paths are often somebody else's.
         use tokio::io::AsyncWriteExt;
 
         let mut child = Command::new("docker")
@@ -478,7 +483,9 @@ impl Computer for DockerComputer {
                 box_id,
                 "sh",
                 "-c",
-                &format!("mkdir -p \"$(dirname '{path}')\" && cat > '{path}'"),
+                r#"mkdir -p "$(dirname "$1")" && cat > "$1""#,
+                "sh",
+                path,
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -633,16 +640,21 @@ impl Computer for DockerComputer {
         }
     }
 
+    /// The password is the box's own, read back from its environment like `BOX_TOKEN`, so a
+    /// restart keeps it. A box without one has no screen here rather than a guessed password;
+    /// boxes created before per-box passwords still carry theirs, and keep working.
     async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
-        match self.docker(&["port", box_id, "6080"]).await {
-            Ok(mapping) => Ok(host_port(&mapping).map(|port| {
-                format!(
-                    "http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password={DESKTOP_VNC_PASSWORD}"
-                )
-            })),
-            Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => Ok(None),
-            Err(error) => Err(error),
-        }
+        let port = match self.docker(&["port", box_id, "6080"]).await {
+            Ok(mapping) => host_port(&mapping),
+            Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(port) = port else {
+            return Ok(None);
+        };
+        let env = self.env_of(box_id).await?;
+        Ok(env_from_inspect(&env, "BOX_VNC_PASSWORD")
+            .map(|password| vnc_page_url(&format!("http://127.0.0.1:{port}"), &password)))
     }
 
     async fn screenshot(&self, box_id: &str) -> BoxResult<Screenshot> {
@@ -736,15 +748,19 @@ impl DockerComputer {
     }
 
     async fn box_token(&self, box_id: &str) -> BoxResult<String> {
-        let env = self
-            .docker(&[
-                "inspect",
-                box_id,
-                "--format",
-                "{{range .Config.Env}}{{println .}}{{end}}",
-            ])
-            .await?;
+        let env = self.env_of(box_id).await?;
         env_from_inspect(&env, "BOX_TOKEN").ok_or_else(no_screen)
+    }
+
+    /// The container's `Config.Env`, one `KEY=value` per line — where every per-box secret lives.
+    async fn env_of(&self, box_id: &str) -> BoxResult<String> {
+        self.docker(&[
+            "inspect",
+            box_id,
+            "--format",
+            "{{range .Config.Env}}{{println .}}{{end}}",
+        ])
+        .await
     }
 
     async fn published_url(&self, box_id: &str, port: u16) -> BoxResult<String> {
@@ -924,6 +940,30 @@ fn secret_token() -> BoxResult<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
+/// A box's VNC password: `VNC_PASSWORD_LEN` characters from the OS CSPRNG, alphanumeric so it
+/// rides in a URL unescaped. A byte is kept only below the largest multiple of 62, so no
+/// character is likelier than another.
+fn vnc_password() -> BoxResult<String> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut password = String::with_capacity(VNC_PASSWORD_LEN);
+    while password.len() < VNC_PASSWORD_LEN {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|err| BoxError::Secret(format!("no OS randomness: {err}")))?;
+        for byte in bytes.into_iter().filter(|byte| *byte < 248) {
+            if password.len() < VNC_PASSWORD_LEN {
+                password.push(char::from(ALPHABET[usize::from(byte) % ALPHABET.len()]));
+            }
+        }
+    }
+    Ok(password)
+}
+
+/// The noVNC page on `origin` that signs in with `password` and keeps itself connected.
+pub fn vnc_page_url(origin: &str, password: &str) -> String {
+    format!("{origin}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password={password}")
+}
+
 fn uuid_like() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -1088,6 +1128,44 @@ mod tests {
             Some("og-tunnel-secret-1")
         );
         assert_eq!(env_from_inspect(blob, "BOX_EGRESS_TUNNEL"), None);
+    }
+
+    fn vnc_password_of(args: &[String]) -> String {
+        args.iter()
+            .find_map(|arg| arg.strip_prefix("BOX_VNC_PASSWORD="))
+            .expect("a desktop box is created with a VNC password")
+            .to_string()
+    }
+
+    #[test]
+    fn each_desktop_box_gets_its_own_vnc_password() {
+        let docker = DockerComputer::new()
+            .with_image("grok-box:local")
+            .with_egress_tunnel(false);
+        let first = vnc_password_of(&docker.create_args(None).expect("create args"));
+        let second = vnc_password_of(&docker.create_args(None).expect("create args"));
+        for password in [&first, &second] {
+            assert_ne!(password, "opengrok", "the shared constant is gone");
+            // x11vnc reads 8 characters; a longer value would only look stronger.
+            assert_eq!(password.len(), VNC_PASSWORD_LEN, "{password}");
+            assert!(
+                password.chars().all(|c| c.is_ascii_alphanumeric()),
+                "{password}"
+            );
+        }
+        assert_ne!(first, second, "two boxes must not share a password");
+    }
+
+    #[test]
+    fn the_vnc_password_is_recovered_from_container_env_onto_the_page() {
+        let blob = "BOX_TOKEN=og-a\nBOX_VNC_PASSWORD=abcd1234\n";
+        let password = env_from_inspect(blob, "BOX_VNC_PASSWORD").expect("recovered");
+        assert_eq!(password, "abcd1234");
+        let page = vnc_page_url("http://127.0.0.1:49160", &password);
+        assert_eq!(
+            page,
+            "http://127.0.0.1:49160/vnc.html?autoconnect=true&resize=scale&reconnect=true&password=abcd1234"
+        );
     }
 
     #[test]

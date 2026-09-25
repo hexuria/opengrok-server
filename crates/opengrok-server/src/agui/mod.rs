@@ -10,6 +10,7 @@ pub mod pending;
 pub mod provision;
 pub mod resume;
 pub mod routes;
+pub mod screen_proxy;
 pub mod site_logins;
 pub mod user_form;
 

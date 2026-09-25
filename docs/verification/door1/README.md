@@ -100,3 +100,9 @@ provider and `tools_for_coworker` yields no tools. **This affects live runs too,
 door.** The fix is operator action, not code: re-enter the box API key (org admin surface /
 app) so it reseals under the current `OG_CREDENTIAL_KEK`, or switch the deployment's computers
 to local Docker.
+
+*Since #194:* this case now names itself — the boot log and `GET /health`'s `vault` field report a
+key id the server does not hold, and the box key reads `invalid_key` rather than "no computer". If
+the old key survives anywhere, the code path is `OG_CREDENTIAL_KEK_OLD=<old>` plus
+`opengrok vault reseal` (`docs/setup/environment.md`, "The credential key"); a key that is gone for
+good still means re-entering the secret.
