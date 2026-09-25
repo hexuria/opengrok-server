@@ -1,10 +1,11 @@
 //! Budgets for the doors anybody on the network can call in a loop.
 //!
-//! Password-reset mail, dynamic client registration, the credential forms and a domain lookup
+//! Password-reset and verification mail, dynamic client registration, the credential forms and a domain lookup
 //! take no credential (or take one they are about to check), so nothing else bounds what they
 //! cost: a mail per call, a row per call, a hash per call, a DNS query per call. Each gets a
 //! budget — so many hits per key per window — and once it is spent the door answers 429 with a
-//! `Retry-After`, in plain words.
+//! `Retry-After`, in plain words. One door here does take a credential: a coworker-less `/ag-ui`
+//! turn, which has a payer but nothing that meters it (`AGUI_UNSCOPED`).
 //!
 //! In memory, per replica, on purpose. A limit exists to bound cost, and a fleet of N replicas
 //! each letting through its own budget still bounds it (at N times the figure); a table would
@@ -43,6 +44,13 @@ pub const FORGOT: Budget = Budget {
     per_window: 5,
     window_ms: HOUR_MS,
 };
+/// `POST /auth/verify/resend` (both bodies): a mail per call, budgeted exactly like `FORGOT` and
+/// for the same reasons — per address and per mailbox, with a reply that never changes.
+pub const VERIFY_RESEND: Budget = Budget {
+    name: "verify-resend",
+    per_window: 5,
+    window_ms: HOUR_MS,
+};
 /// `POST /admin/domains/{domain}/verify`, per org: a resolver round trip per call.
 pub const DOMAIN_VERIFY: Budget = Budget {
     name: "domain-verify",
@@ -61,6 +69,16 @@ pub const CLIENT_REGISTRATION: Budget = Budget {
 pub const LOGIN_FAILURES: Budget = Budget {
     name: "login-failures",
     per_window: 30,
+    window_ms: HOUR_MS,
+};
+
+/// `POST /ag-ui` turns that name no coworker, per account. Such a turn has a payer but no gateway
+/// key of its own, so it runs on the deployment's key where no meter sees it (`GuardedDoor` meters
+/// a coworker's key); this is the bound on what one account can spend that way. A coworker's
+/// turn is metered and capped by its own key instead, and never counts here.
+pub const AGUI_UNSCOPED: Budget = Budget {
+    name: "agui-unscoped",
+    per_window: 60,
     window_ms: HOUR_MS,
 };
 
@@ -129,6 +147,22 @@ impl Budgets {
                 spent(budget, &live, now_ms).map_or(Ok(()), Err)
             }
             None => Ok(()),
+        }
+    }
+
+    /// Give back the newest hit for `key`: a charge taken up front for something that turned out
+    /// not to happen (a retried POST that reattaches to a run already going). A poisoned lock
+    /// keeps the charge — the fail-closed side.
+    pub fn refund(&self, budget: &Budget, key: &str) {
+        if let Ok(mut hits) = self.hits.lock()
+            && let Some(list) = hits.get_mut(&(budget.name, key.to_string()))
+            && let Some(newest) = list
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, at_ms)| **at_ms)
+                .map(|(index, _)| index)
+        {
+            list.swap_remove(newest);
         }
     }
 
@@ -271,6 +305,28 @@ mod tests {
         budgets.hit_at(&SMALL, "a", 3_000);
         assert!(budgets.check_at(&SMALL, "a", 11_000).is_err());
         assert_eq!(budgets.check_at(&SMALL, "a", 12_000), Ok(()));
+    }
+
+    #[test]
+    fn a_refund_frees_the_newest_hit_and_never_goes_below_nothing() {
+        let budgets = Budgets::default();
+        assert_eq!(budgets.take_at(&SMALL, "a", 1_000), Ok(()));
+        assert_eq!(budgets.take_at(&SMALL, "a", 2_000), Ok(()));
+        assert!(budgets.take_at(&SMALL, "a", 3_000).is_err());
+        budgets.refund(&SMALL, "a");
+        // The 2s hit went back, so the wait is still set by the 1s one.
+        assert_eq!(budgets.take_at(&SMALL, "a", 3_000), Ok(()));
+        assert_eq!(
+            budgets.take_at(&SMALL, "a", 3_500),
+            Err(Spent {
+                retry_after_secs: 8
+            })
+        );
+        budgets.refund(&SMALL, "a");
+        budgets.refund(&SMALL, "a");
+        budgets.refund(&SMALL, "a");
+        budgets.refund(&SMALL, "nobody");
+        assert_eq!(budgets.take_at(&SMALL, "a", 4_000), Ok(()));
     }
 
     #[test]

@@ -14,6 +14,11 @@ export function disableUser(id: string): Promise<Account> {
   return postJson<Account>(`/admin/users/${encodeURIComponent(id)}/disable`);
 }
 
+/** The admin vouches for a member's address — the way out when the verification mail never came. */
+export function verifyUser(id: string): Promise<Account> {
+  return postJson<Account>(`/admin/users/${encodeURIComponent(id)}/verify`);
+}
+
 export interface Invite {
   code: string;
   state: "open" | "redeemed" | "revoked";

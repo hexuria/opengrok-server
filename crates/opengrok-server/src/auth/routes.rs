@@ -50,6 +50,8 @@ pub struct AuthState {
     /// The Resend API key, if configured. `None` ⇒ no mailer, so signup auto-verifies (Uriah's
     /// "if we have set resend api ... if not skip it"). The key never leaves the server.
     pub resend_api_key: Option<String>,
+    /// Where a mail is sent (`resend::ENDPOINT`); a test points it at a stand-in mailbox.
+    pub resend_endpoint: String,
     /// The base URL a verification link points back at (this server, as the client reaches it).
     pub public_url: String,
     /// The reverse-exec transport broker — the live meeting point of a machine's daemon stream and
@@ -87,9 +89,19 @@ pub struct AuthState {
     /// Told the id of every account created here. The binary listens and warms the account's
     /// computer (`provision::warm_scope_for_account`); auth itself knows nothing about boxes.
     pub account_created: Option<tokio::sync::mpsc::UnboundedSender<opengrok_core::id::AccountId>>,
+    /// The box.ascii.dev API an ORG's sealed key is used against. Always the vendor's own in
+    /// production — there is deliberately no variable for it, since a key sent to the wrong host
+    /// is a key given away. It is a seam, like `dns`: a test points it at a stand-in so a hosted
+    /// hire whose create answers 429 or 5xx can be driven end to end without dialling the vendor.
+    pub ascii_base_url: String,
     /// Just-rotated-away refresh plaintext, held for `REFRESH_GRACE_MS` so a concurrent refresh
     /// with the old cookie can reuse the current pair. See `refresh_grace`.
     refresh_grace: std::sync::Arc<super::refresh_grace::RefreshGrace>,
+    /// `OG_DEV_SIGN_IN=1`: whether `/auth/cursor_dev_session_token` mints at all. OFF unless a
+    /// deployment says otherwise, because the local-caller check cannot tell a person's shell from
+    /// any other process on the host — and on Docker Desktop a coworker box's traffic to the host
+    /// is proxied by a host process, so it arrives from 127.0.0.1 with no forwarding header.
+    pub dev_sign_in: bool,
 }
 
 impl AuthState {
@@ -109,6 +121,7 @@ impl AuthState {
             minter,
             login_email,
             resend_api_key: None,
+            resend_endpoint: super::resend::ENDPOINT.to_string(),
             public_url: String::new(),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
@@ -119,8 +132,25 @@ impl AuthState {
             cimd_cache: Arc::new(Mutex::new(HashMap::new())),
             cimd_allow_loopback: false,
             account_created: None,
+            ascii_base_url: opengrok_box::ascii::DEFAULT_BASE_URL.to_string(),
             refresh_grace: std::sync::Arc::new(super::refresh_grace::RefreshGrace::default()),
+            dev_sign_in: false,
         }
+    }
+
+    /// Tests only: where an org's box.ascii.dev key is used (see `ascii_base_url`).
+    #[must_use]
+    pub fn with_ascii_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.ascii_base_url = base_url.into();
+        self
+    }
+
+    /// Turn the password-free dev sign-in on (see `dev_sign_in`). The binary passes
+    /// `OG_DEV_SIGN_IN=1`; a test passes `true` to drive the smokes' path.
+    #[must_use]
+    pub fn with_dev_sign_in(mut self, on: bool) -> Self {
+        self.dev_sign_in = on;
+        self
     }
 
     /// Tests only: allow a client id metadata document on a loopback address.
@@ -141,6 +171,24 @@ impl AuthState {
         self.resend_api_key = key.filter(|k| !k.is_empty());
         self.public_url = public_url;
         self
+    }
+
+    /// Send mail somewhere other than Resend — a test's stand-in mailbox.
+    #[must_use]
+    pub fn with_resend_endpoint(mut self, endpoint: String) -> Self {
+        self.resend_endpoint = endpoint;
+        self
+    }
+
+    /// The mailer, when this deployment has one.
+    #[must_use]
+    pub fn mailer(&self) -> Option<super::resend::Mailer> {
+        self.resend_api_key
+            .as_ref()
+            .map(|key| super::resend::Mailer {
+                endpoint: self.resend_endpoint.clone(),
+                key: key.clone(),
+            })
     }
 
     /// Point the catalogue at an explicit gateway — what a test uses to stand in for a real one
@@ -189,6 +237,13 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/refresh", post(refresh_cookie))
         .route("/auth/signup", post(super::identity::signup))
         .route("/auth/verify", get(super::identity::verify_email))
+        // A link that expired or never arrived: the styled card the sign-in page links to, and the
+        // JSON the console's login page calls. Budgeted and constant, like a reset.
+        .route("/auth/verify/resend", post(super::identity::resend_json))
+        .route(
+            "/resend-verification",
+            get(super::identity::resend_page).post(super::identity::resend_form),
+        )
         .route(
             "/signup",
             get(super::identity::signup_page).post(super::identity::signup_form),
@@ -361,7 +416,9 @@ pub(crate) async fn authenticate(
         Err(AccountError::NotVerified) => {
             return Err((
                 StatusCode::FORBIDDEN,
-                "Your email is not verified yet. Check your inbox for the link.".to_string(),
+                "Your email is not verified yet. Open the link we emailed you, ask for a new one \
+                 (Resend verification email), or ask your administrator to verify it."
+                    .to_string(),
             ));
         }
         Err(AccountError::NotEnabled) => {
@@ -636,14 +693,25 @@ fn now_ms() -> i64 {
 /// Sign in. Idempotent per email: a second call adds a session, never a second account.
 pub async fn dev_session_token(
     State(state): State<AuthState>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     Query(query): Query<DevSessionQuery>,
 ) -> Result<Json<DevSessionReply>, AuthFailure> {
-    // LOOPBACK ONLY. This mints a real account token with no browser step, which is exactly right
-    // for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the desktop
-    // test binds 0.0.0.0, and an unauthenticated token mint reachable across the network is the
-    // hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
-    if !is_loopback(&headers) {
+    // OPT-IN FIRST. Refused with the client's SessionRejected shape (`cursor-auth.ts:313`) rather
+    // than a 404: the sentence is what tells an operator whose smokes stopped signing in which
+    // switch to flip.
+    if !state.dev_sign_in {
+        return Err(AuthFailure::SessionRejected(
+            "dev sign-in is off on this server (OG_DEV_SIGN_IN is not 1); use the browser login"
+                .to_string(),
+        ));
+    }
+    // THEN LOOPBACK ONLY. This mints a real account token with no browser step, which is exactly
+    // right for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the
+    // desktop test binds 0.0.0.0, and an unauthenticated token mint reachable across the network
+    // is the hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
+    let peer = peer.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr);
+    if !is_local_caller(peer, &headers) {
         return Err(AuthFailure::SessionRejected(
             "dev sign-in is loopback-only; use the browser login".to_string(),
         ));
@@ -657,6 +725,26 @@ pub async fn dev_session_token(
         // No email arrives when the tier had none; a stable placeholder keeps the account
         // identifiable across launches instead of minting a new one each time.
         .unwrap_or_else(|| "dev@opengrok.local".to_string());
+    // A PASSWORD MAKES IT A PERSON'S ACCOUNT, and only that password signs them in. Loopback is
+    // not a credential: anything on this machine reaches it, and before this check a local
+    // process named the org admin's email and got the admin's session. Only a password-less
+    // throwaway (what every smoke mints) goes through here — which also rules out every org
+    // admin, since an org is set only alongside a password. Checked here and not in `SignIn`,
+    // because browser login and `auth/poll` share `mint_session` after proving the password.
+    if let Some(existing) = state.store.account_by_email(&email).await?
+        && state
+            .store
+            .load_account(&existing.id)
+            .await?
+            .0
+            .password_hash
+            .is_some()
+    {
+        return Err(AuthFailure::SessionRejected(
+            "dev sign-in never signs in an account that has a password; use the browser login"
+                .to_string(),
+        ));
+    }
 
     let (access_token, refresh_token) = mint_session(&state, &email, plan, trial).await?;
     Ok(Json(DevSessionReply {
@@ -665,8 +753,23 @@ pub async fn dev_session_token(
     }))
 }
 
-/// Is this request from loopback? Matches the gateway's own posture — the `Host` header names a
-/// loopback address. A missing or non-loopback host is treated as remote.
+/// Is the caller on this machine? ALL THREE, because each alone was a hole. The `Host` header is
+/// written by the caller, so on its own it let any machine that could reach the port — a
+/// coworker's Docker box on the bridge among them — say `Host: 127.0.0.1` and mint any session.
+/// The socket peer is loopback for EVERY caller a same-machine front proxies (Caddy,
+/// `docs/setup/tls.md`), so on its own it would open the route to the whole LAN in exactly the
+/// hardened setup; that front stamps `X-Forwarded-For`, which a direct local caller never sends.
+/// A server that cannot see its peer (served without connect info) counts the caller as remote.
+fn is_local_caller(peer: Option<std::net::SocketAddr>, headers: &axum::http::HeaderMap) -> bool {
+    let forwarded = ["x-forwarded-for", "forwarded", "x-real-ip"]
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    peer.is_some_and(|peer| peer.ip().to_canonical().is_loopback())
+        && is_loopback(headers)
+        && !forwarded
+}
+
+/// Does the `Host` header name a loopback address? A missing or non-loopback host is remote.
 fn is_loopback(headers: &axum::http::HeaderMap) -> bool {
     let host = headers
         .get(axum::http::header::HOST)

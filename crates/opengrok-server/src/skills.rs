@@ -49,10 +49,10 @@ pub const MAX_SKILL_BODY_CHARS: usize = 8000;
 ///
 /// 256 KiB, and the number is chosen from what the files are FOR rather than from what Postgres
 /// could hold: a reference sheet, a checklist, a short script — things a coworker reads or runs
-/// during a turn, which have to be copied onto its computer before that turn can start. A bundle
-/// in megabytes would not be a skill, it would be a file share wearing a skill's name, and the
-/// copy would be the slowest part of every turn that invoked it. `artifacts.rs` caps at 25 MiB
-/// because a screen recording genuinely is that big; a skill is text.
+/// during a turn, which are copied onto its computer before the model is asked
+/// (`files_line_for_turn`). A bundle in megabytes would not be a skill, it would be a file share
+/// wearing a skill's name, and the copy would be the slowest part of every turn that invoked it.
+/// `artifacts.rs` caps at 25 MiB because a screen recording genuinely is that big; a skill is text.
 pub const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 
 /// And a file count, because a byte cap alone lets ten thousand empty files through, and each one
@@ -287,6 +287,10 @@ impl NotForThisTurn {
 /// A struct rather than a `(String, String)`, for `NewSkill`'s reason: two strings in a row, and
 /// the call site that swaps them compiles and puts the whole body where the name goes.
 pub(crate) struct SkillForTurn {
+    pub id: String,
+    /// The version the body was read from — the files copied must be that version's, not the
+    /// newest at the moment of the copy.
+    pub version: i32,
     pub name: String,
     pub body: String,
     /// Whether the person taking the turn wrote this, or a colleague did. The framing says which,
@@ -341,8 +345,8 @@ pub(crate) async fn for_turn(
     if !skill.enabled {
         return Err(NotForThisTurn::Disabled);
     }
-    let body = match state.auth.store.latest_skill_version(&skill.id).await {
-        Ok(Some(version)) => version.body,
+    let (version, body) = match state.auth.store.latest_skill_version(&skill.id).await {
+        Ok(Some(version)) => (version.version, version.body),
         Ok(None) => return Err(NotForThisTurn::Draft),
         Err(error) => return Err(NotForThisTurn::Unreadable(error.to_string())),
     };
@@ -366,6 +370,8 @@ pub(crate) async fn for_turn(
         });
     }
     Ok(SkillForTurn {
+        id: skill.id,
+        version,
         name: skill.name,
         body,
         author: if skill.owner_id == account.as_str() {
@@ -374,6 +380,62 @@ pub(crate) async fn for_turn(
             crate::persona::SkillAuthor::Colleague
         },
     })
+}
+
+/// A chosen skill's bundled files, put on the coworker's computer for this turn, and the sentence
+/// saying where — or that they are not there. `None` for a skill with no files: nothing is asked
+/// of the box and nothing is said.
+///
+/// ONLY A BOX THAT IS ALREADY UP. The turn does not wake the box before the model is asked (a
+/// plain "hi" once paid 90 s for it), and a skill's files are no reason to start: an asleep or
+/// absent computer gets the sentence that they are not there, so the model neither looks for them
+/// nor answers as though it had run them. A failed copy never fails the turn (CLAUDE.md #8).
+pub(crate) async fn files_line_for_turn(
+    state: &AgUiState,
+    skill: &SkillForTurn,
+    runner: Option<&opengrok_harness::ToolRunner>,
+) -> Option<String> {
+    let unavailable = crate::persona::skill_files_unavailable_line;
+    let files = match state.auth.store.skill_files(&skill.id, skill.version).await {
+        Ok(files) if files.is_empty() => return None,
+        Ok(files) => files,
+        Err(error) => {
+            tracing::warn!(skill = %skill.id, %error, "a chosen skill's files could not be read");
+            return Some(unavailable("they could not be read"));
+        }
+    };
+    let Some((computer, box_id)) = runner.and_then(|runner| runner.fill_target()) else {
+        return Some(unavailable("this coworker has no computer"));
+    };
+    if !matches!(computer.state(&box_id).await.as_deref(), Ok("running")) {
+        return Some(unavailable("the computer is not running"));
+    }
+    // Checked again here, not only on upload: a row stored before the allow-list closed may not
+    // pass it now, and it is refused rather than written.
+    let (plain, refused): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|file| check_path(&file.path).is_ok());
+    let plain: Vec<(String, Vec<u8>)> = plain.into_iter().map(|f| (f.path, f.bytes)).collect();
+    // THE SKILL ID IS IN THE PATH. By name alone, two skills called the same (a person's own and
+    // a colleague's, on a per-org box) shared one directory, and two turns using them at once
+    // raced on its `rm -rf` and each other's writes.
+    let under = format!(".skills/{}/{}/v{}", skill.name, skill.id, skill.version);
+    match opengrok_box::bundle::place(computer.as_ref(), &box_id, &under, &plain).await {
+        Ok(placed) if placed.written.is_empty() => Some(unavailable(
+            "none of them is a plain text file with a plain name",
+        )),
+        Ok(placed) => Some(crate::persona::skill_files_line(
+            &placed.dir,
+            placed.written.len(),
+            placed.skipped.len() + refused.len(),
+            placed.not_executable.len(),
+            skill.author,
+        )),
+        Err(error) => {
+            tracing::warn!(skill = %skill.id, %error, "a chosen skill's files could not be copied");
+            Some(unavailable("they could not be copied onto it"))
+        }
+    }
 }
 
 /// What a person writes a skill down as, and what the row says it came from.
@@ -503,14 +565,15 @@ fn normalise_path(path: &str) -> String {
     path.trim().trim_end_matches('/').to_string()
 }
 
-/// A path is refused, not sanitised. These files are written onto a coworker's computer before a
-/// turn that invoked the skill, so `../../.ssh/authorized_keys` is a traversal wearing a
-/// reference sheet's clothes.
+/// A path is refused, not sanitised. These files are written onto a coworker's computer when a
+/// turn invokes the skill (`files_line_for_turn`), so `../../.ssh/authorized_keys` is a traversal
+/// wearing a reference sheet's clothes.
 ///
-/// THE LIST IS DELIBERATELY SHORT AND CLOSED. It is easier to allow a character later than to
-/// find out which of them mattered once something downstream is shelling out or untarring, and
-/// nothing consumes these files yet — this is the cheapest moment in the feature's life to say
-/// no.
+/// A CLOSED ALLOW-LIST: every component `[A-Za-z0-9._-]`. The copy goes through a shell, and a
+/// bundle is often a colleague's, so a quote, `$`, a space or a backtick is where `a';curl …;'`
+/// becomes a command on the box of whoever invoked it. Non-ASCII is out with the rest: U+FF0F
+/// FULLWIDTH SOLIDUS is not a separator today, and becomes one the moment anything downstream
+/// normalises Unicode.
 fn check_path(path: &str) -> Result<(), Refusal> {
     if path.is_empty() {
         return Err(bad_request("a bundled file needs a path".to_string()));
@@ -518,16 +581,6 @@ fn check_path(path: &str) -> Result<(), Refusal> {
     if path.len() > 200 {
         return Err(bad_request(format!(
             "{path:?} is too long a path for a bundled file"
-        )));
-    }
-    // ASCII only, and no control characters. A newline or a NUL in a path is never a filename
-    // somebody meant; and a non-ASCII one is refused not because U+FF0F FULLWIDTH SOLIDUS is a
-    // separator today — nothing here treats it as one — but because it becomes one the moment
-    // anything downstream normalises Unicode, and that change would be made somewhere else by
-    // somebody who never read this function.
-    if !path.is_ascii() || path.chars().any(|c| c.is_ascii_control()) {
-        return Err(bad_request(format!(
-            "{path:?} must be printable ASCII: a bundle's paths become filenames"
         )));
     }
     if path.starts_with('/') || path.starts_with('~') || path.contains('\\') {
@@ -549,6 +602,12 @@ fn check_path(path: &str) -> Result<(), Refusal> {
                 "{path:?} has a component starting with `-`, which a command line would read as a flag"
             )));
         }
+    }
+    if !opengrok_box::bundle::plain_path(path) {
+        return Err(bad_request(format!(
+            "{path:?} may use only letters, digits, dots, dashes and underscores between its \
+             slashes: a bundle's paths become filenames on a computer"
+        )));
     }
     if path.eq_ignore_ascii_case("SKILL.md") {
         return Err(bad_request(

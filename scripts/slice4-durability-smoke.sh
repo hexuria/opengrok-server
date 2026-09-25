@@ -30,6 +30,7 @@ start_server() {
   OG_DATABASE_URL="$OG_DATABASE_URL" \
   OG_TOKEN_SECRET="$SECRET" \
   OG_MODEL_DOOR=mock \
+  OG_DEV_SIGN_IN=1 \
   RUST_LOG=warn \
   "$BIN" >/dev/null 2>&1 &
   SERVER_PID=$!

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { forgotPassword, login } from "../api/account";
+import { forgotPassword, login, resendVerification } from "../api/account";
 import { ApiError } from "../api/client";
 import { CenterCard } from "../components/shell";
 
@@ -30,6 +30,16 @@ export function LoginPage() {
       : "This server is not set up to send email. Ask your administrator to reset your password."
     : forgot.error
       ? "Could not request a reset."
+      : null;
+
+  // Same shape for a verification link that expired or never arrived.
+  const resend = useMutation({ mutationFn: () => resendVerification(email) });
+  const resendNote = resend.data
+    ? resend.data.mailer
+      ? "If that address is still waiting to be verified, a new link is on its way. It expires in 24 hours."
+      : "This server is not set up to send email. Ask your administrator to verify your address."
+    : resend.error
+      ? "Could not request a verification link."
       : null;
 
   return (
@@ -65,6 +75,7 @@ export function LoginPage() {
         </button>
       </form>
       {forgotNote ? <p className="note">{forgotNote}</p> : null}
+      {resendNote ? <p className="note">{resendNote}</p> : null}
       <p className="foot">
         <a
           href="/forgot-password"
@@ -75,6 +86,17 @@ export function LoginPage() {
           }}
         >
           Forgot your password?
+        </a>
+        {" · "}
+        <a
+          href="/resend-verification"
+          onClick={(e) => {
+            if (!email.trim()) return; // No address typed: fall through to the server's page.
+            e.preventDefault();
+            resend.mutate();
+          }}
+        >
+          Resend verification email
         </a>
       </p>
     </CenterCard>
