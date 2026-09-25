@@ -98,9 +98,7 @@ async fn health(State(state): State<HostState>, headers: HeaderMap) -> Response 
 /// APART FROM `/health`, on purpose. `/health` is liveness: a supervisor restarts on it, and a
 /// gateway outage or a rotated OG_GATEWAY_TOKEN is not fixed by restarting this server. So a
 /// revoked token used to read ok:true until a turn failed (#185); this is where it reads false.
-/// The gateway is asked at most once per `GatewayDoor` readiness window (five seconds; it bills
-/// nothing, but an unauthenticated endpoint must not set the gateway's traffic) and never named:
-/// its address is internal.
+/// The gateway is asked at most every 5 s (`GatewayDoor::ready`), never named: it is internal.
 /// `gateway` is "ok", "refused" with the gateway's status, "unreachable", or "unused" for a mock.
 async fn ready(State(state): State<HostState>, headers: HeaderMap) -> Response {
     if headers.get(axum::http::header::ORIGIN).is_some() {
