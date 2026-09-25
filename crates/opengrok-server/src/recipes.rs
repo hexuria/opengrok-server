@@ -565,7 +565,14 @@ pub(crate) async fn detail_body(
     };
     let relation = relation(state, account, org, &recipe).await;
     let versions = store.recipe_versions(id).await.unwrap_or_default();
-    let grants = store.recipe_grants(id).await.unwrap_or_default();
+    // Somebody else's bot ids are not a recipient's to read; the owner sees every grant that runs.
+    let grants: Vec<_> = store
+        .recipe_grants(id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|grant| relation == Relation::Owner || grant.granted_by == account.as_str())
+        .collect();
     let runs = store.recipe_runs(id, 50).await.unwrap_or_default();
     let shares = if relation == Relation::Owner {
         store.recipe_shares(id).await.unwrap_or_default()
@@ -1239,6 +1246,22 @@ impl RecipeSource for StoreRecipes {
         self.write_run(&id, recipe_id, version, coworker_id, receipt)
             .await;
         Some(id)
+    }
+
+    /// The grant read again, through the same query that built the turn's offers, so a share taken
+    /// back mid-turn stops the next play. A store that cannot answer refuses: the bot may try again,
+    /// and a recipe played on a guess cannot be un-played.
+    async fn still_granted(&self, recipe_id: &str, coworker_id: &CoworkerId) -> Result<(), String> {
+        match self.store.recipes_granted_to(coworker_id.as_str()).await {
+            Ok(rows) if rows.iter().any(|row| row.id == recipe_id) => Ok(()),
+            Ok(_) => Err(format!(
+                "recipe `{recipe_id}` is no longer granted to this coworker: its share was taken \
+                 back, declined, or the grant revoked"
+            )),
+            Err(error) => Err(format!(
+                "could not check that recipe `{recipe_id}` is still granted: {error}"
+            )),
+        }
     }
 }
 

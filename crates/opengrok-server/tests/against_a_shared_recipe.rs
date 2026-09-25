@@ -621,3 +621,190 @@ async fn two_people_in_no_org_are_not_colleagues() {
         "and can still be accepted"
     );
 }
+
+/// A SHARE TAKEN BACK TAKES THE BOTS' GRANTS WITH IT.
+///
+/// A recipient may grant a shared recipe to their own bots, and those grants are what a turn offers
+/// as `run_recipe`. Unsharing and declining used to delete only the share row, so the bot kept
+/// being offered the recipe — and kept playing the owner's newest version, edits made after the
+/// unshare included. Access was checked once, at grant time.
+///
+/// Two halves, both asserted: the paths that end access delete the grants, and the read that
+/// builds a turn's offers re-checks that whoever granted still holds the recipe, so a grant a
+/// cleanup missed fails closed instead of running.
+#[tokio::test]
+async fn unsharing_or_declining_takes_the_recipe_back_from_the_recipients_bots() {
+    let Some(store) = connect().await else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let stamp = now_ms();
+    let owner = format!("acct_owner_{stamp}_w");
+    let colleague = format!("acct_colleague_{stamp}_w");
+    let org = format!("org_{stamp}_w");
+    let bot_c = format!("cw_colleagues_{stamp}");
+    let bot_o = format!("cw_owners_{stamp}");
+    let id = format!("rcp_{stamp}_w");
+    store
+        .create_recipe(
+            &id,
+            &owner,
+            Some(&org),
+            "Pay the rent",
+            "",
+            (1280, 800),
+            stamp,
+        )
+        .await
+        .expect("create");
+    store
+        .add_recipe_version(
+            &id,
+            "filtered",
+            &json!({"steps": [{"op": "click", "x": 1, "y": 1}]}),
+            "filtered",
+            &owner,
+            stamp,
+        )
+        .await
+        .expect("version");
+    let offered = |bot: String| {
+        let store = store.clone();
+        async move { store.recipes_granted_to(&bot).await.expect("granted").len() }
+    };
+    let listed = |bot: String| {
+        let store = store.clone();
+        let id = id.clone();
+        async move {
+            store
+                .recipe_grants(&id)
+                .await
+                .expect("grants")
+                .iter()
+                .any(|grant| grant.coworker_id == bot)
+        }
+    };
+
+    // ---- a direct share, withdrawn ----
+    store
+        .share_recipe(&id, "account", &colleague, &owner, stamp)
+        .await
+        .expect("share");
+    assert!(
+        store
+            .answer_recipe_share(&id, &colleague, Some(&org), true, stamp)
+            .await
+            .expect("accept")
+    );
+    store
+        .grant_recipe(&id, &bot_c, &colleague, stamp)
+        .await
+        .expect("grant to the colleague's bot");
+    store
+        .grant_recipe(&id, &bot_o, &owner, stamp)
+        .await
+        .expect("grant to the owner's bot");
+    assert_eq!(offered(bot_c.clone()).await, 1, "accepted and granted");
+    store
+        .unshare_recipe(&id, "account", &colleague)
+        .await
+        .expect("unshare");
+    assert_eq!(
+        offered(bot_c.clone()).await,
+        0,
+        "a withdrawn share is not offered to the bot it was granted to"
+    );
+    assert!(
+        !listed(bot_c.clone()).await,
+        "and the owner's page no longer lists that grant"
+    );
+    assert_eq!(
+        offered(bot_o.clone()).await,
+        1,
+        "the owner's own grant is not the colleague's to lose"
+    );
+
+    // ---- an org share, withdrawn: everyone who accepted through it loses their grants ----
+    store
+        .share_recipe(&id, "org", &org, &owner, stamp)
+        .await
+        .expect("share to the org");
+    assert!(
+        store
+            .answer_recipe_share(&id, &colleague, Some(&org), true, stamp)
+            .await
+            .expect("accept through the org")
+    );
+    store
+        .grant_recipe(&id, &bot_c, &colleague, stamp)
+        .await
+        .expect("grant again");
+    assert_eq!(offered(bot_c.clone()).await, 1);
+    store
+        .unshare_recipe(&id, "org", &org)
+        .await
+        .expect("unshare the org");
+    assert_eq!(
+        offered(bot_c.clone()).await,
+        0,
+        "an org share withdrawn is withdrawn from every member's bots"
+    );
+    assert!(!listed(bot_c.clone()).await);
+
+    // ---- declined after granting ----
+    store
+        .share_recipe(&id, "account", &colleague, &owner, stamp)
+        .await
+        .expect("share again");
+    assert!(
+        store
+            .answer_recipe_share(&id, &colleague, Some(&org), true, stamp)
+            .await
+            .expect("accept")
+    );
+    store
+        .grant_recipe(&id, &bot_c, &colleague, stamp)
+        .await
+        .expect("grant");
+    assert_eq!(offered(bot_c.clone()).await, 1);
+    assert!(
+        store
+            .answer_recipe_share(&id, &colleague, Some(&org), false, stamp)
+            .await
+            .expect("decline")
+    );
+    assert_eq!(
+        offered(bot_c.clone()).await,
+        0,
+        "a person who declined has no bot running it"
+    );
+    assert!(!listed(bot_c.clone()).await);
+
+    // ---- a cleanup that never ran still fails closed ----
+    assert!(
+        store
+            .answer_recipe_share(&id, &colleague, Some(&org), true, stamp)
+            .await
+            .expect("accept again")
+    );
+    store
+        .grant_recipe(&id, &bot_c, &colleague, stamp)
+        .await
+        .expect("grant");
+    assert_eq!(offered(bot_c.clone()).await, 1);
+    // The share row goes without passing through `unshare_recipe`: a row lost some other way, or
+    // a path added later that forgets the grants.
+    sqlx::query("delete from recipe_share where recipe_id = $1 and scope_id = $2")
+        .bind(&id)
+        .bind(&colleague)
+        .execute(store.pool())
+        .await
+        .expect("delete the share by hand");
+    assert_eq!(
+        offered(bot_c.clone()).await,
+        0,
+        "a grant whose granter no longer holds the recipe is not offered, whoever forgot it"
+    );
+    assert!(!listed(bot_c).await);
+    assert_eq!(offered(bot_o).await, 1, "the owner still holds their own");
+}

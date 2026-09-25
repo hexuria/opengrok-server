@@ -2649,6 +2649,23 @@ const RECIPE_SELECT: &str =
         (select max(version) from recipe_version v where v.recipe_id = r.id) as latest_version
    from recipe r";
 
+/// A grant counts only while whoever made it still holds the recipe: its owner, or a person whose
+/// own share row is accepted — the question `recipe_accepted_by` answers, asked of `granted_by`.
+///
+/// ASKED ON EVERY READ, not only when the grant is made. Unshare and decline delete the grants they
+/// end, but a turn's offers are rebuilt from this read every turn, and a grant a cleanup missed
+/// (a row lost some other way, a path added later) must fail closed rather than keep a former
+/// recipient's bot playing the owner's newest edits. `g` and `r` are the grant and its recipe.
+const GRANT_STILL_HELD: &str = "(g.granted_by = r.owner_id or exists (
+        select 1 from recipe_share s
+         where s.recipe_id = r.id and s.scope = 'account' and s.scope_id = g.granted_by
+           and s.accepted_at_ms is not null))";
+
+/// The grants one person made on one recipe, never its owner's: the owner cannot lose access to
+/// their own recipe, so an answer or unshare naming them has nothing of theirs to take.
+const DROP_GRANTS_MADE_BY: &str = "delete from recipe_grant g using recipe r
+     where g.recipe_id = $1 and r.id = g.recipe_id and g.granted_by = $2 and r.owner_id <> $2";
+
 impl PgStore {
     #[allow(clippy::too_many_arguments)]
     pub async fn create_recipe(
@@ -2930,19 +2947,44 @@ impl PgStore {
         Ok(())
     }
 
+    /// Take a share back, and the grants the people losing it made to their bots.
+    ///
+    /// ONE TRANSACTION, GRANTS FIRST. For an org share, who accepted through it is only known from
+    /// the `'org:'` account rows this deletes; dropping them first would leave nothing to say
+    /// whose bots to take the recipe from.
     pub async fn unshare_recipe(
         &self,
         recipe_id: &str,
         scope: &str,
         scope_id: &str,
     ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        if scope == "org" {
+            sqlx::query(
+                "delete from recipe_grant g using recipe r
+                  where g.recipe_id = $1 and r.id = g.recipe_id and g.granted_by <> r.owner_id
+                    and g.granted_by in (
+                        select scope_id from recipe_share
+                         where recipe_id = $1 and scope = 'account' and granted_by = 'org:' || $2)",
+            )
+            .bind(recipe_id)
+            .bind(scope_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(DROP_GRANTS_MADE_BY)
+                .bind(recipe_id)
+                .bind(scope_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query(
             "delete from recipe_share where recipe_id = $1 and scope = $2 and scope_id = $3",
         )
         .bind(recipe_id)
         .bind(scope)
         .bind(scope_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         // A person who accepted through the org keeps nothing once the org share is withdrawn.
         if scope == "org" {
@@ -2951,9 +2993,10 @@ impl PgStore {
             )
             .bind(recipe_id)
             .bind(scope_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -3048,6 +3091,14 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         }
+        // Declining is giving it back: the bots this person granted it to stop being offered it.
+        if !accept {
+            sqlx::query(DROP_GRANTS_MADE_BY)
+                .bind(recipe_id)
+                .bind(account_id)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -3094,10 +3145,11 @@ impl PgStore {
     }
 
     pub async fn recipe_grants(&self, recipe_id: &str) -> StoreResult<Vec<RecipeGrantRow>> {
-        let rows = sqlx::query(
-            "select recipe_id, coworker_id, granted_by, granted_at_ms from recipe_grant
-              where recipe_id = $1 order by granted_at_ms",
-        )
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "select g.recipe_id, g.coworker_id, g.granted_by, g.granted_at_ms
+               from recipe_grant g join recipe r on r.id = g.recipe_id
+              where g.recipe_id = $1 and {GRANT_STILL_HELD} order by g.granted_at_ms"
+        )))
         .bind(recipe_id)
         .fetch_all(&self.pool)
         .await?;
@@ -3113,11 +3165,12 @@ impl PgStore {
             .collect()
     }
 
-    /// The recipes a bot may run: granted, and not deleted.
+    /// The recipes a bot may run: granted by somebody who still holds them, and not deleted.
     pub async fn recipes_granted_to(&self, coworker_id: &str) -> StoreResult<Vec<RecipeRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{RECIPE_SELECT} join recipe_grant g on g.recipe_id = r.id
-             where g.coworker_id = $1 and r.deleted_at_ms is null order by r.name"
+             where g.coworker_id = $1 and r.deleted_at_ms is null and {GRANT_STILL_HELD}
+             order by r.name"
         )))
         .bind(coworker_id)
         .fetch_all(&self.pool)

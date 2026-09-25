@@ -402,6 +402,18 @@ pub trait RecipeSource: Send + Sync {
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
     ) -> Option<String>;
+    /// Whether this bot may play the recipe NOW, or the sentence saying why not.
+    ///
+    /// The offers a turn carries were read when the turn began, and a turn can outlast the share
+    /// that granted them: taken back mid-turn, the recipe must stop at the next play, not the next
+    /// turn. Default yes, for a source that keeps no grants to re-read.
+    async fn still_granted(
+        &self,
+        _recipe_id: &str,
+        _coworker_id: &CoworkerId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The arguments `run_recipe` accepts.
@@ -1758,6 +1770,9 @@ impl Executor {
         let Some(source) = self.recipe_source.as_ref() else {
             return ToolResult::refused(call_id, "recipes are not available on this server");
         };
+        if let Err(why) = source.still_granted(recipe_id, &context.coworker_id).await {
+            return ToolResult::refused(call_id, why);
+        }
         let (version, mut request) = match source.recipe_request(recipe_id, values).await {
             Ok(found) => found,
             Err(why) => return ToolResult::refused(call_id, why),
@@ -4236,6 +4251,8 @@ mod tests {
         runs: Mutex<Vec<(String, i32, bool)>>,
         /// Which recipe was asked for, and with which values — the point of the precedence test.
         asked: Mutex<Vec<(String, opengrok_recipes::Values)>>,
+        /// A recipe whose share was taken back after the turn's offers were read.
+        withdrawn: Option<&'static str>,
     }
 
     #[async_trait]
@@ -4275,6 +4292,12 @@ mod tests {
                 runs.push((recipe_id.to_string(), version, receipt.ok));
             }
             Some(format!("rrun_spy_{recipe_id}"))
+        }
+        async fn still_granted(&self, recipe_id: &str, _by: &CoworkerId) -> Result<(), String> {
+            if self.withdrawn == Some(recipe_id) {
+                return Err(format!("recipe `{recipe_id}` was taken back"));
+            }
+            Ok(())
         }
     }
 
@@ -4372,6 +4395,30 @@ mod tests {
             &[("rcp_gmail".to_string(), 2, true)],
             "the run is written down"
         );
+    }
+
+    /// The offers were read when the turn began; the grant is read again when the recipe plays.
+    #[tokio::test]
+    async fn a_recipe_taken_back_mid_turn_is_refused_before_the_box_is_touched() {
+        let spy = Arc::new(SpyComputer::default());
+        let recipes = Arc::new(SpyRecipes {
+            withdrawn: Some("rcp_gmail"),
+            ..SpyRecipes::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes.clone());
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})),
+            )
+            .await;
+        assert!(!result.ok, "{result:?}");
+        assert!(result.content.contains("taken back"), "{result:?}");
+        assert!(spy.last_box().is_none(), "nothing was played");
+        assert!(recipes.runs.lock().unwrap().is_empty());
+        assert!(recipes.asked.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
