@@ -1258,8 +1258,13 @@ async fn converse_raw(
                 let answer = std::mem::take(&mut withheld);
                 emit_visible_text(&mut projection, sink, &mut round_events, answer).await;
             } else if !text_live {
-                let blank =
-                    blank_turn_text(&all, &round_events, last_listing.as_deref(), &withheld);
+                // A chart round has shown the chart: its "I'll draw a chart" is the preamble
+                // bubble 83f09fe removed, not words the run would otherwise lack.
+                let blank = (!round_tool)
+                    .then(|| {
+                        blank_turn_text(&all, &round_events, last_listing.as_deref(), &withheld)
+                    })
+                    .flatten();
                 flush_withheld_text(
                     &mut projection,
                     sink,

@@ -4396,6 +4396,45 @@ async fn a_chart_round_and_its_ending_are_journaled_together() {
     );
 }
 
+/// A chart round's preamble is not painted: the chart is what the round showed. The blank-turn
+/// fallback painted "I'll draw a chart" as a bubble above it, because the run had no
+/// TEXT_MESSAGE yet and the chart's TOOL_CALL frames did not count as saying something.
+#[tokio::test]
+async fn a_chart_rounds_preamble_is_not_painted() {
+    let door = MockDoor::with_script(vec![
+        ModelDelta::Text("I'll draw a chart of your spending.".to_string()),
+        ModelDelta::ToolCallStart {
+            id: "c1".to_string(),
+            name: "bar_chart".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: "c1".to_string(),
+            delta: r#"{"title":"spend"}"#.to_string(),
+        },
+        ModelDelta::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("chart my spending"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallStart),
+        "{events:?}"
+    );
+    assert_eq!(assistant_text(&events), "", "{events:?}");
+}
+
 /// A DOOR THAT WILL NOT OPEN ENDS THE RUN ONCE, SAYING WHY, and asks nothing further.
 #[tokio::test]
 async fn a_door_that_will_not_open_ends_the_run_once() {
