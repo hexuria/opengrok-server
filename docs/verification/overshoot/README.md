@@ -19,7 +19,8 @@ exit goes through `close`. In the order the loop reaches them:
 |---|---|---|
 | The opening could not be journaled | fail | "the run could not be recorded: …" |
 | Stop, at the top of a round | stop | — |
-| The door would not open, or the stream broke | fail | the door's sentence |
+| Past the run's wall clock (`RunBudget::max_wall_ms`, 15 min), at the top of any round after the first | the wrap-up call (below) | — |
+| The door would not open (after its safe retries), did not start answering within `call_timeout_ms`, went quiet for `idle_ms`, or the stream broke | fail | the door's sentence (`ModelError::sentence`) |
 | A plan with no tool started, past `PLAN_ONLY_TEXT_LIMIT` withheld characters | fail | "the coworker described N characters of work without starting any of it…" |
 | Stop, after the model asked for a tool and before it runs | stop | — |
 | A catalog listing asked for again after one was already skipped | finish | the listing's first line |
@@ -30,7 +31,8 @@ exit goes through `close`. In the order the loop reaches them:
 | The same screenshot `SAME_SCREEN_LIMIT` (4) times running | fail | "the screen has not changed after 4 looks…" |
 | `MAX_FAILED_WORK_ROUNDS` (2) failures in a row | finish | one short failure fact |
 | A chart or form was painted | finish | — |
-| Spoken rounds reach `MAX_ROUNDS` (8), or screen rounds reach `MAX_COMPUTER_ROUNDS` (24) | fail, or the opened sentence | "this run reached its limit of …" |
+| Spoken rounds reach `MAX_ROUNDS` (8), or screen rounds reach `MAX_COMPUTER_ROUNDS` (24) | the opened sentence if there is one, else the wrap-up call | — |
+| The wrap-up call: no tools, a `[harness]` line saying which limit | finish with the model's words; fail with "this run reached its limit of …" if it fails or says nothing; stop if a Stop landed first | the model's summary |
 | A round with no tool call | finish | the model's words |
 
 A round counts toward the screen budget only when **every** call in it is a `computer` action that
@@ -83,6 +85,10 @@ cause.
   `a_second_recipe_in_the_same_request_still_plays` (a different recipe is a different task).
 - **Stop.** The Stop button is a command against the run (026903f). It is honoured at every step
   boundary and at the close (`formal/tla/HarnessLoop.tla` StopIsHonoured).
+- **Clocks (#93).** A model call that never starts, or goes quiet, now ends the run with a
+  sentence. Before this it held the run, and its lease, for as long as the process lived. A run
+  past its wall clock starts no new work. Neither of these would have stopped the kabisado plays,
+  which were work, not silence. They bound what the round caps never could.
 
 ## Still open
 
