@@ -374,6 +374,17 @@ async fn an_org_visible_coworker_is_on_a_members_roster_and_answers_them() {
         )
         .await;
     assert_eq!(status, 404, "{body}");
+    // The owner's bot keys are the owner's: the listing is a 404, not an empty list that reads
+    // as "this coworker has no keys".
+    let (status, body) = h
+        .send(
+            &member,
+            reqwest::Method::GET,
+            &format!("/coworkers/{ada}/keys"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
     // Nor can a member mint a grant of their own through the approvals door.
     let (status, body) = h
         .send(
@@ -451,6 +462,12 @@ async fn an_org_visible_coworker_is_on_a_members_roster_and_answers_them() {
             (reqwest::Method::GET, format!("/coworkers/{id}/usage"), None),
             (reqwest::Method::GET, format!("/coworkers/{id}/limit"), None),
             (reqwest::Method::POST, format!("/coworkers/{id}/keys"), None),
+            (reqwest::Method::GET, format!("/coworkers/{id}/keys"), None),
+            (
+                reqwest::Method::DELETE,
+                format!("/coworkers/{id}/keys/{ghost}"),
+                None,
+            ),
             (
                 reqwest::Method::GET,
                 format!("/coworkers/{id}/mcp-calls"),

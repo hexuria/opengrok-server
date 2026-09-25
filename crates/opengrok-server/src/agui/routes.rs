@@ -2414,6 +2414,10 @@ async fn set_limit(
     }
 }
 
+/// `GET /coworkers/{id}/keys` — the owner's bot keys for this coworker. Anyone else's id, a
+/// shared coworker's included, is a 404 like every other coworker route: the query alone
+/// answered `[]` to a stranger and an unknown id alike, which is the empty success that reads
+/// as "no keys" rather than "not yours".
 async fn list_bot_keys(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2423,6 +2427,11 @@ async fn list_bot_keys(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
     match state
         .auth
         .store
@@ -2480,6 +2489,11 @@ async fn list_mcp_calls(
     }
 }
 
+/// `DELETE /coworkers/{id}/keys/{jti}` — keyed by the caller's own key, not by the path's
+/// coworker, and deliberately not gated on `owned_coworker`: retiring a coworker does not revoke
+/// its bot keys, so a gate on the retired (off-roster) row would leave a key the owner still holds
+/// live with no door to revoke it through. Somebody else's key, or an id that is no key, is the
+/// same 404, so nothing about the path's coworker is confirmed.
 async fn revoke_bot_key(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
