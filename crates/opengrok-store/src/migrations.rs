@@ -190,7 +190,20 @@ create table if not exists secret_store (
 );
 -- Which OG_CREDENTIAL_KEK sealed the row (a hash of the key, never the key). Null on rows sealed
 -- before it existed: those are tried under every key held, and `opengrok vault reseal` fills it.
-alter table secret_store add column if not exists key_id text;
+--
+-- GUARDED, like `skill.approved_at_ms` below: a bare `add column if not exists` takes ACCESS
+-- EXCLUSIVE before deciding there is nothing to do, and this file replays on every boot. Bare, it
+-- deadlocked concurrent site-login saves against another harness's boot in CI (25 Sep 2026).
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'secret_store'
+           and column_name = 'key_id'
+    ) then
+        alter table secret_store add column key_id text;
+    end if;
+end $do$;
 
 -- Who may make which coworker do what. A row here is permission; its absence is refusal, which is
 -- why nothing in the schema grants by default and why `policy_for` returns an empty context rather
