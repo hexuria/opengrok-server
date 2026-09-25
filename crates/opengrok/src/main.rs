@@ -294,10 +294,15 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("could not bind {bind}"))?;
 
     tracing::info!(%bind, "opengrok listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server stopped unexpectedly")?;
+    // The socket peer rides along because the dev sign-in must know who is REALLY calling: a
+    // `Host` header is whatever the caller wrote (`auth/routes.rs::is_local_caller`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server stopped unexpectedly")?;
     Ok(())
 }
 

@@ -636,6 +636,7 @@ fn now_ms() -> i64 {
 /// Sign in. Idempotent per email: a second call adds a session, never a second account.
 pub async fn dev_session_token(
     State(state): State<AuthState>,
+    peer: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     Query(query): Query<DevSessionQuery>,
 ) -> Result<Json<DevSessionReply>, AuthFailure> {
@@ -643,7 +644,8 @@ pub async fn dev_session_token(
     // for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the desktop
     // test binds 0.0.0.0, and an unauthenticated token mint reachable across the network is the
     // hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
-    if !is_loopback(&headers) {
+    let peer = peer.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr);
+    if !is_local_caller(peer, &headers) {
         return Err(AuthFailure::SessionRejected(
             "dev sign-in is loopback-only; use the browser login".to_string(),
         ));
@@ -657,6 +659,26 @@ pub async fn dev_session_token(
         // No email arrives when the tier had none; a stable placeholder keeps the account
         // identifiable across launches instead of minting a new one each time.
         .unwrap_or_else(|| "dev@opengrok.local".to_string());
+    // A PASSWORD MAKES IT A PERSON'S ACCOUNT, and only that password signs them in. Loopback is
+    // not a credential: anything on this machine reaches it, and before this check a local
+    // process named the org admin's email and got the admin's session. Only a password-less
+    // throwaway (what every smoke mints) goes through here — which also rules out every org
+    // admin, since an org is set only alongside a password. Checked here and not in `SignIn`,
+    // because browser login and `auth/poll` share `mint_session` after proving the password.
+    if let Some(existing) = state.store.account_by_email(&email).await?
+        && state
+            .store
+            .load_account(&existing.id)
+            .await?
+            .0
+            .password_hash
+            .is_some()
+    {
+        return Err(AuthFailure::SessionRejected(
+            "dev sign-in never signs in an account that has a password; use the browser login"
+                .to_string(),
+        ));
+    }
 
     let (access_token, refresh_token) = mint_session(&state, &email, plan, trial).await?;
     Ok(Json(DevSessionReply {
@@ -665,8 +687,23 @@ pub async fn dev_session_token(
     }))
 }
 
-/// Is this request from loopback? Matches the gateway's own posture — the `Host` header names a
-/// loopback address. A missing or non-loopback host is treated as remote.
+/// Is the caller on this machine? ALL THREE, because each alone was a hole. The `Host` header is
+/// written by the caller, so on its own it let any machine that could reach the port — a
+/// coworker's Docker box on the bridge among them — say `Host: 127.0.0.1` and mint any session.
+/// The socket peer is loopback for EVERY caller a same-machine front proxies (Caddy,
+/// `docs/setup/tls.md`), so on its own it would open the route to the whole LAN in exactly the
+/// hardened setup; that front stamps `X-Forwarded-For`, which a direct local caller never sends.
+/// A server that cannot see its peer (served without connect info) counts the caller as remote.
+fn is_local_caller(peer: Option<std::net::SocketAddr>, headers: &axum::http::HeaderMap) -> bool {
+    let forwarded = ["x-forwarded-for", "forwarded", "x-real-ip"]
+        .iter()
+        .any(|name| headers.contains_key(*name));
+    peer.is_some_and(|peer| peer.ip().to_canonical().is_loopback())
+        && is_loopback(headers)
+        && !forwarded
+}
+
+/// Does the `Host` header name a loopback address? A missing or non-loopback host is remote.
 fn is_loopback(headers: &axum::http::HeaderMap) -> bool {
     let host = headers
         .get(axum::http::header::HOST)

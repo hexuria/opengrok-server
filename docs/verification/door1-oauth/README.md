@@ -80,6 +80,8 @@ when someone makes a call.
 - **Dev sign-in is loopback-only.** `/auth/cursor_dev_session_token` refuses over the LAN
   address with "dev sign-in is loopback-only; use the browser login". Reading the coworker's key
   list needs `http://127.0.0.1:1447`. From another machine, browser sign-in is the only path.
+  (Since 25 Sep 2026 "loopback" means the socket peer, not only the `Host` header, which any
+  caller could forge; and a password account is never signed in this way.)
 - **Caddy's root is not where the docs guessed.** On this Mac Caddy keeps its data under
   `~/.local/share/caddy`, not `~/Library/Application Support/Caddy`. Fetching the root from the
   admin API is the reliable way: `curl -s localhost:2019/pki/ca/local | jq -r .root_certificate`.

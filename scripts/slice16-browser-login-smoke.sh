@@ -78,10 +78,14 @@ echo "6. the dev token is loopback-only now"
 # This smoke runs on 127.0.0.1, so dev sign-in still works for the OTHER smokes.
 loop=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/cursor_dev_session_token?plan=pro&email=x@og.local")
 [ "$loop" = "200" ] || fail "dev token refused a loopback caller ($loop) — would break every other smoke"
-# A forged non-loopback Host is refused (proxy the check without needing a second interface).
+# A non-loopback Host is refused. A forged LOOPBACK Host from another machine is refused by the
+# socket peer instead, which needs a second interface and so lives in against_the_web_console.rs.
 forged=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/cursor_dev_session_token?plan=pro" -H 'host: 192.168.1.9:1447')
 [ "$forged" = "401" ] || fail "dev token served a non-loopback Host ($forged) — the LAN mint is still open"
-ok "loopback dev sign-in works; a LAN Host is 401"
+# A same-machine HTTPS front connects from loopback for every LAN caller and stamps this header.
+proxied=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/cursor_dev_session_token?plan=pro" -H 'x-forwarded-for: 192.168.1.9')
+[ "$proxied" = "401" ] || fail "dev token served a proxied caller ($proxied) — Caddy would open it to the LAN"
+ok "loopback dev sign-in works; a LAN Host or a proxied caller is 401"
 
 echo
 echo "PASS — slice 16: browser login binds a token to a human step, and the blind LAN mint is closed."
