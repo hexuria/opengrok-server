@@ -588,7 +588,9 @@ every record that sharing would otherwise break carry whose it is.
   that is not on the caller's roster answers **404 on every coworker route**, the run door
   (`POST /ag-ui`) and `POST /coworkers/{id}/approvals` included. Those two used to say 403 "no
   grant lets …": identical for an unknown id, so it confirmed nothing, but unlike every other
-  route; `refuse_use` now decides both. One that is on their roster and still refused (the owner
+  route; `refuse_use` now decides both. So it does for `POST /schedules` and `POST /monitors`,
+  which name the coworker in the body and used to answer an unknown id 404 but a real one 403,
+  which told a stranger which ids exist. One that is on their roster and still refused (the owner
   revoked their own grant) is a 403 with the rule's sentence. The member's turn is billed to the member
   (`spend_actor`, and the per-person key for coworker × member), and `GET
   /ag-ui/threads/gateway-{id}` shows each person only their own runs of the one shared thread id.
