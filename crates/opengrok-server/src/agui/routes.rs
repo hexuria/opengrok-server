@@ -1208,6 +1208,19 @@ pub async fn repin_coworker(
         Ok(profile) => profile.unwrap_or_else(|| serde_json::json!({})),
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    // The stored hide flag, read here for the same reason and with the same refusal: the reply
+    // is the roster row the app overwrites its own from, so a failed read answered as `false`
+    // would un-hide the coworker on the sidebar of the person who hid it. `GET /coworkers`
+    // answers the same failure 503.
+    let hidden_from_sidebar = match hidden {
+        Some(hidden) => hidden,
+        None => match state.auth.store.hidden_coworker_ids(&account_id).await {
+            Ok(ids) => ids.contains(coworker_id.as_str()),
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        },
+    };
     let at_ms = now_ms();
     let mut events = Vec::new();
     // One command per decision, as the aggregate defines them: renaming, repinning and describing
@@ -1282,26 +1295,16 @@ pub async fn repin_coworker(
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
     }
-    let hidden_from_sidebar = if let Some(hidden) = hidden {
-        if state
+    if let Some(hidden) = hidden
+        && state
             .auth
             .store
             .set_coworker_hidden(&account_id, &coworker_id, hidden, at_ms)
             .await
             .is_err()
-        {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
-        }
-        hidden
-    } else {
-        state
-            .auth
-            .store
-            .hidden_coworker_ids(&account_id)
-            .await
-            .ok()
-            .is_some_and(|ids| ids.contains(coworker_id.as_str()))
-    };
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+    }
     if !decoration.is_empty() {
         crate::persona::merge_profile_text(&mut profile, &serde_json::Value::Object(decoration));
         // A 500 rather than the seam-B path's silent `let _`: this door exists because an edit
