@@ -311,9 +311,19 @@ fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
     }
 }
 
-/// This call is the command that failed last round, by invoke name or whole command.
+/// What makes two failures the same one: a shell's invoke name or whole command, and for any
+/// other tool its name and arguments. Two different files a `read_file` could not find are two
+/// failures, not a retry.
+fn failure_key(call: &opengrok_tools::ToolCall) -> String {
+    match shell_command(&call.arguments) {
+        "" => format!("{}:{}", call.name, call.arguments),
+        command => intent::shell_action_key(command),
+    }
+}
+
+/// This call is the one that failed last round.
 fn repeats_last_failure(call: &opengrok_tools::ToolCall, last: Option<&str>) -> bool {
-    last.is_some_and(|last| intent::shell_action_key(shell_command(&call.arguments)) == last)
+    last.is_some_and(|last| failure_key(call) == last)
 }
 
 /// The host catalog's own binary is missing. No rewording finds it, so the turn stops on the
@@ -1471,9 +1481,7 @@ async fn converse_raw(
                             1
                         };
                     }
-                    last_failed_key = failed
-                        .last()
-                        .map(|(call, _)| intent::shell_action_key(shell_command(&call.arguments)));
+                    last_failed_key = failed.last().map(|(call, _)| failure_key(call));
                 } else if work_ok && !skip_listing {
                     // A synthetic "already listed" ok is not a catalog read. Clearing
                     // last_failure here is how a later skip finished with a blank chat.

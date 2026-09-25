@@ -2505,6 +2505,65 @@ async fn a_missing_python_gets_a_python3_retry() {
     assert!(assistant_text(&events).contains("Done."));
 }
 
+/// Two different files that are not there are two outcomes, not a retry of one: a tool with no
+/// `command` argument is told apart by its arguments.
+#[tokio::test]
+async fn two_different_missing_files_do_not_end_the_turn() {
+    fn read(id: &str, path: &str) -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::ToolCallStart {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: id.to_string(),
+                delta: serde_json::json!({ "path": path }).to_string(),
+            },
+            ModelDelta::ToolCallEnd { id: id.to_string() },
+        ]
+    }
+    let door = Rounds::new(
+        vec![
+            read("c1", "notes.md"),
+            read("c2", "NOTES.md"),
+            read("c3", "docs/notes.md"),
+        ],
+        "Found it in docs/notes.md.",
+    );
+    let reads = Arc::new(Mutex::new(0usize));
+    let counted = reads.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "read_file" } }),
+        Arc::new(move |call| {
+            let n = {
+                let mut reads = counted.lock().unwrap();
+                *reads += 1;
+                *reads
+            };
+            if n < 3 {
+                opengrok_tools::ToolResult::ok(&call.id, "cat: no such file\n[exit code 1]")
+            } else {
+                opengrok_tools::ToolResult::ok(&call.id, "the notes\n[exit code 0]")
+            }
+        }),
+    );
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("read my notes"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*reads.lock().unwrap(), 3);
+    assert!(
+        assistant_text(&events).contains("docs/notes.md"),
+        "{events:?}"
+    );
+}
+
 /// The streak still does its job for the same command failing the same way: the second
 /// identical failure ends the turn with one short fact, not a diary of retries.
 #[tokio::test]
