@@ -877,18 +877,20 @@ async fn a_call_refused_the_same_way_twice_ends_the_run() {
 
 /// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
 /// as text, and never started a call. Crossing the character bound ends the run with a
-/// reason, instead of streaming the rest of the flood — including a tool call that
-/// arrives only after it.
+/// reason a person can read, instead of streaming the rest of the flood — including a tool
+/// call that arrives only after it. The plan itself is not shown: it is all intent.
 #[tokio::test]
 async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
     struct PlanDoor;
     #[async_trait::async_trait]
     impl ModelDoor for PlanDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-            let script = vec![
-                ModelDelta::Text(flood),
-                ModelDelta::Text(" and then I will call the tool.".to_string()),
+            let mut script: Vec<ModelDelta> = "I'll check the host and then list the profiles. "
+                .repeat(PLAN_ONLY_TEXT_LIMIT / 40)
+                .split_inclusive(' ')
+                .map(|word| ModelDelta::Text(word.to_string()))
+                .collect();
+            script.extend([
                 ModelDelta::ToolCallStart {
                     id: "late".to_string(),
                     name: "shell".to_string(),
@@ -896,7 +898,7 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
                 ModelDelta::ToolCallEnd {
                     id: "late".to_string(),
                 },
-            ];
+            ]);
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
@@ -931,7 +933,259 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
         .get("message")
         .and_then(|m| m.as_str())
         .unwrap_or_default();
-    assert!(message.contains("plan-only text"), "{message}");
+    assert!(
+        message.contains("without starting any of it"),
+        "the reason is a sentence, not engine-speak: {message}"
+    );
+    assert!(
+        !assistant_text(&events).contains("I'll check"),
+        "a plan is not an answer: {events:?}"
+    );
+}
+
+/// A LONG ANSWER IS NOT A STALL. Any coworker with a computer answering "explain X" or a
+/// routine's daily briefing past ~250 words used to end in RUN_ERROR "plan-only text", and
+/// the withheld answer was never shown.
+#[tokio::test]
+async fn a_long_answer_with_tools_offered_is_delivered_not_failed() {
+    let answer = long_answer();
+    let events = run_conversation(
+        &MockDoor::with_script(words(&answer)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain the borrow checker"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), answer);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::RunError),
+        "{events:?}"
+    );
+}
+
+/// Prose, longer than the plan-only bound, with no intent opener anywhere.
+fn long_answer() -> String {
+    "The borrow checker tracks who owns each value and for how long. "
+        .repeat(PLAN_ONLY_TEXT_LIMIT / 60 + 2)
+        .trim_end()
+        .to_string()
+}
+
+/// Word by word, the way a provider streams.
+fn words(text: &str) -> Vec<ModelDelta> {
+    text.split_inclusive(' ')
+        .map(|word| ModelDelta::Text(word.to_string()))
+        .collect()
+}
+
+/// #61, back for every coworker with a computer since 83f09fe: with a work tool offered every
+/// text delta was withheld for the whole round, so the answer arrived as one burst.
+#[tokio::test]
+async fn a_coworker_with_a_computer_streams_its_answer() {
+    let answer = long_answer();
+    let events = run_conversation(
+        &MockDoor::with_script(words(&answer)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain the borrow checker"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    let pieces = events
+        .iter()
+        .filter(|event| event.event_type == EventType::TextMessageContent)
+        .count();
+    assert!(pieces > 1, "one burst is not streaming: {pieces} piece(s)");
+    assert_eq!(assistant_text(&events), answer);
+}
+
+/// A streamed answer after a failed tool is the answer. The failure fact is for a round that
+/// said nothing of its own; painted after a real answer it reads as the conclusion.
+#[tokio::test]
+async fn a_streamed_answer_after_a_failed_tool_is_not_followed_by_the_failure() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = if round == 1 {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"cat notes.txt"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]
+            } else {
+                words(&long_answer())
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(|call| opengrok_tools::ToolResult::refused(&call.id, "no such file: notes.txt")),
+    );
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("summarise my notes"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), long_answer());
+}
+
+/// And the pieces reach a live watcher while the model is still talking.
+#[tokio::test]
+async fn a_paced_answer_with_a_computer_reaches_the_sink_before_the_run_ends() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    struct FirstText(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    #[async_trait::async_trait]
+    impl EventSink for FirstText {
+        async fn emit(&self, events: &[Event]) {
+            if events
+                .iter()
+                .any(|event| event.event_type == EventType::TextMessageContent)
+                && let Some(tx) = self.0.lock().ok().and_then(|mut slot| slot.take())
+            {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    let sink = FirstText(std::sync::Mutex::new(Some(tx)));
+    let handle = tokio::spawn(async move {
+        run_conversation_streaming(
+            &MockDoor::with_script(words(&long_answer())).paced_by_ms(10),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("explain the borrow checker"),
+            "t1",
+            "r1",
+            1,
+            &sink,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .expect("first text should arrive before the run ends")
+        .unwrap();
+    assert!(
+        !handle.is_finished(),
+        "text arrived only after the turn finished — the answer came as one burst"
+    );
+    let events = handle.await.unwrap();
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// A file list with a closing offer, answered by a coworker with a computer, arrives as the
+/// model wrote it — not as `README. md` on one flattened line.
+#[tokio::test]
+async fn a_markdown_answer_with_a_computer_arrives_as_written() {
+    let reply = "Here are the files in your project:\n\n- README.md\n- src/main.rs\n\nLet me know if you want more.";
+    let events = run_conversation(
+        &MockDoor::with_script(words(reply)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("list my files"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), reply);
+}
+
+/// Words the person saw before a tool ran are part of the conversation: the next call must
+/// not be asked as if they were never said.
+#[tokio::test]
+async fn text_the_person_saw_reaches_the_next_request() {
+    struct SpyDoor {
+        round: Mutex<usize>,
+        assistant: Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for SpyDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = if round == 1 {
+                let mut script = words(&long_answer());
+                script.extend([
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"cargo check"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]);
+                script
+            } else {
+                self.assistant.lock().unwrap().extend(
+                    request
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == "assistant")
+                        .map(|message| message.content.clone()),
+                );
+                vec![ModelDelta::Text("It builds.".to_string())]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    let door = SpyDoor {
+        round: Mutex::new(0),
+        assistant: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain, then check it builds"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let assistant = door.assistant.lock().unwrap();
+    assert_eq!(assistant.as_slice(), [long_answer()], "{assistant:?}");
 }
 
 /// The bound is "tools offered and unused", not "the model wrote a lot". A coworker
@@ -1429,8 +1683,11 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
     assert!(assistant_text(&events).contains("here are the files"));
 }
 
+/// A turn whose whole reply is intent — it said what it would do and called nothing — shows
+/// that reply. Dropping it finished the run with no text at all: the empty success (CLAUDE.md,
+/// three facts №3), which the person blames on the app.
 #[tokio::test]
-async fn intent_only_text_with_tools_offered_is_not_chat() {
+async fn an_intent_only_reply_is_shown_rather_than_an_empty_success() {
     struct IntentDoor;
     #[async_trait::async_trait]
     impl ModelDoor for IntentDoor {
@@ -1454,12 +1711,10 @@ async fn intent_only_text_with_tools_offered_is_not_chat() {
     )
     .await;
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    let text = assistant_text(&events);
-    assert!(
-        !text.to_ascii_lowercase().contains("i'll pull"),
-        "intent-only rounds must not become bubbles: {text:?}"
+    assert_eq!(
+        assistant_text(&events),
+        "I'll pull the BIR profile and then look up dues."
     );
-    assert!(!text.contains("look up"), "{text:?}");
 }
 
 #[tokio::test]

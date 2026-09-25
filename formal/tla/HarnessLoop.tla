@@ -132,6 +132,8 @@ Call ==
            [] r = "streamError" -> EndWith("failed") /\ anyDelta' \in {anyDelta, TRUE}
                                    /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:911-941 — prose past PLAN_ONLY_TEXT_LIMIT with work tools offered and none started.
+           \* Since #178 only text still withheld counts, i.e. text that keeps opening with intent;
+           \* an answer goes live first and is a "words" reply. The exit itself is unchanged.
            [] r = "planFlood"   -> Close("split", "failed") /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:1573-1604 — no tools asked for: last round either way.
            [] r = "words"       -> Finish /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>

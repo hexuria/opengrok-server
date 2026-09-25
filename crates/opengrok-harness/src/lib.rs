@@ -67,20 +67,28 @@ pub const MAX_COMPUTER_ROUNDS: usize = 24;
 /// that is not happening, and the honest thing is to say so rather than to keep looking.
 pub const SAME_SCREEN_LIMIT: usize = 4;
 
-/// Assistant text a tool-capable round may emit before a `ToolCallStart`.
+/// Withheld text a tool-capable round may pile up before a `ToolCallStart`.
 ///
 /// Seen live (NativeChat Shot A): a model offered tools wrote a plan of the work as
-/// `TEXT_MESSAGE` and never started a call. Words without a call are a reply; a flood of
-/// them is the model stalling. The bound is a couple of short paragraphs — enough for
-/// "I'll look that up" plus a real answer, not enough for a repeated plan of unused tools.
-/// The same lesson is a sentence in `computer_system_prompt`; this is the stop that
-/// prompt text alone did not provide.
+/// `TEXT_MESSAGE` and never started a call. A flood of plan is the model stalling, and this
+/// is the stop that prompt text alone did not provide.
 ///
-/// Short intent *before* a tool (`I'll probe…`) is a different bug: NativeChat paints
-/// every `TEXT_MESSAGE` as chat. Work-tool rounds drop that prose; a text-only round
-/// still drops it when it is intent/status/diary, and only flushes leftover facts.
-/// This bound still fires on the withheld bytes — a flood with no call is still a flood.
+/// IT COUNTS ONLY TEXT STILL WITHHELD, which after `LIVE_TEXT_AFTER` characters is only text
+/// that keeps opening with intent. It used to count every character, so any coworker with a
+/// computer that answered "explain X" or wrote a routine's briefing past ~250 words ended in
+/// RUN_ERROR, and the answer it had written was never shown (#178). A real answer goes live
+/// long before this bound; what reaches it is a plan, and a plan is not shown.
 pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
+
+/// Characters of non-intent text, past any opening intent, before a tool-capable round starts
+/// streaming its words.
+///
+/// Short intent *before* a tool (`I'll probe…`) is why text is withheld at all: NativeChat
+/// paints every `TEXT_MESSAGE` as a bubble, and a streamed preamble cannot be taken back when
+/// the tool call arrives. A preamble is short; an answer long enough to need streaming is not.
+/// Withholding the whole round instead brought back #61 for every coworker with a computer:
+/// the answer arrived in one burst at the end (#180).
+pub const LIVE_TEXT_AFTER: usize = 200;
 
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
@@ -610,19 +618,41 @@ pub async fn resume_conversation(
     all
 }
 
+/// Paint what the round withheld: the text past its opening intent, or the last failure fact.
+/// `blank` is what to show when that leaves nothing — `None` where the run already said
+/// something or ends with its own sentence.
 async fn flush_withheld_text(
     projection: &mut Projection,
     sink: Option<&dyn EventSink>,
     withheld: &mut String,
     round_events: &mut Vec<Event>,
     last_failure: Option<&str>,
+    blank: Option<String>,
 ) {
-    let Some(visible) = intent::visible_chat(&std::mem::take(withheld), last_failure) else {
+    let withheld = std::mem::take(withheld);
+    let Some(visible) = intent::visible_chat(&withheld, last_failure).or(blank) else {
         return;
     };
-    let produced = projection.push(ModelDelta::Text(visible));
-    emit_live(sink, &produced).await;
-    round_events.extend(produced);
+    emit_visible_text(projection, sink, round_events, visible).await;
+}
+
+/// What a text-only round shows when stripping its intent leaves nothing and the run has said
+/// nothing yet: the listing it read, else the model's own words.
+///
+/// NEVER AN EMPTY SUCCESS (CLAUDE.md, three facts №3). A turn that said "I'll pull the profile"
+/// and stopped used to finish with no text at all, which the person blames on the app.
+fn blank_turn_text(
+    all: &[Event],
+    round_events: &[Event],
+    last_listing: Option<&str>,
+    withheld: &str,
+) -> Option<String> {
+    if round_has_assistant_text(all) || round_has_assistant_text(round_events) {
+        return None;
+    }
+    last_listing
+        .map(str::to_string)
+        .or_else(|| Some(withheld.trim().to_string()).filter(|text| !text.is_empty()))
 }
 
 async fn emit_visible_text(
@@ -936,73 +966,86 @@ async fn converse_raw(
             }
         };
 
+        // The words the person saw this round, which the next request must carry. F8: text
+        // that was withheld and dropped is not among them — replaying a discarded preamble as
+        // an assistant message re-billed the diary on every hop.
         let mut said = String::new();
         let mut withheld = String::new();
+        // A round with no work tool on offer streams from its first word. One with a work tool
+        // withholds until `intent::live_from` says the words are an answer, not a preamble.
+        let mut text_live = !tools_offered;
         let mut round_work_tool = false;
         if let Some(mut stream) = stream {
             while let Some(delta) = stream.next().await {
                 match delta {
                     Ok(delta) => {
                         any_delta = true;
-                        if let ModelDelta::Text(text) = &delta {
-                            // F8: discarded intent must not land on `said`. The next
-                            // hop would append it as an assistant message and re-bill
-                            // the diary. Count plan-only from the bytes; keep them off
-                            // the next request.
-                            if !tools_offered {
-                                said.push_str(text);
-                            }
-                            if tools_offered && !started_a_tool {
-                                plan_only_chars =
-                                    plan_only_chars.saturating_add(text.chars().count());
-                            }
-                            if tools_offered {
-                                withheld.push_str(text);
-                            }
-                        }
                         if let ModelDelta::ToolCallStart { name, .. } = &delta {
                             started_a_tool = true;
                             if !is_client_render_tool(name) {
                                 round_work_tool = true;
                             }
                         }
-                        // Work-tool rounds withhold TEXT until ToolCallStart / finalization
-                        // so NativeChat does not paint "I'll probe…" as chat. Reasoning and
-                        // tool frames still stream. A text-only round flushes below.
-                        let withhold_text = tools_offered && matches!(delta, ModelDelta::Text(_));
-                        if !withhold_text {
-                            let produced = projection.push(delta);
-                            // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
-                            // adds a second reader that does not have to wait for the run to end.
-                            // Through `emit_live`, never `sink.emit` directly, so the live
-                            // delta path meets `scrub_event_secrets` like every other path.
-                            // Without it a model that smuggled a `values.password` into its
-                            // own tool args reached NativeChat verbatim.
-                            emit_live(sink, &produced).await;
-                            round_events.extend(produced);
-                        }
-                        if tools_offered
-                            && !started_a_tool
-                            && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
+                        if let ModelDelta::Text(text) = &delta
+                            && !text_live
                         {
-                            timing.record_model(timing::elapsed_ms(model_started));
-                            end_run!(
-                                round_events,
-                                Ending::Fail(format!(
-                                    "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
-                                ))
-                            );
+                            withheld.push_str(text);
+                            if !started_a_tool {
+                                plan_only_chars =
+                                    plan_only_chars.saturating_add(text.chars().count());
+                            }
+                            if let Some(from) = intent::live_from(&withheld, LIVE_TEXT_AFTER) {
+                                text_live = true;
+                                let shown = withheld.split_off(from);
+                                withheld.clear();
+                                said.push_str(&shown);
+                                emit_visible_text(&mut projection, sink, &mut round_events, shown)
+                                    .await;
+                            } else if !started_a_tool && plan_only_chars > PLAN_ONLY_TEXT_LIMIT {
+                                timing.record_model(timing::elapsed_ms(model_started));
+                                flush_withheld_text(
+                                    &mut projection,
+                                    sink,
+                                    &mut withheld,
+                                    &mut round_events,
+                                    None,
+                                    None,
+                                )
+                                .await;
+                                end_run!(
+                                    round_events,
+                                    Ending::Fail(format!(
+                                        "the coworker described {plan_only_chars} characters of work without starting any of it, so the turn was stopped"
+                                    ))
+                                );
+                            }
+                            continue;
                         }
+                        if let ModelDelta::Text(text) = &delta {
+                            said.push_str(text);
+                        }
+                        let produced = projection.push(delta);
+                        // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
+                        // adds a second reader that does not have to wait for the run to end.
+                        // Through `emit_live`, never `sink.emit` directly, so the live
+                        // delta path meets `scrub_event_secrets` like every other path.
+                        // Without it a model that smuggled a `values.password` into its
+                        // own tool args reached NativeChat verbatim.
+                        emit_live(sink, &produced).await;
+                        round_events.extend(produced);
                     }
                     Err(error) => {
                         timing.record_model(timing::elapsed_ms(model_started));
-                        if !round_work_tool {
+                        // Once live, the round has shown its own words; a failure fact after
+                        // them would read as the answer.
+                        if !round_work_tool && !text_live {
                             flush_withheld_text(
                                 &mut projection,
                                 sink,
                                 &mut withheld,
                                 &mut round_events,
                                 last_failure.as_deref(),
+                                None,
                             )
                             .await;
                         }
@@ -1013,13 +1056,16 @@ async fn converse_raw(
             timing.record_model(timing::elapsed_ms(model_started));
             if round_work_tool {
                 withheld.clear();
-            } else {
+            } else if !text_live {
+                let blank =
+                    blank_turn_text(&all, &round_events, last_listing.as_deref(), &withheld);
                 flush_withheld_text(
                     &mut projection,
                     sink,
                     &mut withheld,
                     &mut round_events,
                     last_failure.as_deref(),
+                    blank,
                 )
                 .await;
             }
@@ -1142,6 +1188,14 @@ async fn converse_raw(
                     auto_review_ms,
                 );
 
+                // Before the results, where the words came: the model said them, then asked.
+                if !said.is_empty() {
+                    request.messages.push(ChatMessage {
+                        images: Vec::new(),
+                        role: "assistant".to_string(),
+                        content: std::mem::take(&mut said),
+                    });
+                }
                 for (result, call) in results.iter().zip(calls.iter()) {
                     let produced = projection.push_tool_result(result);
                     emit_live(sink, &produced).await;
@@ -1309,16 +1363,6 @@ async fn converse_raw(
                             "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
                         ))
                     );
-                }
-
-                // Work-tool preamble was withheld from chat AND from `said` (F8).
-                // Replaying it as an assistant message is how rounds got slower.
-                if !said.is_empty() && !round_work_tool {
-                    request.messages.push(ChatMessage {
-                        images: Vec::new(),
-                        role: "assistant".to_string(),
-                        content: said,
-                    });
                 }
 
                 if work_fail_streak >= intent::MAX_FAILED_WORK_ROUNDS {

@@ -93,6 +93,19 @@ fn normalize(text: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Openers that read like intent and are a real answer's closing offer. "Let me know if you
+/// want more." at the end of a file list made the whole reply count as intent, and the rewrite
+/// that followed flattened it.
+const CLOSERS: &[&str] = &[
+    "let me know",
+    "i'll be happy",
+    "i'll be glad",
+    "i'll be here",
+    "i will be happy",
+    "i will be glad",
+    "i will be here",
+];
+
 fn has_fact_signal(text: &str) -> bool {
     let digits = text.chars().filter(char::is_ascii_digit).count();
     // Ports like 17421 are not facts; a TIN / form list is.
@@ -100,122 +113,153 @@ fn has_fact_signal(text: &str) -> bool {
         return true;
     }
     let lower = text.to_ascii_lowercase();
-    lower.contains("tin")
+    // A WORD, not a substring: `contains("tin")` made "setting", "testing" and "continue"
+    // facts, which kept intent sentences that carried them.
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|word| word == "tin")
         || lower.contains("deadline")
         || lower.contains("form 1")
         || lower.contains("1701")
         || lower.contains("2550")
 }
 
+/// Starts by announcing what the coworker is about to do: "I'll pull…", "Let me check…".
+/// The only kind of sentence dropped from the front of a reply.
+fn opens_with_intent(sentence: &str) -> bool {
+    let n = normalize(sentence);
+    !CLOSERS.iter().any(|closer| n.starts_with(closer))
+        && INTENT_OPENERS.iter().any(|opener| n.starts_with(opener))
+}
+
+/// Intent, or a status line with no fact in it ("The BIR agent isn't answering"). Counted to
+/// recognise a retry diary; never used to cut a sentence out of the middle of an answer, where
+/// the same words ("trying to", "isn't running") are ordinary prose.
 fn sentence_is_intent(sentence: &str) -> bool {
     let n = normalize(sentence);
     if n.is_empty() {
         return true;
     }
+    if CLOSERS.iter().any(|closer| n.starts_with(closer)) {
+        return false;
+    }
     if INTENT_OPENERS.iter().any(|opener| n.starts_with(opener)) {
         return true;
     }
-    if STATUS_MARKERS.iter().any(|marker| n.contains(marker)) && !has_fact_signal(&n) {
-        return true;
-    }
-    false
+    STATUS_MARKERS.iter().any(|marker| n.contains(marker)) && !has_fact_signal(&n)
 }
 
-/// Pre-tool / between-tool CoT: “I'll pull…”, “First I'll…”, “The X isn't answering…”.
-pub fn is_intent_or_status_prose(text: &str) -> bool {
-    let n = normalize(text);
-    if n.is_empty() {
-        return true;
-    }
-    if has_fact_signal(&n) && !is_retry_diary(text) {
-        return false;
-    }
-    INTENT_OPENERS.iter().any(|opener| n.starts_with(opener))
-        || STATUS_MARKERS.iter().any(|marker| n.contains(marker))
-}
-
-/// Multi-paragraph or multi-sentence retry narration. One short failure fact is not this.
+/// Multi-paragraph or multi-sentence retry narration. One short failure fact is not this, and
+/// neither is a real answer that mentions a status phrase once: most of it must be narration.
 pub fn is_retry_diary(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
+        return false;
+    }
+    let sentences = split_sentences(trimmed);
+    let intent_sentences = sentences.iter().filter(|s| sentence_is_intent(s)).count();
+    if intent_sentences == 0 || intent_sentences * 2 < sentences.len() {
         return false;
     }
     let paragraphs = trimmed
         .split("\n\n")
         .filter(|p| !p.trim().is_empty())
         .count();
-    let intent_sentences = split_sentences(trimmed)
-        .into_iter()
-        .filter(|s| sentence_is_intent(s))
-        .count();
-    (paragraphs >= 2 && intent_sentences >= 1)
+    paragraphs >= 2
         || intent_sentences >= 3
-        || (trimmed.chars().count() > 400 && intent_sentences >= 1 && !has_fact_signal(trimmed))
+        || (trimmed.chars().count() > 400 && !has_fact_signal(trimmed))
 }
 
 fn is_sentence_end(ch: char, next: Option<char>) -> bool {
     match ch {
-        '!' | '?' | '\n' => true,
-        // `xai/grok-4.6` and `3.14` are not sentence ends. Slice 5 greps the
-        // mock door's model pin; splitting on the version dot made it `4. 6`.
-        '.' => !next.is_some_and(|n| n.is_ascii_digit()),
+        '\n' => true,
+        // Only before whitespace or the end. `xai/grok-4.6`, `3.14`, `README.md` and a URL's
+        // `?q=` are not sentence ends: splitting there printed `grok-4. 6` and `README. md`.
+        '.' | '!' | '?' => next.is_none_or(char::is_whitespace),
         _ => false,
     }
 }
 
-fn split_sentences(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for (i, ch) in chars.iter().copied().enumerate() {
-        current.push(ch);
-        if is_sentence_end(ch, chars.get(i + 1).copied()) {
-            let piece = current.trim();
-            if !piece.is_empty() {
-                out.push(piece.to_string());
-            }
-            current.clear();
+/// Each sentence as a trimmed byte range of `text`, and whether it was ended by a terminator.
+/// Ranges rather than copies, so what is kept is sliced out of the original with its own
+/// newlines, list markers and spacing — never re-joined.
+fn sentence_spans(text: &str) -> Vec<(usize, usize, bool)> {
+    fn trimmed(text: &str, start: usize, end: usize, ended: bool) -> Option<(usize, usize, bool)> {
+        let piece = &text[start..end];
+        let lead = piece.len() - piece.trim_start().len();
+        let tail = piece.len() - piece.trim_end().len();
+        (lead + tail < piece.len()).then_some((start + lead, end - tail, ended))
+    }
+    let mut spans = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if is_sentence_end(ch, chars.peek().map(|(_, next)| *next)) {
+            let end = at + ch.len_utf8();
+            spans.extend(trimmed(text, start, end, true));
+            start = end;
         }
     }
-    let piece = current.trim();
-    if !piece.is_empty() {
-        out.push(piece.to_string());
-    }
-    out
+    spans.extend(trimmed(text, start, text.len(), false));
+    spans
 }
 
-/// Drop leading (and leftover) intent sentences. `None` if nothing factual remains.
-/// A reply with no intent sentences is returned unchanged — version pins and
-/// decimals must not be rewritten.
+fn split_sentences(text: &str) -> Vec<String> {
+    sentence_spans(text)
+        .into_iter()
+        .map(|(start, end, _)| text[start..end].to_string())
+        .collect()
+}
+
+/// Where the text after its opening intent sentences begins, as a byte offset. While the text
+/// is still arriving (`finished` false) its last, unended sentence is never counted as intent:
+/// it may yet turn out to be anything.
+fn leading_intent_end(text: &str, finished: bool) -> usize {
+    let mut from = 0;
+    for (start, end, ended) in sentence_spans(text) {
+        if !(ended || finished) || !opens_with_intent(&text[start..end]) {
+            break;
+        }
+        from = end;
+    }
+    from + (text[from..].len() - text[from..].trim_start().len())
+}
+
+/// Where withheld text may start streaming: past any opening intent, once what follows is at
+/// least `min_chars` long and does not itself open with intent. `None` keeps withholding.
+///
+/// THE LENGTH IS WHAT TELLS A PREAMBLE FROM AN ANSWER. NativeChat paints every TEXT_MESSAGE as
+/// a bubble, so a streamed "Sure! Checking now." before a tool call cannot be taken back; a
+/// preamble is short, and an answer long enough to need streaming is not.
+pub fn live_from(text: &str, min_chars: usize) -> Option<usize> {
+    let from = leading_intent_end(text, false);
+    let rest = &text[from..];
+    if rest.chars().count() < min_chars {
+        return None;
+    }
+    let first = sentence_spans(rest)
+        .first()
+        .map(|(start, end, _)| &rest[*start..*end])
+        .unwrap_or(rest);
+    (!opens_with_intent(first)).then_some(from)
+}
+
+/// Drop the opening intent sentences and keep the rest exactly as written. `None` if nothing
+/// remains or what remains is a retry diary. A reply that does not open with intent is returned
+/// unchanged — version pins, decimals, filenames and markdown must not be rewritten.
+///
+/// ONLY THE FRONT. Intent in the middle or at the end is part of the answer: a drafted email's
+/// "I'll send the report on Friday." is the email.
 pub fn strip_intent_keep_facts(text: &str) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
-    let sentences = split_sentences(text);
-    if sentences.is_empty() {
-        return None;
-    }
-    if !sentences
-        .iter()
-        .any(|sentence| sentence_is_intent(sentence))
-    {
-        return if is_retry_diary(text) {
-            None
-        } else {
-            Some(text.to_string())
-        };
-    }
-    let kept: Vec<&str> = sentences
-        .iter()
-        .map(String::as_str)
-        .skip_while(|sentence| sentence_is_intent(sentence))
-        .filter(|sentence| !sentence_is_intent(sentence) || has_fact_signal(sentence))
-        .collect();
-    let joined = kept.join(" ").trim().to_string();
-    if joined.is_empty() || is_intent_or_status_prose(&joined) || is_retry_diary(&joined) {
+    let from = leading_intent_end(text, true);
+    let kept = &text[from..];
+    if kept.trim().is_empty() || is_retry_diary(kept) {
         None
     } else {
-        Some(joined)
+        Some(kept.to_string())
     }
 }
 
@@ -447,13 +491,7 @@ pub fn annotate_empty_result(content: &str) -> String {
 
 /// What NativeChat may paint from withheld model text this round.
 pub fn visible_chat(withheld: &str, last_failure: Option<&str>) -> Option<String> {
-    if let Some(facts) = strip_intent_keep_facts(withheld) {
-        if is_retry_diary(&facts) {
-            return last_failure.map(str::to_string);
-        }
-        return Some(facts);
-    }
-    last_failure.map(str::to_string)
+    strip_intent_keep_facts(withheld).or_else(|| last_failure.map(str::to_string))
 }
 
 #[cfg(test)]
@@ -463,21 +501,17 @@ mod tests {
 
     #[test]
     fn ill_pull_and_curly_apostrophe_are_intent() {
-        assert!(is_intent_or_status_prose("I'll pull the BIR profile"));
-        assert!(is_intent_or_status_prose("I’ll look up the dues"));
-        assert!(is_intent_or_status_prose("First I'll probe the host"));
-        assert!(is_intent_or_status_prose(
-            "The BIR agent isn't answering on 17421"
-        ));
-        assert!(is_intent_or_status_prose("Let me check the forms"));
+        assert!(sentence_is_intent("I'll pull the BIR profile"));
+        assert!(sentence_is_intent("I’ll look up the dues"));
+        assert!(sentence_is_intent("First I'll probe the host"));
+        assert!(sentence_is_intent("The BIR agent isn't answering on 17421"));
+        assert!(sentence_is_intent("Let me check the forms"));
     }
 
     #[test]
     fn facts_are_not_intent() {
-        assert!(!is_intent_or_status_prose(
-            "TIN 123-456-789. Forms: 1701, 2550M."
-        ));
-        assert!(!is_intent_or_status_prose("deadline 15 April"));
+        assert!(!sentence_is_intent("TIN 123-456-789. Forms: 1701, 2550M."));
+        assert!(!sentence_is_intent("deadline 15 April"));
     }
 
     #[test]
@@ -498,6 +532,68 @@ mod tests {
             !visible_chat(reply, None).unwrap().contains("grok-4. 6"),
             "sentence-split must not break a model pin"
         );
+    }
+
+    /// A markdown answer with a closing offer came back as
+    /// `Here are the files in your project: - README. md - src/main. rs`: the closing
+    /// "Let me know" read as intent, every `.` split a sentence and the rest was re-joined
+    /// with spaces.
+    #[test]
+    fn a_markdown_answer_with_a_closing_offer_is_not_rewritten() {
+        let reply = "Here are the files in your project:\n\n- README.md\n- src/main.rs\n\nLet me know if you want more.";
+        assert_eq!(visible_chat(reply, None).as_deref(), Some(reply));
+    }
+
+    #[test]
+    fn let_me_know_is_not_intent() {
+        assert!(!sentence_is_intent("Let me know if you want more."));
+        assert!(!sentence_is_intent("I'll be happy to help with the rest."));
+        assert!(sentence_is_intent("Let me check the forms."));
+    }
+
+    /// `tin` as a substring made "setting", "testing" and "continue" facts.
+    #[test]
+    fn a_real_word_is_not_a_fact_signal() {
+        assert!(!has_fact_signal("setting up the testing"));
+        assert!(!has_fact_signal("continue"));
+        assert!(has_fact_signal("TIN 123-456-789"));
+        assert!(has_fact_signal("your tin is on file"));
+    }
+
+    #[test]
+    fn a_non_empty_answer_is_never_blanked() {
+        assert!(visible_chat("Let me know if you want more.", None).is_some());
+    }
+
+    /// A status phrase in the middle of real prose is not a diary. "trying to" in one sentence
+    /// of a multi-paragraph answer used to drop that sentence and flatten the rest.
+    #[test]
+    fn a_status_phrase_inside_an_answer_does_not_rewrite_it() {
+        let reply = "Rust checks borrows at compile time.\n\nWhen you are trying to mutate a borrowed value, the compiler refuses. Clone it, or end the borrow first.";
+        assert_eq!(visible_chat(reply, None).as_deref(), Some(reply));
+    }
+
+    /// Leading intent goes; what follows keeps its own bytes, newlines and list markers.
+    #[test]
+    fn leading_intent_is_dropped_and_the_rest_is_kept_as_written() {
+        let reply = "I'll look that up.\n\nHere are the files:\n\n- README.md\n- src/main.rs";
+        assert_eq!(
+            visible_chat(reply, None).as_deref(),
+            Some("Here are the files:\n\n- README.md\n- src/main.rs")
+        );
+    }
+
+    /// Streaming starts once the text past any opening intent is long enough to be an answer,
+    /// and not while it still opens with intent.
+    #[test]
+    fn withheld_text_goes_live_after_its_opening_intent() {
+        let answer = "The borrow checker tracks who owns each value. ".repeat(6);
+        let text = format!("I'll explain. {answer}");
+        let from = live_from(&text, 200).unwrap();
+        assert_eq!(&text[from..], answer);
+        assert!(live_from("I'll check the host. ", 10).is_none());
+        assert!(live_from(&"I'll check the host and then ".repeat(20), 200).is_none());
+        assert!(live_from("Short answer.", 200).is_none());
     }
 
     #[test]
