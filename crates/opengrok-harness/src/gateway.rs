@@ -96,6 +96,62 @@ impl GatewayDoor {
             http,
         }
     }
+
+    /// Ask the gateway whether it will take this door's key, without asking a model anything:
+    /// `GET /v1/models`, which lists the catalogue and bills nothing.
+    ///
+    /// For boot. `/health` answers for the event store and stays that way — it is the
+    /// supervisor's liveness check, and a gateway outage must not restart this server — so a
+    /// wrong OG_GATEWAY_TOKEN used to report ok:true until the first turn failed (#185).
+    pub async fn probe(&self) -> Result<(), ModelError> {
+        let response = self
+            .http
+            .get(format!("{}/v1/models", self.base_url))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .map_err(send_error)?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(ModelError::Refused {
+            status: status.as_u16(),
+            body: String::new(),
+            retry_after_s: None,
+        })
+    }
+}
+
+/// A request that did not come back, as the door reports it. The URL is dropped: it is the
+/// internal gateway's address, and this text used to reach the chat whole (#185).
+///
+/// ONLY A FAILED CONNECT IS `Unreachable`, because only then is it certain nothing was sent —
+/// which is what lets the loop ask again without billing twice. A request that went out and
+/// then lost its connection may have reached a model, so it is not retried.
+fn send_error(error: reqwest::Error) -> ModelError {
+    let connect = error.is_connect();
+    let timeout = error.is_timeout();
+    let detail = error.without_url().to_string();
+    if connect {
+        ModelError::Unreachable(detail)
+    } else if timeout {
+        tracing::warn!(%detail, "the model gateway timed out");
+        ModelError::TimedOut("the model gateway did not answer in time".to_string())
+    } else {
+        ModelError::Stream(detail)
+    }
+}
+
+/// The seconds in a `Retry-After`. The HTTP-date form is not read: the gateway sends seconds.
+fn retry_after_s(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// The gateway's 402 names the scope in its own words ("the quota on this API key is
@@ -120,16 +176,7 @@ fn spend_cap_sentence(body: &str) -> String {
     )
 }
 
-/// One upstream sentence, on one line, short enough to read. See `spend_cap_sentence`.
-fn bounded(message: &str) -> String {
-    let flat = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() > 200 {
-        let kept: String = flat.chars().take(200).collect();
-        format!("{kept}…")
-    } else {
-        flat
-    }
-}
+use crate::model::bounded;
 
 /// One `data:` frame of an OpenAI-dialect stream. Only the fields we act on are named; the rest
 /// are ignored rather than rejected, because a provider adding a field must not break a run.
@@ -452,10 +499,11 @@ impl ModelDoor for GatewayDoor {
             .json(&payload)
             .send()
             .await
-            .map_err(|error| ModelError::Unreachable(error.to_string()))?;
+            .map_err(send_error)?;
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after_s = retry_after_s(response.headers());
             let body = response.text().await.unwrap_or_default();
             // WHICH KEY WAS REFUSED, because nobody else can say. The gateway records nothing at
             // all for a rejected key — it proved that by presenting junk and watching its own log
@@ -484,6 +532,7 @@ impl ModelDoor for GatewayDoor {
                 status: status.as_u16(),
                 // Bounded: an upstream error page must not become a megabyte in our logs.
                 body: body.chars().take(500).collect(),
+                retry_after_s,
             });
         }
 
@@ -494,7 +543,12 @@ impl ModelDoor for GatewayDoor {
         let body_state = live.clone();
         let body = response.bytes_stream().flat_map(move |chunk| {
             let events = match chunk {
-                Err(error) => vec![Err(ModelError::Stream(error.to_string()))],
+                Err(error) => vec![Err(match send_error(error) {
+                    // A body that stopped arriving is the model going quiet, not a gateway
+                    // that could not be reached: nothing about the connect failed.
+                    ModelError::Unreachable(detail) => ModelError::Stream(detail),
+                    other => other,
+                })],
                 Ok(bytes) => {
                     let mut state = match body_state.lock() {
                         Ok(guard) => guard,
@@ -546,6 +600,83 @@ struct SseState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The internal gateway address is not the person's business. An unreachable gateway used
+    /// to print the reqwest error whole, URL and path included, into the chat.
+    #[tokio::test]
+    async fn an_unreachable_gateway_does_not_leak_its_url() {
+        let door = GatewayDoor::new("http://127.0.0.1:1", "k");
+        let error = door
+            .stream(ModelRequest::default())
+            .await
+            .err()
+            .expect("nothing listens on port 1");
+        for text in [error.to_string(), error.sentence()] {
+            assert!(!text.contains("127.0.0.1:1"), "{text}");
+            assert!(!text.contains("/v1/chat/completions"), "{text}");
+        }
+        assert!(
+            matches!(error, ModelError::Unreachable(_)),
+            "a refused connection sent nothing, which is what makes it safe to retry: {error:?}"
+        );
+    }
+
+    /// Answers every connection with one fixed HTTP response.
+    async fn answering(response: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = vec![0u8; 8192];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{address}"), task)
+    }
+
+    /// A 429 carries how long to wait; the door keeps it so the loop can honour it.
+    #[tokio::test]
+    async fn a_rate_limit_keeps_its_retry_after() {
+        let (url, task) = answering(
+            "HTTP/1.1 429 Too Many Requests\r\nretry-after: 3\r\ncontent-type: application/json\r\ncontent-length: 74\r\nconnection: close\r\n\r\n{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}",
+        )
+        .await;
+        let error = GatewayDoor::new(url, "k")
+            .stream(ModelRequest::default())
+            .await
+            .err()
+            .expect("a 429 is not a stream");
+        assert!(
+            matches!(
+                error,
+                ModelError::Refused {
+                    status: 429,
+                    retry_after_s: Some(3),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        task.abort();
+    }
+
+    /// A wrong OG_GATEWAY_TOKEN is found at boot, not on the first turn.
+    #[tokio::test]
+    async fn the_boot_probe_names_a_refused_key() {
+        let (url, task) = answering(
+            "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+        )
+        .await;
+        let probed = GatewayDoor::new(url, "oag_live_wrong").probe().await;
+        assert!(
+            matches!(probed, Err(ModelError::Refused { status: 401, .. })),
+            "{probed:?}"
+        );
+        task.abort();
+    }
 
     /// A gateway that accepts the connection and never answers — a hung process, a proxy with
     /// nothing behind it — used to hold the call, and the run, for as long as the process lived.

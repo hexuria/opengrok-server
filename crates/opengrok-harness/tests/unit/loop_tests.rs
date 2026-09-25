@@ -4013,6 +4013,109 @@ async fn a_door_that_will_not_open_ends_the_run_once() {
     );
 }
 
+/// A door that fails with `first` on its first call and answers "back" after.
+struct FailsOnce {
+    first: Mutex<Option<ModelError>>,
+    calls: Mutex<usize>,
+}
+
+impl FailsOnce {
+    fn with(error: ModelError) -> Self {
+        Self {
+            first: Mutex::new(Some(error)),
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelDoor for FailsOnce {
+    async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        *self.calls.lock().unwrap() += 1;
+        if let Some(error) = self.first.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(Box::pin(futures::stream::iter([Ok(ModelDelta::Text(
+            "back".to_string(),
+        ))])))
+    }
+}
+
+/// A gateway restarting refuses connections for a moment. Nothing was sent, so nothing can be
+/// billed twice, and the turn used to fail on the spot (#185).
+#[tokio::test]
+async fn a_refused_connection_is_retried() {
+    let door = FailsOnce::with(ModelError::Unreachable("connection refused".to_string()));
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "back");
+}
+
+/// A short Retry-After is honoured once.
+#[tokio::test]
+async fn a_rate_limit_with_a_short_retry_after_is_asked_again() {
+    let door = FailsOnce::with(ModelError::Refused {
+        status: 429,
+        body: r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#
+            .to_string(),
+        retry_after_s: Some(0),
+    });
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(assistant_text(&events), "back");
+}
+
+/// A request the gateway could not take is not asked twice, and the person reads the reason,
+/// not the gateway's JSON.
+#[tokio::test]
+async fn a_rejected_request_ends_with_a_sentence_not_json() {
+    let door = FailsOnce::with(ModelError::Refused {
+        status: 400,
+        body: r#"{"type":"error","error":{"type":"upstream_error","message":"This model's maximum context length is 128000 tokens."}}"#
+            .to_string(),
+        retry_after_s: None,
+    });
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 1);
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError);
+    let message = last.extra["message"].as_str().unwrap_or_default();
+    assert!(!message.contains('{'), "{message}");
+    assert!(message.contains("maximum context length"), "{message}");
+}
+
 /// A PARK ASKS `stopped` TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured, the verifier's trace).
 /// A Stop pressed while the tool ran used to end the run on a card: its `Suspended` is refused on
 /// a stopped run, so the card's answer was a 409.

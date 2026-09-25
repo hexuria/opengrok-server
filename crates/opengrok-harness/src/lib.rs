@@ -349,7 +349,8 @@ pub async fn run_turn_with_tools(
         // A door that will not open is a failed run, not a crash: the client gets an ending it can
         // render and reason about (CLAUDE.md #8, fail closed and say why).
         Err(error) => {
-            events.extend(projection.fail(error.to_string()));
+            tracing::warn!(%error, "the model door did not open");
+            events.extend(projection.fail(error.sentence()));
             return events;
         }
     };
@@ -358,7 +359,8 @@ pub async fn run_turn_with_tools(
         match delta {
             Ok(delta) => events.extend(projection.push(delta)),
             Err(error) => {
-                events.extend(projection.fail(error.to_string()));
+                tracing::warn!(%error, "the model stream broke");
+                events.extend(projection.fail(error.sentence()));
                 return events;
             }
         }
@@ -1109,7 +1111,9 @@ async fn converse_raw(
             Ok(stream) => Some(stream),
             Err(error) => {
                 timing.record_model(timing::elapsed_ms(model_started));
-                end_run!(round_events, Ending::Fail(error.to_string()));
+                // The detail for the log; the person gets the sentence (#185).
+                tracing::warn!(%error, run_id, "the model door did not open");
+                end_run!(round_events, Ending::Fail(error.sentence()));
             }
         };
 
@@ -1196,7 +1200,8 @@ async fn converse_raw(
                             )
                             .await;
                         }
-                        end_run!(round_events, Ending::Fail(error.to_string()));
+                        tracing::warn!(%error, run_id, "the model stream broke");
+                        end_run!(round_events, Ending::Fail(error.sentence()));
                     }
                 }
             }

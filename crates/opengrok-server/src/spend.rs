@@ -879,9 +879,9 @@ fn over_points(name: &str, limits: &crate::points::Effective, counted: &Counted)
 fn is_credential_refusal(error: &ModelError) -> bool {
     match error {
         ModelError::Refused { status: 401, .. } => true,
-        ModelError::Refused { status: 503, body } => {
-            body.to_ascii_lowercase().contains("credential")
-        }
+        ModelError::Refused {
+            status: 503, body, ..
+        } => body.to_ascii_lowercase().contains("credential"),
         _ => false,
     }
 }

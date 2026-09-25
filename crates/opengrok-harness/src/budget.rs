@@ -57,20 +57,39 @@ impl RunBudget {
     }
 
     /// Open the door's stream, or say why it did not open in time.
+    ///
+    /// A door that did not open is asked again when `ModelError::retry_wait` says it is safe: a
+    /// refused connection (a gateway restarting) or a short `Retry-After`. Only here, before a
+    /// single delta: nothing has been answered or shown, so nothing is billed or painted twice.
     pub(crate) async fn open(
         &self,
         door: &dyn ModelDoor,
         request: ModelRequest,
     ) -> Result<DeltaStream, ModelError> {
         let limit = Duration::from_millis(self.call_timeout_ms);
-        tokio::time::timeout(limit, door.stream(request))
-            .await
-            .unwrap_or_else(|_| {
-                Err(ModelError::TimedOut(format!(
-                    "the model did not start answering within {}",
-                    spoken(limit)
-                )))
-            })
+        let mut attempt = 0;
+        loop {
+            let opened = tokio::time::timeout(limit, door.stream(request.clone()))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ModelError::TimedOut(format!(
+                        "the model did not start answering within {}",
+                        spoken(limit)
+                    )))
+                });
+            let wait = match &opened {
+                Err(error) => error.retry_wait(attempt),
+                Ok(_) => None,
+            };
+            let Some(wait) = wait else {
+                return opened;
+            };
+            if let Err(error) = &opened {
+                tracing::warn!(%error, attempt, "the model door did not open; asking again");
+            }
+            tokio::time::sleep(wait).await;
+            attempt += 1;
+        }
     }
 
     /// The next delta, or a timeout the loop ends the run with.
