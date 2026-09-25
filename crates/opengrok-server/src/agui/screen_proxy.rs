@@ -15,10 +15,19 @@
 //! THE TICKET IS STABLE WITHIN A WINDOW. The pane polls the status, and a `vncUrl` that changed on
 //! every poll would reload the desktop each time; the same claims sign to the same token, so the
 //! URL changes once per window, not once per poll.
+//!
+//! THE BOX'S PAGES ARE HOSTILE UNTIL PROVEN OTHERWISE. The model has a shell on the box, a per-org
+//! box is shared by colleagues, and their skill scripts are copied there to run — any of them can
+//! replace what answers on 6080. Yet the page is served from THIS origin, which also serves
+//! `/console` and honours its `og_access` cookie. See `confined` for what keeps the one from
+//! acting as the other, and `DIAL` for why a redirect is never followed.
+
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use serde::{Deserialize, Serialize};
@@ -44,11 +53,12 @@ struct Ticket {
 }
 
 /// Where the person's app reached this server. `OG_PUBLIC_GATEWAY_URL` when it names a real host;
-/// its default, `http://{OG_BIND}`, is usually a listen address (`0.0.0.0`) no webview can open,
+/// its default, `http://{OG_BIND}`, is usually a listen address (`0.0.0.0`, `[::]`) no webview can open,
 /// so then the `Host` the request came in on, which is by construction one the app can reach.
 pub fn public_origin(configured: &str, headers: &HeaderMap) -> Option<String> {
     let configured = configured.trim_end_matches('/');
-    if configured.starts_with("http") && !configured.contains("://0.0.0.0") {
+    let listen_address = configured.contains("://0.0.0.0") || configured.contains("://[::]");
+    if configured.starts_with("http") && !listen_address {
         return Some(configured.to_string());
     }
     let host = headers.get(header::HOST)?.to_str().ok()?;
@@ -126,7 +136,7 @@ pub async fn serve(
     request: Request,
 ) -> Response {
     let Some(port) = upstream_for(&state, &coworker_id, &ticket).await else {
-        return (StatusCode::NOT_FOUND, "no such screen").into_response();
+        return confined((StatusCode::NOT_FOUND, "no such screen").into_response());
     };
     let upgrade = request
         .headers()
@@ -135,36 +145,140 @@ pub async fn serve(
     if upgrade {
         return tunnel(port, request).await;
     }
+    confined(fetch(port, &rest).await)
+}
+
+/// The one client the proxy dials a box with. NO REDIRECTS: `loopback_port` pins only the first
+/// hop, and reqwest follows ten by default — a box answering `302 Location:
+/// http://169.254.169.254/…` had this host fetch its cloud credentials (or the gateway's loopback
+/// admin, or any internal service) and hand the body to the ticket holder, and to the box's own
+/// script. NO PROXY: it only ever dials loopback, and must not carry a box's port through an
+/// `HTTP_PROXY` in the server's environment.
+static DIAL: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()
+});
+
+/// One of noVNC's files from the box on `port`, with only its status, body and `Content-Type`.
+async fn fetch(port: u16, rest: &str) -> Response {
+    let silent = || {
+        (
+            StatusCode::BAD_GATEWAY,
+            "the computer's screen did not answer",
+        )
+            .into_response()
+    };
     if rest
         .split('/')
         .any(|segment| segment == ".." || segment.is_empty())
     {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     }
-    let fetched = reqwest::Client::new()
+    let Some(client) = DIAL.as_ref() else {
+        return silent();
+    };
+    let Ok(fetched) = client
         .get(format!("http://127.0.0.1:{port}/{rest}"))
-        .timeout(std::time::Duration::from_secs(20))
         .send()
-        .await;
-    let Ok(fetched) = fetched else {
+        .await
+    else {
+        return silent();
+    };
+    if fetched.status().is_redirection() {
         return (
             StatusCode::BAD_GATEWAY,
-            "the computer's screen did not answer",
+            "the computer's screen answered with a redirect, which this server does not follow",
         )
             .into_response();
-    };
+    }
     let status = StatusCode::from_u16(fetched.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let kind = fetched.headers().get(header::CONTENT_TYPE).cloned();
     let Ok(bytes) = fetched.bytes().await else {
-        return (
-            StatusCode::BAD_GATEWAY,
-            "the computer's screen did not answer",
-        )
-            .into_response();
+        return silent();
+    };
+    let page = kind
+        .as_ref()
+        .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
+    let bytes = if page {
+        with_storage_shim(&bytes).into()
+    } else {
+        bytes
     };
     let mut response = (status, bytes).into_response();
     if let Some(kind) = kind {
         response.headers_mut().insert(header::CONTENT_TYPE, kind);
+    }
+    response
+}
+
+/// Put first in every page the box serves, because `confined` takes its storage away. noVNC
+/// before 1.5 (1.3.0 and 1.4.0 were tried) reads `localStorage` unguarded, and in an opaque origin
+/// that read throws: the page died before it dialled, and the pane stayed blank. An in-memory
+/// store stands in ONLY when the real one throws; settings then last as long as the page, which
+/// is all the pane needs, since `vncUrl` carries them. It widens nothing: the page could define
+/// the same object itself.
+const STORAGE_SHIM: &[u8] = b"<script>try{window.localStorage}catch(_){var m=new Map;\
+Object.defineProperty(window,'localStorage',{configurable:true,value:{\
+getItem:function(k){k=String(k);return m.has(k)?m.get(k):null},\
+setItem:function(k,v){m.set(String(k),String(v))},removeItem:function(k){m.delete(String(k))},\
+clear:function(){m.clear()},key:function(i){var a=Array.from(m.keys());return i<a.length?a[i]:null},\
+get length(){return m.size}}})}</script>";
+
+/// `page` with `STORAGE_SHIM` straight after its `<head>` tag, so it runs before any of the page's
+/// own scripts (noVNC's are modules, which wait for the parse anyway). No `<head>` at all: first.
+fn with_storage_shim(page: &[u8]) -> Vec<u8> {
+    let lower = page.to_ascii_lowercase();
+    let after_head = lower
+        .windows(6)
+        .position(|window| {
+            window.starts_with(b"<head")
+                && window
+                    .get(5)
+                    .is_some_and(|&byte| byte == b'>' || byte.is_ascii_whitespace())
+        })
+        .and_then(|start| {
+            let close = lower.get(start..)?.iter().position(|&byte| byte == b'>')?;
+            Some(start + close + 1)
+        })
+        .unwrap_or(0);
+    let (before, after) = page.split_at(after_head.min(page.len()));
+    [before, STORAGE_SHIM, after].concat()
+}
+
+/// Every answer on the proxy's path, the box's files included, as a page that cannot act as the
+/// person. Without this a box that replaced its noVNC (a shell command, a colleague's skill
+/// script, a prompt injection) ran script on THIS origin: `fetch('/coworkers', {credentials:
+/// 'include'})` with the `og_access` cookie of whoever opened `vncUrl` in a browser signed in to
+/// `/console` — or framed `/console` and read it. Before the proxy the page was on its own
+/// loopback origin, which carried no cookies.
+///
+/// - `sandbox` without `allow-same-origin` gives the page an OPAQUE origin. Its requests to this
+///   server are cross-site, so the `SameSite=Lax` cookies stay home, and without CORS on the API
+///   it could not read an answer anyway. noVNC needs only its scripts and pointer lock; forms,
+///   popups and top navigation stay off. DO NOT add `allow-same-origin` to "fix" a noVNC error:
+///   together with `allow-scripts` it removes the sandbox.
+/// - `Access-Control-Allow-Origin: *` is what makes that workable: noVNC loads its modules with
+///   `crossorigin="anonymous"` and fetches its locale and `package.json`, and from an opaque
+///   origin each of those is a CORS request. `*` never carries credentials.
+/// - `nosniff`, so a file is only ever what its `Content-Type` says.
+/// - `no-referrer`, because the ticket is in the path and would ride along to anything else the
+///   page loads.
+fn confined(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (
+            header::CONTENT_SECURITY_POLICY,
+            "sandbox allow-scripts allow-pointer-lock",
+        ),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        headers.insert(name, HeaderValue::from_static(value));
     }
     response
 }
