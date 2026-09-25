@@ -596,3 +596,59 @@ async fn a_passkey_is_sealed_beside_the_password_row_and_the_reveal_door_takes_n
         .expect("query");
     assert_eq!(sealed, 0);
 }
+
+/// The key has been lost once already. When it is again, the reveal must say so — a 500 "store
+/// unavailable" sends the person to blame the app and the operator to look at Postgres, when the
+/// fix is a key only the operator can put back (or the person saving the login again).
+#[tokio::test]
+async fn a_login_sealed_under_a_lost_key_says_so_instead_of_store_unavailable() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, true).await;
+    let ada = h
+        .person(&format!("ada-{}@og.local", uuid::Uuid::now_v7().simple()))
+        .await;
+    let account =
+        AccountId::from_stored(h.agui.auth.minter.verify_access(&ada).expect("claims").sub);
+    let (status, row, text) = h
+        .call(
+            &ada,
+            "POST",
+            "/site-logins",
+            Some(json!({ "origin": "lost-key.example", "username": "ada", "password": PASSWORD })),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    let id = row["id"].as_str().expect("id").to_string();
+
+    // The same row, as a server whose key was regenerated would find it.
+    const LOST_KEK: &str = "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA=";
+    let secret_id = PgStore::site_login_secret_id(&account, &id);
+    let lost = Vault::from_base64_key(LOST_KEK).expect("lost vault");
+    h.store
+        .put_secret(
+            &secret_id,
+            &lost.seal(&secret_id, PASSWORD).expect("seal"),
+            1,
+        )
+        .await
+        .expect("overwrite");
+
+    let (status, body, text) = h
+        .call(&ada, "POST", &format!("/site-logins/{id}/reveal"), None)
+        .await;
+    assert_ne!(status, 500, "a lost key is not a database outage: {text}");
+    assert_eq!(status, 409, "{text}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sealed with a key this server no longer has"),
+        "{text}"
+    );
+    assert!(!text.contains("store unavailable"), "{text}");
+    assert!(!text.contains(PASSWORD), "{text}");
+    assert!(
+        !text.contains(lost.key_id()),
+        "the key id is the operator's, not the app's: {text}"
+    );
+}

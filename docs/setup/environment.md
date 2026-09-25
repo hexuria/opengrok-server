@@ -10,7 +10,59 @@ literals), and a variable that exists in code but not here is a documentation bu
 |---|---|
 | `OG_DATABASE_URL` | Postgres — see [`postgres.md`](postgres.md) |
 | `OG_TOKEN_SECRET` | signs our access tokens. No default, so two deployments can never share a key by accident. `openssl rand -hex 32`. **Changing it signs out every desktop at once**, and the recovery is a sign-in window that dies 180 s after it opens, with the person at the keyboard — so when editing `.env` for any other reason, fingerprint this value before and after (`grep -m1 '^OG_TOKEN_SECRET=' .env \| cut -d= -f2- \| shasum -a 256 \| cut -c1-12`) and change lines in place rather than rewriting the file |
-| `OG_CREDENTIAL_KEK` | encrypts connector credentials at rest. Deliberately no default. `openssl rand -base64 32` |
+| `OG_CREDENTIAL_KEK` | the credential key: seals **every** stored secret (the list is below). Deliberately no default. `openssl rand -base64 32`. **Back it up next to the database backup — a database restored without it is a database of secrets nobody can open.** Unset is a legitimate deployment that stores no secrets. To change it, rotate (below); never just replace it |
+| `OG_CREDENTIAL_KEK_OLD` | retired credential keys, comma-separated. They open what they sealed and never seal anything new; `opengrok vault reseal` moves their rows to `OG_CREDENTIAL_KEK`, after which they can go. A bad value refuses the boot and names the entry. Set without `OG_CREDENTIAL_KEK`, the boot is refused too — that is a rotation half done |
+
+### The credential key
+
+`secret_store` holds, all sealed under `OG_CREDENTIAL_KEK` (ChaCha20-Poly1305, each row bound to its
+own id):
+
+| what | row id |
+|---|---|
+| a connector's access token, and its refresh token | `<connection id>`, `<connection id>_refresh` |
+| an org's computer keys (box.ascii.dev, Windows 365) | `org-computer:<org>:<kind>` |
+| a coworker's own gateway key, one per member | `coworker-gateway-key:<coworker>:<account>` (older rows: `coworker-gateway-key:<coworker>`) |
+| a person's saved site-login passwords, authenticator-code seeds and passkey private keys | `site-login:…`, `site-login-otp:…`, `site-login-passkey:…` ([`site-logins.md`](site-logins.md)) |
+
+**Lose the key and all of it is gone** — the ciphertexts stay, and nothing opens them. It has
+happened once (`docs/verification/door1/README.md`: a reboot regenerated the key and the org's box
+key read as "no computer"). So: back the value up wherever the database backup goes, and treat a
+`.env` rewrite as a chance to lose it (fingerprint it before and after, as for `OG_TOKEN_SECRET`).
+
+Every row records which key sealed it: a key id, a short hash of the key (never the key). That is
+what lets the server say which key is missing instead of failing one secret at a time:
+
+- **at boot** the server compares the key ids in `secret_store` with the keys it holds and opens the
+  newest row of each as a canary. A key it does not hold is an `ERROR` line naming the key id and the
+  fix; it does not stop the boot.
+- **`GET /health`** carries `"vault": {"ok", "configured", "reason"}` beside the top-level `ok`,
+  which a lost key does **not** flip (a server whose secrets will not open still runs coworkers, and
+  every probe reads only `ok`). No key ids or counts there: the probe is unauthenticated.
+- **a reveal or use** of a secret under a missing key answers "this credential was sealed with a key
+  this server no longer has …" — `409` on `POST /site-logins/{id}/reveal`, not `500 store unavailable`.
+- **`opengrok vault status`** prints the current and retired key ids, how many rows each sealed,
+  and any key id this server does not hold. Exits 1 when something does not open.
+
+**Rotating** (a leaked key, or routine hygiene):
+
+1. `openssl rand -base64 32` — the new key.
+2. In `.env`: move the current value to `OG_CREDENTIAL_KEK_OLD`, put the new one in
+   `OG_CREDENTIAL_KEK`. Restart. Everything still opens; new secrets are sealed under the new key.
+3. `opengrok vault reseal` (same environment as the server). It re-seals every row still under a
+   retired key, or from before key ids were recorded, under the current key, and prints counts:
+   resealed, already current, changed meanwhile by the server, unopenable. It is safe beside the
+   running server and resumable — run it again after an interruption and it skips what is done.
+   **Only after the restart in step 2**: a server still running on the old key alone cannot open
+   what the reseal writes.
+4. When it reports `unopenable: 0`, remove `OG_CREDENTIAL_KEK_OLD` and restart.
+
+A row it cannot open is listed by id and **kept**, never deleted: if the old key turns up, put it in
+`OG_CREDENTIAL_KEK_OLD` and reseal again. If it never does, those secrets have to be entered again
+(an org admin re-pastes the box key; a person saves the login again).
+
+Rows written before key ids existed carry none. They are tried under every key held, so the upgrade
+loses nothing; run `opengrok vault reseal` once so a later lost key is caught by id.
 
 ## The listeners
 
@@ -112,6 +164,8 @@ throwaway signup addresses.
 | `OG_CONNECTORS` | JSON list of OAuth provider configurations (holds client secrets — file permissions are the guard) |
 | `OG_OAUTH_REDIRECT_URI` | where a provider sends the browser back; must match the app registration byte for byte |
 | `OG_PLUGINS_DIR` | Agent Plugins installed on this server, one directory each |
+| `OG_PLUGIN_CONNECT_TIMEOUT_MS` | default `5000`: what one plugin server gets for `initialize` + `tools/list` together. Servers are dialled concurrently before a turn's first model call, so this is the most a dead one can delay a turn; a server that misses it is left out of that turn, named in a WARN, and the coworker is told it is unavailable. A server that failed is not tried again for 30 s, and a listed one is reused for 60 s (per principal, coworker and credential) |
+| `OG_PLUGIN_CALL_TIMEOUT_MS` | default `60000`: what one plugin `tools/call` gets. On the deadline the server is sent `notifications/cancelled` and the model gets a result saying the call may still have taken effect. Zero or junk in either is refused with a WARN and the default used — an unbounded wait is the bug these exist to prevent |
 
 ## Diagnostics
 
