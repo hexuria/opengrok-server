@@ -112,6 +112,13 @@ pub struct ToolResult {
     /// [`ToolImage::visibility`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
+    /// A refusal that came after the call had already done part of its work: a recipe the box
+    /// played until a step failed. Every other refusal came before anything ran, so a corrected
+    /// call is new work and not a replay; the loop's once-per-request rule for recipes counted
+    /// a missing parameter as a play and then refused the fixed call (#120). The loop's, not
+    /// the wire's: never serialized.
+    #[serde(skip)]
+    pub stopped_part_way: bool,
 }
 
 /// Where a tool-result image may be shown. Rides `TOOL_CALL_RESULT.image.visibility`.
@@ -194,6 +201,7 @@ impl ToolResult {
             awaiting_approval: false,
             awaiting_reason: None,
             image: None,
+            stopped_part_way: false,
         }
     }
 
@@ -213,6 +221,7 @@ impl ToolResult {
             awaiting_approval: true,
             awaiting_reason: Some(reason),
             image: None,
+            stopped_part_way: false,
         }
     }
 
@@ -225,7 +234,15 @@ impl ToolResult {
             awaiting_approval: false,
             awaiting_reason: None,
             image: None,
+            stopped_part_way: false,
         }
+    }
+
+    /// This refusal came after the box had already acted.
+    #[must_use]
+    pub fn part_way(mut self) -> Self {
+        self.stopped_part_way = true;
+        self
     }
 }
 
@@ -1798,7 +1815,7 @@ impl Executor {
         let mut result = if receipt.ok {
             ToolResult::ok(call_id, said)
         } else {
-            ToolResult::refused(call_id, said)
+            ToolResult::refused(call_id, said).part_way()
         };
         if let Some(image) = receipt.image.clone() {
             result = result.with_image(image);
@@ -4468,12 +4485,14 @@ mod tests {
             recipes.runs.lock().unwrap().last().map(|r| r.2),
             Some(false)
         );
+        assert!(result.stopped_part_way, "the box played it: {result:?}");
 
         // A recipe that was never granted is refused before anything runs.
         let result = executor
             .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_other"})))
             .await;
         assert!(!result.ok, "{result:?}");
+        assert!(!result.stopped_part_way, "nothing played: {result:?}");
         assert!(
             result.content.contains("not granted") || result.content.contains("no recipe"),
             "{result:?}"

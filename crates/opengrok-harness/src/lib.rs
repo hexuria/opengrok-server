@@ -273,6 +273,19 @@ fn recipe_of(call: &opengrok_tools::ToolCall) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The recipe this call played, when the box played it: a success, or a run that stopped part
+/// way. A refusal before the box (a missing parameter, a recipe not granted, an unreachable box,
+/// a policy block) played nothing. Counting it made the corrected call a "replay" that was never
+/// run, and the search the person asked for never happened (#120).
+fn played_recipe(
+    call: &opengrok_tools::ToolCall,
+    result: &opengrok_tools::ToolResult,
+) -> Option<String> {
+    (result.ok || result.stopped_part_way)
+        .then(|| recipe_of(call))
+        .flatten()
+}
+
 fn is_replay(call: &opengrok_tools::ToolCall, played: &HashSet<String>) -> bool {
     recipe_of(call).is_some_and(|recipe| played.contains(&recipe))
 }
@@ -637,9 +650,7 @@ pub async fn resume_conversation(
 
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
-    let played_now = matches!(outcome, ResumeOutcome::Approved)
-        .then(|| recipe_of(&approved))
-        .flatten();
+    let approved_ran = matches!(outcome, ResumeOutcome::Approved);
     let results = match outcome {
         ResumeOutcome::Approved => {
             // The person may have answered the card long after the box went to sleep.
@@ -706,8 +717,8 @@ pub async fn resume_conversation(
         started_a_tool: true,
         played: results
             .iter()
-            .filter(|result| result.call_id == approved.id && !result.awaiting_approval)
-            .filter_map(|_| played_now.clone())
+            .filter(|result| approved_ran && result.call_id == approved.id)
+            .filter_map(|result| played_recipe(&approved, result))
             .collect(),
         ..Carried::default()
     };
@@ -1365,14 +1376,11 @@ async fn converse_raw(
                     auto_review_ms,
                 );
                 skipped_replay |= replayed;
-                // Played whether it succeeded or stopped part way: either way a replay repeats
-                // it. A call still waiting on a card has not played.
                 played.extend(
                     calls
                         .iter()
                         .zip(results.iter())
-                        .filter(|(_, result)| !result.awaiting_approval)
-                        .filter_map(|(call, _)| recipe_of(call)),
+                        .filter_map(|(call, result)| played_recipe(call, result)),
                 );
 
                 // Before the results, where the words came: the model said them, then asked.

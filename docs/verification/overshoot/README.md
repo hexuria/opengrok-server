@@ -80,8 +80,14 @@ cause.
   this request already played is answered without touching the box. The model is told it was not
   played again and why. If it asks again, the turn ends with that sentence. The recipe the
   approved call played in a resume is carried into the resumed segment, so the resume cannot
-  replay it either. Tests: `a_recipe_is_played_at_most_once_per_request`,
-  `a_resumed_run_does_not_replay_the_recipe_it_was_approved_for`, and
+  replay it either. A recipe counts as played only when the box played it: a success, or a run
+  that stopped part way (`ToolResult::stopped_part_way`). A refusal before the box (a missing
+  parameter, a recipe not granted, an unreachable box, a policy block) played nothing, so the
+  corrected call runs. Tests: `a_recipe_is_played_at_most_once_per_request`,
+  `a_resumed_run_does_not_replay_the_recipe_it_was_approved_for`,
+  `a_recipe_refused_before_the_box_still_plays_when_corrected`,
+  `a_recipe_that_stopped_part_way_is_not_played_again`,
+  `a_resumed_recipe_refused_before_the_box_may_be_asked_again`, and
   `a_second_recipe_in_the_same_request_still_plays` (a different recipe is a different task).
 - **Stop.** The Stop button is a command against the run (026903f). It is honoured at every step
   boundary and at the close (`formal/tla/HarnessLoop.tla` StopIsHonoured).
@@ -98,6 +104,10 @@ cause.
   way `docs/verification/auto-review/` does. The capture passes if the stream has exactly one
   `run_recipe` `TOOL_CALL_RESULT` that played, and no `computer` click after it that plays the
   video, skips an ad or dismisses a popup. It must not include the gateway URL or any key.
+- **Recipes played before an earlier card.** Only the approved call's recipe is carried into a
+  resumed segment. A recipe that played in a segment before a later card (a shell auto-review
+  card, say) is not, so the segment after that card could play it once more. Carrying the whole
+  set needs it from the journal, like the budgets below.
 - **Budgets that restart on resume.** A resumed segment still starts its spoken and screen budgets
   from zero. Carrying them across needs the rounds already spent from the journal. That belongs
   with the run budget work in #93.

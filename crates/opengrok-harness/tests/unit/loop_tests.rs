@@ -2726,6 +2726,141 @@ async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
+/// A `run_recipe` that refuses a call with no `values` before anything plays, the way the
+/// executor refuses a missing parameter, and plays (and counts) one that has them.
+fn binding_recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            if call.arguments.get("values").is_none() {
+                return opengrok_tools::ToolResult::refused(&call.id, "missing value for `query`");
+            }
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(&call.id, "played 4 steps; the results page is open")
+        }),
+    );
+    (runner, plays)
+}
+
+fn recipe_with_values(id: &str, recipe: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: opengrok_tools::RUN_RECIPE.to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "recipe": recipe, "values": { "query": "kabisado" } })
+                .to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+fn tool_results(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallResult)
+        .filter_map(|event| event.extra.get("content").and_then(|c| c.as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A recipe refused before the box (here a missing parameter, worded so the model can fix it)
+/// played nothing. It was counted as played, so the corrected call was answered "Not played
+/// again" and the search the person asked for never ran (#120, verifier's probe).
+#[tokio::test]
+async fn a_recipe_refused_before_the_box_still_plays_when_corrected() {
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_with_values("c2", "search-youtube"),
+        ],
+        "The results page is open.",
+    );
+    let (runner, plays) = binding_recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert!(
+        tool_results(&events)
+            .iter()
+            .all(|content| !content.starts_with("Not played again")),
+        "{:?}",
+        tool_results(&events)
+    );
+    assert_eq!(assistant_text(&events), "The results page is open.");
+}
+
+/// A recipe the box played until a step failed did play: asking for it again is a replay.
+#[tokio::test]
+async fn a_recipe_that_stopped_part_way_is_not_played_again() {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::refused(&call.id, "recipe stopped at step 2").part_way()
+        }),
+    );
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_deltas("c2", "search-youtube"),
+        ],
+        "It stopped at step 2.",
+    );
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert!(tool_results(&events)[1].starts_with("Not played again"));
+}
+
+/// The approved call of a resume that was refused before the box is not carried as played.
+#[tokio::test]
+async fn a_resumed_recipe_refused_before_the_box_may_be_asked_again() {
+    let door = Rounds::new(
+        vec![recipe_with_values("c2", "search-youtube")],
+        "The results page is open.",
+    );
+    let (runner, plays) = binding_recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "search-youtube" }),
+    };
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
 /// profile.list then profile.search: one real read, then a facts hop — not a second invoke.
 #[tokio::test]
 async fn a_second_profile_search_after_list_is_not_executed() {
