@@ -873,19 +873,25 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
         rows.iter()
-            .map(|row| {
-                let owner = RosterOwner {
-                    id: AccountId::from_stored(row.try_get::<String, _>("owner_id")?),
-                    first_name: row.try_get("owner_first")?,
-                    last_name: row.try_get("owner_last")?,
-                    // Blank is no org, as `Account` reads the same column.
-                    org_id: row
-                        .try_get::<Option<String>, _>("owner_org")?
-                        .filter(|org| !org.is_empty()),
-                };
-                Ok((coworker_view_row(row)?, owner))
-            })
+            .map(|row| Ok((coworker_view_row(row)?, roster_owner_row(row)?)))
             .collect()
+    }
+
+    /// One account as `roster_for` names an owner, for a reply about a coworker that is not on
+    /// a roster yet (the hire). The same LEFT join and the same columns, so the hire reply's
+    /// `owner` is the one the next roster read lists; a missing account row is blank names,
+    /// not an error, exactly as the roster reads it.
+    pub async fn roster_owner(&self, account_id: &AccountId) -> StoreResult<RosterOwner> {
+        let row = sqlx::query(
+            "select $1 as owner_id, coalesce(owner.first_name, '') as owner_first,
+                    coalesce(owner.last_name, '') as owner_last, owner.org_id as owner_org
+             from (select 1) as one
+             left join account_view owner on owner.id = $1",
+        )
+        .bind(account_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        roster_owner_row(&row)
     }
 
     /// This account's OWN coworkers, newest first — what management is gated on. Not the
@@ -2624,6 +2630,18 @@ pub struct RosterOwner {
     pub first_name: String,
     pub last_name: String,
     pub org_id: Option<String>,
+}
+
+fn roster_owner_row(row: &sqlx::postgres::PgRow) -> StoreResult<RosterOwner> {
+    Ok(RosterOwner {
+        id: AccountId::from_stored(row.try_get::<String, _>("owner_id")?),
+        first_name: row.try_get("owner_first")?,
+        last_name: row.try_get("owner_last")?,
+        // Blank is no org, as `Account` reads the same column.
+        org_id: row
+            .try_get::<Option<String>, _>("owner_org")?
+            .filter(|org| !org.is_empty()),
+    })
 }
 
 /// A grant row, addressed to `principal`. For a shared coworker the row is the owner's and the

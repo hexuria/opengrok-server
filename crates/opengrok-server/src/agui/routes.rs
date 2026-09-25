@@ -1198,6 +1198,13 @@ pub async fn repin_coworker(
     let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     };
+    // Read before anything is written, and a failure refuses the whole PATCH: the blob is merged
+    // into and written back whole, so an unreadable one taken as `{}` would overwrite the stored
+    // title and avatar with nothing — and even a PATCH that touches no decoration answers it.
+    let mut profile = match state.auth.store.seamb_profile(&coworker_id).await {
+        Ok(profile) => profile.unwrap_or_else(|| serde_json::json!({})),
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
     let at_ms = now_ms();
     let mut events = Vec::new();
     // One command per decision, as the aggregate defines them: renaming, repinning and describing
@@ -1251,7 +1258,14 @@ pub async fn repin_coworker(
         box_id: after.box_id.clone(),
         retired: after.retired,
         members: after.members.clone(),
-        updated_at_ms: at_ms,
+        // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
+        // projection is only rewritten with events, and a reply stamped `now` over an unchanged
+        // row would move the coworker in the sidebar until the next roster read moved it back.
+        updated_at_ms: if events.is_empty() {
+            listed.updated_at_ms
+        } else {
+            at_ms
+        },
         role: after.role.clone(),
         visibility: after.visibility,
     };
@@ -1285,17 +1299,6 @@ pub async fn repin_coworker(
             .ok()
             .is_some_and(|ids| ids.contains(coworker_id.as_str()))
     };
-    // The blob is read even when nothing in it changed, because the reply below has to be the
-    // whole post-patch truth: the app overwrites its row from what comes back, and a title left
-    // out of the answer is a title the next roster read has to go and fetch again.
-    let mut profile = state
-        .auth
-        .store
-        .seamb_profile(&coworker_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| serde_json::json!({}));
     if !decoration.is_empty() {
         crate::persona::merge_profile_text(&mut profile, &serde_json::Value::Object(decoration));
         // A 500 rather than the seam-B path's silent `let _`: this door exists because an edit
@@ -1334,6 +1337,10 @@ async fn hide_shared(
     owner: &opengrok_store::RosterOwner,
     hidden: bool,
 ) -> Response {
+    let profile = match state.auth.store.seamb_profile(&listed.id).await {
+        Ok(profile) => profile,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
     if state
         .auth
         .store
@@ -1343,10 +1350,6 @@ async fn hide_shared(
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
     }
-    let profile = match state.auth.store.seamb_profile(&listed.id).await {
-        Ok(profile) => profile,
-        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    };
     Json(coworker_row(
         listed,
         profile.as_ref(),
@@ -1357,15 +1360,23 @@ async fn hide_shared(
     .into_response()
 }
 
-/// One coworker, as every route that answers with one spells it — the roster and the PATCH reply.
+/// One coworker, as every route that answers with one spells it — the roster, the hire reply
+/// (which adds `computerError` and `templateNote`) and the PATCH reply.
 ///
 /// camelCase throughout, because that is what the app's `Coworker` deserialises: a snake_case
 /// key is a field it silently reads as absent, which is how #27 lost a whole reply, and how the
 /// roster (which serialized the core `CoworkerView` as-is) lost the sort key, the title and the
-/// avatar on every relaunch. `title`, `avatarShape`, `avatarColor`, `isGroup` and `memberIds` are
-/// the desktop roster's names (`docs/research/client-grok-bot.md` §8.1, from
-/// `source/host/extensions/session/session-summaries.ts:13-16`); `updatedAtMs` and `boxId` are
-/// the spellings the hire and PATCH replies already answer with.
+/// avatar on every relaunch.
+///
+/// Provenance, key by key, because no NativeChat source is in this checkout and the struct that
+/// decodes this row is its `Coworker`: `title`, `avatarShape`, `avatarColor`, `isGroup` and
+/// `memberIds` are the Electron host's roster names (`docs/research/client-grok-bot.md` §8.1,
+/// transcribed from `source/host/extensions/session/session-summaries.ts:13-16`). §8.1 spells
+/// the sort key `updatedAt` and the hide flag `isHiddenFromSidebar`; this row keeps
+/// `updatedAtMs`, `hiddenFromSidebar` and `boxId`, the spellings the hire and PATCH replies
+/// already answered NativeChat with before this row existed, so renaming one to match §8.1
+/// would break the client that reads it today. The permission keys are server precedent (below).
+/// Checking these against NativeChat's `Coworker` is the client's half.
 ///
 /// Every key is always present, null when unset: a key that is sometimes missing is a shape the
 /// app has to guess about. `retired` is not a key because a retired coworker is never a row.
@@ -1504,6 +1515,14 @@ pub async fn hire(
 ) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+
+    // The hirer as the roster will name them, read BEFORE anything is written: the reply is a
+    // roster row, and a read failing after the hire committed could only answer 503 over a
+    // coworker that exists — which a client retries into a second hire.
+    let owner = match state.auth.store.roster_owner(&account_id).await {
+        Ok(owner) => owner,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
 
     let coworker_id = CoworkerId::new();
@@ -1656,19 +1675,20 @@ pub async fn hire(
             .into_response();
     }
 
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": coworker_id.as_str(),
-            "name": view.name,
-            "model": view.model,
-            "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": provision::error_json_at(&computer_error),
-            // A sentence when something the template promised did not land; null otherwise.
-            "templateNote": template_note,
-        })),
-    )
-        .into_response()
+    // The roster's row, so a hired coworker does not change shape the first time the app
+    // relaunches onto `GET /coworkers`; the two keys only a hire can answer ride on top of it.
+    // Not hidden: nobody can have hidden an id minted a moment ago.
+    let profile = template.as_ref().and_then(crate::templates::hire_profile);
+    let mut row = coworker_row(&view, profile.as_ref(), false, &owner, &account_id);
+    if let Some(row) = row.as_object_mut() {
+        row.insert(
+            "computerError".to_string(),
+            provision::error_json_at(&computer_error),
+        );
+        // A sentence when something the template promised did not land; null otherwise.
+        row.insert("templateNote".to_string(), serde_json::json!(template_note));
+    }
+    (StatusCode::CREATED, Json(row)).into_response()
 }
 
 #[derive(Debug, Deserialize)]
