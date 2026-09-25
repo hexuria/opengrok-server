@@ -105,7 +105,7 @@ pub struct ModelRequest {
     pub spend_actor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -113,6 +113,17 @@ pub struct ChatMessage {
     /// must see to act on it. Sent to the door as image parts; empty for a message of words only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImagePart>,
+}
+
+impl ChatMessage {
+    /// Words from `role`, and nothing else.
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            ..Self::default()
+        }
+    }
 }
 
 /// One image in a message, base64 with its media type — what an `image_url` data URL needs.
