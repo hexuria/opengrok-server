@@ -13,8 +13,8 @@
 //!   plain `shellArgs` is undescribable and refused before the ask dialog):
 //!   `{ "id": <u32>, "shellStreamArgs": ShellArgs }`. There is NO `execId` field — the request is
 //!   correlated by the ENVELOPE `requestId`, not anything inside the message.
-//!   `ShellArgs` carries `command` (the readable command), `simpleCommands` (the app's OWN parse —
-//!   the gate already matched against THIS list, never a re-parse here), `workingDirectory`,
+//!   `ShellArgs` carries `command` (the readable command), `simpleCommands` (the server's own split
+//!   of that command, `local_exec::simple_commands` — never a caller's list), `workingDirectory`,
 //!   `timeout`, `toolCallId`, and `skipApproval` — which the server ALWAYS sets to `false`: a
 //!   caller does not get to wave a command past the gate.
 //! - **daemon→server** result: the STREAMING shell sends a series of `ExecClientMessage`s carrying
@@ -30,8 +30,8 @@ use super::broker::ExecOutcome;
 
 /// Build the `serverMessage` for one shell command destined for the user's machine. `exec_id` is
 /// the request id we correlate the result by; it doubles as `toolCallId`. `simple_commands` is the
-/// app's pre-parsed command list the gate judged — passed through verbatim so the daemon's own
-/// allowlisting sees exactly what we judged.
+/// server's own split of the line the gate read, so the daemon's own allowlisting sees the same
+/// simple commands, not the unsplit string.
 pub fn shell_server_message(
     exec_id: &str,
     command: &str,

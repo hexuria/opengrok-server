@@ -12,6 +12,7 @@
 //! `Bypass`. See `docs/archive/reverse-exec-design.md`.
 
 pub mod broker;
+mod shell;
 mod wire;
 pub use broker::LocalExecBroker;
 
@@ -63,11 +64,10 @@ impl LocalExecDecision {
     }
 }
 
-/// Does `pattern` match `command`? Prefix match on a WORD BOUNDARY — `pattern` matches `command`
-/// when they are equal or `command` begins with `pattern` followed by a space. So `git status`
-/// matches `git status --short` but not `git statusx`, and a broad `git` matches `git anything`.
-/// Both sides are whitespace-trimmed first. Deliberately simple and conservative: a rule can only
-/// widen to whole extra arguments, never to a different command that merely shares a prefix.
+/// The raw-text prefix match the gate used before it read shell syntax: equal, or `pattern` plus a
+/// space. Kept ONLY as a second way for a deny rule to match, so reading the line more closely can
+/// never make a stored deny (`curl x | sh`) refuse less than it did. Never used for allow: on the
+/// raw line it allowed `ls; rm -rf ~` under a rule of `ls` (#204).
 fn matches(pattern: &str, command: &str) -> bool {
     let pattern = pattern.trim();
     let command = command.trim();
@@ -79,7 +79,7 @@ fn matches(pattern: &str, command: &str) -> bool {
 
 /// The first word of a command pattern, after a path prefix (`/usr/bin/sudo`,
 /// `C:\Windows\System32\sudo.exe`). Used only to decide whether a standing
-/// allow is forbidden; matching at run time is still `matches` above.
+/// allow is forbidden; matching at run time is `decide`.
 fn first_command(pattern: &str) -> &str {
     let token = pattern.split_whitespace().next().unwrap_or("");
     token.rsplit(['/', '\\']).next().unwrap_or(token)
@@ -88,7 +88,9 @@ fn first_command(pattern: &str) -> &str {
 /// Whether this standing rule may be persisted. Deny is never refused here —
 /// remembering "never run sudo" is a safety net. Allow of `sudo` (and
 /// `sudo.exe`, any path, any arguments) is refused, because a standing allow
-/// on `sudo` would silently cover `sudo rm -rf /`.
+/// on `sudo` would silently cover `sudo rm -rf /`. So is an allow that is not
+/// one plain command (`cd src && cargo test`): the gate would never match it,
+/// and storing it inert hides that from the person who asked for it (#203).
 ///
 /// The one writer of standing rules is `POST /local-exec/policy/rule`. The
 /// AG-UI card's answer is only `approved: bool` (`agui::routes::AnswerRequest`)
@@ -102,6 +104,12 @@ pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> 
     let command = first_command(pattern);
     if command.eq_ignore_ascii_case("sudo") || command.eq_ignore_ascii_case("sudo.exe") {
         Some("sudo cannot be a standing allow")
+    } else if shell::read(pattern).plain.is_none() {
+        Some(
+            "an allow rule must be one plain command: no ; && || | & or newline, no $( ) or \
+             backticks, no redirection to a path, no VAR= in front, and not a program that runs \
+             another (sh, eval, env, sudo, xargs…)",
+        )
     } else {
         None
     }
@@ -112,8 +120,9 @@ pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> 
 ///
 /// - `Never` (default): deny, always.
 /// - `Bypass`: allow (the lists are skipped by the user's deliberate choice; still audited).
-/// - `Ask`: a denylist match denies (deny wins), else an allowlist *or session
-///   allow* match allows, else ask.
+/// - `Ask`: a deny rule matching ANY simple command in the line denies (deny wins); else an
+///   allow or session-allow rule covering the line allows, and only a line that is ONE plain
+///   simple command can be covered; else ask. See `shell` for how the line is read.
 pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     match policy.mode {
         LocalExecMode::Never => LocalExecDecision::Deny(
@@ -121,14 +130,24 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
         ),
         LocalExecMode::Bypass => LocalExecDecision::Allow,
         LocalExecMode::Ask => {
-            if policy.deny.iter().any(|pattern| matches(pattern, command)) {
-                LocalExecDecision::Deny("a deny rule matched this command".to_string())
-            } else if policy
-                .allow
-                .iter()
-                .chain(policy.session_allow.iter())
-                .any(|pattern| matches(pattern, command))
-            {
+            let programs = shell::programs(command);
+            let denied = policy.deny.iter().find(|pattern| {
+                matches(pattern, command) || shell::denies(pattern, &programs)
+            });
+            let allowed = || match shell::read(command).plain {
+                Some(words) => policy
+                    .allow
+                    .iter()
+                    .chain(policy.session_allow.iter())
+                    .any(|pattern| shell::allows(pattern, &words)),
+                None => false,
+            };
+            if let Some(pattern) = denied {
+                LocalExecDecision::Deny(format!(
+                    "a deny rule matched this command: `{}`",
+                    pattern.trim()
+                ))
+            } else if allowed() {
                 LocalExecDecision::Allow
             } else {
                 LocalExecDecision::Ask
@@ -137,15 +156,10 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     }
 }
 
-/// Postgres btree keys blow up past roughly 2,700 bytes, and the insert is
-/// discarded (`let _ =`). Long or chained commands belong in the session list.
-pub const STANDING_ALLOW_MAX_BYTES: usize = 1800;
-
-pub fn prefer_session_allow(command: &str) -> bool {
-    command.len() > STANDING_ALLOW_MAX_BYTES
-        || command.contains(" && ")
-        || command.contains(" || ")
-        || command.contains(" | ")
+/// The simple commands in `line`, as written, for the daemon's `simpleCommands`: the server's own
+/// split, so the list a machine's local approval sees is the line the gate read (#203).
+pub fn simple_commands(line: &str) -> Vec<String> {
+    shell::read(line).simple_commands
 }
 
 impl LocalExecMode {
@@ -599,7 +613,6 @@ pub async fn enqueue_and_wait(
     account_id: &str,
     machine_id: &str,
     command: &str,
-    simple_commands: &[String],
     origin: Origin,
     approval_id: &str,
     pre_approved: bool,
@@ -652,15 +665,7 @@ pub async fn enqueue_and_wait(
                 "allow"
             };
             audit(word).await;
-            run_on_machine(
-                state,
-                machine_id,
-                &request_id,
-                approval_id,
-                command,
-                simple_commands,
-            )
-            .await
+            run_on_machine(state, machine_id, &request_id, approval_id, command).await
         }
     }
 }
@@ -709,12 +714,13 @@ async fn run_on_machine(
     request_id: &str,
     approval_id: &str,
     command: &str,
-    simple_commands: &[String],
 ) -> EnqueueResult {
+    // The daemon's `simpleCommands` is the server's own split, never a caller's: the list the
+    // machine's local approval sees must be the one the gate read (#203).
     let server_message = user_machine_shell_message(
         request_id,
         command,
-        simple_commands,
+        &simple_commands(command),
         EXEC_TIMEOUT.as_millis() as u64,
     );
     let rx = match state
@@ -751,11 +757,8 @@ async fn run_on_machine(
 #[serde(rename_all = "camelCase")]
 struct RunBody {
     machine_id: String,
+    /// A caller's `simpleCommands` is not read: the daemon is sent the server's own split.
     command: String,
-    /// The app's own parse of `command`, if the caller has one. Absent ⇒ the whole command as a
-    /// single simple command — the gate still matches on the readable string either way.
-    #[serde(default)]
-    simple_commands: Vec<String>,
 }
 
 /// `POST /local-exec/run` — the user runs a command on their OWN machine from another device. The
@@ -773,18 +776,12 @@ async fn run_direct(
     if command.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "command is required").into_response();
     }
-    let simple = if body.simple_commands.is_empty() {
-        vec![command.to_string()]
-    } else {
-        body.simple_commands
-    };
     let approval_id = uuid::Uuid::now_v7().to_string();
     match enqueue_and_wait(
         &state,
         account_id.as_str(),
         &body.machine_id,
         command,
-        &simple,
         Origin::User,
         &approval_id,
         false,
@@ -1035,7 +1032,6 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
             account_id.as_str(),
             &self.machine_id,
             command,
-            &[command.to_string()],
             Origin::Bot(self.coworker_id.clone()),
             call_id,
             approved,
@@ -1141,16 +1137,6 @@ mod tests {
         assert!(matches!(
             decide(&denied, "git status"),
             LocalExecDecision::Deny(_)
-        ));
-    }
-
-    #[test]
-    fn long_or_chained_commands_prefer_the_session_list() {
-        assert!(!prefer_session_allow("uname"));
-        assert!(prefer_session_allow("cd src && cargo test"));
-        assert!(prefer_session_allow("git log | head"));
-        assert!(prefer_session_allow(
-            &"x".repeat(STANDING_ALLOW_MAX_BYTES + 1)
         ));
     }
 
