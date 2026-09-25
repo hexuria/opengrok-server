@@ -188,6 +188,9 @@ create table if not exists secret_store (
     ciphertext    bytea  not null,
     updated_at_ms bigint not null
 );
+-- Which OG_CREDENTIAL_KEK sealed the row (a hash of the key, never the key). Null on rows sealed
+-- before it existed: those are tried under every key held, and `opengrok vault reseal` fills it.
+alter table secret_store add column if not exists key_id text;
 
 -- Who may make which coworker do what. A row here is permission; its absence is refusal, which is
 -- why nothing in the schema grants by default and why `policy_for` returns an empty context rather

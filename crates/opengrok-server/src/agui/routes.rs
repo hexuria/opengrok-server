@@ -55,8 +55,8 @@ pub struct AgUiState {
     /// call per reviewed tool call must be cheap, the reviewer must not be the reviewed, and a
     /// coworker-route outage must not become a wall of cards. `OG_AUTO_REVIEW_MODEL`.
     pub auto_review_model: String,
-    /// Seals connector credentials. `None` means no connector can be stored, which is a legitimate
-    /// deployment — and must read as "connectors unavailable" rather than as a crash.
+    /// Seals every credential: connector tokens, org computer keys, coworker gateway keys, saved
+    /// site logins. `None` is a legitimate deployment that stores none, not a crash.
     pub vault: Option<Arc<opengrok_store::Vault>>,
     /// Provider configuration and the callback URL.
     pub connectors: crate::connections::routes::Connectors,
@@ -666,11 +666,14 @@ async fn live_token(
     vault: &opengrok_store::Vault,
     chosen: &opengrok_core::connection::ConnectionView,
 ) -> Option<String> {
+    // Logged, not swallowed: a token sealed under a lost key used to read as "not connected", and
+    // the plugin that needed it just quietly went missing.
     let stored = state
         .auth
         .store
         .open_credential(vault, &chosen.id)
         .await
+        .inspect_err(|error| tracing::error!(%error, connection = %chosen.id, "a connection's token will not open"))
         .ok()
         .flatten();
 
