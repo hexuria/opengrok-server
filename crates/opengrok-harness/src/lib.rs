@@ -312,16 +312,19 @@ fn answered_here(
 
 /// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`), on either shell.
 /// A host probe such as `gpui-agent hello` is not one: it must not consume the
-/// single listing this turn is allowed to run.
+/// single listing this turn is allowed to run. Neither is another program's `invoke x.list`:
+/// the one-listing rule was measured on the BIR host's binary, and anywhere else the second
+/// read is the work (#183).
 fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
     matches!(
         call.name.as_str(),
         "shell" | opengrok_tools::USER_MACHINE_SHELL
-    ) && {
-        let command = shell_command(&call.arguments).to_ascii_lowercase();
-        let trimmed = command.trim();
-        !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
-    }
+    ) && names_the_catalog(call)
+        && {
+            let command = shell_command(&call.arguments).to_ascii_lowercase();
+            let trimmed = command.trim();
+            !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
+        }
 }
 
 /// What makes two failures the same one: a shell's invoke name or whole command, and for any
@@ -1042,6 +1045,9 @@ async fn converse_raw(
     // What the last failed command was, by `intent::shell_action_key`. A non-zero exit adds to
     // the streak only when it repeats the command that failed last time.
     let mut last_failed_key: Option<String> = None;
+    // The calls that succeeded last round, by `failure_key`. Running one of them again is not
+    // progress: a read repeated beside the same failing test changes nothing the test sees.
+    let mut last_ok_keys: HashSet<String> = HashSet::new();
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
     // This run called the BIR host's catalog, so its final answer keeps the demo's filter.
@@ -1331,6 +1337,12 @@ async fn converse_raw(
                 emit_live(sink, &waking).await;
                 round_events.extend(waking);
                 let skip_listing = had_successful_listing && listing_only;
+                // Read before `played` takes this round's recipes, or every recipe that just
+                // played would look like one the loop answered itself.
+                let loop_answered: Vec<bool> = calls
+                    .iter()
+                    .map(|call| skip_listing || answered_here(call, &played).is_some())
+                    .collect();
                 let tool_started = std::time::Instant::now();
                 let ((results, per_tool), auto_review_ms) = if skip_listing {
                     skipped_redundant_listing = true;
@@ -1471,6 +1483,24 @@ async fn converse_raw(
                         && result.ok
                         && !intent::counts_as_work_failure(true, &result.content)
                 });
+                // Work that moved this round: a call the loop really ran, that succeeded, and
+                // that is not last round's success again. A synthetic answer ("already
+                // listed", "not played again") ran nothing and moves nothing.
+                let ok_keys: HashSet<String> = calls
+                    .iter()
+                    .zip(results.iter())
+                    .zip(loop_answered.iter())
+                    .filter(|((call, result), answered)| {
+                        !**answered
+                            && !is_client_render_tool(&call.name)
+                            && result.ok
+                            && !result.awaiting_approval
+                            && !intent::counts_as_work_failure(true, &result.content)
+                    })
+                    .map(|((call, _), _)| failure_key(call))
+                    .collect();
+                let progressed = ok_keys.iter().any(|key| !last_ok_keys.contains(key));
+                last_ok_keys = ok_keys;
                 if work_failed {
                     // A missing catalog binary is not fixed by rewording the same command.
                     // Stop this round. A home-directory find is refused once so the model can
@@ -1497,9 +1527,15 @@ async fn converse_raw(
                     // with no match, then a failing test run, is two outcomes of ordinary work,
                     // not a retry diary — and ending the turn on the second one showed the
                     // person the first line of the test output as the answer (#183).
-                    let repeated_or_refused = failed.iter().any(|(call, result)| {
-                        !result.ok || repeats_last_failure(call, last_failed_key.as_deref())
-                    });
+                    //
+                    // Neither counts when the same round also moved: an edit, then the test
+                    // that still fails, is the fix-then-test loop. Counting it ended a coding
+                    // coworker's turn on "test result: FAILED" one edit before the pass. What
+                    // bounds that loop is the run's budget, which ends in the model's words.
+                    let repeated_or_refused = !progressed
+                        && failed.iter().any(|(call, result)| {
+                            !result.ok || repeats_last_failure(call, last_failed_key.as_deref())
+                        });
                     if failed
                         .iter()
                         .any(|(call, result)| is_missing_catalog_binary(call, &result.content))

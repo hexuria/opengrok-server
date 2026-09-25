@@ -401,8 +401,11 @@ pub fn counts_as_work_failure(ok: bool, content: &str) -> bool {
         return true;
     }
     match shell_exit_code(content) {
-        Some(code) if code != 0 => true,
-        _ => is_unrecoverable_command_miss(content),
+        // An exit the shell reported is the verdict. `cat build.log` that exits 0 printed a
+        // log's "command not found", and nothing failed; counting it put "That call failed"
+        // under a successful read.
+        Some(code) => code != 0,
+        None => is_unrecoverable_command_miss(content),
     }
 }
 
@@ -420,9 +423,12 @@ pub fn short_failure_fact(content: &str) -> String {
                 .find(|line| !line.is_empty() && !line.starts_with("[harness]"))
         })
         .unwrap_or("the tool failed");
+    // An ellipsis is not a sentence end: `test parse_empty ... FAILED` cut at its first ". "
+    // showed the person "test parse_empty .." as the whole answer.
     let sentence = line
-        .split_once(". ")
-        .map(|(head, _)| head.trim())
+        .match_indices(". ")
+        .find(|(at, _)| !line[..*at].ends_with('.'))
+        .map(|(at, _)| line[..at].trim())
         .filter(|head| !head.is_empty())
         .unwrap_or(line);
     let mut fact = sentence.to_string();
@@ -619,6 +625,10 @@ mod tests {
         );
         assert_eq!(fact, "connection refused on 17421");
         assert!(short_failure_fact("").contains("failed"));
+        assert_eq!(
+            short_failure_fact("test parse_empty ... FAILED\ntest result: FAILED. 1 failed"),
+            "test parse_empty ... FAILED"
+        );
     }
 
     #[test]
@@ -645,6 +655,14 @@ mod tests {
             "listed 3 profiles\n[exit code 0]"
         ));
         assert!(!counts_as_work_failure(true, "listed 3 profiles"));
+        assert!(!counts_as_work_failure(
+            true,
+            "exit 0\n--- stdout ---\nstep 4: bash: rustup: command not found"
+        ));
+        assert!(!counts_as_work_failure(
+            true,
+            "step 4: bash: rustup: command not found\n[exit code 0]"
+        ));
     }
 
     #[test]

@@ -2468,6 +2468,39 @@ async fn ls_then_cat_reads_the_file() {
     assert!(assistant_text(&events).contains("README says hello"));
 }
 
+/// Another program's `invoke x.list` is not the BIR catalog: its second read runs. The
+/// one-listing rule matched any `invoke <name>.list` on the box shell before it was scoped to
+/// the binary it was measured on.
+#[tokio::test]
+async fn another_programs_invoke_list_is_not_the_one_catalog_listing() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "todo invoke items.list"),
+            shell_deltas("c2", "todo invoke items.get --id 3"),
+        ],
+        "Item 3 is due Friday.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("todo invoke items.list", "1 2 3\n[exit code 0]"),
+        ("todo invoke items.get --id 3", "due friday\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("when is item 3 due?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap().as_slice(),
+        ["todo invoke items.list", "todo invoke items.get --id 3"]
+    );
+    assert!(assistant_text(&events).contains("due Friday"), "{events:?}");
+}
+
 /// A grep with no match (exit 1) and a failing test run (exit 101) are two different
 /// outcomes of ordinary work, not two failed retries. The turn used to end on the second
 /// with the first line of the test output as the answer.
@@ -2664,6 +2697,132 @@ async fn the_same_command_failing_twice_still_ends_the_turn() {
         assistant_text(&events).contains("No rule to make target"),
         "{events:?}"
     );
+}
+
+fn write_deltas(id: &str, path: &str, content: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: "write_file".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "path": path, "content": content }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A box with `write_file` and a `shell` whose `cargo test` fails until its `passes_on`-th run.
+fn fix_then_test_runner(passes_on: usize) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+    let shell_ran = ran.clone();
+    let write_ran = ran.clone();
+    let runner = ToolRunner::local_only()
+        .with_local(
+            serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+            Arc::new(move |call| {
+                let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+                let runs = {
+                    let mut ran = shell_ran.lock().unwrap();
+                    ran.push(command.clone());
+                    ran.iter().filter(|asked| **asked == command).count()
+                };
+                let body = match command.as_str() {
+                    "cargo test" if runs < passes_on => {
+                        "test parse_empty ... FAILED\ntest result: FAILED. 1 failed\n[exit code 101]"
+                    }
+                    "cargo test" => "test result: ok. 3 passed",
+                    _ => "pub fn parse() {}",
+                };
+                opengrok_tools::ToolResult::ok(&call.id, body)
+            }),
+        )
+        .with_local(
+            serde_json::json!({ "type": "function", "function": { "name": "write_file" } }),
+            Arc::new(move |call| {
+                let path = call.arguments["path"].as_str().unwrap_or("").to_string();
+                write_ran.lock().unwrap().push(format!("write {path}"));
+                opengrok_tools::ToolResult::ok(&call.id, format!("wrote {path}"))
+            }),
+        );
+    (runner, ran)
+}
+
+/// The verifier's probe for #183: each round edits the file and runs the test again. The same
+/// failing `cargo test` after an edit is the fix-then-test loop, not a retry, so the turn
+/// reaches the third run (the one that passes) and ends in the model's words.
+#[tokio::test]
+async fn an_edit_between_two_failing_test_runs_does_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            [
+                write_deltas("w1", "src/lib.rs", "fn parse() { todo!() }"),
+                shell_deltas("c1", "cargo test"),
+            ]
+            .concat(),
+            [
+                write_deltas("w2", "src/lib.rs", "fn parse() { if line.is_empty() {} }"),
+                shell_deltas("c2", "cargo test"),
+            ]
+            .concat(),
+            shell_deltas("c3", "cargo test"),
+        ],
+        "Fixed: parse now accepts an empty line, and all three tests pass.",
+    );
+    let (runner, ran) = fix_then_test_runner(3);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("make the tests pass"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = ran.lock().unwrap().clone();
+    assert_eq!(
+        ran.iter()
+            .filter(|command| *command == "cargo test")
+            .count(),
+        3,
+        "{ran:?}"
+    );
+    assert_eq!(door.calls(), 4);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let text = assistant_text(&events);
+    assert!(text.contains("all three tests pass"), "{text:?}");
+    assert!(!text.contains("test result: FAILED"), "{text:?}");
+}
+
+/// Progress is new work, not the same success again: reading the same file beside the same
+/// failing test changes nothing the test sees, so the second identical round still ends the
+/// turn on the failure.
+#[tokio::test]
+async fn the_same_read_beside_the_same_failing_test_still_ends_the_turn() {
+    let round = |n: u8| {
+        [
+            shell_deltas(&format!("r{n}"), "cat src/lib.rs"),
+            shell_deltas(&format!("c{n}"), "cargo test"),
+        ]
+        .concat()
+    };
+    let door = Rounds::new(vec![round(1), round(2), round(3)], "unreachable");
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("make the tests pass"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "test parse_empty ... FAILED");
 }
 
 fn recipe_deltas(id: &str, recipe: &str) -> Vec<ModelDelta> {
