@@ -331,6 +331,10 @@ create table if not exists monitor_firing (
     run_id     text not null,
     primary key (monitor_id, run_id)
 );
+-- When the firing was recorded, so the in-flight cap can count a run that was fired but has not
+-- journaled its first frame yet — without counting forever one that never will. NULL on rows
+-- written before the cap existed, which the cap reads as "long since settled".
+alter table monitor_firing add column if not exists fired_at_ms bigint;
 
 -- Where the monitor sweep has read to in `events`. One row; advanced under a row lock so two
 -- replicas never process the same span. Seeded at the log's current end on first use — a new

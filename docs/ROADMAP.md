@@ -45,7 +45,11 @@ POST. This slice makes the server start runs itself.
 - [x] **6a.4** Endpoints: `POST/GET /schedules`, pause/resume, delete — ownership as 404, same as
   runs. *(this commit)*
 - [x] **6b.1** `monitor` aggregate + projection: an event-type matcher over our own `events` table,
-  cursor-driven, no new infra. *(this commit)*
+  cursor-driven, no new infra. *(this commit)* **Scoped to its owner since #179:** the log is every
+  tenant's, so an event fires a monitor only when its stream resolves to the monitor's account
+  (`PgStore::stream_owner` carries the prefix table; an org's or unowned stream matches nobody).
+  `watches` is checked against `opengrok_core::monitor::WATCHABLE` (422 otherwise), and a monitor
+  has at most `autonomy::MAX_RUNS_IN_FLIGHT` runs working at once. `tests/against_monitors.rs`.
 - [x] **6b.2** The loop guard: fired runs are stamped with their monitor, and a monitor never
   matches events from its own firings. *(this commit)*
 - [x] **6b.3** Endpoints: `/monitors`, same shape as `/schedules`. *(this commit)*

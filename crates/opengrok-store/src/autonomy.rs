@@ -11,6 +11,7 @@
 
 use opengrok_core::id::{AccountId, CoworkerId, MonitorId, RunId, ScheduleId};
 use opengrok_core::monitor::{Monitor, MonitorEvent, MonitorView};
+use opengrok_core::run::RunStatus;
 use opengrok_core::schedule::{Schedule, ScheduleEvent, ScheduleView, WakeKind, next_fire_ms};
 use sqlx::Row;
 
@@ -353,13 +354,15 @@ impl PgStore {
             // The loop guard's memory, written with the event that creates the fact. If the
             // firing is recorded at all, the exclusion exists — there is no window in which a
             // monitor could see its own run.
-            if let MonitorEvent::Fired { run_id, .. } = event {
+            if let MonitorEvent::Fired { run_id, at_ms, .. } = event {
                 sqlx::query(
-                    "insert into monitor_firing (monitor_id, run_id) values ($1, $2)
+                    "insert into monitor_firing (monitor_id, run_id, fired_at_ms)
+                     values ($1, $2, $3)
                      on conflict do nothing",
                 )
                 .bind(id.as_str())
                 .bind(run_id.as_str())
+                .bind(at_ms)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -532,5 +535,88 @@ impl PgStore {
         .fetch_optional(self.pool())
         .await?;
         Ok(row.is_some())
+    }
+
+    /// The one account a log stream belongs to, or `None` when no single account does.
+    ///
+    /// THE EVENTS TABLE HAS NO OWNER COLUMN — every tenant appends to one log — so a monitor can
+    /// only be scoped by resolving the stream id it matched. The published table:
+    ///
+    /// | stream              | owner                                                            |
+    /// |---------------------|------------------------------------------------------------------|
+    /// | `account/{id}`      | the id itself                                                    |
+    /// | `run/{id}`          | `run_view.account_id` — who started the run, even on a shared coworker; NULL is nobody |
+    /// | `coworker/{id}`     | `coworker_view.account_id` — who hired it                        |
+    /// | `schedule/{id}`     | `schedule_view.account_id`                                       |
+    /// | `monitor/{id}`      | `monitor_view.account_id`                                        |
+    /// | `connection/{id}`   | scope `user`: that account; scope `bot`: the account that hired that coworker; `global`: nobody |
+    /// | `org/{id}`, other   | nobody                                                           |
+    ///
+    /// `None` MATCHES NOBODY. A stream whose owner cannot be named — an org's, an unowned run, a
+    /// prefix written by code this table has not heard of — must not fire every monitor that
+    /// watches its type; failing closed costs a missed firing, failing open cost another tenant's
+    /// stream id in somebody's prompt (#179).
+    pub async fn stream_owner(&self, stream_id: &str) -> StoreResult<Option<AccountId>> {
+        let Some((kind, id)) = stream_id.split_once('/') else {
+            return Ok(None);
+        };
+        let sql = match kind {
+            "account" => return Ok((!id.is_empty()).then(|| AccountId::from_stored(id))),
+            "run" => "select account_id from run_view where id = $1",
+            "coworker" => "select account_id from coworker_view where id = $1",
+            "schedule" => "select account_id from schedule_view where id = $1",
+            "monitor" => "select account_id from monitor_view where id = $1",
+            "connection" => {
+                "select case c.scope
+                          when 'user' then c.owner_id
+                          when 'bot' then (select w.account_id from coworker_view w
+                                           where w.id = c.owner_id)
+                        end as account_id
+                 from connection_view c where c.id = $1"
+            }
+            _ => return Ok(None),
+        };
+        let row = sqlx::query(sql)
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("account_id"))
+            .transpose()?
+            .flatten()
+            .map(AccountId::from_stored))
+    }
+
+    /// How many of this monitor's firings are still working: a run it fired that has not ended,
+    /// or a firing recorded since `pending_since_ms` whose run has not journaled its first frame.
+    ///
+    /// THE SECOND HALF IS WHY THIS IS NOT `unfinished_runs_in_thread`. A firing is recorded, then
+    /// spawned, and the run only reaches `run_view` once the coworker's computer has woken and the
+    /// first frame is written — seconds, or a minute and a half. A burst of matches in one span
+    /// would all read zero in between and all fire. Bounded by `pending_since_ms` because a firing
+    /// the policy refused, or one a crash cut short, never journals at all, and counting those
+    /// forever would jam the monitor shut for good.
+    pub async fn monitor_runs_in_flight(
+        &self,
+        monitor: &MonitorId,
+        pending_since_ms: i64,
+    ) -> StoreResult<i64> {
+        let ended: Vec<&str> = [RunStatus::Finished, RunStatus::Failed, RunStatus::Stopped]
+            .iter()
+            .map(RunStatus::as_str)
+            .collect();
+        let row = sqlx::query(
+            "select count(*) as n from monitor_firing f
+             left join run_view r on r.id = f.run_id
+             where f.monitor_id = $1
+               and case when r.id is null then f.fired_at_ms > $3
+                        else not (r.status = any($2)) end",
+        )
+        .bind(monitor.as_str())
+        .bind(&ended)
+        .bind(pending_since_ms)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(row.try_get("n")?)
     }
 }

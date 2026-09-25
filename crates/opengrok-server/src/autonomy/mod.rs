@@ -27,6 +27,14 @@ pub(crate) struct Announce {
     pub name: String,
 }
 
+/// How many runs one routine or one monitor may have in flight before another wake is refused.
+///
+/// Three is "a burst is fine, a stampede is not". A webhook is pressed by whoever holds its key; a
+/// monitor is pressed by its owner's own log, where one bad deploy can write a hundred
+/// `run-failed` in a span — and every press is a run that is billed and holds a recovery lease.
+/// The clock sweep caps itself the same way one level up (`sweep::CLAIM_LIMIT`).
+pub const MAX_RUNS_IN_FLIGHT: i64 = 3;
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }

@@ -28,21 +28,12 @@ use subtle::ConstantTimeEq;
 use opengrok_core::id::{HookId, RunId};
 use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
+use crate::autonomy::MAX_RUNS_IN_FLIGHT;
 use crate::autonomy::routes::mutate_schedule;
 use crate::host_state::HostState;
 
 /// Largest JSON body we will attach to a wake. A webhook is a ping-or-payload, not a file drop.
 const MAX_BODY_BYTES: usize = 64 * 1024;
-
-/// How many runs one routine may have in flight before an inbound POST is refused.
-///
-/// A HOOK CAN BE PRESSED AS FAST AS WHOEVER HOLDS THE KEY LIKES — a retry loop at the other end,
-/// a SaaS app redelivering, a shell loop — and every press starts a run that is billed and holds
-/// a recovery lease. Three is "a burst is fine, a stampede is not"; the clock sweep caps itself
-/// the same way one level up (`autonomy::sweep::CLAIM_LIMIT`). The count is a brake and not a
-/// lock: two POSTs in the same millisecond can both read the same number, which is fine, because
-/// what this exists to stop is the thousandth press and not the fourth.
-const MAX_RUNS_IN_FLIGHT: i64 = 3;
 
 pub fn router(state: HostState) -> Router {
     Router::new()
@@ -220,6 +211,11 @@ async fn inbound(
 
     // Counted only once the key is known good: how much work a routine has in flight is not
     // something an unauthenticated caller may learn by watching for a 429.
+    //
+    // A HOOK CAN BE PRESSED AS FAST AS WHOEVER HOLDS THE KEY LIKES — a retry loop at the other
+    // end, a SaaS app redelivering, a shell loop. The count is a brake and not a lock: two POSTs
+    // in the same millisecond can both read the same number, which is fine, because what this
+    // exists to stop is the thousandth press and not the fourth.
     match state
         .agui
         .auth
