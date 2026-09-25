@@ -1175,7 +1175,12 @@ async fn converse_raw(
             while let Some(delta) = budget.next(&mut stream).await {
                 match delta {
                     Ok(delta) => {
-                        any_delta = true;
+                        // Whitespace is not something produced: a reply of "\n\n" finished
+                        // RUN_FINISHED with an empty bubble, the empty success of CLAUDE.md
+                        // fact 3, instead of saying the model returned no text.
+                        if !matches!(&delta, ModelDelta::Text(text) if text.trim().is_empty()) {
+                            any_delta = true;
+                        }
                         if let ModelDelta::ToolCallStart { name, .. } = &delta {
                             started_a_tool = true;
                             round_tool = true;

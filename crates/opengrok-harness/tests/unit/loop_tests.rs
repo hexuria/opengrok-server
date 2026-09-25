@@ -95,6 +95,34 @@ async fn a_mock_run_is_a_well_formed_agui_run() {
     assert!(text.contains("hello"), "{text}");
 }
 
+/// A reply of nothing but whitespace is not a reply. With or without a computer, it used to end
+/// RUN_FINISHED with an empty bubble: the empty success (CLAUDE.md, three facts №3).
+#[tokio::test]
+async fn a_reply_of_only_whitespace_ends_as_an_error_that_says_so() {
+    for tools in [None, Some(tool_runner())] {
+        let door = MockDoor::with_script(vec![
+            ModelDelta::Text("\n\n".to_string()),
+            ModelDelta::Text("  ".to_string()),
+        ]);
+        let events = run_conversation(
+            &door,
+            tools.as_ref(),
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let ending = events.last().unwrap();
+        assert_eq!(ending.event_type, EventType::RunError, "{events:?}");
+        assert_eq!(
+            ending.extra.get("message").unwrap(),
+            "the model returned no text"
+        );
+    }
+}
+
 /// The failure that matters: the client still gets an ending, so its spinner stops.
 #[tokio::test]
 async fn a_broken_stream_still_ends_the_run() {
