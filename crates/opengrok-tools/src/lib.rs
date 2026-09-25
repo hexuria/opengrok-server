@@ -570,11 +570,24 @@ pub const NETWORK_OFF: &str =
 /// The wait for a sleeping box, when nobody said otherwise. The server passes its own.
 const DEFAULT_WAKE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// The tools whose action leaves the box for the network — the ones the egress tunnel's consent
-/// card is about. One list, used by the ask, the frame's admission check and the server's
-/// resume paths.
+/// The tools whose action can leave the box for the network. By tool name, for what must hold
+/// whatever the action: a form's screen hold and a standing `never`. A screenshot taken while
+/// a sign-in handoff is open can capture the secret being typed, so it stays held.
 pub fn leaves_the_box(tool_name: &str) -> bool {
     matches!(tool_name, "computer" | "open_url" | RUN_RECIPE)
+}
+
+/// The calls the egress tunnel's card is about: a leave-box call whose action can reach the
+/// network. A `computer` screenshot only reads the box's own display and sends nothing through
+/// the person's network, yet it raised the card like a click (#165). It is the one exemption:
+/// `move` can prefetch, `scroll` can lazy-load, `key` can submit, so every other action asks,
+/// and so does anything not spelt exactly `"action": "screenshot"` — missing, misspelt, another
+/// case, not a string. One predicate for the ask, the "waking" frame and the resume paths, or
+/// the frame says the box is waking for a call that parks on a card.
+pub fn needs_egress_consent(tool_name: &str, arguments: &Value) -> bool {
+    leaves_the_box(tool_name)
+        && !(tool_name == "computer"
+            && arguments.get("action").and_then(Value::as_str) == Some("screenshot"))
 }
 
 /// The tools that run on the box (as opposed to plugin tools and the person's own machine).
@@ -893,7 +906,7 @@ impl Executor {
         // In the after-wake mode the box is woken before the tunnel is asked about, so the frame
         // is right either way.
         if self.egress_tunnel == EgressTunnelMode::On
-            && screen_tool
+            && needs_egress_consent(tool_name, &call.arguments)
             && review_inactive
             && !review_approved
             && !self.egress_consented()
@@ -1543,7 +1556,7 @@ impl Executor {
         // client attached). Docker host-network is not that. With no standing auto-review
         // allow, leave-box tools raise the Review-an-action card. A primary-gate Ask
         // subsumes this (one card).
-        let leave_box_tool = leaves_the_box(&tool_name);
+        let asks_the_tunnel = needs_egress_consent(&tool_name, &arguments);
         let review_inactive = self
             .auto_review
             .as_ref()
@@ -1553,7 +1566,7 @@ impl Executor {
         // click (21 Sep 2026). The resume paths set it from the answered card's own tool.
         let egress_consented = self.egress_consented();
         if self.egress_tunnel == EgressTunnelMode::On
-            && leave_box_tool
+            && asks_the_tunnel
             && !review_approved
             && !egress_consented
             && review_inactive
@@ -1656,7 +1669,7 @@ impl Executor {
             return ToolResult::refused(&call.id, NETWORK_OFF);
         }
         if self.egress_tunnel == EgressTunnelMode::AskTheBoxAfterWake
-            && leave_box_tool
+            && asks_the_tunnel
             && !review_approved
             && !egress_consented
             && review_inactive
@@ -3563,13 +3576,155 @@ mod tests {
         let result = executor
             .execute(
                 &context_with_box("box_mine"),
-                &call("computer", json!({ "action": "screenshot" })),
+                &call(
+                    "computer",
+                    json!({ "action": "click", "coordinate": [120, 40] }),
+                ),
             )
             .await;
         assert!(result.awaiting_approval, "{result:?}");
         assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
         assert!(result.content.contains("egress tunnel"), "{result:?}");
         assert_eq!(spy.last_box(), None, "must not run before Review an action");
+    }
+
+    /// Looking at the box's own screen sends nothing through the person's network, so the
+    /// tunnel's card is not raised for it (#165). The issue's own arguments: every field set,
+    /// `action` says screenshot.
+    #[tokio::test]
+    async fn egress_tunnel_lets_a_screenshot_through_without_a_card() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(
+                    "computer",
+                    json!({"to": [0, 0], "key": "", "text": "", "action": "screenshot",
+                           "button": 1, "scroll": [0, 0], "coordinate": [0, 0]}),
+                ),
+            )
+            .await;
+        assert!(!result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, None);
+    }
+
+    /// Only a screenshot is exempt. Every action that acts can navigate, submit or load (a hover
+    /// prefetches, a scroll lazy-loads), and anything the gate cannot read as a screenshot asks.
+    #[tokio::test]
+    async fn egress_tunnel_still_asks_for_every_screen_action_that_acts() {
+        let mut asks: Vec<(&str, Value)> = [
+            "click",
+            "left_click",
+            "right_click",
+            "double_click",
+            "move",
+            "drag",
+            "type",
+            "key",
+            "scroll",
+            "zoom",
+            "Screenshot",
+        ]
+        .into_iter()
+        .map(|action| {
+            (
+                "computer",
+                json!({ "action": action, "coordinate": [1, 2] }),
+            )
+        })
+        .collect();
+        asks.extend([
+            ("computer", json!({})),
+            ("computer", json!({ "action": ["screenshot"] })),
+            ("computer", json!("screenshot")),
+            ("open_url", json!({ "url": "https://example.com" })),
+            (RUN_RECIPE, json!({ "recipe": "r1" })),
+        ]);
+        for (tool, arguments) in asks {
+            let spy = Arc::new(SpyComputer::default());
+            let executor = allowing(spy.clone())
+                .with_screen(true)
+                .with_egress_tunnel(true);
+            let result = executor
+                .execute(
+                    &context_with_box("box_mine"),
+                    &call(tool, arguments.clone()),
+                )
+                .await;
+            assert!(result.awaiting_approval, "{tool} {arguments}: {result:?}");
+            assert_eq!(
+                result.awaiting_reason,
+                Some(AwaitingReason::AutoReview),
+                "{tool} {arguments}"
+            );
+            assert!(result.content.contains("egress tunnel"), "{result:?}");
+            assert_eq!(spy.last_box(), None, "{tool} {arguments}");
+        }
+    }
+
+    /// The "waking" frame agrees with the gate: a screenshot the tunnel no longer asks about
+    /// reaches the box, so it wakes it; a click parks on the card first, so nothing wakes. A
+    /// held screen still holds a screenshot — a handoff's secret may be on it.
+    #[tokio::test]
+    async fn a_screenshot_under_the_tunnel_wakes_the_box() {
+        let sleepy = Arc::new(SleepyComputer::new(&["archived"]));
+        let executor = allowing(sleepy.clone())
+            .with_screen(true)
+            .with_egress_tunnel(true);
+        let context = context_with_box("box_mine");
+        assert!(
+            executor
+                .box_needs_wake(&context, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        assert!(
+            !executor
+                .box_needs_wake(
+                    &context,
+                    &call("computer", json!({"action": "click", "coordinate": [1, 2]}))
+                )
+                .await
+        );
+        let mut holding = context_with_box("box_mine");
+        holding.screen_hold = true;
+        assert!(
+            !executor
+                .box_needs_wake(&holding, &call("computer", json!({"action": "screenshot"})))
+                .await
+        );
+        let refused = executor
+            .execute(&holding, &call("computer", json!({"action": "screenshot"})))
+            .await;
+        assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+        assert_eq!(sleepy.resumes(), 0);
+    }
+
+    /// The second tunnel ask, after a wake, draws the same line.
+    #[tokio::test]
+    async fn after_wake_mode_asks_for_a_click_but_not_a_screenshot() {
+        let spy = Arc::new(SpyComputer {
+            tunnel_ready: true,
+            ..SpyComputer::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_egress_tunnel_mode(EgressTunnelMode::AskTheBoxAfterWake);
+        let context = context_with_box("box_mine");
+        let look = executor
+            .execute(&context, &call("computer", json!({"action": "screenshot"})))
+            .await;
+        assert!(!look.awaiting_approval, "{look:?}");
+        let click = executor
+            .execute(
+                &context,
+                &call("computer", json!({"action": "click", "coordinate": [1, 2]})),
+            )
+            .await;
+        assert!(click.awaiting_approval, "{click:?}");
+        assert_eq!(click.awaiting_reason, Some(AwaitingReason::AutoReview));
     }
 
     #[tokio::test]
@@ -3604,9 +3759,9 @@ mod tests {
             .execute(
                 &context,
                 &ToolCall {
-                    id: "call_shot".to_string(),
+                    id: "call_click".to_string(),
                     name: "computer".to_string(),
-                    arguments: json!({ "action": "screenshot" }),
+                    arguments: json!({ "action": "click", "coordinate": [120, 40] }),
                 },
             )
             .await;
@@ -3621,9 +3776,9 @@ mod tests {
             .with_egress_consented(true);
         let context = context_with_box("box_mine");
         let later = ToolCall {
-            id: "call_shot".to_string(),
+            id: "call_click".to_string(),
             name: "computer".to_string(),
-            arguments: json!({ "action": "screenshot" }),
+            arguments: json!({ "action": "click", "coordinate": [120, 40] }),
         };
         let result = executor.execute(&context, &later).await;
         assert!(!result.awaiting_approval, "asked again: {result:?}");
@@ -3803,7 +3958,10 @@ mod tests {
         let result = asking
             .execute(
                 &context_with_box("box_mine"),
-                &call("computer", json!({ "action": "screenshot" })),
+                &call(
+                    "computer",
+                    json!({ "action": "click", "coordinate": [1, 2] }),
+                ),
             )
             .await;
         assert!(result.awaiting_approval, "{result:?}");

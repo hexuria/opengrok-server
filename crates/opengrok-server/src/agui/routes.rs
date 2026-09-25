@@ -4341,7 +4341,7 @@ async fn continue_run(
     let runner = runner.with_egress_consented(
         matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
             && answered.reason == opengrok_core::run::SuspendReason::AutoReview
-            && opengrok_tools::leaves_the_box(&answered.tool),
+            && opengrok_tools::needs_egress_consent(&answered.tool, &answered.arguments),
     );
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
