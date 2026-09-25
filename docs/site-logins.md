@@ -4,7 +4,7 @@ _21 Sep 2026. What the server keeps for a person's website logins, how a bot use
 
 ## What a row is
 
-`site_login` holds one row per (account, site, username, kind): `kind` is `password`, `code` or `passkey`, so a password and a passkey for one name on one site are two rows and saving one never turns the other into it. Each row carries `label`, `notes`, `created_at_ms`, `updated_at_ms`, `last_used_at_ms`, and for a passkey its public half (`passkey_credential_id`, `passkey_rp_id`, `passkey_user_handle`). The secrets are not on the row. They are sealed with the deployment's credential key (`OG_CREDENTIAL_KEK`) in `secret_store`, under keys that carry the account id so an account purge sweeps them:
+`site_login` holds one row per (account, site, username, kind): `kind` is `password`, `code` or `passkey`, so a password and a passkey for one name on one site are two rows and saving one never turns the other into it. Each row carries `label`, `notes`, `created_at_ms`, `updated_at_ms`, `last_used_at_ms`, and for a passkey its public half (`passkey_credential_id`, `passkey_rp_id`, `passkey_user_handle`). The secrets are not on the row. They are sealed with the deployment's credential key (`OG_CREDENTIAL_KEK` — back it up and rotate it as [`setup/site-logins.md`](setup/site-logins.md) says; losing it loses every one of them) in `secret_store`, under keys that carry the account id so an account purge sweeps them:
 
 | secret | key |
 |---|---|

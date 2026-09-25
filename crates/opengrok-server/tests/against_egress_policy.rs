@@ -70,6 +70,10 @@ impl TunnelBox {
     fn touched(&self) -> Vec<String> {
         self.touched.lock().expect("touched").clone()
     }
+    /// A click acts and then looks, so it touches the box twice; count the acts.
+    fn acts(&self) -> usize {
+        self.touched().iter().filter(|what| *what == "act").count()
+    }
     fn note(&self, what: &str) {
         self.touched.lock().expect("touched").push(what.to_string());
     }
@@ -164,18 +168,24 @@ impl Computer for TunnelBox {
     }
 }
 
-/// A model that takes a screenshot every time it is asked, with a FRESH call id each round, and
+/// A model that works the screen every time it is asked, with a FRESH call id each round, and
 /// stops after three rounds. The fixed-id mock cannot drive this: an answered call id is carried
 /// on the resumed runner as its yes, so a second call with the same id would be let through by
-/// that yes rather than by the consent this file is about.
+/// that yes rather than by the consent this file is about. It clicks unless told otherwise: a
+/// screenshot sends nothing through the tunnel and raises no card (#165).
 struct LookingModel {
     rounds: AtomicUsize,
+    arguments: Mutex<&'static str>,
 }
+
+const CLICK: &str = r#"{"action":"click","coordinate":[120,40]}"#;
+const SCREENSHOT: &str = r#"{"action":"screenshot"}"#;
 
 #[async_trait]
 impl ModelDoor for LookingModel {
     async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
         let round = self.rounds.fetch_add(1, Ordering::SeqCst) + 1;
+        let arguments = *self.arguments.lock().expect("arguments");
         let script = if round > 3 {
             vec![ModelDelta::Text("that is all I needed".to_string())]
         } else {
@@ -188,7 +198,7 @@ impl ModelDoor for LookingModel {
                 },
                 ModelDelta::ToolCallArgs {
                     id: id.clone(),
-                    delta: r#"{"action":"screenshot"}"#.to_string(),
+                    delta: arguments.to_string(),
                 },
                 ModelDelta::ToolCallEnd { id },
             ]
@@ -287,6 +297,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
     let tunnel_box = Arc::new(TunnelBox::default());
     let model = Arc::new(LookingModel {
         rounds: AtomicUsize::new(0),
+        arguments: Mutex::new(CLICK),
     });
     let auth = AuthState::new(
         store.clone(),
@@ -725,28 +736,35 @@ async fn bypass_skips_the_card_and_a_deny_does_not_consent_the_run() {
     let path = format!("/coworkers/{agent}/computer/egress-policy");
     h.route_traffic(&token, true).await;
 
-    // bypass: the model looks three times and nobody is asked.
+    // bypass: the model clicks three times and nobody is asked.
     let (status, _) = h.put(&token, &path, &json!({ "mode": "bypass" })).await;
     assert_eq!(status, 204);
-    let sse = h.turn(&token, &agent, "look at the screen").await;
+    let sse = h.turn(&token, &agent, "click the screen").await;
     assert!(
         !sse.contains("run-awaiting-approval"),
         "no card under bypass: {sse}"
     );
-    assert_eq!(
-        h.tunnel_box.touched().len(),
-        3,
-        "{:?}",
-        h.tunnel_box.touched()
-    );
+    assert_eq!(h.tunnel_box.acts(), 3, "{:?}", h.tunnel_box.touched());
 
-    // ask: the first look raises the card. A DENY is carried to the model, which looks again —
-    // and that look must raise a card of its own, not slip through on a consent that was
-    // never given (the #160 bug).
+    // ask, and the model only looks: a screenshot uses nobody's network, so no card (#165).
     h.model.rounds.store(0, Ordering::SeqCst);
+    *h.model.arguments.lock().expect("arguments") = SCREENSHOT;
     let (status, _) = h.put(&token, &path, &json!({ "mode": "ask" })).await;
     assert_eq!(status, 204);
+    let before = h.tunnel_box.touched().len();
     let sse = h.turn(&token, &agent, "look at the screen").await;
+    assert!(
+        !sse.contains("run-awaiting-approval"),
+        "a screenshot raises no tunnel card: {sse}"
+    );
+    assert_eq!(h.tunnel_box.touched().len(), before + 3);
+    *h.model.arguments.lock().expect("arguments") = CLICK;
+
+    // ask: the first click raises the card. A DENY is carried to the model, which clicks again
+    // — and that click must raise a card of its own, not slip through on a consent that was
+    // never given (the #160 bug).
+    h.model.rounds.store(0, Ordering::SeqCst);
+    let sse = h.turn(&token, &agent, "click the screen").await;
     assert!(
         sse.contains("run-awaiting-approval"),
         "ask raises the card: {sse}"
@@ -772,15 +790,16 @@ async fn bypass_skips_the_card_and_a_deny_does_not_consent_the_run() {
             .is_some_and(|why| why.contains("egress tunnel")),
         "the queue carries the tunnel's own sentence: {item}"
     );
+
     let answered = h.answer(&token, run_id.as_str(), &first_call, false).await;
     assert_eq!(answered["approved"], false, "{answered}");
     let (again, second_call) = h.wait_for_pending(Some(&first_call)).await;
     assert_eq!(again, run_id, "the same run asks again");
     assert_ne!(second_call, first_call);
     assert_eq!(
-        h.tunnel_box.touched().len(),
+        h.tunnel_box.acts(),
         3,
-        "a denied look never reached the box"
+        "a denied click never reached the box"
     );
 
     // A YES consents the rest of the run: the third look runs without a card, and the run ends.
@@ -790,9 +809,9 @@ async fn bypass_skips_the_card_and_a_deny_does_not_consent_the_run() {
     assert_eq!(run.status, RunStatus::Finished, "{:?}", run.status);
     assert!(run.pending.is_none(), "{:?}", run.pending);
     assert_eq!(
-        h.tunnel_box.touched().len(),
+        h.tunnel_box.acts(),
         5,
-        "the approved look and the one after it ran: {:?}",
+        "the approved click and the one after it ran: {:?}",
         h.tunnel_box.touched()
     );
 }
