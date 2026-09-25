@@ -1,6 +1,7 @@
 //! OpenGrok — the server the coworkers live on.
 
 mod admin;
+mod kek;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -215,18 +216,12 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    // Seals connector credentials. Absent is a legitimate deployment — one with no connectors —
-    // and must read as "connectors unavailable" rather than as a crash at boot.
-    let vault = match std::env::var("OG_CREDENTIAL_KEK") {
-        Ok(kek) if !kek.is_empty() => Some(Arc::new(
-            opengrok_store::Vault::from_base64_key(&kek)
-                .map_err(|error| anyhow::anyhow!("{error}"))?,
-        )),
-        _ => {
-            tracing::info!("no OG_CREDENTIAL_KEK — connectors are unavailable on this server");
-            None
-        }
-    };
+    // Seals every credential: connector tokens, org computer keys, coworker gateway keys, saved
+    // site logins and passkeys. Absent is a legitimate deployment that stores none, not a crash; a
+    // key that no longer opens what is sealed is logged loudly here and reported on `/health`.
+    let vault = kek::from_env().map_err(|error| anyhow::anyhow!("{error}"))?;
+    kek::check_at_boot(&auth.store, vault.as_ref()).await;
+    let vault = vault.map(Arc::new);
 
     let connectors = load_connectors()?;
     let plugins = load_plugins();

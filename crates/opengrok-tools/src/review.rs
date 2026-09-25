@@ -25,23 +25,60 @@ impl ReviewPolicy {
     }
 }
 
-/// One question for the judge. Arguments arrive already redacted and clipped.
+/// One question for the judge. Arguments arrive already redacted and clipped. `call_id` is for
+/// the judge's log line only; it is never shown to the judge's model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewAsk<'a> {
+    pub call_id: &'a str,
     pub tool: &'a str,
     pub arguments: &'a str,
     pub allow_instructions: &'a str,
     pub block_instructions: &'a str,
 }
 
-/// The judge's word. `Unavailable` is a judge that could not answer (unreachable, timed out,
-/// spoke more than one word) — it lands on the same rung as `Ask`, with a different explanation.
+/// The judge's word. `Unavailable` is a judge that could not answer — it lands on the same rung
+/// as `Ask`, with a different explanation that names the cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewVerdict {
     Allow,
     Ask,
     Block,
-    Unavailable,
+    Unavailable(JudgeFailure),
+}
+
+/// Why the judge could not answer. A spend cap, a timeout, an unknown route and a rambling
+/// answer all used to read "the reviewer did not answer", and nobody could tell them apart
+/// (#201). No text rides here: a refusal's body can carry gateway or store errors, which belong
+/// in the judge's log line, not on a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeFailure {
+    /// This coworker's spend limit: the judge is billed to the coworker's own key.
+    SpendCap,
+    /// The spend guard could not count the call and held it.
+    Held,
+    /// The gateway refused the judge's route, with this HTTP status.
+    Refused(u16),
+    Unreachable,
+    /// The answer broke off part-way.
+    StreamBroke,
+    TimedOut,
+    /// It answered, but not with exactly one of its words.
+    Unparseable,
+}
+
+impl JudgeFailure {
+    /// The cause in words a person can act on.
+    pub fn words(self) -> String {
+        match self {
+            Self::SpendCap => "this coworker's spend limit was reached".to_string(),
+            Self::Held => "its call could not be metered, so it was held".to_string(),
+            Self::Refused(status) => format!("the model gateway refused its route ({status})"),
+            Self::Unreachable => "the model gateway could not be reached".to_string(),
+            Self::StreamBroke => "its reply broke off part-way".to_string(),
+            Self::TimedOut => "it timed out".to_string(),
+            Self::Unparseable => "it replied with something other than allow or ask".to_string(),
+        }
+    }
 }
 
 /// The judge. Implementations MUST be total: never panic, never return an error — an outage is
@@ -115,9 +152,37 @@ pub fn ask_first_reason(block_instructions: &str) -> String {
         clip(block_instructions.trim(), 200)
     )
 }
-/// The paragraph a card shows when the judge could not answer at all.
-pub const REVIEW_UNAVAILABLE_REASON: &str =
-    "The reviewer did not answer, so this is being asked rather than allowed.";
+/// How every judge-failure card opens. The server counts a run's failures in a row by it, from
+/// the run's journal, so it must stay the reason's first words.
+pub const REVIEW_UNAVAILABLE_PREFIX: &str = "The reviewer did not answer";
+
+/// The paragraph a card shows when the judge could not answer, with the cause.
+pub fn unavailable_reason(cause: JudgeFailure) -> String {
+    format!(
+        "{REVIEW_UNAVAILABLE_PREFIX} ({}), so this is being asked rather than allowed.",
+        cause.words()
+    )
+}
+
+pub fn is_unavailable_reason(why: &str) -> bool {
+    why.starts_with(REVIEW_UNAVAILABLE_PREFIX)
+}
+
+/// After this many judge failures in a row in one run, a reviewed call is refused without
+/// asking the judge. Every failure is a card; a judge that is down for the run (a coworker at
+/// its spend cap is refused on every call) made a wall of them, each billed an attempt.
+pub const JUDGE_DOWN_AFTER: u32 = 3;
+
+/// What the model is told once the judge is known to be down. A refusal, not an allow: the
+/// person's written ask-first rules still stand with nobody to read them (CLAUDE.md #8).
+pub fn judge_down_reason(failures: u32) -> String {
+    format!(
+        "the auto-reviewer is down: it failed {failures} times in a row in this run, and each \
+         card said why. Reviewed actions are refused until it answers again, so tell the person \
+         the reviewer is down instead of retrying; their next message starts a run that asks it \
+         afresh"
+    )
+}
 
 /// THE LADDER. block > ask > allow; ask beats allow; and the primary gate's ask subsumes a review
 /// ask — at most one card per call (`docs/AUTO-REVIEW.md` §4.3). `approved` means a person has

@@ -121,8 +121,9 @@ call passes through (box shell, read/write, plugin tools, `user_machine_shell`) 
 **The judge.** Instructions are natural language, so the verdict is a bounded model call —
 exiting through open-ai-gateway like every model call (non-negotiable #4), on a deployment-owned
 route (`OG_AUTO_REVIEW_MODEL`, default the server's own model), never the coworker's own route:
-one call per tool call must be cheap, the reviewer must not be the reviewed, and a coworker-route
-outage must not become a wall of cards. Given ONLY the tool name, redacted arguments, and the
+one call per tool call must be cheap and the reviewer must not be the reviewed. It is billed and
+capped on the coworker's own key and spend scope, though, so a coworker at its cap has its judge
+refused on every call. Given ONLY the tool name, redacted arguments, and the
 effective instruction texts, it returns one word of `allow | block | ask`. Fail-closed ladder
 (non-negotiable #8):
 
@@ -131,7 +132,15 @@ effective instruction texts, it returns one word of `allow | block | ask`. Fail-
 - else allow instructions apply → **allow**.
 - else, or the judge is uncertain, or both sides apply → **ask** (ask beats allow).
 - judge call fails, times out, or answers anything but one bare word → **ask** (never silently
-  allow; never hard-fail the run).
+  allow; never hard-fail the run). The card's reason names the cause — the coworker's spend
+  limit, a refused route and its status, an unreachable gateway, a broken reply, a timeout, a
+  stray answer — and the judge logs it with the coworker, the model and the call id (#201).
+- the judge has failed `JUDGE_DOWN_AFTER` (3) times in a row in this run → the next reviewed call
+  is **refused** without asking the judge, in words telling the model to tell the person the
+  reviewer is down. Narrower than an ask, so still fail-closed; a capped key is not billed
+  another attempt; the person's next message starts a run that asks the judge afresh. The count
+  is read back from the run's journal on every resume (`judge_failure_streak`), because each
+  failure parks the run and the rebuilt executor would otherwise always start at zero.
 
 An ask suspends the run through the proven machinery: `RunCommand::Suspend` →
 `AwaitingApproval`, no expiry ever — the card answers whenever the user returns.

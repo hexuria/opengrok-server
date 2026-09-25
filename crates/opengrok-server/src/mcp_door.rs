@@ -374,14 +374,7 @@ fn to_mcp_tool(schema: &serde_json::Value) -> Option<Tool> {
     // MCP inputSchema and strict hosts reject it.
     let parameters: JsonObject = match function.get("parameters") {
         Some(serde_json::Value::Object(map)) if !map.is_empty() => map.clone(),
-        _ => {
-            let mut map = JsonObject::new();
-            map.insert(
-                "type".to_string(),
-                serde_json::Value::String("object".to_string()),
-            );
-            map
-        }
+        _ => opengrok_tools::mcp::open_object(),
     };
     let mut tool = Tool::new(name.to_string(), String::new(), parameters);
     // Omit description entirely when empty, rather than shipping `"description": ""`.
@@ -1252,3 +1245,8 @@ async fn fail_stuck_mcp_run(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/mcp_door.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests;
