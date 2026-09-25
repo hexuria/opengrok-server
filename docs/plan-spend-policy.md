@@ -74,7 +74,9 @@ A burst can overrun a limit by at most one reading's worth (15 s) per coworker.
 
 A capped turn whose key is then refused at dispatch is held with what would fix it — a 503
 naming a credential names the org principal's route and the seat it lacks — never run on the
-deployment's key (`docs/known-gaps.md` §2).
+deployment's key (`docs/known-gaps.md` §2). Capped or not, the refusal is recorded on the key's
+row until the key next serves, and the spend, limit and usage replies answer `metered: false`
+with "this coworker's key cannot serve: <reason>" rather than an empty meter.
 
 ## 4. Who sets what
 

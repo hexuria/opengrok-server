@@ -97,6 +97,19 @@ key is deliberately NOT re-minted — a new key on the same principal lands on t
 mint-time refusal above still waits on the principal-aware probe from open-ai-gateway
 (`against_spend_caps.rs::a_key_whose_route_reaches_no_credential_is_named_not_re_minted`).
 
+**AND NAMED WHERE THE USAGE IS READ, 25 Sep 2026.** The fallback kept the conversation alive but
+left the console lying: the coworker's own meter was empty and every reply still said
+`metered: true`. `GuardedDoor` now records each credential refusal on the key's row
+(`coworker_gateway_key.refusal`, key-scoped so a stale turn cannot flag a fresh key) and clears it
+on the next call the key serves or on a re-mint. The spend, limit and usage replies read it first
+and answer `metered: false` with "this coworker's key cannot serve: <reason>" — the route and the
+seat for a 503, "revoked or disabled there" for a 401 on a key the gateway still knows
+(`…a_key_the_gateway_refuses_but_still_knows_is_named_in_the_console_not_re_minted`). What is
+still open is only the PREVENTION: a key that will not serve is still minted, and is found at its
+first turn rather than refused at hire. A billed probe completion per mint was considered and not
+taken: it costs every hire a request on a model the coworker may never use, and a ladder id can
+pass on one rung and fail on another.
+
 ---
 
 ## 3. Nothing can tell a live gateway key from a dead one
@@ -136,6 +149,11 @@ with no way to see why from our logs.
   `revoked_at_ms`, without which a re-mint over a retired row stayed invisible and was re-minted
   every retry interval. Probing on first use after a restart was not done: the reactive probe
   costs nothing on the happy path and also catches a wipe while the server is running.
+
+  **The gateway's "no key" does not say why.** A key lost in a wipe and one an operator deleted on
+  purpose answer the same, so a key DELETED on the gateway is re-minted on the coworker's next
+  turn. To cut a coworker off, disable its org's principal on the gateway or retire the coworker
+  here; a key merely REVOKED or disabled on the gateway is left alone, and the console names it.
   (`against_spend_caps.rs::a_key_the_gateway_forgot_is_re_minted_rather_than_retried_forever`,
   `…a_capped_coworker_whose_key_was_forgotten_is_held_once_and_then_runs_on_a_fresh_key`.)
 

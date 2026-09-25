@@ -1660,4 +1660,82 @@ async fn a_key_whose_route_reaches_no_credential_is_named_not_re_minted() {
             .expect("row");
         assert!(row.revoked_at_ms.is_none(), "a live key is not retired");
     }
+
+    // THE CONSOLE SAYS WHY instead of "metered" over a key that counts nothing. Ada's turn ran on
+    // the deployment's key, so her own meter is empty; Bo's was held. Each reply names the route.
+    let principal = GatewayAdmin::org_principal_email(org_id.as_str());
+    for coworker in [&ada, &bo] {
+        for path in [
+            format!("/coworkers/{coworker}/spend"),
+            format!("/coworkers/{coworker}/limit"),
+            format!("/coworkers/{coworker}/usage?window=month"),
+        ] {
+            let (status, reply) = h.get_json(&access, &path).await;
+            assert_eq!(status, 200, "{path}: {reply}");
+            assert_eq!(reply["metered"], json!(false), "{path}: {reply}");
+            let note = reply["note"].as_str().unwrap_or_default();
+            assert!(
+                note.starts_with("this coworker's key cannot serve: "),
+                "{path}: {note}"
+            );
+            assert!(note.contains(&principal), "{path} names the route: {note}");
+        }
+    }
+
+    // A seat bound to the route: the next call the key serves clears the flag.
+    h.stand_in.lock().unwrap().no_credential = false;
+    let (status, failure) = h.turn(&ada, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (_, spend) = h.spend(&access, &ada).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+    assert!(spend["note"].is_null(), "{spend}");
+    let (_, spend) = h.spend(&access, &bo).await;
+    assert_eq!(
+        spend["metered"],
+        json!(false),
+        "Bo has not been served since: {spend}"
+    );
+}
+
+/// A 401 on a key the gateway STILL KNOWS is somebody's decision there (revoked or disabled), so
+/// it is not re-minted — but it is not "metered" either. Every uncapped turn falls back to the
+/// deployment's key and vanishes from the coworker's usage; the console now says so, and why.
+#[tokio::test]
+async fn a_key_the_gateway_refuses_but_still_knows_is_named_in_the_console_not_re_minted() {
+    let database_url = database_or_skip!();
+    let (h, access, owner, _) = org_admin(&database_url).await;
+    let ada = hire(&h, &access, "Ada").await;
+    let key = {
+        let mut stand_in = h.stand_in.lock().unwrap();
+        stand_in.keys[0].revoked = true;
+        stand_in.keys[0].key.clone()
+    };
+
+    let (status, failure) = h.turn(&ada, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.keys.len(), 1, "not re-minted");
+        assert_eq!(stand_in.bearers, vec![key, DEPLOYMENT_KEY.to_string()]);
+    }
+    let row = h
+        .store
+        .coworker_key(&CoworkerId::from_stored(ada.clone()), &owner)
+        .await
+        .expect("row")
+        .expect("row");
+    assert!(
+        row.revoked_at_ms.is_none(),
+        "not retired: the gateway knows it"
+    );
+
+    let (status, spend) = h.spend(&access, &ada).await;
+    assert_eq!(status, 200);
+    assert_eq!(spend["metered"], json!(false), "{spend}");
+    let note = spend["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with("this coworker's key cannot serve: "),
+        "{note}"
+    );
+    assert!(note.contains("revoked or disabled"), "{note}");
 }

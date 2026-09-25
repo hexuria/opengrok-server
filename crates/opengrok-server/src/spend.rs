@@ -489,6 +489,24 @@ fn seat_of(usage: Option<&KeyUsage>) -> Option<&'static str> {
     }
 }
 
+/// The console's sentence for a live key the gateway has been refusing as a credential, if it
+/// has been (`GuardedDoor::key_refused`). Every reply that would otherwise say "metered" asks
+/// this first: an uncapped coworker whose key cannot serve runs on the deployment's key, so its
+/// own meter shows nothing, and "metered, zero used" is the under-report this replaces.
+pub async fn cannot_serve(
+    store: &PgStore,
+    coworker: &CoworkerId,
+    account: &AccountId,
+) -> Result<Option<String>, String> {
+    store
+        .coworker_key_refusal(coworker, account)
+        .await
+        .map(|refusal| {
+            refusal.map(|refusal| format!("this coworker's key cannot serve: {}", refusal.reason))
+        })
+        .map_err(|error| format!("the key row could not be read: {error}"))
+}
+
 /// What the console shows. The coworker must be this account's (the caller checks ownership).
 pub async fn spend_for(
     state: &AgUiState,
@@ -520,6 +538,16 @@ pub async fn spend_for(
             seat: None,
         });
     };
+    if let Some(note) = cannot_serve(store, coworker_id, account_id).await? {
+        return Ok(CoworkerSpend {
+            metered: false,
+            note: Some(note),
+            key_prefix: Some(row.key_prefix),
+            limits: limits.clone(),
+            windows: windows_of(None, &limits),
+            seat: None,
+        });
+    }
     let (usage, note) = match state.auth.gateway_admin.as_ref() {
         None => (
             None,
@@ -580,6 +608,11 @@ pub struct GuardedDoor {
     /// wording depends on how recently the meter was read is worse than one that never names
     /// anybody.
     pool_cache: Mutex<HashMap<String, (PoolReading, i64)>>,
+    /// When this replica last cleared each pair's recorded refusal after a call its key served.
+    /// The clear is a write, so a tool loop pays for one per freshness window rather than one
+    /// per call; a pair whose key this replica just saw refused is dropped from here, so the next
+    /// call it serves clears the row at once.
+    served_cleared: Mutex<HashMap<String, i64>>,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
     /// a test that counts reads sets it to zero.
     fresh_ms: i64,
@@ -602,6 +635,7 @@ impl GuardedDoor {
             cache: Mutex::new(HashMap::new()),
             limits_cache: Mutex::new(HashMap::new()),
             pool_cache: Mutex::new(HashMap::new()),
+            served_cleared: Mutex::new(HashMap::new()),
             fresh_ms: FRESH_MS,
         }
     }
@@ -695,30 +729,99 @@ impl GuardedDoor {
     /// row only when it says no. That is the 8 Sep wipe, and the only case a re-mint cures. A key
     /// the gateway still knows (revoked or disabled there) is an operator's decision and is left
     /// alone; so is every read that fails, because a meter blip must not cost a live key.
-    /// `true` when the key was retired.
     async fn retire_if_forgotten(
         &self,
         coworker: &CoworkerId,
         payer: &AccountId,
-        key_id: Option<&str>,
-    ) -> bool {
+        key_id: &str,
+    ) -> KeyFate {
         let Some(admin) = self.admin.as_ref() else {
-            return false;
+            return KeyFate::Unchecked;
         };
+        match admin.key_usage_within(key_id, METER_TIMEOUT).await {
+            Ok(None) if self.retire_dead_key(coworker, payer, key_id).await => KeyFate::Retired,
+            Ok(Some(_)) => KeyFate::StillKnown,
+            _ => KeyFate::Unchecked,
+        }
+    }
+
+    /// The gateway refused this pair's key as a CREDENTIAL. A key it forgot is retired and the
+    /// next turn mints another (`None`). Anything else is recorded on the row, so the console's
+    /// spend, limit and usage replies say why this coworker is not being counted instead of
+    /// reading "metered" over a key that serves nothing — and the reason is handed back for the
+    /// turn's own sentence. `key_id` is the key the caller read for this call when it has one; the
+    /// uncapped path reads none, so the live row stands in.
+    async fn key_refused(
+        &self,
+        coworker: &CoworkerId,
+        payer: &AccountId,
+        key_id: Option<&str>,
+        error: &ModelError,
+    ) -> Option<String> {
         let key_id = match key_id {
             Some(key_id) => key_id.to_string(),
             None => match self.store.coworker_key(coworker, payer).await {
                 Ok(Some(row)) if row.revoked_at_ms.is_none() => row.key_id,
-                _ => return false,
+                _ => return None,
             },
         };
-        if !matches!(
-            admin.key_usage_within(&key_id, METER_TIMEOUT).await,
-            Ok(None)
-        ) {
-            return false;
+        let reason = if matches!(error, ModelError::Refused { status: 401, .. }) {
+            match self.retire_if_forgotten(coworker, payer, &key_id).await {
+                KeyFate::Retired => return None,
+                KeyFate::StillKnown => "the gateway refuses it although it still knows it, so it \
+                     may have been revoked or disabled there; an admin re-enables it on the \
+                     gateway, or retires and re-hires the coworker"
+                    .to_string(),
+                KeyFate::Unchecked => "the gateway refuses it, and whether it was lost there or \
+                     revoked could not be checked"
+                    .to_string(),
+            }
+        } else {
+            // Minting another key on the same principal lands on the same route, so this is
+            // named for an admin, never re-minted.
+            format!(
+                "its org's gateway route ({}) reaches no provider credential; an admin binds a \
+                 seat to that route",
+                self.route_of(payer).await
+            )
+        };
+        if let Err(error) = self
+            .store
+            .note_coworker_key_refusal(coworker, payer, &key_id, &reason, now_ms())
+            .await
+        {
+            tracing::error!(%error, coworker = %coworker.as_str(), "points guard: the key's refusal could not be recorded for the console");
         }
-        self.retire_dead_key(coworker, payer, &key_id).await
+        if let Ok(mut cleared) = self.served_cleared.lock() {
+            cleared.remove(&pair_key(coworker, payer));
+        }
+        tracing::warn!(coworker = %coworker.as_str(), reason, "points guard: this coworker's own key cannot serve");
+        Some(reason)
+    }
+
+    /// The pair's key just served a call, so any refusal recorded against it is over. Throttled
+    /// per pair (see `served_cleared`); a failed clear is logged and retried on the next call.
+    async fn key_served(&self, coworker: &CoworkerId, payer: &AccountId) {
+        let pair = pair_key(coworker, payer);
+        let now = now_ms();
+        if self.fresh_ms > 0
+            && let Ok(cleared) = self.served_cleared.lock()
+            && cleared
+                .get(&pair)
+                .is_some_and(|at_ms| now - *at_ms <= self.fresh_ms)
+        {
+            return;
+        }
+        match self.store.clear_coworker_key_refusal(coworker, payer).await {
+            Ok(()) => {
+                if let Ok(mut cleared) = self.served_cleared.lock() {
+                    cleared.insert(pair, now);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, coworker = %coworker.as_str(), "points guard: a served key's old refusal could not be cleared");
+            }
+        }
     }
 
     /// The gateway has said it has no such key. `true` when the pair no longer holds it.
@@ -766,8 +869,7 @@ impl GuardedDoor {
     }
 
     /// The route a coworker's key lands on is its payer's org principal (`ensure_key_for`); a
-    /// 503 naming a credential means that route reaches no provider seat. Minting another key on
-    /// the same principal lands on the same route, so it is named for an admin, never re-minted.
+    /// 503 naming a credential means that route reaches no provider seat.
     async fn route_of(&self, payer: &AccountId) -> String {
         match self.org_of(payer).await {
             Some(org_id) => GatewayAdmin::org_principal_email(&org_id),
@@ -1032,27 +1134,22 @@ impl ModelDoor for GuardedDoor {
             // WHAT IT COSTS, stated rather than hidden: that turn is metered against the
             // deployment's key instead of the coworker's, so the usage panel under-reports it and
             // this log line is the only record. An under-reported turn beats a dead conversation.
-            let attempt = self.inner.stream(request.clone()).await;
-            let Err(error) = attempt else {
-                return attempt;
+            let error = match self.inner.stream(request.clone()).await {
+                Ok(stream) => {
+                    if request.gateway_key.is_some() {
+                        self.key_served(&coworker, &payer).await;
+                    }
+                    return Ok(stream);
+                }
+                Err(error) => error,
             };
             if request.gateway_key.is_none() || !is_credential_refusal(&error) {
                 return Err(error);
             }
             // And the key is REPAIRED, not just stepped around: on 8 Sep a dead row stayed dead,
-            // so every later turn paid two requests and none of them appeared in its usage.
-            if matches!(error, ModelError::Refused { status: 401, .. }) {
-                self.retire_if_forgotten(&coworker, &payer, None).await;
-            } else {
-                let route = self.route_of(&payer).await;
-                tracing::warn!(
-                    coworker = %coworker.as_str(),
-                    %route,
-                    "points guard: this coworker's key reaches no provider credential on its \
-                     route; an admin binds a seat to that route. Not re-minted: a new key on the \
-                     same principal lands on the same route."
-                );
-            }
+            // so every later turn paid two requests and none of them appeared in its usage. One
+            // that cannot be repaired is at least NAMED where its usage is read.
+            self.key_refused(&coworker, &payer, None, &error).await;
             tracing::warn!(
                 coworker = %coworker.as_str(),
                 %error,
@@ -1139,31 +1236,34 @@ impl ModelDoor for GuardedDoor {
         // A CAPPED TURN CANNOT FALL BACK, so a refused credential is held with what would fix
         // it rather than handed on as a bare 503/401 that points nowhere.
         let error = match self.inner.stream(request).await {
+            Ok(stream) => {
+                self.key_served(&coworker, &payer).await;
+                return Ok(stream);
+            }
             Err(error) if is_credential_refusal(&error) => error,
-            other => return other,
+            Err(error) => return Err(error),
         };
-        let sentence = if !matches!(error, ModelError::Refused { status: 401, .. }) {
-            format!(
-                "{name}'s key reaches no provider credential on its org's gateway route ({}); an \
-                 admin binds a seat to that route. {name} is under a points limit, so the turn \
-                 is held rather than run on the deployment's key.",
-                self.route_of(&payer).await
-            )
-        } else if self
-            .retire_if_forgotten(&coworker, &payer, Some(&key.key_id))
+        match self
+            .key_refused(&coworker, &payer, Some(&key.key_id), &error)
             .await
         {
-            return Err(held_on_a_forgotten_key(&name));
-        } else {
-            format!(
-                "The gateway refused {name}'s own key although it still knows it — it may have \
-                 been revoked or disabled there. An admin re-enables it on the gateway, or \
-                 retires and re-hires {name}. {name} is under a points limit, so the turn is \
-                 held rather than run on the deployment's key."
-            )
-        };
-        Err(ModelError::Held(sentence))
+            None => Err(held_on_a_forgotten_key(&name)),
+            Some(reason) => Err(ModelError::Held(format!(
+                "{name}'s own key cannot serve: {reason}. {name} is under a points limit, so the \
+                 turn is held rather than run on the deployment's key."
+            ))),
+        }
     }
+}
+
+/// What asking the gateway about a refused key found.
+enum KeyFate {
+    /// It has no such key: the row is retired and the next turn mints a fresh one.
+    Retired,
+    /// It knows the key and refused it anyway — revoked or disabled there, an operator's call.
+    StillKnown,
+    /// No admin connection, a read that failed, or a retire that did not land: nothing is known.
+    Unchecked,
 }
 
 /// The capped turn that finds its key gone could not be counted, so it is held — once. The row
