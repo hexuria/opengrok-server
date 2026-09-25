@@ -89,6 +89,14 @@ Two reasons the refusal above is still wanted rather than superseded:
   `repo::candidates` on the gateway's request path, which no admin endpoint exposes. So this
   needs either a principal-aware route probe from the gateway, or a different question entirely.
 
+**FLAGGED 25 Sep 2026, still not prevented.** When a coworker's own key is refused with a 503
+naming a credential, `GuardedDoor` no longer leaves it unexplained: an uncapped turn still falls
+back, and the log line names the route (`org-<org_id>@gateway.local`); a CAPPED turn is held with
+a sentence naming that route and saying an admin binds a seat to it, instead of a bare 503. The
+key is deliberately NOT re-minted — a new key on the same principal lands on the same route. The
+mint-time refusal above still waits on the principal-aware probe from open-ai-gateway
+(`against_spend_caps.rs::a_key_whose_route_reaches_no_credential_is_named_not_re_minted`).
+
 ---
 
 ## 3. Nothing can tell a live gateway key from a dead one
@@ -116,8 +124,20 @@ with no way to see why from our logs.
   prefix test and fails the panic test, which is why both exist). That the line is *emitted on a
   401* is not covered by a test: the harness crate keeps its tests socket-free on purpose, and a
   subscriber-capture test would have cost a dev-dependency for one assertion.
-- **Validate a stored prefix against the gateway** when a row is first used after a restart, or
-  on the mint path, so a dead row is diagnosable rather than silent.
+- ~~**Validate a stored prefix against the gateway**~~ **DONE 25 Sep 2026, on first refusal
+  rather than first use.** When a coworker's own key draws a 401 — or the capped path's meter
+  read says the gateway has no such key — `GuardedDoor::retire_if_forgotten` asks the gateway
+  (`GET /admin/api/keys/{id}/usage`) whether it still knows the key. Only a definite "no key"
+  retires the row (pair- and key-scoped, so a concurrent re-mint survives), drops the sealed
+  secret and clears the mint back-off; the next turn mints a fresh key and is metered again. A
+  key the gateway still knows (revoked or disabled there) is an operator's decision and is left
+  alone. The uncapped turn that found it still falls back once; a capped one is held once with
+  "a fresh key is minted on its next turn; send it again". `insert_coworker_key` now clears
+  `revoked_at_ms`, without which a re-mint over a retired row stayed invisible and was re-minted
+  every retry interval. Probing on first use after a restart was not done: the reactive probe
+  costs nothing on the happy path and also catches a wipe while the server is running.
+  (`against_spend_caps.rs::a_key_the_gateway_forgot_is_re_minted_rather_than_retried_forever`,
+  `…a_capped_coworker_whose_key_was_forgotten_is_held_once_and_then_runs_on_a_fresh_key`.)
 
 ---
 

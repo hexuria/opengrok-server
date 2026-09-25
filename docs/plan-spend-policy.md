@@ -56,7 +56,9 @@ or two answers disagree.
    unmetered coworker under a pool is held, not run uncounted on the deployment key.
 3. The meter: the per-key read (15 s fresh, a reading under 60 s stands in when the gateway
    does not answer within 2 s, else held with the reason). Points `null` — no reference price
-   on the gateway — ⇒ held, with the sentence that says who sets it.
+   on the gateway — ⇒ held, with the sentence that says who sets it. A gateway that says it has
+   no such key ⇒ the row is retired and the turn held once ("send it again"); the next turn
+   mints a fresh key (`docs/known-gaps.md` §3).
 4. The pool, when one is set: the batch read over every key the owner's coworkers ever had
    (revoked rows included — a retired coworker's month still counts, so retire-and-rehire does
    not reset the month), cached **per owner** for 15 s so N active coworkers of one member share
@@ -69,6 +71,10 @@ or two answers disagree.
    - "New Bot has used its 30,000 points for today (30,000 used); it frees up at 14:32 UTC."
 
 A burst can overrun a limit by at most one reading's worth (15 s) per coworker.
+
+A capped turn whose key is then refused at dispatch is held with what would fix it — a 503
+naming a credential names the org principal's route and the seat it lacks — never run on the
+deployment's key (`docs/known-gaps.md` §2).
 
 ## 4. Who sets what
 

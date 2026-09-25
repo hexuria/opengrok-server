@@ -414,6 +414,9 @@ impl PgStore {
         Ok(())
     }
 
+    /// A mint over a retired row makes it live again: every reader filters on `revoked_at_ms`,
+    /// so an upsert that kept it would store a fresh key nobody ever presents, and the run path
+    /// would mint another every retry interval, for good.
     pub async fn insert_coworker_key(&self, view: &CoworkerKeyView) -> StoreResult<()> {
         sqlx::query(
             "insert into coworker_gateway_key
@@ -424,7 +427,7 @@ impl PgStore {
                 set key_id = excluded.key_id,
                     key_prefix = excluded.key_prefix, quota_usd = excluded.quota_usd,
                     created_at_ms = excluded.created_at_ms,
-                    secret_scoped = excluded.secret_scoped",
+                    secret_scoped = excluded.secret_scoped, revoked_at_ms = null",
         )
         .bind(&view.coworker_id)
         .bind(&view.account_id)
@@ -525,6 +528,32 @@ impl PgStore {
         .fetch_all(self.pool())
         .await?;
         rows.into_iter().map(coworker_key_row).collect()
+    }
+
+    /// Retire ONE person's key on one coworker, and only while the row still names `key_id`:
+    /// a turn that found the key dead must not retire the fresh one a concurrent turn has
+    /// already minted over it. `Some` only when this call did the retiring.
+    pub async fn mark_coworker_key_revoked(
+        &self,
+        coworker: &CoworkerId,
+        account: &AccountId,
+        key_id: &str,
+        at_ms: i64,
+    ) -> StoreResult<Option<CoworkerKeyView>> {
+        let row = sqlx::query(
+            "update coworker_gateway_key set revoked_at_ms = $4
+             where coworker_id = $1 and account_id = $2 and key_id = $3
+               and revoked_at_ms is null
+             returning coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
+                       revoked_at_ms, secret_scoped",
+        )
+        .bind(coworker.as_str())
+        .bind(account.as_str())
+        .bind(key_id)
+        .bind(at_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(coworker_key_row).transpose()
     }
 
     /// Every key row an account's coworkers ever had, revoked ones included — the pool read
