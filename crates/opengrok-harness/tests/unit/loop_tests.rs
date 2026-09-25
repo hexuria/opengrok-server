@@ -1614,7 +1614,7 @@ async fn between_tool_intent_text_is_not_chat() {
     assert_eq!(run_timing_value(&events).expect("timing")["tool_rounds"], 2);
 }
 
-/// After a successful listing shell, the next model request carries the harness
+/// After a successful catalog listing, the next model request carries the harness
 /// nudge so the hop answers instead of announcing another probe.
 #[tokio::test]
 async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
@@ -1647,7 +1647,7 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
                     },
                     ModelDelta::ToolCallArgs {
                         id: "c1".to_string(),
-                        delta: r#"{"command":"ls"}"#.to_string(),
+                        delta: r#"{"command":"gpui-agent invoke profile.list"}"#.to_string(),
                     },
                     ModelDelta::ToolCallEnd {
                         id: "c1".to_string(),
@@ -1664,9 +1664,13 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
         round: Mutex::new(0),
         seen: Mutex::new(Vec::new()),
     };
+    let (runner, _) = shell_runner(&[(
+        "gpui-agent invoke profile.list",
+        "Juan Dela Cruz\n[exit code 0]",
+    )]);
     let events = run_conversation(
         &door,
-        Some(&tool_runner()),
+        Some(&runner),
         &MemoryJournal::new(),
         request("list files"),
         "t1",
@@ -1995,7 +1999,17 @@ fn listing_and_show_commands_are_readonly_shell_fast_path() {
         opengrok_tools::USER_MACHINE_SHELL,
         "gpui-agent invoke profile.search --q buwiz"
     )));
-    assert!(is_readonly_listing_shell(&call("shell", "ls -la")));
+    assert!(is_readonly_listing_shell(&call(
+        "shell",
+        "gpui-agent invoke profile.forms_set.get --arg year=2025"
+    )));
+    // Ordinary reads on a computer are work, not the turn's one catalog listing (#183).
+    assert!(!is_readonly_listing_shell(&call("shell", "ls -la")));
+    assert!(!is_readonly_listing_shell(&call("shell", "cat README.md")));
+    assert!(!is_readonly_listing_shell(&call(
+        "shell",
+        "grep deb /etc/apt/sources.list"
+    )));
     assert!(!is_readonly_listing_shell(&call(
         "shell",
         "echo opengrok-tool-ran > /tmp/opengrok-tool-ran"
@@ -2064,6 +2078,232 @@ fn ums_runner(tool: LocalTool) -> ToolRunner {
         }),
         tool,
     )
+}
+
+fn shell_deltas(id: &str, command: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: "shell".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "command": command }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A box `shell` whose answer to each command is looked up in `answers`, and which records
+/// every command it was asked to run.
+fn shell_runner(answers: &[(&str, &str)]) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ran_tool = ran.clone();
+    let answers: Vec<(String, String)> = answers
+        .iter()
+        .map(|(command, body)| (command.to_string(), body.to_string()))
+        .collect();
+    let tool: LocalTool = Arc::new(move |call| {
+        let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+        ran_tool.lock().unwrap().push(command.clone());
+        let body = answers
+            .iter()
+            .find(|(asked, _)| *asked == command)
+            .map(|(_, body)| body.clone())
+            .unwrap_or_else(|| "[exit code 0]".to_string());
+        opengrok_tools::ToolResult::ok(&call.id, body)
+    });
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        tool,
+    );
+    (runner, ran)
+}
+
+/// A door that plays one script per round, then answers `last` in words.
+struct Rounds {
+    scripts: Vec<Vec<ModelDelta>>,
+    last: String,
+    calls: Mutex<usize>,
+}
+
+impl Rounds {
+    fn new(scripts: Vec<Vec<ModelDelta>>, last: &str) -> Self {
+        Self {
+            scripts,
+            last: last.to_string(),
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelDoor for Rounds {
+    async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let round = {
+            let mut count = self.calls.lock().unwrap();
+            *count += 1;
+            *count
+        };
+        let script = self
+            .scripts
+            .get(round - 1)
+            .cloned()
+            .unwrap_or_else(|| vec![ModelDelta::Text(self.last.clone())]);
+        Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+    }
+}
+
+/// `ls` then `cat README.md` on the box. Both used to be "the one listing": the `cat` got a
+/// synthetic "A listing already succeeded" and the file was never read (#183).
+#[tokio::test]
+async fn ls_then_cat_reads_the_file() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "ls"),
+            shell_deltas("c2", "cat README.md"),
+        ],
+        "The README says hello.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("ls", "README.md\n[exit code 0]"),
+        ("cat README.md", "# hello\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("what does my README say?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(ran.lock().unwrap().as_slice(), ["ls", "cat README.md"]);
+    assert!(
+        !events.iter().any(|event| {
+            event.event_type == EventType::ToolCallResult
+                && event
+                    .extra
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains("A listing already succeeded"))
+        }),
+        "{events:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(assistant_text(&events).contains("README says hello"));
+}
+
+/// A grep with no match (exit 1) and a failing test run (exit 101) are two different
+/// outcomes of ordinary work, not two failed retries. The turn used to end on the second
+/// with the first line of the test output as the answer.
+#[tokio::test]
+async fn non_zero_exits_from_normal_commands_do_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "grep -rn TODO src"),
+            shell_deltas("c2", "cargo test"),
+            shell_deltas("c3", "cat src/lib.rs"),
+        ],
+        "One test fails: parse rejects an empty line.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("grep -rn TODO src", "[exit code 1]"),
+        (
+            "cargo test",
+            "test result: FAILED. 1 failed\n[exit code 101]",
+        ),
+        ("cat src/lib.rs", "pub fn parse() {}\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("why do my tests fail?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 4);
+    assert_eq!(ran.lock().unwrap().len(), 3);
+    let text = assistant_text(&events);
+    assert!(text.contains("parse rejects an empty line"), "{text:?}");
+    assert!(!text.contains("test result: FAILED"), "{text:?}");
+}
+
+/// `python` missing on the box is fixed by `python3`. Exit 127 used to set the failure streak
+/// straight to its ceiling, so the retry was never asked for.
+#[tokio::test]
+async fn a_missing_python_gets_a_python3_retry() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "python x.py"),
+            shell_deltas("c2", "python3 x.py"),
+        ],
+        "Done.",
+    );
+    let (runner, ran) = shell_runner(&[
+        (
+            "python x.py",
+            "bash: python: command not found\n[exit code 127]",
+        ),
+        ("python3 x.py", "ok\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("run x.py"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap().as_slice(),
+        ["python x.py", "python3 x.py"]
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(assistant_text(&events).contains("Done."));
+}
+
+/// The streak still does its job for the same command failing the same way: the second
+/// identical failure ends the turn with one short fact, not a diary of retries.
+#[tokio::test]
+async fn the_same_command_failing_twice_still_ends_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "make build"),
+            shell_deltas("c2", "make build"),
+        ],
+        "unreachable",
+    );
+    let (runner, _) = shell_runner(&[(
+        "make build",
+        "make: *** No rule to make target 'build'.  Stop.\n[exit code 2]",
+    )]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("build it"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        assistant_text(&events).contains("No rule to make target"),
+        "{events:?}"
+    );
 }
 
 /// profile.list then profile.search: one real read, then a facts hop — not a second invoke.

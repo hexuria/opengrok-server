@@ -158,29 +158,23 @@ fn looks_like_write(command: &str) -> bool {
     MARKERS.iter().any(|marker| command.contains(marker))
 }
 
+/// A read of the host app's catalog: `gpui-agent invoke profile.list`, `….search`, `….get`.
+///
+/// ONLY THE CATALOG. This used to count any command starting with `ls`, `cat`, `head`, `echo`
+/// and friends, or containing `.list`, and it applied to the box's own `shell`: after one `ls`
+/// succeeded, `cat README.md` got a synthetic "a listing already succeeded" and the file was
+/// never read (#183). The one-listing rule was written for the BIR host, where a second catalog
+/// read was the model stalling; on a computer, reading the next file is the work.
+///
+/// `gpui-agent hello` and `gpui-agent invoke --help` are probes, not reads. Counting either as
+/// the one listing made the following `profile.search` a synthetic skip, and the turn closed
+/// with no sentence (run 01a0c9ed).
 fn looks_like_listing_or_show(command: &str) -> bool {
-    let first = command.split_whitespace().next().unwrap_or("");
-    // `gpui-agent hello` and `gpui-agent invoke --help` are probes. Counting either
-    // as the one listing made the following `profile.search` a synthetic skip, and
-    // the turn closed with no sentence (run 01a0c9ed).
-    matches!(
-        first,
-        "ls" | "cat"
-            | "head"
-            | "tail"
-            | "pwd"
-            | "whoami"
-            | "date"
-            | "file"
-            | "stat"
-            | "echo"
-            | "printf"
-            | "type"
-    ) || command.contains("profile.list")
-        || command.contains("profile.search")
-        || command.contains("dues.list")
-        || command.contains("forms_set.get")
-        || command.contains(".list")
+    let name = intent::shell_action_key(command);
+    name != command
+        && [".list", ".search", ".get"]
+            .iter()
+            .any(|verb| name.ends_with(verb))
 }
 
 /// `find ~` and `find /Users/<name>` exited 0 after about 90s on the demo machine.
@@ -265,7 +259,7 @@ fn refused_broad_walk(call: &opengrok_tools::ToolCall) -> opengrok_tools::ToolRe
     )
 }
 
-/// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`).
+/// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`), on either shell.
 /// A host probe such as `gpui-agent hello` is not one: it must not consume the
 /// single listing this turn is allowed to run.
 fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
@@ -277,6 +271,20 @@ fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
         let trimmed = command.trim();
         !trimmed.is_empty() && !looks_like_write(trimmed) && looks_like_listing_or_show(trimmed)
     }
+}
+
+/// This call is the command that failed last round, by invoke name or whole command.
+fn repeats_last_failure(call: &opengrok_tools::ToolCall, last: Option<&str>) -> bool {
+    last.is_some_and(|last| intent::shell_action_key(shell_command(&call.arguments)) == last)
+}
+
+/// The host catalog's own binary is missing. No rewording finds it, so the turn stops on the
+/// first miss (the Hog Rider run burned all eight calls on it). Any OTHER missing command is an
+/// ordinary failure: `python` missing on the box is fixed by `python3`, and setting the streak
+/// to its ceiling on every exit 127 never let that retry be asked for (#183).
+fn is_missing_catalog_binary(call: &opengrok_tools::ToolCall, content: &str) -> bool {
+    shell_command(&call.arguments).contains("gpui-agent")
+        && intent::is_unrecoverable_command_miss(content)
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -898,6 +906,9 @@ async fn converse_raw(
     let mut any_delta = false;
     let mut last_failure: Option<String> = None;
     let mut work_fail_streak: u32 = 0;
+    // What the last failed command was, by `intent::shell_action_key`. A non-zero exit adds to
+    // the streak only when it repeats the command that failed last time.
+    let mut last_failed_key: Option<String> = None;
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
     // The catalog sentence to show if a later round only repeats the listing.
@@ -1214,8 +1225,8 @@ async fn converse_raw(
                         message.content.push_str(intent::READONLY_SHELL_NUDGE);
                     } else if shell_failed && !result.awaiting_approval {
                         last_failure = Some(intent::short_failure_fact(&result.content));
-                        if work_fail_streak == 0
-                            && !intent::is_unrecoverable_command_miss(&result.content)
+                        if !repeats_last_failure(call, last_failed_key.as_deref())
+                            && !is_missing_catalog_binary(call, &result.content)
                             && !is_broad_walk_call(call)
                         {
                             message.content.push_str("\n\n");
@@ -1254,8 +1265,8 @@ async fn converse_raw(
                         && !intent::counts_as_work_failure(true, &result.content)
                 });
                 if work_failed {
-                    // A missing binary is not fixed by rewording the same command. Stop
-                    // this round. A home-directory find is refused once so the model can
+                    // A missing catalog binary is not fixed by rewording the same command.
+                    // Stop this round. A home-directory find is refused once so the model can
                     // call the catalog; a second find reaches the streak ceiling below.
                     // A rejected `--arg` (missing year, a JSON blob as a positional) is
                     // the host's sentence for the model to correct. It must not spend
@@ -1264,19 +1275,45 @@ async fn converse_raw(
                         !intent::counts_as_work_failure(result.ok, &result.content)
                             || intent::is_invoke_argv_mistake(&result.content)
                     });
-                    if results
+                    let failed: Vec<(&opengrok_tools::ToolCall, &opengrok_tools::ToolResult)> =
+                        calls
+                            .iter()
+                            .zip(results.iter())
+                            .filter(|(call, result)| {
+                                !is_client_render_tool(&call.name)
+                                    && !result.awaiting_approval
+                                    && intent::counts_as_work_failure(result.ok, &result.content)
+                            })
+                            .collect();
+                    // A refusal or a tool error counts every time. A command that ran and exited
+                    // non-zero counts only when it is the command that failed last time: a grep
+                    // with no match, then a failing test run, is two outcomes of ordinary work,
+                    // not a retry diary — and ending the turn on the second one showed the
+                    // person the first line of the test output as the answer (#183).
+                    let repeated_or_refused = failed.iter().any(|(call, result)| {
+                        !result.ok || repeats_last_failure(call, last_failed_key.as_deref())
+                    });
+                    if failed
                         .iter()
-                        .any(|result| intent::is_unrecoverable_command_miss(&result.content))
+                        .any(|(call, result)| is_missing_catalog_binary(call, &result.content))
                     {
                         work_fail_streak = intent::MAX_FAILED_WORK_ROUNDS;
                     } else if !argv_mistake {
-                        work_fail_streak = work_fail_streak.saturating_add(1);
+                        work_fail_streak = if repeated_or_refused {
+                            work_fail_streak.saturating_add(1)
+                        } else {
+                            1
+                        };
                     }
+                    last_failed_key = failed
+                        .last()
+                        .map(|(call, _)| intent::shell_action_key(shell_command(&call.arguments)));
                 } else if work_ok && !skip_listing {
                     // A synthetic "already listed" ok is not a catalog read. Clearing
                     // last_failure here is how a later skip finished with a blank chat.
                     work_fail_streak = 0;
                     last_failure = None;
+                    last_failed_key = None;
                 }
 
                 let waiting: Vec<Waiting> = results

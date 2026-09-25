@@ -168,6 +168,9 @@ Refused(o) == o \in {"refusedA", "refusedB"}
 \* lib.rs:1222-1569 — what the results mean, in the code's order.
 Judge ==
     /\ pc = "judge"
+    \* Since #183 "unrecoverable" is the host catalog's binary missing, and a non-zero exit
+    \* restarts the streak at 1 unless it repeats the last failing command. Modelling every
+    \* workFail as +1 over-approximates the early finish; no property here depends on it.
     /\ LET wf == CASE outcome = "unrecoverable" -> MaxFailedWork        \* lib.rs:1243-1247
                    [] outcome = "workFail"      -> workFails + 1        \* lib.rs:1248-1249
                    [] outcome = "ok"            -> 0                    \* lib.rs:1251-1255
