@@ -13,6 +13,12 @@ export interface Coworker {
   boxId?: string | null;
   /** A sentence when something the template promised did not land at hire (a limit, say). */
   templateNote?: string | null;
+  /**
+   * False on a roster row an org-mate shared: the roster lists what you may talk to, and every
+   * management route (repin, spend, door calls) answers such a row 403 or 404. True on a hire
+   * reply, which is always yours and is the same row the roster lists.
+   */
+  mine?: boolean;
 }
 
 export function listCoworkers(): Promise<Coworker[]> {

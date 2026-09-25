@@ -219,6 +219,17 @@ async fn hidden_from_sidebar_is_the_caller_s_preference_and_delete_retires() {
     let listed = h.list(&access).await;
     assert_eq!(row(&listed, &agent)["hiddenFromSidebar"], json!(true));
 
+    // A PATCH that does not name the flag answers the STORED one: the app overwrites its row
+    // from the reply, so a rename answered `false` would un-hide the coworker in the sidebar.
+    let (status, patched) = h
+        .patch(&access, &agent, json!({ "name": "Ada Lovelace" }))
+        .await;
+    assert_eq!(status, 200, "{patched}");
+    assert_eq!(patched["name"], json!("Ada Lovelace"), "{patched}");
+    assert_eq!(patched["hiddenFromSidebar"], json!(true), "{patched}");
+    let listed = h.list(&access).await;
+    assert_eq!(row(&listed, &agent)["hiddenFromSidebar"], json!(true));
+
     let (status, patched) = h
         .patch(&access, &agent, json!({ "hiddenFromSidebar": false }))
         .await;

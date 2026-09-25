@@ -784,10 +784,10 @@ mod tests {
             Err(CoworkerError::NotAGroup)
         ));
     }
-    /// The HTTP route refuses `org` today, because nothing reads visibility yet and a 200 would
-    /// tell somebody their coworker was shared when it was not. This test is what makes that
-    /// refusal one branch to delete rather than a feature to build later: the aggregate already
-    /// records the decision and replays it. Do not delete this when the route's arm goes.
+    /// The aggregate records the owner's decision and replays it; the roster (`roster_for`) and
+    /// the run door (`policy_to_use`) are what read it. The HTTP route refuses `org` only for an
+    /// owner in no org, where a 200 would tell somebody their coworker was shared when it was
+    /// not — that refusal is the route's, never this aggregate's.
     #[test]
     fn org_is_a_decision_the_aggregate_already_records_and_replays() {
         let mut coworker = hired();
