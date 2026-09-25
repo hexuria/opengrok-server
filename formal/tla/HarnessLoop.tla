@@ -138,7 +138,8 @@ Call ==
                                    /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:911-941 — prose past PLAN_ONLY_TEXT_LIMIT with work tools offered and none started.
            \* Since #178 only text still withheld counts, i.e. text that keeps opening with intent;
-           \* an answer goes live first and is a "words" reply. The exit itself is unchanged.
+           \* an answer goes live first and is a "words" reply. The exit still fails; it paints the
+           \* withheld words first, which no property here reads.
            [] r = "planFlood"   -> Close("split", "failed") /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:1573-1604 — no tools asked for: last round either way.
            [] r = "words"       -> Finish /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
@@ -174,8 +175,9 @@ Refused(o) == o \in {"refusedA", "refusedB"}
 Judge ==
     /\ pc = "judge"
     \* Since #183 "unrecoverable" is the host catalog's binary missing, and a non-zero exit
-    \* restarts the streak at 1 unless it repeats the last failing command. Modelling every
-    \* workFail as +1 over-approximates the early finish; no property here depends on it.
+    \* restarts the streak at 1 unless it repeats the last failing command with no other call in
+    \* the round making progress. Modelling every workFail as +1 over-approximates the early
+    \* finish; no property here depends on it.
     /\ LET wf == CASE outcome = "unrecoverable" -> MaxFailedWork        \* lib.rs:1243-1247
                    [] outcome = "workFail"      -> workFails + 1        \* lib.rs:1248-1249
                    [] outcome = "ok"            -> 0                    \* lib.rs:1251-1255
