@@ -195,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
     // Where a coworker's computer comes from. box.ascii.dev when a key is present, otherwise local
     // Docker — so a coworker gets a computer on a laptop with no account anywhere, and the hosted
     // one is an upgrade rather than a prerequisite. `OG_COMPUTER=none` turns computers off.
+    // HOSTED (`OG_HOSTED=1`) NEVER GETS A DOCKER PROVIDER: this one is the only door to a Local
+    // VM (`provision::lookup_provider`), and a bot container on the API host sits beside the
+    // token secret and the org vault.
+    let hosted = !opengrok_server::agui::provision::local_docker_allowed();
     let computer: Option<Arc<dyn opengrok_box::Computer>> = match std::env::var("OG_COMPUTER")
         .as_deref()
     {
@@ -202,12 +206,22 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("OG_COMPUTER=none — coworkers will have no computer and no tools");
             None
         }
+        Ok("docker") if hosted => anyhow::bail!(
+            "OG_COMPUTER=docker is refused with OG_HOSTED=1: a hosted deployment never runs bot \
+             containers on its API host; set OG_BOX_API_KEY or OG_COMPUTER=none"
+        ),
         Ok("docker") => Some(Arc::new(opengrok_box::DockerComputer::new())),
         Ok("ascii") | Ok("box") => Some(Arc::new(opengrok_box::AsciiBoxes::new(
             std::env::var("OG_BOX_API_KEY").context("OG_COMPUTER=ascii needs OG_BOX_API_KEY")?,
         ))),
         _ => match std::env::var("OG_BOX_API_KEY") {
             Ok(key) if !key.is_empty() => Some(Arc::new(opengrok_box::AsciiBoxes::new(key))),
+            _ if hosted => {
+                tracing::warn!(
+                    "OG_HOSTED=1 and no OG_BOX_API_KEY — computers come only from each org's box.ascii.dev key"
+                );
+                None
+            }
             _ => {
                 tracing::info!("no OG_BOX_API_KEY — using local Docker for coworkers");
                 Some(Arc::new(opengrok_box::DockerComputer::new()))

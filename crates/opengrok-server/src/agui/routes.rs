@@ -445,7 +445,7 @@ pub(crate) async fn tools_for_coworker(
     // 2026). The executor wakes the box the first time a tool needs it, and the stream says so.
     // What stays is one cheap look at the box: a provider that refuses to say (401/403 — an ascii
     // key revoked, a computer this deployment may no longer reach) is taken over by local Docker
-    // now, as it was when the wake found the same refusal.
+    // now — where this server runs Local VMs at all (`take_over_with_local_docker`).
     let _ = stopped;
     let mut running = false;
     match computer.state(&box_id).await {
@@ -458,25 +458,31 @@ pub(crate) async fn tools_for_coworker(
                     ..
                 }
             ) || error.to_string().contains("forbidden");
-            if forbidden {
-                tracing::warn!(%error, box_id, "the provider refuses this box; taking it over with local Docker");
-                match super::provision::take_over_with_local_docker(
+            let taken = if forbidden && kind != "local-docker" {
+                super::provision::take_over_with_local_docker(
                     state,
+                    account_id,
                     scope,
                     &scope_id,
                     org_id.as_deref(),
+                    &error,
                 )
                 .await
-                {
-                    Some((local, new_id)) => {
-                        computer = local;
-                        box_id = new_id;
-                        running = true;
-                    }
-                    None => return None,
-                }
             } else {
-                tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so");
+                None
+            };
+            // No takeover keeps the refusing box rather than dropping every tool: the first
+            // tool that needs it answers with the refusal, a result the model can relay, where
+            // `None` here left it told it has no computer and never why (CLAUDE.md #8).
+            match taken {
+                Some((local, new_id)) => {
+                    computer = local;
+                    box_id = new_id;
+                    running = true;
+                }
+                None => {
+                    tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so")
+                }
             }
         }
     }
