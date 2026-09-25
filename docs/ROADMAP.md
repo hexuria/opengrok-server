@@ -637,3 +637,7 @@ every record that sharing would otherwise break carry whose it is.
   answered from text with made-up output). A coworker pinned to it cannot use its computer, and
   no policy or auto-review gate ever fires for it. xai/grok-4.6 emits real tool calls; pin a
   coworker there (slice 18) until this is resolved upstream.
+  *25 Sep 2026 (#197):* the shipped default (`DEFAULT_MODEL`, `.env.example`) is now
+  `xai/grok-4.6`, and `POST /models/probe` offers one tool and answers `toolCalls`, so the
+  console's Test tells a route that talks from one that can act. This box stays open until luna
+  itself is re-verified with a captured `tool_calls` response.

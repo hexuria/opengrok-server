@@ -1030,7 +1030,10 @@ pub async fn probe_model(
             .into_response();
     }
     match catalogue.probe(model).await {
-        Ok(served) => Json(serde_json::json!({ "ok": true, "served": served })).into_response(),
+        Ok(probed) => Json(serde_json::json!({
+            "ok": true, "served": probed.served, "toolCalls": probed.tool_calls,
+        }))
+        .into_response(),
         // The gateway's own words. A paraphrase would lose the part that says what to do.
         Err(detail) => Json(serde_json::json!({ "ok": false, "detail": detail })).into_response(),
     }

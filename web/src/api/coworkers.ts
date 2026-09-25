@@ -172,6 +172,11 @@ export interface ProbeResult {
   served?: string;
   /** The gateway's own words when it would not. */
   detail?: string;
+  /**
+   * Whether the route called the one tool the probe offered. `false` beside `ok: true` is a
+   * route that talks but cannot act — a coworker on it cannot use its computer.
+   */
+  toolCalls?: boolean;
 }
 
 export function probeModel(model: string): Promise<ProbeResult> {
