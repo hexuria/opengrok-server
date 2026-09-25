@@ -163,3 +163,88 @@ fn og_login_email_is_not_documented_as_a_login_path() {
     assert!(!row.contains("binds to"), "{row}");
     assert!(row.contains("first-run.md"), "{row}");
 }
+
+// ---- #200: a database a demo can live in ---------------------------------------------------------
+
+/// The gateway's dev container keeps PGDATA in its writable layer, so a Docker restart wiped
+/// every database on it. The documented home for data that matters has to survive that — and the
+/// mount has to match the image's major version: from 18 the image's VOLUME is
+/// `/var/lib/postgresql` (PGDATA is `/var/lib/postgresql/18/docker`), and a mount at the old
+/// `…/data` path does not hold the cluster.
+#[test]
+fn the_documented_postgres_keeps_its_data_across_a_restart() {
+    let postgres = read("docs/setup/postgres.md");
+    assert!(
+        !postgres.contains("The fix worth making\nonce")
+            && !postgres.contains("fix worth making once"),
+        "the trap is still only described, never fixed"
+    );
+    assert!(
+        postgres.contains("postgres:18"),
+        "name the image version the mount is for"
+    );
+    assert!(
+        postgres.contains("-v opengrok-pgdata:/var/lib/postgresql "),
+        "a named volume at the 18+ mount point"
+    );
+    assert!(
+        !postgres.contains("opengrok-pgdata:/var/lib/postgresql/data"),
+        "the pre-18 path does not hold an 18 cluster"
+    );
+    assert!(postgres.contains("--restart unless-stopped"));
+}
+
+#[test]
+fn there_is_a_backup_and_restore_runbook() {
+    let postgres = read("docs/setup/postgres.md");
+    for needle in [
+        "pg_dump",
+        "pg_restore",
+        "OG_CREDENTIAL_KEK",
+        "OG_TOKEN_SECRET",
+    ] {
+        assert!(
+            postgres.contains(needle),
+            "postgres.md never mentions {needle}"
+        );
+    }
+}
+
+#[test]
+fn data_transforming_migrations_have_a_documented_approach() {
+    let postgres = read("docs/setup/postgres.md");
+    assert!(postgres.contains("\n## Data-transforming migrations\n"));
+    let migrations = read("crates/opengrok-store/src/migrations.rs");
+    let module_doc: String = migrations
+        .lines()
+        .take_while(|line| line.starts_with("//!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        module_doc.contains("Data-transforming migrations"),
+        "the schema's own doc points at the approach before anyone writes one"
+    );
+}
+
+/// The side databases the smokes are handed, as the setup doc creates them and as CI does. A
+/// fourth one (slice 21) was added to CI and the gate and never to the doc, so a local gate run
+/// that followed the doc failed at slice 21 with a word about Postgres, not about the doc.
+#[test]
+fn the_gate_databases_the_doc_creates_are_the_ones_ci_creates() {
+    let for_db = |text: &str| -> Vec<String> {
+        let line = text
+            .lines()
+            .find(|line| line.trim_start().starts_with("for db in "))
+            .expect("a `for db in` loop");
+        line.split_whitespace()
+            .filter(|word| {
+                word.starts_with("opengrok_s") && word.trim_end_matches(';').ends_with("_gate")
+            })
+            .map(|word| word.trim_end_matches(';').to_string())
+            .collect()
+    };
+    let ci = for_db(&read(".github/workflows/ci.yml"));
+    let doc = for_db(&read("docs/setup/postgres.md"));
+    assert!(!ci.is_empty());
+    assert_eq!(doc, ci, "docs/setup/postgres.md and ci.yml disagree");
+}

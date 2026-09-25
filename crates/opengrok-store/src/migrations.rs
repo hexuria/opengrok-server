@@ -1,9 +1,9 @@
 //! Schema, applied in-process under an advisory lock.
 //!
 //! The lock is why several replicas can boot at once without racing each other into a half-applied
-//! schema: whoever gets it migrates, the rest wait and then find the work already done. Matches
-//! open-ai-gateway's pattern deliberately (`RUNBOOK.md` §2) — one database server for a developer,
-//! and one habit to learn across the two services.
+//! schema: whoever gets it migrates, the rest wait and find the work done. Matches open-ai-gateway
+//! (`RUNBOOK.md` §2). EVERY STATEMENT RUNS ON EVERY BOOT, a data transform included: read
+//! docs/setup/postgres.md, "Data-transforming migrations", before writing one.
 
 use sqlx::PgPool;
 

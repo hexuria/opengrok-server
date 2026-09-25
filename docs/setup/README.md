@@ -6,7 +6,7 @@ a bug in the docs — fix the doc in the same commit as whatever you learned.
 
 | Step | File | You are done when |
 |---|---|---|
-| 1 | [`postgres.md`](postgres.md) | `psql` reaches the dev Postgres and the `opengrok` database exists |
+| 1 | [`postgres.md`](postgres.md) | `psql` reaches the dev Postgres and the `opengrok` database exists — on a named volume if its data should outlive a Docker restart |
 | 2 | [`environment.md`](environment.md) | `.env` exists with the required secrets generated |
 | 3 | [`running.md`](running.md) | `curl http://127.0.0.1:1447/health` answers `{"ok":true,…}` |
 | 4 | [`first-run.md`](first-run.md) | the first admin signs in at `/console`, a hired coworker's Test says it can call tools, and one real turn shows `TOOL_CALL_*` events and `reason=Passthrough` at the gateway |
