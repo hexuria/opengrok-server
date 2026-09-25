@@ -130,6 +130,10 @@ pub enum ModelError {
     Refused { status: u16, body: String },
     #[error("the stream broke: {0}")]
     Stream(String),
+    /// A model call ran past the run's clock (`RunBudget`): it never started answering, or it
+    /// went quiet. Already a sentence; nothing was billed for the silence.
+    #[error("{0}")]
+    TimedOut(String),
     /// A LIMIT SOMEBODY SET was reached: the gateway answered 402, or the points guard counted
     /// this coworker over its cap. Already a sentence a person can act on — it is what the
     /// transcript shows, and what `skills::from_tape` answers 402 with.

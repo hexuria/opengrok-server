@@ -9,6 +9,7 @@
 //! exhaustively) or in a door (isolated, swappable), which is what makes a run reproducible
 //! without a provider.
 
+mod budget;
 pub mod cloaked_door;
 pub mod gateway;
 mod intent;
@@ -20,6 +21,7 @@ pub mod review;
 mod timing;
 pub mod tools;
 
+pub use budget::RunBudget;
 pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
@@ -34,7 +36,6 @@ pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 
 use std::collections::HashSet;
 
-use futures::StreamExt;
 use opengrok_wire::agui::Event;
 
 /// Run one turn and collect every event a client should see.
@@ -342,7 +343,8 @@ pub async fn run_turn_with_tools(
         request.tools = runner.tool_schemas();
     }
 
-    let mut stream = match door.stream(request).await {
+    let budget = RunBudget::default();
+    let mut stream = match budget.open(door, request).await {
         Ok(stream) => stream,
         // A door that will not open is a failed run, not a crash: the client gets an ending it can
         // render and reason about (CLAUDE.md #8, fail closed and say why).
@@ -352,7 +354,7 @@ pub async fn run_turn_with_tools(
         }
     };
 
-    while let Some(delta) = stream.next().await {
+    while let Some(delta) = budget.next(&mut stream).await {
         match delta {
             Ok(delta) => events.extend(projection.push(delta)),
             Err(error) => {
@@ -457,6 +459,36 @@ pub async fn run_conversation_streaming(
         run_id,
         Some(sink),
         Carried::default(),
+    )
+    .await
+}
+
+/// `run_conversation`, held to `budget` rather than the default, with an optional live sink.
+///
+/// The door a routine or a schedule would give its own limits through; every other entry point
+/// runs on `RunBudget::default()`.
+pub async fn run_conversation_within(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    context: RunContext,
+    budget: RunBudget,
+    sink: Option<&dyn EventSink>,
+) -> Vec<Event> {
+    let projection = Projection::new(&context.thread_id, &context.run_id, context.at_ms);
+    converse(
+        door,
+        tools,
+        journal,
+        request,
+        projection,
+        &context.run_id,
+        sink,
+        Carried {
+            budget,
+            ..Carried::default()
+        },
     )
     .await
 }
@@ -665,6 +697,7 @@ pub async fn resume_conversation(
             .filter(|result| result.call_id == approved.id && !result.awaiting_approval)
             .filter_map(|_| played_now.clone())
             .collect(),
+        ..Carried::default()
     };
     let mut rest = converse(
         door,
@@ -888,6 +921,8 @@ struct Carried {
     /// Recipes this request already played. A replay repeats what the recipe did rather than
     /// correcting it (#120), and the approved call a resume runs is one of them.
     played: HashSet<String>,
+    /// What the segment may spend.
+    budget: RunBudget,
 }
 
 /// The loop both entry points share.
@@ -928,6 +963,7 @@ async fn converse_raw(
     let Carried {
         started_a_tool: already_started_a_tool,
         mut played,
+        budget,
     } = carried;
     let mut all = Vec::new();
 
@@ -985,7 +1021,9 @@ async fn converse_raw(
     // what the chat shows if that action is asked again or spends the last call.
     let mut opened: Option<(String, String)> = None;
     let mut timing = timing::TurnTiming::new();
+    timing.budget(&budget);
     let verbose_timing = timing::verbose_from_env();
+    let run_clock = std::time::Instant::now();
 
     // EVERY EXIT OF THIS LOOP IS `close`. Returning any other way is how one exit ended a run with
     // no terminal event and others wrote their ending in two halves; this keeps the one way out
@@ -1010,6 +1048,31 @@ async fn converse_raw(
         }};
     }
 
+    // THE LAST CALL, WHEN A BUDGET IS SPENT: no tools, and a request to say what was done. The
+    // round before it is already durable, so this is a round of its own, and its ending goes
+    // down with it in one write like every other. A Stop pressed by now wins — the person asked
+    // for nothing more — and a wrap-up that fails or says nothing ends the run with `$why`, the
+    // RUN_ERROR every cap used to end with.
+    macro_rules! wrap_up {
+        ($why:expr) => {{
+            let why: String = $why;
+            if journal.stopped(run_id).await {
+                end_run!(Vec::new(), Ending::Stop);
+            }
+            let (round, ending) = wrap_up(
+                door,
+                &request,
+                &budget,
+                &mut projection,
+                sink,
+                &mut timing,
+                why,
+            )
+            .await;
+            end_run!(round, ending);
+        }};
+    }
+
     let mut opening = projection.start();
     let opened_ok = journal.record(run_id, &opening).await;
     emit_live(sink, &opening).await;
@@ -1024,7 +1087,7 @@ async fn converse_raw(
         );
     }
 
-    for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS) {
+    for round in 0..(budget.max_rounds + budget.max_computer_rounds) {
         let mut round_events = Vec::new();
 
         // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
@@ -1032,10 +1095,17 @@ async fn converse_raw(
         if journal.stopped(run_id).await {
             end_run!(round_events, Ending::Stop);
         }
+        // The first round always runs; after it, past the wall clock no new work starts.
+        if round > 0 && run_clock.elapsed() >= budget.max_wall() {
+            wrap_up!(format!(
+                "this run reached its time limit of {}",
+                budget::spoken(budget.max_wall())
+            ));
+        }
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let model_started = std::time::Instant::now();
-        let stream = match door.stream(request.clone()).await {
+        let stream = match budget.open(door, request.clone()).await {
             Ok(stream) => Some(stream),
             Err(error) => {
                 timing.record_model(timing::elapsed_ms(model_started));
@@ -1053,7 +1123,7 @@ async fn converse_raw(
         let mut text_live = !tools_offered;
         let mut round_work_tool = false;
         if let Some(mut stream) = stream {
-            while let Some(delta) = stream.next().await {
+            while let Some(delta) = budget.next(&mut stream).await {
                 match delta {
                     Ok(delta) => {
                         any_delta = true;
@@ -1514,13 +1584,15 @@ async fn converse_raw(
                 } else {
                     spoken_rounds += 1;
                 }
-                let over = if spoken_rounds >= MAX_ROUNDS {
+                let over = if spoken_rounds >= budget.max_rounds {
                     Some(format!(
-                        "this run reached its limit of {MAX_ROUNDS} model calls"
+                        "this run reached its limit of {} model calls",
+                        budget.max_rounds
                     ))
-                } else if computer_rounds >= MAX_COMPUTER_ROUNDS {
+                } else if computer_rounds >= budget.max_computer_rounds {
                     Some(format!(
-                        "this run reached its limit of {MAX_COMPUTER_ROUNDS} looks and actions on its computer"
+                        "this run reached its limit of {} looks and actions on its computer",
+                        budget.max_computer_rounds
                     ))
                 } else {
                     None
@@ -1528,11 +1600,19 @@ async fn converse_raw(
                 if let Some(why) = over {
                     // An opened target or editor is the answer, so spending the last call on it
                     // finishes with its sentence rather than failing.
-                    let ending = match opened.clone() {
-                        Some((_, sentence)) => Ending::Finish(Some(sentence)),
-                        None => Ending::Fail(why),
-                    };
-                    end_run!(round_events, ending);
+                    if let Some((_, sentence)) = opened.clone() {
+                        end_run!(round_events, Ending::Finish(Some(sentence)));
+                    }
+                    // DURABLE BEFORE THE WRAP-UP CALL, as before any call.
+                    if let Err(error) = record_round(journal, run_id, &round_events).await {
+                        all.append(&mut round_events);
+                        end_run!(
+                            Vec::new(),
+                            Ending::Fail(format!("the run could not be recorded: {error}"))
+                        );
+                    }
+                    all.append(&mut round_events);
+                    wrap_up!(why);
                 }
 
                 // DURABLE BEFORE THE NEXT CALL. Recorded here, at the top of the next round's
@@ -1581,9 +1661,59 @@ async fn converse_raw(
         Vec::new(),
         Ending::Fail(format!(
             "this run reached its loop bound of {} rounds",
-            MAX_ROUNDS + MAX_COMPUTER_ROUNDS
+            budget.max_rounds + budget.max_computer_rounds
         ))
     );
+}
+
+/// The wrap-up call itself: the conversation so far, a harness line saying why this is the last
+/// call, and no tools. Only words and reasoning are painted — a model that asks for a tool
+/// anyway is not given one. Returns the round and how it ends.
+async fn wrap_up(
+    door: &dyn ModelDoor,
+    request: &ModelRequest,
+    budget: &RunBudget,
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    timing: &mut timing::TurnTiming,
+    why: String,
+) -> (Vec<Event>, Ending) {
+    let mut ask = request.clone();
+    ask.tools.clear();
+    ask.messages.push(ChatMessage {
+        images: Vec::new(),
+        role: "user".to_string(),
+        content: format!(
+            "[harness] {why}, so this is the last call and no tools are offered. In two or three \
+             sentences, tell the person what was done and what is left. Do not ask for a tool."
+        ),
+    });
+    keep_recent_images(&mut ask.messages, RECENT_IMAGES);
+    let started = std::time::Instant::now();
+    let mut round = Vec::new();
+    let streamed: Result<(), ModelError> = async {
+        let mut stream = budget.open(door, ask).await?;
+        while let Some(delta) = budget.next(&mut stream).await {
+            let delta = delta?;
+            if matches!(delta, ModelDelta::Text(_) | ModelDelta::Reasoning(_)) {
+                let produced = projection.push(delta);
+                emit_live(sink, &produced).await;
+                round.extend(produced);
+            }
+        }
+        Ok(())
+    }
+    .await;
+    timing.record_model(timing::elapsed_ms(started));
+    if let Err(error) = &streamed {
+        tracing::warn!(%error, "the wrap-up call failed; the run ends on its budget");
+    }
+    if streamed.is_ok() && round_has_assistant_text(&round) {
+        timing.wrapped_up(&why);
+        (round, Ending::Finish(None))
+    } else {
+        (round, Ending::Fail(why))
+    }
 }
 
 /// Computer-step shots are `agent`: live SSE may carry the PNG for the Computer pane, but the

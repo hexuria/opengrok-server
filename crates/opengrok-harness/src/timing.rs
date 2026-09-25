@@ -43,6 +43,10 @@ pub struct TurnTiming {
     tool_wait_ms: u64,
     auto_review_ms: u64,
     tool_rounds: u32,
+    /// The limits this run was held to, so a replay can say what it was allowed.
+    budget: Option<Value>,
+    /// Why the run ended on its wrap-up call, when it did: which limit it reached.
+    wrapped_up: Option<String>,
 }
 
 impl TurnTiming {
@@ -54,7 +58,17 @@ impl TurnTiming {
             tool_wait_ms: 0,
             auto_review_ms: 0,
             tool_rounds: 0,
+            budget: None,
+            wrapped_up: None,
         }
+    }
+
+    pub fn budget(&mut self, budget: &crate::RunBudget) {
+        self.budget = serde_json::to_value(budget).ok();
+    }
+
+    pub fn wrapped_up(&mut self, why: &str) {
+        self.wrapped_up = Some(why.to_string());
     }
 
     pub fn record_model(&mut self, ms: u64) {
@@ -72,8 +86,10 @@ impl TurnTiming {
         elapsed_ms(self.started)
     }
 
+    /// The run's own record of what it spent. `budget` and `wrapped_up` are present only when
+    /// set, so a frame from a run that had neither reads exactly as it always did.
     pub fn value(&self) -> Value {
-        json!({
+        let mut value = json!({
             "model_ms": self.model_ms,
             "tools": self.tools.iter().map(|tool| {
                 json!({ "name": tool.name, "ms": tool.ms })
@@ -82,7 +98,16 @@ impl TurnTiming {
             "auto_review_ms": self.auto_review_ms,
             "total_ms": self.total_ms(),
             "tool_rounds": self.tool_rounds,
-        })
+        });
+        if let Some(object) = value.as_object_mut() {
+            if let Some(budget) = &self.budget {
+                object.insert("budget".to_string(), budget.clone());
+            }
+            if let Some(why) = &self.wrapped_up {
+                object.insert("wrapped_up".to_string(), json!(why));
+            }
+        }
+        value
     }
 
     /// Compact CUSTOM. Flattened `total_ms` / `tool_rounds` so a drawer that only reads

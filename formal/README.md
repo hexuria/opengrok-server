@@ -20,7 +20,9 @@ TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
 nothing, a plan-only flood, tool calls, a stream error or a door error. A tool round's results
 are ok, refused (two distinguishable signatures), parked, a work failure, an argv mistake or a
 missing binary; its calls are screen actions, other work, or a chart/form. The person may press
-Stop at any step.
+Stop at any step. With `WrapUp` (#93) a spent budget, or the wall clock at the top of any
+round after the first, goes to `wrap`: a Stop recorded by then wins, and otherwise one more
+call with no tools finishes the run with its words or fails it with the budget's reason.
 
 **Lifecycle** (`RunLifecycle`). The aggregate is `running | awaiting | finished | failed |
 stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
@@ -36,7 +38,7 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | Every ending emits exactly one terminal event | safety | `ExactlyOneEnding`; Lean `Ending.at_most_one_terminal`, `ended_is_stable` |
 | The loop never leaves its `for` without an ending | safety | `NeverFallsOut`; Lean `Budget.never_falls_out` |
 | No model call while a round's tool results are not yet durable | safety | `DurableBeforeNextCall` |
-| Spoken and screen budgets hold; model calls ≤ `R + C` | safety | `BudgetsHold`, `CallsBounded`; Lean `Budget.calls_bounded` |
+| Spoken and screen budgets hold; model calls ≤ `R + C`, the wrap-up call included | safety | `BudgetsHold`, `CallsBounded`; Lean `Budget.calls_bounded`, `calls_with_wrap_up_bounded` |
 | At most one tool batch runs after a Stop (the check-to-`run_all` gap) | safety | `AtMostOneToolRunAfterStop` |
 | A Stop recorded before the close asks is how the run ends — no finish, no card | safety | `StopIsHonoured` |
 | An approved call runs at most once per committed answer | safety | `ApprovedAtMostOnce`; Lean `Answer.at_most_one_commit` |

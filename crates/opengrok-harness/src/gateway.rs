@@ -52,12 +52,48 @@ impl std::fmt::Debug for GatewayDoor {
     }
 }
 
+/// How long a connection to the gateway may take. The gateway is on the same network; ten
+/// seconds is a gateway that is not there.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the gateway may send nothing at all, headers or body.
+///
+/// A READ TIMEOUT, NOT A TOTAL ONE: a total timeout would cut a long, healthy stream off at its
+/// deadline. The gateway sends a keep-alive every 10 s and ends an idle stream itself at 180 s
+/// with a `stream_idle` 504 (`gateway-open-ai-gateway.md` §2), so silence past this is a gateway
+/// that cannot answer, and the gateway's own sentence wins whenever it can still give one.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(200);
+
 impl GatewayDoor {
     pub fn new(base_url: impl Into<String>, key: impl Into<String>) -> Self {
+        Self::with_timeouts(base_url, key, CONNECT_TIMEOUT, READ_TIMEOUT)
+    }
+
+    /// `new`, with its two clocks set by the caller.
+    ///
+    /// Before these existed the client had none (`reqwest::Client::new()`), so a gateway that
+    /// accepted the connection and never answered held the run for as long as the process
+    /// lived, its lease renewed the whole time (#93).
+    pub fn with_timeouts(
+        base_url: impl Into<String>,
+        key: impl Into<String>,
+        connect: std::time::Duration,
+        read: std::time::Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .read_timeout(read)
+            .build()
+            .unwrap_or_else(|error| {
+                // Only a TLS backend that cannot start fails here, and `Client::new` would then
+                // fail the same way on first use. Loud, because the door has lost its clocks.
+                tracing::error!(%error, "the gateway client could not be built with timeouts");
+                reqwest::Client::new()
+            });
         Self {
             base_url: base_url.into(),
             key: key.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 }
@@ -510,6 +546,37 @@ struct SseState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A gateway that accepts the connection and never answers — a hung process, a proxy with
+    /// nothing behind it — used to hold the call, and the run, for as long as the process lived.
+    #[tokio::test]
+    async fn a_gateway_that_accepts_and_never_answers_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        let door = GatewayDoor::with_timeouts(
+            format!("http://{address}"),
+            "k",
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(200),
+        );
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            door.stream(ModelRequest::default()),
+        )
+        .await
+        .expect("the door gives up on its own");
+        assert!(
+            answered.is_err(),
+            "a silent gateway is an error, not a stream"
+        );
+        held.abort();
+    }
 
     /// WHAT MAY BE WRITTEN DOWN ABOUT A REFUSED KEY. The gateway records nothing at all for a
     /// key it rejects, so our log is the only place that can ever name the credential a 401 was
