@@ -361,7 +361,9 @@ pub(crate) async fn authenticate(
         Err(AccountError::NotVerified) => {
             return Err((
                 StatusCode::FORBIDDEN,
-                "Your email is not verified yet. Check your inbox for the link.".to_string(),
+                "Your email is not verified yet. Check your inbox for the link, or ask your \
+                 administrator to verify it."
+                    .to_string(),
             ));
         }
         Err(AccountError::NotEnabled) => {

@@ -4,7 +4,8 @@
 //! Every route here is authenticated by the account access token. Two authority levels:
 //!   - a signed-in person may edit THEIR OWN name, avatar and password (never their email — it is
 //!     the identity their org and their invite were bound to);
-//!   - the org's ADMIN may list the org's users, enable/disable them, and issue invite codes.
+//!   - the org's ADMIN may list the org's users, enable/disable them, vouch for an address whose
+//!     verification mail never arrived, and issue invite codes — for members of THEIR org only.
 //!
 //! Admin authority is the org's `admin` field, checked per request against the caller's account —
 //! there is no ambient "is admin" flag, so losing the admin role is immediate, not cached.
@@ -35,6 +36,7 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/users", get(list_users))
         .route("/admin/users/{id}/enable", post(enable_user))
         .route("/admin/users/{id}/disable", post(disable_user))
+        .route("/admin/users/{id}/verify", post(verify_user))
         .route("/admin/invites", get(list_invites).post(issue_invite))
         // Domain ownership (12.later): a console admin claims a domain, publishes the TXT record
         // we hand back, and asks us to check it. Only a verified domain admits signups.
@@ -381,15 +383,25 @@ async fn list_users(State(state): State<AuthState>, headers: axum::http::HeaderM
     }
 }
 
-async fn set_enabled(state: &AuthState, id: &str, enabled: bool) -> Response {
+/// Apply an admin's decision to one member of THEIR org (`org_id`, from `admin_org`). The target
+/// is loaded and its org compared, because `admin_org` only proves the caller runs SOME org:
+/// without this an admin of one org enabled, disabled or vouched for any account on the
+/// deployment by id. Anybody outside the org is "no such user" — the reply does not confirm the
+/// id exists elsewhere.
+async fn decide_for_member(
+    state: &AuthState,
+    org_id: &OrgId,
+    id: &str,
+    command: impl FnOnce(&Account) -> Option<AccountCommand>,
+) -> Response {
     let account_id = AccountId::from_stored(id.to_string());
-    let Ok((account, seq)) = state.store.load_account(&account_id).await else {
-        return (StatusCode::NOT_FOUND, "no such user").into_response();
+    let (account, seq) = match state.store.load_account(&account_id).await {
+        Ok((account, seq)) if account.org_id.as_deref() == Some(org_id.as_str()) => (account, seq),
+        _ => return (StatusCode::NOT_FOUND, "no such user").into_response(),
     };
-    let command = if enabled {
-        AccountCommand::Enable { at_ms: now_ms() }
-    } else {
-        AccountCommand::Disable { at_ms: now_ms() }
+    // `None` is "already so": the same answer with no second event in the log.
+    let Some(command) = command(&account) else {
+        return Json(account_json(&account_id, &account)).into_response();
     };
     let events = match account.decide(command) {
         Ok(events) => events,
@@ -406,10 +418,34 @@ async fn enable_user(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Err(refusal) = admin_org(&state, &headers).await {
-        return refusal;
-    }
-    set_enabled(&state, &id, true).await
+    let (org_id, _, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    decide_for_member(&state, &org_id, &id, |_| {
+        Some(AccountCommand::Enable { at_ms: now_ms() })
+    })
+    .await
+}
+
+/// `POST /admin/users/{id}/verify` — the admin vouches for the member's address. The ONLY way
+/// out when the verification mail never arrived: the link is sent once, dies in 24 hours, and a
+/// second signup is refused as a duplicate. Deliberately separate from Enable — an Enable that
+/// also verified would let anyone holding a leaked invite sign up as a colleague and be let in
+/// by the admin's routine click; this one is a decision the admin makes on purpose.
+async fn verify_user(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let (org_id, _, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    decide_for_member(&state, &org_id, &id, |account| {
+        (!account.verified).then(|| AccountCommand::VerifyEmail { at_ms: now_ms() })
+    })
+    .await
 }
 
 async fn disable_user(
@@ -421,15 +457,19 @@ async fn disable_user(
         Ok((caller_id, _, _)) => caller_id,
         Err(refusal) => return refusal,
     };
-    if let Err(refusal) = admin_org(&state, &headers).await {
-        return refusal;
-    }
+    let (org_id, _, _) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
     // Disabling yourself could lock the org out (a disabled account cannot sign in). Refuse it —
     // an admin who wants to leave hands the role over first.
     if caller.as_str() == id {
         return (StatusCode::CONFLICT, "you cannot disable your own account").into_response();
     }
-    set_enabled(&state, &id, false).await
+    decide_for_member(&state, &org_id, &id, |_| {
+        Some(AccountCommand::Disable { at_ms: now_ms() })
+    })
+    .await
 }
 
 /// `POST /admin/invites` — issue a code, and hand back both the code and a paste-or-click signup

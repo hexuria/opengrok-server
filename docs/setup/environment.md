@@ -92,7 +92,7 @@ false until that client is attached. Never publish 8791/8792.
 | Variable | Default | What it is |
 |---|---|---|
 | `OG_LOGIN_EMAIL` | `host@opengrok.local` | the host account a browser login binds to on a single-user deployment |
-| `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
+| `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias). A mail that never arrives is not a dead end: the org's admin clicks **Verify** in the console (`POST /admin/users/{id}/verify`) or the operator runs `opengrok admin account verify --email <e>` |
 | `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
 
 No variable configures DNS: domain-ownership proof (`/admin/domains/{d}/verify`) resolves the

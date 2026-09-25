@@ -74,10 +74,21 @@ pub async fn signup_form(
     let code = form.code.clone();
     match do_signup(&state, form).await {
         Ok(reply) => {
-            let msg = if reply.verified {
-                "Account created. Your administrator will enable it, then you can sign in."
-            } else {
-                "Account created. Check your email for a verification link, then your administrator                  will enable your account."
+            // THREE OUTCOMES, NOT TWO. Choosing on `verified` alone told a person whose mail was
+            // never sent to go and wait for it — the account was then stuck until someone read
+            // the server log.
+            let msg = match (reply.verified, reply.verification_email_sent) {
+                (true, _) => {
+                    "Account created. Your administrator will enable it, then you can sign in."
+                }
+                (false, true) => {
+                    "Account created. Check your email for a verification link, then your \
+                     administrator will enable your account."
+                }
+                (false, false) => {
+                    "Account created, but the verification email could not be sent. Ask your \
+                     administrator to verify and enable your account."
+                }
             };
             super::pages::message(StatusCode::OK, "Welcome to Open Grok", msg)
         }
@@ -206,8 +217,9 @@ async fn do_signup(
         .await;
 
     // Send the verification email, if a mailer is configured. A send failure does not fail the
-    // signup — the account exists and the operator can re-trigger; failing here would strand a
-    // real account behind a mail hiccup.
+    // signup — the account exists, and its org's admin vouches for the address instead
+    // (`POST /admin/users/{id}/verify`, `opengrok admin account verify`); failing here would
+    // strand a real account behind a mail hiccup.
     let mut sent = false;
     if let Some(key) = &state.resend_api_key {
         let token = mint_verify_token(state, account_id.as_str(), at_ms);

@@ -167,7 +167,7 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   open-code gate and the domain-match gate atomically, each refusal distinguishable.
 - [x] **12.2** `account` extended — argon2id password, name, org, `verified` (Resend-driven),
   `enabled` (admin-flipped); credential login checks all three in order.
-- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account create`) — the
+- [x] **12.3** CLI (`opengrok admin org create / invite / account enable / account verify / account create`) — the
   operator bootstraps the first org from shell; no HTTP admin surface. `account create` mints a
   ready test identity (the multi-account-under-a-different-name need).
 - [x] **12.4** HTTP — `POST /auth/signup` (both gates), the credential form at `/loginDeepControl`

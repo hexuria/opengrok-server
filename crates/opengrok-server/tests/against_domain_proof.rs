@@ -138,8 +138,12 @@ fn app_with(
     if let Some(dns) = dns {
         auth = auth.with_dns(dns);
     }
+    (router_for(auth.clone()), auth)
+}
+
+fn router_for(auth: AuthState) -> axum::Router {
     let agui = AgUiState {
-        auth: auth.clone(),
+        auth,
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
@@ -153,7 +157,7 @@ fn app_with(
         host_settings: None,
     };
     let gateway = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
-    (opengrok_server::router(agui, gateway), auth)
+    opengrok_server::router(agui, gateway)
 }
 
 async fn spawn(app: axum::Router) -> String {
@@ -579,4 +583,180 @@ async fn a_reset_link_changes_the_password_once_and_only_once() {
         .expect("login");
     assert_eq!(res.status(), 200);
     assert!(cookie_value(&res, "og_access").is_some());
+}
+
+/// A mailer whose every send fails, with no network: a bearer that is not a valid header value
+/// makes the request unbuildable, so `send` answers false before it dials anybody. That is the
+/// 20 Sep shape without a Resend account — `RESEND_FROM_EMAIL` left on a domain the account never
+/// verified rejects every send the same way.
+const MAILER_THAT_NEVER_DELIVERS: &str = "re_never\ndelivers";
+
+async fn issue_invite(client: &reqwest::Client, base: &str, cookie: &str) -> String {
+    let res = client
+        .post(format!("{base}/admin/invites"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .expect("invite");
+    assert_eq!(res.status(), 201);
+    let body: serde_json::Value = res.json().await.expect("json");
+    body["code"].as_str().expect("code").to_string()
+}
+
+/// A MAIL THAT NEVER ARRIVED USED TO STRAND THE ACCOUNT FOR GOOD. With a mailer configured, signup
+/// registers `verified = false` and sends one link; a failed send is only logged, the link dies in
+/// 24 hours, a second signup is refused as a duplicate, and the admin's Enable flips only
+/// `enabled` — so the person got "not verified" forever while the console said "enabled". The
+/// admin now vouches for the address explicitly, in their own org and nobody else's.
+#[tokio::test]
+async fn a_member_whose_verification_mail_never_arrived_can_be_verified_by_their_admin() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let stamp = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("strand-{stamp}.test");
+    let (_org, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let (_other_org, other_admin) =
+        seed_org(&store, &format!("elsewhere-{stamp}.test"), "adminpass1").await;
+
+    let auth = AuthState::new(
+        store.clone(),
+        Arc::new(TokenMinter::new(b"stranded-signup-secret")),
+        "host@og.local".to_string(),
+    )
+    .with_resend(
+        Some(MAILER_THAT_NEVER_DELIVERS.to_string()),
+        "http://127.0.0.1".to_string(),
+    );
+    let base = spawn(router_for(auth)).await;
+    let client = reqwest::Client::new();
+    let cookie = cookie_login(&client, &base, &admin_email, "adminpass1").await;
+
+    // The signup succeeds and says, truthfully, that no mail went out.
+    let code = issue_invite(&client, &base, &cookie).await;
+    let jo = format!("jo@{domain}");
+    let res = client
+        .post(format!("{base}/auth/signup"))
+        .json(&serde_json::json!({ "email": jo, "password": "password1", "code": code }))
+        .send()
+        .await
+        .expect("signup");
+    assert_eq!(res.status(), 201);
+    let reply: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(reply["verification_email_sent"], false);
+    assert_eq!(reply["verified"], false);
+    let jo_id = reply["account_id"].as_str().expect("id").to_string();
+
+    // The console shows why Jo cannot sign in.
+    let users: serde_json::Value = client
+        .get(format!("{base}/admin/users"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("users")
+        .json()
+        .await
+        .expect("json");
+    let row = users["users"]
+        .as_array()
+        .expect("users")
+        .iter()
+        .find(|user| user["id"] == jo_id.as_str())
+        .expect("jo listed")
+        .clone();
+    assert_eq!(row["verified"], false);
+
+    // Enable alone still leaves the address unproven — the admin has not said they vouch for it.
+    let res = client
+        .post(format!("{base}/admin/users/{jo_id}/enable"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("enable");
+    assert_eq!(res.status(), 200);
+    let res = client
+        .post(format!("{base}/auth/login"))
+        .json(&serde_json::json!({ "email": jo, "password": "password1" }))
+        .send()
+        .await
+        .expect("login");
+    assert_eq!(res.status(), 403);
+    let text = res.text().await.expect("text");
+    assert!(text.contains("not verified"), "{text}");
+    assert!(
+        text.contains("administrator"),
+        "the refusal names a way out: {text}"
+    );
+
+    // Another org's admin cannot reach Jo at all — not to verify, not to enable or disable.
+    let other_cookie = cookie_login(&client, &base, &other_admin, "adminpass1").await;
+    for action in ["verify", "enable", "disable"] {
+        let res = client
+            .post(format!("{base}/admin/users/{jo_id}/{action}"))
+            .header("cookie", &other_cookie)
+            .send()
+            .await
+            .expect("cross-org");
+        assert_eq!(res.status(), 404, "another org's admin may not {action} Jo");
+    }
+
+    // Jo's own admin vouches for the address; Jo signs in.
+    let res = client
+        .post(format!("{base}/admin/users/{jo_id}/verify"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("verify");
+    assert_eq!(
+        res.status(),
+        200,
+        "{}",
+        res.text().await.unwrap_or_default()
+    );
+    let verified: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(verified["verified"], true);
+    assert_eq!(verified["enabled"], true);
+    // Twice is the same answer, not a second event.
+    let res = client
+        .post(format!("{base}/admin/users/{jo_id}/verify"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("verify again");
+    assert_eq!(res.status(), 200);
+    let jo_cookie = cookie_login(&client, &base, &jo, "password1").await;
+
+    // A member is not an admin.
+    let res = client
+        .post(format!("{base}/admin/users/{jo_id}/verify"))
+        .header("cookie", &jo_cookie)
+        .send()
+        .await
+        .expect("member verify");
+    assert_eq!(res.status(), 403);
+    // ...and its own account is theirs to use, not to administer: still 403, not the admin's 409.
+    let res = client
+        .post(format!("{base}/admin/users/{jo_id}/disable"))
+        .header("cookie", &jo_cookie)
+        .send()
+        .await
+        .expect("member self-disable");
+    assert_eq!(res.status(), 403);
+
+    // The styled form tells the truth about the mail instead of "check your email".
+    let code = issue_invite(&client, &base, &cookie).await;
+    let res = client
+        .post(format!("{base}/signup"))
+        .form(&[
+            ("email", format!("sam@{domain}").as_str()),
+            ("password", "password1"),
+            ("code", code.as_str()),
+        ])
+        .send()
+        .await
+        .expect("form signup");
+    assert_eq!(res.status(), 200);
+    let page = res.text().await.expect("page");
+    assert!(!page.contains("Check your email"), "{page}");
+    assert!(page.contains("could not be sent"), "{page}");
+    assert!(page.contains("administrator"), "{page}");
 }
