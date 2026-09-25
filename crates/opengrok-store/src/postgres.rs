@@ -808,12 +808,13 @@ impl PgStore {
         Ok(seq)
     }
 
-    /// The roster, newest first — the order the client sorts by.
     /// Whether this person may TALK to this coworker: they own it, or it is shared with their
     /// org and they are in that org. Not whether they may manage it — management stays with the
     /// owner, and `coworkers_for` is what that is gated on.
     ///
     /// An empty `org_id` never matches, so two accounts with no org do not silently share.
+    /// `roster_for` and `policy_to_use` repeat this predicate in SQL; the three must agree, or a
+    /// member would be listed a coworker they cannot talk to, or talk to one they cannot see.
     pub async fn may_use_coworker(
         &self,
         account_id: &AccountId,
@@ -838,6 +839,57 @@ impl PgStore {
         Ok(row.is_some())
     }
 
+    /// The roster, newest first — the order the client sorts by: this person's own coworkers,
+    /// plus the ones an org-mate has shared with the org. Each row carries its owner, because a
+    /// shared row has to be able to say whose it is.
+    ///
+    /// A superset of `coworkers_for`, never narrower: the account joins are LEFT joins, so a
+    /// person's own coworker is listed (and PATCHable) even if an account row is missing.
+    ///
+    /// SEPARATE from `coworkers_for` on purpose. That one is the authorisation primitive
+    /// management is gated on (PATCH, retire, keys, limits, the computer — a dozen routes), and
+    /// widening it would hand every org member every other member's write surface. Sharing a
+    /// coworker lets somebody talk to it; it is not a write grant.
+    pub async fn roster_for(
+        &self,
+        account_id: &AccountId,
+    ) -> StoreResult<Vec<(CoworkerView, RosterOwner)>> {
+        let rows = sqlx::query(
+            "select c.id, c.name, c.model, c.box_id, c.retired, c.updated_at_ms, c.members,
+                    c.role, c.visibility,
+                    c.account_id as owner_id, coalesce(owner.first_name, '') as owner_first,
+                    coalesce(owner.last_name, '') as owner_last, owner.org_id as owner_org
+             from coworker_view c
+             left join account_view owner on owner.id = c.account_id
+             left join account_view caller on caller.id = $1
+             where c.retired = false
+               and (c.account_id = $1
+                    or (c.visibility = 'org'
+                        and coalesce(owner.org_id, '') <> ''
+                        and owner.org_id = caller.org_id))
+             order by c.updated_at_ms desc",
+        )
+        .bind(account_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let owner = RosterOwner {
+                    id: AccountId::from_stored(row.try_get::<String, _>("owner_id")?),
+                    first_name: row.try_get("owner_first")?,
+                    last_name: row.try_get("owner_last")?,
+                    // Blank is no org, as `Account` reads the same column.
+                    org_id: row
+                        .try_get::<Option<String>, _>("owner_org")?
+                        .filter(|org| !org.is_empty()),
+                };
+                Ok((coworker_view_row(row)?, owner))
+            })
+            .collect()
+    }
+
+    /// This account's OWN coworkers, newest first — what management is gated on. Not the
+    /// roster: a coworker an org-mate shared is `roster_for`'s, never this.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
             "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility
@@ -904,6 +956,11 @@ impl PgStore {
     ///
     /// A row that is missing comes back as `None` inside the context, and every `None` denies —
     /// so a lookup that finds nothing is a refusal, never a default-allow.
+    ///
+    /// STRICT: this principal's own grant row and nothing else. It is what "may change this
+    /// grant" (`set_approvals`), "may attach a connection" and "may fire a routine" ask, and
+    /// widening it to shared coworkers would let a member mint a grant of their own. The question
+    /// "may this person talk to it on this turn" is `policy_to_use`.
     pub async fn policy_for(
         &self,
         principal: &AccountId,
@@ -917,26 +974,65 @@ impl PgStore {
         .bind(coworker.as_str())
         .fetch_optional(&self.pool)
         .await?
-        .map(|row| {
-            let profile: serde_json::Value = row.try_get("profile")?;
-            let needs_approval: serde_json::Value = row.try_get("needs_approval")?;
-            Ok::<_, StoreError>(opengrok_policy::Grant {
-                principal: principal.clone(),
-                coworker: coworker.clone(),
-                // An unreadable profile becomes `None` — the narrowest reading, per the rule that
-                // a typo may only ever narrow access.
-                profile: serde_json::from_value(profile).unwrap_or(opengrok_policy::ToolSet::None),
-                // An unreadable approval list becomes `All`, which is the NARROW reading here:
-                // every tool then needs a human yes. The direction flips because this field
-                // restricts rather than grants, and a typo must still only ever narrow.
-                needs_approval: serde_json::from_value(needs_approval)
-                    .unwrap_or(opengrok_policy::ToolSet::All),
-                revoked: row.try_get("revoked")?,
-            })
-        })
+        .map(|row| grant_from_row(&row, principal, coworker))
         .transpose()?;
+        let ceiling = self.ceiling_of(coworker).await?;
+        Ok(opengrok_policy::Context { grant, ceiling })
+    }
 
-        let ceiling = sqlx::query("select tools from ceiling_view where coworker_id = $1")
+    /// The policy a TURN runs under: this principal's own grant if they hold one, else — when the
+    /// coworker is shared with the org they are in — its owner's grant, addressed to them.
+    ///
+    /// Derived on every read rather than written as a grant row per member when the owner
+    /// shares, because a copied row goes stale three ways: an org-mate who joins later gets
+    /// nothing, one who leaves keeps a live grant, and switching back to private has to find and
+    /// revoke every copy. Read here, unsharing, leaving the org and the owner's own revocation
+    /// all take effect on the next turn (CLAUDE.md #6), and the member's access is the owner's —
+    /// never wider, `revoked` included.
+    ///
+    /// An own row wins even when revoked: a principal who was explicitly cut off must not walk
+    /// back in through the org. Nothing found is an empty context, which denies.
+    pub async fn policy_to_use(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+    ) -> StoreResult<opengrok_policy::Context> {
+        let grant = sqlx::query(
+            "select profile, needs_approval, revoked from (
+                 select g.profile, g.needs_approval, g.revoked, 0 as priority
+                 from grant_view g
+                 where g.principal_id = $1 and g.coworker_id = $2
+                 union all
+                 select g.profile, g.needs_approval, g.revoked, 1 as priority
+                 from coworker_view c
+                 join account_view owner on owner.id = c.account_id
+                 join account_view caller on caller.id = $1
+                 join grant_view g on g.principal_id = c.account_id and g.coworker_id = c.id
+                 where c.id = $2
+                   and c.account_id <> $1
+                   and c.retired = false
+                   and c.visibility = 'org'
+                   and coalesce(owner.org_id, '') <> ''
+                   and owner.org_id = caller.org_id
+             ) as usable
+             order by priority
+             limit 1",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|row| grant_from_row(&row, principal, coworker))
+        .transpose()?;
+        let ceiling = self.ceiling_of(coworker).await?;
+        Ok(opengrok_policy::Context { grant, ceiling })
+    }
+
+    async fn ceiling_of(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<Option<opengrok_policy::Ceiling>> {
+        sqlx::query("select tools from ceiling_view where coworker_id = $1")
             .bind(coworker.as_str())
             .fetch_optional(&self.pool)
             .await?
@@ -947,9 +1043,7 @@ impl PgStore {
                     tools: serde_json::from_value(tools).unwrap_or(opengrok_policy::ToolSet::None),
                 })
             })
-            .transpose()?;
-
-        Ok(opengrok_policy::Context { grant, ceiling })
+            .transpose()
     }
 
     /// Record a grant and a ceiling together.
@@ -2521,6 +2615,39 @@ impl PgStore {
         }
         Ok(openable)
     }
+}
+
+/// Who hired a coworker, for a roster row that may not be the reader's own.
+#[derive(Debug, Clone)]
+pub struct RosterOwner {
+    pub id: AccountId,
+    pub first_name: String,
+    pub last_name: String,
+    pub org_id: Option<String>,
+}
+
+/// A grant row, addressed to `principal`. For a shared coworker the row is the owner's and the
+/// principal the member: `decide` checks the grant names who is asking, and the member is.
+fn grant_from_row(
+    row: &sqlx::postgres::PgRow,
+    principal: &AccountId,
+    coworker: &CoworkerId,
+) -> StoreResult<opengrok_policy::Grant> {
+    let profile: serde_json::Value = row.try_get("profile")?;
+    let needs_approval: serde_json::Value = row.try_get("needs_approval")?;
+    Ok(opengrok_policy::Grant {
+        principal: principal.clone(),
+        coworker: coworker.clone(),
+        // An unreadable profile becomes `None` — the narrowest reading, per the rule that a typo
+        // may only ever narrow access.
+        profile: serde_json::from_value(profile).unwrap_or(opengrok_policy::ToolSet::None),
+        // An unreadable approval list becomes `All`, which is the NARROW reading here: every tool
+        // then needs a human yes. The direction flips because this field restricts rather than
+        // grants, and a typo must still only ever narrow.
+        needs_approval: serde_json::from_value(needs_approval)
+            .unwrap_or(opengrok_policy::ToolSet::All),
+        revoked: row.try_get("revoked")?,
+    })
 }
 
 fn coworker_view_row(row: &sqlx::postgres::PgRow) -> StoreResult<CoworkerView> {

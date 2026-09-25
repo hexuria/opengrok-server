@@ -503,10 +503,13 @@ pub(crate) async fn tools_for_coworker(
         });
     });
 
+    // The policy a turn runs under, so a member of the org talking to a shared coworker gets the
+    // tools its owner's grant allows — the same answer the run door's gate just gave. Callers
+    // that must be the owner (routines, the tool listing) gate on that before they get here.
     let policy = state
         .auth
         .store
-        .policy_for(account_id, &coworker_id)
+        .policy_to_use(account_id, &coworker_id)
         .await
         .ok()?;
 
@@ -1057,9 +1060,12 @@ pub struct RepinRequest {
 /// visibility are the aggregate's, and the title, avatar shape and colour are the client's
 /// decoration in the seam-B profile blob. `notifyOnUpdates` has no home at all — see below.
 ///
-/// Ownership answers 404, like every other per-coworker route here: an id that is not yours must
-/// not be distinguishable from one that does not exist. A body naming no field is a 400 rather
-/// than a silent no-op, because a caller who sent one meant something.
+/// A coworker not on your roster answers 404, like every other per-coworker route here: an id
+/// you cannot use must not be distinguishable from one that does not exist. One an org-mate
+/// shared with you is on your roster, so you already know it exists; what you may change on it is
+/// your own sidebar, and anything else is a 403 that says so — management stays with the owner.
+/// A body naming no field is a 400 rather than a silent no-op, because a caller who sent one
+/// meant something.
 pub async fn repin_coworker(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -1077,16 +1083,15 @@ pub async fn repin_coworker(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     let coworker_id = CoworkerId::from_stored(coworker_id);
-    let owns = state
-        .auth
-        .store
-        .coworkers_for(&account_id)
-        .await
-        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
-        .unwrap_or(false);
-    if !owns {
-        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
-    }
+    // The caller's own roster row, so the reply below can be exactly what the roster will list.
+    let (listed, owner) = match state.auth.store.roster_for(&account_id).await {
+        Ok(roster) => match roster.into_iter().find(|(view, _)| view.id == coworker_id) {
+            Some(seat) => seat,
+            None => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        },
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    let mine = owner.id == account_id;
 
     // A name is trimmed and must survive it. Null is a wrong type here rather than "clear it":
     // the role is nullable and a name is not, because `persona::system_message` has no identity
@@ -1117,9 +1122,10 @@ pub async fn repin_coworker(
     };
     // "private" | "org". An unrecognised word is refused rather than defaulted: a caller who
     // wrote "public" meant something we do not offer, and quietly storing "private" would tell
-    // them they had shared a coworker they had not. `org` is accepted now that a shared
-    // coworker has a transcript per member; before that it was refused, because storing it
-    // would have reported a sharing that did nothing.
+    // them they had shared a coworker they had not. `org` is honoured by the roster
+    // (`roster_for`) and the run door (`policy_to_use`). Until #175 nothing on this door read
+    // it, and a 200 here reported a sharing that did nothing; an owner in no org, for whom that
+    // is still true, is refused below.
     let visibility = match body.get("visibility") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(text)) => {
@@ -1161,18 +1167,32 @@ pub async fn repin_coworker(
     //
     // So a body naming nothing this route can change — including one carrying only that toggle —
     // is a 400 rather than a silent no-op, and the sentence lists what it could have named.
-    if name.is_none()
-        && model.is_none()
-        && role.is_none()
-        && visibility.is_none()
-        && hidden.is_none()
-        && decoration.is_empty()
-    {
+    let manages = name.is_some()
+        || model.is_some()
+        || role.is_some()
+        || visibility.is_some()
+        || !decoration.is_empty();
+    if !manages && hidden.is_none() {
         return refuse(
             "nothing to change: send a name, a model, a role, a title, an avatar shape or \
              colour, a visibility, hiddenFromSidebar, or several"
                 .to_string(),
         );
+    }
+    if !mine {
+        return match (manages, hidden) {
+            (false, Some(hidden)) => {
+                hide_shared(&state, &account_id, &listed, &owner, hidden).await
+            }
+            _ => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "only the person who hired this coworker can change it; you can \
+                              hide it from your own sidebar"
+                })),
+            )
+                .into_response(),
+        };
     }
 
     let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
@@ -1199,6 +1219,20 @@ pub async fn repin_coworker(
             Ok(more) => events.extend(more),
             Err(error) => return refuse(error.to_string()),
         }
+    }
+    // Sharing with the org when there is no org would store a word that reaches nobody — the
+    // 200 would tell the person their coworker was shared when it was not. Refused only on the
+    // way IN, so a coworker already marked `org` (its owner has since left the org) can still be
+    // saved from a card that sends its visibility back unchanged.
+    if visibility == Some(opengrok_core::coworker::Visibility::Org)
+        && loaded.visibility != opengrok_core::coworker::Visibility::Org
+        && owner.org_id.is_none()
+    {
+        return refuse(
+            "visibility: this account is in no org, so there is nobody to share this coworker \
+             with; it stays private"
+                .to_string(),
+        );
     }
     if let Some(visibility) = visibility {
         match loaded.decide(CoworkerCommand::SetVisibility { visibility, at_ms }) {
@@ -1280,7 +1314,47 @@ pub async fn repin_coworker(
     // The same row the roster lists, by construction: the app overwrites its row from this reply
     // and relaunches onto `GET /coworkers`, so two spellings of one coworker is a coworker that
     // changes shape on restart.
-    Json(coworker_row(&view, Some(&profile), hidden_from_sidebar)).into_response()
+    Json(coworker_row(
+        &view,
+        Some(&profile),
+        hidden_from_sidebar,
+        &owner,
+        &account_id,
+    ))
+    .into_response()
+}
+
+/// A member hiding a coworker an org-mate shared: the one change that is theirs to make, because
+/// the sidebar it changes is their own (`coworker_hidden` is keyed by the viewer). Without it a
+/// shared coworker is a row somebody can never put away.
+async fn hide_shared(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    listed: &opengrok_core::coworker::CoworkerView,
+    owner: &opengrok_store::RosterOwner,
+    hidden: bool,
+) -> Response {
+    if state
+        .auth
+        .store
+        .set_coworker_hidden(account_id, &listed.id, hidden, now_ms())
+        .await
+        .is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+    }
+    let profile = match state.auth.store.seamb_profile(&listed.id).await {
+        Ok(profile) => profile,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    Json(coworker_row(
+        listed,
+        profile.as_ref(),
+        hidden,
+        owner,
+        account_id,
+    ))
+    .into_response()
 }
 
 /// One coworker, as every route that answers with one spells it — the roster and the PATCH reply.
@@ -1297,11 +1371,20 @@ pub async fn repin_coworker(
 /// app has to guess about. `retired` is not a key because a retired coworker is never a row.
 /// `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant would
 /// overwrite the toggle the person just moved.
+///
+/// The permission fields are decided here, per viewer, on every row (ROADMAP 19.2; the shape the
+/// pre-deletion roster answered, `git show 0cc3487^:crates/opengrok-server/src/gateway/live.rs`).
+/// `mine` is ownership; `canManage` follows it exactly, because management stays with the owner
+/// when a coworker is shared — without it a member's client offers edit controls that answer
+/// 403; `owner` names the hirer so a shared row can say whose it is.
 pub(crate) fn coworker_row(
     view: &opengrok_core::coworker::CoworkerView,
     profile: Option<&serde_json::Value>,
     hidden_from_sidebar: bool,
+    owner: &opengrok_store::RosterOwner,
+    viewer: &opengrok_core::id::AccountId,
 ) -> serde_json::Value {
+    let mine = owner.id == *viewer;
     // Blank reads as absent, the way `Persona::compose` reads the same blob: a cleared title is
     // a coworker with no title, not one called "".
     let decorated = |key: &str| {
@@ -1326,6 +1409,12 @@ pub(crate) fn coworker_row(
         "boxId": view.box_id.as_ref().map(|id| id.as_str()),
         "isGroup": !view.members.is_empty(),
         "memberIds": view.members.iter().map(CoworkerId::as_str).collect::<Vec<_>>(),
+        "mine": mine,
+        "canManage": mine,
+        "owner": {
+            "id": owner.id.as_str(),
+            "name": format!("{} {}", owner.first_name, owner.last_name).trim(),
+        },
     })
 }
 
@@ -1661,7 +1750,9 @@ pub async fn list_coworkers(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    let coworkers = match state.auth.store.coworkers_for(&account_id).await {
+    // `roster_for`, not `coworkers_for`: the roster is what this person may TALK to, including
+    // what an org-mate shared; `coworkers_for` is what they may manage, and stays owner-only.
+    let coworkers = match state.auth.store.roster_for(&account_id).await {
         Ok(coworkers) => coworkers,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
@@ -1671,7 +1762,7 @@ pub async fn list_coworkers(
     };
     // A 503 rather than rows without their decoration: a roster that answers 200 with every
     // title and avatar quietly gone is the app repainting a correct sidebar as a wrong one.
-    let ids: Vec<CoworkerId> = coworkers.iter().map(|view| view.id.clone()).collect();
+    let ids: Vec<CoworkerId> = coworkers.iter().map(|(view, _)| view.id.clone()).collect();
     let profiles = match state.auth.store.seamb_profiles(&ids).await {
         Ok(profiles) => profiles,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
@@ -1680,11 +1771,13 @@ pub async fn list_coworkers(
     // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
     let rows: Vec<serde_json::Value> = coworkers
         .iter()
-        .map(|view| {
+        .map(|(view, owner)| {
             coworker_row(
                 view,
                 profiles.get(view.id.as_str()),
                 hidden.contains(view.id.as_str()),
+                owner,
+                &account_id,
             )
         })
         .collect();
@@ -2467,10 +2560,13 @@ pub async fn run(
     let mut coworker_role: Option<String> = None;
 
     if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
+        // `policy_to_use`, not `policy_for`: a coworker an org-mate shared is one this person may
+        // talk to under the owner's grant, read now. A store error is an empty context, which
+        // denies.
         let policy = state
             .auth
             .store
-            .policy_for(account_id, &coworker_id)
+            .policy_to_use(account_id, &coworker_id)
             .await
             .unwrap_or_default();
         let decision = opengrok_policy::decide(
