@@ -2549,7 +2549,38 @@ pub struct RecipeRunRow {
     pub ok: bool,
     pub stopped_at: Option<i32>,
     pub receipt: serde_json::Value,
+    /// When the run was written: when it started, for one the server played.
     pub at_ms: i64,
+    /// Set while the run is playing and renewed as it plays; null once it has finished.
+    #[serde(default)]
+    pub lease_until_ms: Option<i64>,
+}
+
+impl RecipeRunRow {
+    /// `finished`, `running`, or `interrupted` — a row whose lease ran out with nobody finishing
+    /// it, because the process playing it stopped. What the box did then is not known.
+    pub fn state(&self, now_ms: i64) -> &'static str {
+        match self.lease_until_ms {
+            None => "finished",
+            Some(until) if until > now_ms => "running",
+            Some(_) => "interrupted",
+        }
+    }
+}
+
+fn recipe_run_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRunRow> {
+    Ok(RecipeRunRow {
+        id: row.try_get("id")?,
+        recipe_id: row.try_get("recipe_id")?,
+        version: row.try_get("version")?,
+        coworker_id: row.try_get("coworker_id")?,
+        run_id: row.try_get("run_id")?,
+        ok: row.try_get("ok")?,
+        stopped_at: row.try_get("stopped_at")?,
+        receipt: row.try_get("receipt")?,
+        at_ms: row.try_get("at_ms")?,
+        lease_until_ms: row.try_get("lease_until_ms")?,
+    })
 }
 
 fn recipe_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRow> {
@@ -2588,6 +2619,23 @@ const RECIPE_SELECT: &str =
         r.created_at_ms, r.updated_at_ms, r.deleted_at_ms,
         (select max(version) from recipe_version v where v.recipe_id = r.id) as latest_version
    from recipe r";
+
+/// A grant counts only while whoever made it still holds the recipe: its owner, or a person whose
+/// own share row is accepted — the question `recipe_accepted_by` answers, asked of `granted_by`.
+///
+/// ASKED ON EVERY READ, not only when the grant is made. Unshare and decline delete the grants they
+/// end, but a turn's offers are rebuilt from this read every turn, and a grant a cleanup missed
+/// (a row lost some other way, a path added later) must fail closed rather than keep a former
+/// recipient's bot playing the owner's newest edits. `g` and `r` are the grant and its recipe.
+const GRANT_STILL_HELD: &str = "(g.granted_by = r.owner_id or exists (
+        select 1 from recipe_share s
+         where s.recipe_id = r.id and s.scope = 'account' and s.scope_id = g.granted_by
+           and s.accepted_at_ms is not null))";
+
+/// The grants one person made on one recipe, never its owner's: the owner cannot lose access to
+/// their own recipe, so an answer or unshare naming them has nothing of theirs to take.
+const DROP_GRANTS_MADE_BY: &str = "delete from recipe_grant g using recipe r
+     where g.recipe_id = $1 and r.id = g.recipe_id and g.granted_by = $2 and r.owner_id <> $2";
 
 impl PgStore {
     #[allow(clippy::too_many_arguments)]
@@ -2870,19 +2918,44 @@ impl PgStore {
         Ok(())
     }
 
+    /// Take a share back, and the grants the people losing it made to their bots.
+    ///
+    /// ONE TRANSACTION, GRANTS FIRST. For an org share, who accepted through it is only known from
+    /// the `'org:'` account rows this deletes; dropping them first would leave nothing to say
+    /// whose bots to take the recipe from.
     pub async fn unshare_recipe(
         &self,
         recipe_id: &str,
         scope: &str,
         scope_id: &str,
     ) -> StoreResult<()> {
+        let mut tx = self.pool.begin().await?;
+        if scope == "org" {
+            sqlx::query(
+                "delete from recipe_grant g using recipe r
+                  where g.recipe_id = $1 and r.id = g.recipe_id and g.granted_by <> r.owner_id
+                    and g.granted_by in (
+                        select scope_id from recipe_share
+                         where recipe_id = $1 and scope = 'account' and granted_by = 'org:' || $2)",
+            )
+            .bind(recipe_id)
+            .bind(scope_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(DROP_GRANTS_MADE_BY)
+                .bind(recipe_id)
+                .bind(scope_id)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query(
             "delete from recipe_share where recipe_id = $1 and scope = $2 and scope_id = $3",
         )
         .bind(recipe_id)
         .bind(scope)
         .bind(scope_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         // A person who accepted through the org keeps nothing once the org share is withdrawn.
         if scope == "org" {
@@ -2891,9 +2964,10 @@ impl PgStore {
             )
             .bind(recipe_id)
             .bind(scope_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2988,6 +3062,14 @@ impl PgStore {
             .execute(&self.pool)
             .await?;
         }
+        // Declining is giving it back: the bots this person granted it to stop being offered it.
+        if !accept {
+            sqlx::query(DROP_GRANTS_MADE_BY)
+                .bind(recipe_id)
+                .bind(account_id)
+                .execute(&self.pool)
+                .await?;
+        }
         Ok(true)
     }
 
@@ -3034,10 +3116,11 @@ impl PgStore {
     }
 
     pub async fn recipe_grants(&self, recipe_id: &str) -> StoreResult<Vec<RecipeGrantRow>> {
-        let rows = sqlx::query(
-            "select recipe_id, coworker_id, granted_by, granted_at_ms from recipe_grant
-              where recipe_id = $1 order by granted_at_ms",
-        )
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "select g.recipe_id, g.coworker_id, g.granted_by, g.granted_at_ms
+               from recipe_grant g join recipe r on r.id = g.recipe_id
+              where g.recipe_id = $1 and {GRANT_STILL_HELD} order by g.granted_at_ms"
+        )))
         .bind(recipe_id)
         .fetch_all(&self.pool)
         .await?;
@@ -3053,11 +3136,12 @@ impl PgStore {
             .collect()
     }
 
-    /// The recipes a bot may run: granted, and not deleted.
+    /// The recipes a bot may run: granted by somebody who still holds them, and not deleted.
     pub async fn recipes_granted_to(&self, coworker_id: &str) -> StoreResult<Vec<RecipeRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{RECIPE_SELECT} join recipe_grant g on g.recipe_id = r.id
-             where g.coworker_id = $1 and r.deleted_at_ms is null order by r.name"
+             where g.coworker_id = $1 and r.deleted_at_ms is null and {GRANT_STILL_HELD}
+             order by r.name"
         )))
         .bind(coworker_id)
         .fetch_all(&self.pool)
@@ -3065,6 +3149,50 @@ impl PgStore {
         rows.iter().map(recipe_row).collect()
     }
 
+    /// Write a run down BEFORE the box is asked to play it: not ok yet, and leased until
+    /// `lease_until_ms`. Writes nothing and answers false when this bot already has a run whose
+    /// lease is live, because two recipes clicking on one screen at once is neither's recipe.
+    pub async fn start_recipe_run(
+        &self,
+        id: &str,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &str,
+        lease_until_ms: i64,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "insert into recipe_run
+                 (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms, lease_until_ms)
+             select $1, $2, $3, $4, $1, false, null, '{\"ok\": false, \"running\": true}'::jsonb, $5, $6
+              where not exists (
+                  select 1 from recipe_run where coworker_id = $4 and lease_until_ms > $5)",
+        )
+        .bind(id)
+        .bind(recipe_id)
+        .bind(version)
+        .bind(coworker_id)
+        .bind(at_ms)
+        .bind(lease_until_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// Push a playing run's lease out. A finished row is left alone.
+    pub async fn hold_recipe_run(&self, id: &str, lease_until_ms: i64) -> StoreResult<()> {
+        sqlx::query(
+            "update recipe_run set lease_until_ms = $2 where id = $1 and lease_until_ms is not null",
+        )
+        .bind(id)
+        .bind(lease_until_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Write a finished run: a new row, or the one `start_recipe_run` wrote, finished in place.
+    /// A finished row keeps the time it started, so history does not reorder as runs land.
     #[allow(clippy::too_many_arguments)]
     pub async fn record_recipe_run(
         &self,
@@ -3080,7 +3208,10 @@ impl PgStore {
     ) -> StoreResult<()> {
         sqlx::query(
             "insert into recipe_run (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             on conflict (id) do update set
+               run_id = excluded.run_id, ok = excluded.ok, stopped_at = excluded.stopped_at,
+               receipt = excluded.receipt, lease_until_ms = null",
         )
         .bind(id)
         .bind(recipe_id)
@@ -3096,8 +3227,6 @@ impl PgStore {
         Ok(())
     }
 
-    /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
-    /// long-lived recipe cannot grow an unbounded history nobody reads.
     /// Drop the artifacts of runs that are no longer there.
     ///
     /// Called after pruning, because an artifact outliving its run is a megabyte nobody can
@@ -3120,54 +3249,90 @@ impl PgStore {
         Ok(done.rows_affected())
     }
 
+    /// Drop all but the newest `keep` runs of one version BY ONE ACCOUNT — the account whose bot
+    /// `coworker_id` is. Called after a run is written, so a long-lived recipe cannot grow an
+    /// unbounded history nobody reads.
+    ///
+    /// PER RUNNER, because a shared recipe is run by more than its owner: kept per version alone,
+    /// five runs by a recipient evicted the owner's history, and the orphan sweep then took the
+    /// owner's screenshots with it. A bot with no roster row (a stand-in) is its own runner.
+    ///
+    /// A run still playing is never pruned: its row is what keeps the orphan sweep off the
+    /// screenshots it is filing, and the receipt it is about to write needs somewhere to land.
     pub async fn prune_recipe_runs(
         &self,
         recipe_id: &str,
         version: i32,
+        coworker_id: &str,
         keep: i64,
+        now_ms: i64,
     ) -> StoreResult<u64> {
         let done = sqlx::query(
-            "delete from recipe_run
+            "with runner as (
+                 select id from coworker_view
+                  where account_id in (select account_id from coworker_view where id = $3)
+                 union select $3
+             )
+             delete from recipe_run
               where recipe_id = $1 and version = $2
+                and coworker_id in (select id from runner)
+                and (lease_until_ms is null or lease_until_ms <= $5)
                 and id not in (
                     select id from recipe_run
                      where recipe_id = $1 and version = $2
+                       and coworker_id in (select id from runner)
                      order by at_ms desc
-                     limit $3
+                     limit $4
                 )",
         )
         .bind(recipe_id)
         .bind(version)
+        .bind(coworker_id)
         .bind(keep)
+        .bind(now_ms)
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected())
     }
 
+    /// One account's runs of a recipe: the ones its own bots played, retired bots included.
+    ///
+    /// A run is shown only to the account that ran it, because that is the account its
+    /// screenshots belong to (`artifact.account_id`, the only thing the bytes route serves by),
+    /// and a history that listed a colleague's runs listed pictures that could never open.
+    pub async fn recipe_runs_for_account(
+        &self,
+        recipe_id: &str,
+        account_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<RecipeRunRow>> {
+        let rows = sqlx::query(
+            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms,
+                    lease_until_ms
+               from recipe_run
+              where recipe_id = $1
+                and coworker_id in (select id from coworker_view where account_id = $2)
+              order by at_ms desc limit $3",
+        )
+        .bind(recipe_id)
+        .bind(account_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(recipe_run_row).collect()
+    }
+
     pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
         let rows = sqlx::query(
-            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms
+            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms,
+                    lease_until_ms
                from recipe_run where recipe_id = $1 order by at_ms desc limit $2",
         )
         .bind(recipe_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(RecipeRunRow {
-                    id: row.try_get("id")?,
-                    recipe_id: row.try_get("recipe_id")?,
-                    version: row.try_get("version")?,
-                    coworker_id: row.try_get("coworker_id")?,
-                    run_id: row.try_get("run_id")?,
-                    ok: row.try_get("ok")?,
-                    stopped_at: row.try_get("stopped_at")?,
-                    receipt: row.try_get("receipt")?,
-                    at_ms: row.try_get("at_ms")?,
-                })
-            })
-            .collect()
+        rows.iter().map(recipe_run_row).collect()
     }
 }
 

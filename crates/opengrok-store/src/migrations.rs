@@ -1158,6 +1158,32 @@ create table if not exists credential_hint (
     updated_at_ms  bigint not null,
     primary key (account_id, coworker_id, origin)
 );
+
+-- A RECIPE RUN IS A ROW BEFORE THE BOX IS TOUCHED, and this is how the row says it is still
+-- playing. A run used to be written only after the box answered, inside the request that asked for
+-- it — so a closed tab dropped the handler, the box finished clicking, and the server kept no run,
+-- no screenshots and no error. Now the row comes first and the work is detached from the request.
+--
+-- A LEASE, NOT A STATUS, for the reason `recovery.rs` gives: a live process pushes the expiry out
+-- as it works and a dead one cannot, so a row whose lease has passed had nobody finishing it. Read
+-- that way, a restart needs no sweep and two replicas cannot disagree. Null is a finished run —
+-- every row written before this column existed, and every row once its receipt lands.
+--
+-- Guarded like `skill.approved_at_ms` above, and for the same deadlock: a bare `add column if not
+-- exists` takes ACCESS EXCLUSIVE on every boot before deciding there is nothing to do. The index
+-- is inside the guard so it, too, is built once; it serves "is this bot already playing?".
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'recipe_run'
+           and column_name = 'lease_until_ms'
+    ) then
+        alter table recipe_run add column lease_until_ms bigint;
+        create index recipe_run_live_idx on recipe_run (coworker_id)
+            where lease_until_ms is not null;
+    end if;
+end $do$;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.
