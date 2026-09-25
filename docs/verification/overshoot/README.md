@@ -20,8 +20,8 @@ exit goes through `close`. In the order the loop reaches them:
 | The opening could not be journaled | fail | "the run could not be recorded: …" |
 | Stop, at the top of a round | stop | — |
 | Past the run's wall clock (`RunBudget::max_wall_ms`, 15 min), at the top of any round after the first | the wrap-up call (below) | — |
-| The door would not open (after its safe retries), did not start answering within `call_timeout_ms`, went quiet for `idle_ms`, or the stream broke | fail | the door's sentence (`ModelError::sentence`) |
-| A plan with no tool started, past `PLAN_ONLY_TEXT_LIMIT` withheld characters | fail | "the coworker described N characters of work without starting any of it…" |
+| The door would not open (after its safe retries), did not start answering within `call_timeout_ms`, went quiet for `idle_ms`, or the stream broke | fail | the door's sentence (`ModelError::sentence`), after any words the round withheld |
+| A plan with no tool started, past `PLAN_ONLY_TEXT_LIMIT` withheld characters | fail | the withheld words as written, then "the coworker described N characters of work without starting any of it…" |
 | Stop, after the model asked for a tool and before it runs | stop | — |
 | A catalog listing asked for again after one was already skipped | finish | the listing's first line |
 | The same open-target / open-editor action again | finish | the opened sentence |
@@ -29,7 +29,7 @@ exit goes through `close`. In the order the loop reaches them:
 | A call waiting on a person | park | a card each |
 | Every call refused, the same way as last round | fail | "`tool` was refused the same way twice…" |
 | The same screenshot `SAME_SCREEN_LIMIT` (4) times running | fail | "the screen has not changed after 4 looks…" |
-| `MAX_FAILED_WORK_ROUNDS` (2) failures in a row | finish | one short failure fact |
+| `MAX_FAILED_WORK_ROUNDS` (2) failures in a row, with no other call in those rounds making progress | finish | one short failure fact |
 | A chart or form was painted | finish | — |
 | Spoken rounds reach `MAX_ROUNDS` (8), or screen rounds reach `MAX_COMPUTER_ROUNDS` (24) | the opened sentence if there is one, else the wrap-up call | — |
 | The wrap-up call: no tools, a `[harness]` line saying which limit | finish with the model's words; fail with "this run reached its limit of …" if it fails or says nothing; stop if a Stop landed first | the model's summary |

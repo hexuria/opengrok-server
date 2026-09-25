@@ -80,7 +80,11 @@ pub const SAME_SCREEN_LIMIT: usize = 4;
 /// that keeps opening with intent. It used to count every character, so any coworker with a
 /// computer that answered "explain X" or wrote a routine's briefing past ~250 words ended in
 /// RUN_ERROR, and the answer it had written was never shown (#178). A real answer goes live
-/// long before this bound; what reaches it is a plan, and a plan is not shown.
+/// long before this bound; what reaches it is text that opens every sentence with intent.
+///
+/// THAT TEXT IS SHOWN AS WRITTEN BEFORE THE RUN STOPS. Filtered for intent it came to
+/// nothing, and "what would you do? just tell me" answered with "I'll install nginx… I'll
+/// then request a certificate…" ended in a RUN_ERROR with none of the answer on screen.
 pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
 
 /// Characters of non-intent text, past any opening intent, before a tool-capable round starts
@@ -1197,13 +1201,12 @@ async fn converse_raw(
                                     .await;
                             } else if !started_a_tool && plan_only_chars > PLAN_ONLY_TEXT_LIMIT {
                                 timing.record_model(timing::elapsed_ms(model_started));
-                                flush_withheld_text(
+                                let written = std::mem::take(&mut withheld);
+                                emit_visible_text(
                                     &mut projection,
                                     sink,
-                                    &mut withheld,
                                     &mut round_events,
-                                    None,
-                                    None,
+                                    written,
                                 )
                                 .await;
                                 end_run!(
@@ -1232,14 +1235,21 @@ async fn converse_raw(
                         timing.record_model(timing::elapsed_ms(model_started));
                         // Once live, the round has shown its own words; a failure fact after
                         // them would read as the answer.
+                        //
+                        // Before that, the exit flushes what was withheld (#178): the words past
+                        // their intent, else the failure fact, else the words as written. No tool
+                        // call follows them now to make "I'll check the logs." a preamble.
                         if !round_work_tool && !text_live {
+                            let written = (!round_tool)
+                                .then(|| withheld.trim().to_string())
+                                .filter(|text| !text.is_empty());
                             flush_withheld_text(
                                 &mut projection,
                                 sink,
                                 &mut withheld,
                                 &mut round_events,
                                 last_failure.as_deref(),
-                                None,
+                                written,
                             )
                             .await;
                         }

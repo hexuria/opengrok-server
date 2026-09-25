@@ -1110,7 +1110,8 @@ async fn a_call_refused_the_same_way_twice_ends_the_run() {
 /// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
 /// as text, and never started a call. Crossing the character bound ends the run with a
 /// reason a person can read, instead of streaming the rest of the flood — including a tool
-/// call that arrives only after it. The plan itself is not shown: it is all intent.
+/// call that arrives only after it. What the model wrote up to the bound is shown as written
+/// first: every exit flushes the withheld text (#178).
 #[tokio::test]
 async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
     struct PlanDoor;
@@ -1170,9 +1171,79 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
         "the reason is a sentence, not engine-speak: {message}"
     );
     assert!(
-        !assistant_text(&events).contains("I'll check"),
-        "a plan is not an answer: {events:?}"
+        assistant_text(&events).starts_with("I'll check the host and then list the profiles."),
+        "the words are flushed before the run closes: {events:?}"
     );
+}
+
+/// A stream that breaks after words that opened with intent shows those words before the
+/// RUN_ERROR (#178, "any remaining exit flushes withheld text"). Filtered for intent they came
+/// to nothing, and the person saw the error alone.
+#[tokio::test]
+async fn a_broken_stream_shows_the_words_it_withheld() {
+    struct BreaksAfterWords;
+    #[async_trait::async_trait]
+    impl ModelDoor for BreaksAfterWords {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ModelDelta::Text(
+                    "I'll keep the old config and only change the port.".to_string(),
+                )),
+                Err(ModelError::Stream("upstream hung up".to_string())),
+            ])))
+        }
+    }
+    let events = run_conversation(
+        &BreaksAfterWords,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("what would you change?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunError);
+    assert_eq!(
+        assistant_text(&events),
+        "I'll keep the old config and only change the port."
+    );
+}
+
+/// The verifier's probe for #178: asked "what would you do? just tell me", a coworker with a
+/// shell answers in sentences that each open with intent. Filtered for intent, that answer came
+/// to nothing and the person saw only the RUN_ERROR.
+#[tokio::test]
+async fn an_answer_that_is_all_intent_is_shown_before_the_plan_bound_stops_it() {
+    let answer = [
+        "I'll install nginx from the distribution's packages. ",
+        "I'll then request a certificate with certbot for your domain. ",
+        "I'll point the server block at the app on port 8080. ",
+        "I'll finish by reloading nginx and checking the site answers over https. ",
+    ]
+    .concat()
+    .repeat(PLAN_ONLY_TEXT_LIMIT / 200);
+    let door = MockDoor::with_script(
+        answer
+            .split_inclusive(' ')
+            .map(|word| ModelDelta::Text(word.to_string()))
+            .collect(),
+    );
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("what would you do to put my app online? just tell me"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let text = assistant_text(&events);
+    assert!(text.starts_with("I'll install nginx"), "{events:?}");
+    assert!(text.contains("request a certificate"), "{text:?}");
+    assert!(text.chars().count() > PLAN_ONLY_TEXT_LIMIT, "{text:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunError);
 }
 
 /// A LONG ANSWER IS NOT A STALL. Any coworker with a computer answering "explain X" or a
