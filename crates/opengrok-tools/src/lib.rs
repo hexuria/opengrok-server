@@ -625,11 +625,13 @@ pub struct Executor {
     /// Live sessions with the MCP servers this coworker's plugins bring, keyed by
     /// `<plugin>.<server>`.
     ///
-    /// Connected once per request rather than per call: a turn that reaches for three tools on one
-    /// server should not hand-shake three times.
+    /// Connected once per request rather than per call — and pooled across requests by
+    /// `mcp::Pool` — so a turn that reaches for three tools on one server hand-shakes at most once.
     sessions: BTreeMap<String, Arc<crate::mcp::Session>>,
     /// Every plugin tool on offer, in the order a model is told about them.
     plugin_tools: Vec<crate::mcp::McpTool>,
+    /// Plugin servers that should have been reached this request and were not, with the reason.
+    unavailable_plugins: BTreeMap<String, String>,
     /// The reverse-exec bridge, present ONLY when this account has an enrolled, enabled machine.
     /// Its presence is what advertises `user_machine_shell` — the tool exists iff a machine can
     /// actually be reached.
@@ -729,6 +731,7 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            unavailable_plugins: BTreeMap::new(),
             user_machine: None,
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
@@ -757,6 +760,7 @@ impl Executor {
             approved_calls: std::collections::BTreeSet::new(),
             sessions: BTreeMap::new(),
             plugin_tools: Vec::new(),
+            unavailable_plugins: BTreeMap::new(),
             user_machine: None,
             auto_review: None,
             review_approved_calls: std::collections::BTreeSet::new(),
@@ -1128,6 +1132,36 @@ impl Executor {
         self.sessions = sessions;
         self.plugin_tools = tools;
         self
+    }
+
+    /// Attach what a dial produced: the sessions, the tools, and the servers that did not answer.
+    #[must_use]
+    pub fn with_plugins(mut self, dialled: crate::mcp::Dialled) -> Self {
+        self.unavailable_plugins = dialled.unavailable;
+        self.with_plugin_tools(dialled.sessions, dialled.tools)
+    }
+
+    /// One sentence for the system message naming the plugin servers that could not be reached
+    /// this request, or nothing.
+    ///
+    /// SAID UP FRONT BECAUSE THEIR TOOLS ARE NOT OFFERED. Without it a person asking for GitHub
+    /// while GitHub's server is down hears that the coworker has no GitHub, which sends them to
+    /// the wrong place (#199).
+    pub fn unavailable_plugins_line(&self) -> String {
+        if self.unavailable_plugins.is_empty() {
+            return String::new();
+        }
+        let reasons = self
+            .unavailable_plugins
+            .values()
+            .map(|reason| clip_reason(reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            " Some of your connected tools are unavailable on this turn, so they are not offered: \
+             {reasons}. If asked for one, say it could not be reached right now and may work on a \
+             later message — not that you do not have it."
+        )
     }
 
     /// The tools that need no plugin. `open_url` and `computer` are in the default grant but are
@@ -1871,16 +1905,33 @@ impl Executor {
     ) -> ToolResult {
         let name = self.internal_tool_name(name);
         let Some((plugin, server, remote)) = crate::mcp::split_qualified(&name) else {
-            return ToolResult::refused(call_id, format!("there is no tool called {name}"));
+            // A server that did not answer offered no tools this turn, so the wire name of one the
+            // model remembers from an earlier turn resolves to nothing. Refused with the server's
+            // reason, not as a tool that never existed.
+            let down = self.unavailable_plugins.iter().find(|(key, _)| {
+                name.starts_with(&format!("{}_", crate::mcp::openai_safe_tool_name(key)))
+            });
+            return ToolResult::refused(
+                call_id,
+                match down {
+                    Some((_, reason)) => format!("{name} cannot run now: {}", clip_reason(reason)),
+                    None => format!("there is no tool called {name}"),
+                },
+            );
         };
 
         let key = format!("{plugin}.{server}");
         let Some(session) = self.sessions.get(&key) else {
             // Named precisely: "no such tool" and "that plugin is not connected right now" send a
             // person to different places.
+            let why = self
+                .unavailable_plugins
+                .get(&key)
+                .map(|reason| format!(" ({})", clip_reason(reason)))
+                .unwrap_or_default();
             return ToolResult::refused(
                 call_id,
-                format!("{plugin} is not connected on this run, so {name} cannot run"),
+                format!("{plugin} is not connected on this run{why}, so {name} cannot run"),
             );
         };
 
@@ -2150,6 +2201,16 @@ fn strip_identity(arguments: Value) -> Value {
             Value::Object(map)
         }
         other => other,
+    }
+}
+
+/// A remote server's error text, cut to what a prompt can afford: it is the server's words, and a
+/// server must not be able to fill the system message with them.
+fn clip_reason(reason: &str) -> String {
+    const MOST: usize = 240;
+    match reason.char_indices().nth(MOST) {
+        Some((cut, _)) => format!("{}…", &reason[..cut]),
+        None => reason.to_string(),
     }
 }
 

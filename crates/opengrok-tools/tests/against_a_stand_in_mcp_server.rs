@@ -1,8 +1,10 @@
 //! Drives our MCP client against a stand-in MCP server.
 //!
 //! The unit tests in `mcp` prove we fill placeholders and namespace tools correctly. This proves
-//! the client actually speaks the protocol: initialize, list, call — and that the credential
-//! resolved from a coworker's connections arrives in the server's hands.
+//! the client actually speaks the protocol: initialize, list, call — that the credential resolved
+//! from a coworker's connections arrives in the server's hands, that the schema the server sent is
+//! what the model is offered (#196), and that a server which never answers costs a turn its
+//! deadline rather than the turn (#199).
 //!
 //! THE SERVER IS HAND-WRITTEN, ON PURPOSE. Standing up rmcp's own server would be less code and a
 //! worse test: two halves of one library agreeing with each other proves they share an
@@ -12,7 +14,9 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -21,7 +25,9 @@ use axum::{Json, Router};
 use opengrok_box::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_tools::Executor;
-use opengrok_tools::mcp::{Endpoint, McpTool, Session, advertised_parameters, within_budget};
+use opengrok_tools::mcp::{
+    Deadlines, Dialled, Endpoint, McpTool, Pool, Session, advertised_parameters, within_budget,
+};
 use serde_json::{Value, json};
 
 /// What the server saw, so a test can assert on the request rather than only the reply.
@@ -30,6 +36,10 @@ struct Seen {
     authorization: Arc<Mutex<Option<String>>>,
     custom: Arc<Mutex<Option<String>>>,
     calls: Arc<Mutex<Vec<(String, Value)>>>,
+    /// Handshakes, so reuse can be told apart from reconnecting.
+    initializes: Arc<AtomicUsize>,
+    /// `notifications/cancelled` params, so a timed-out call can be shown to have been called off.
+    cancelled: Arc<Mutex<Vec<Value>>>,
 }
 
 /// The protocol version rmcp negotiates. Answering with something it does not know fails the
@@ -37,107 +47,144 @@ struct Seen {
 const PROTOCOL_VERSION: &str = "2025-11-25";
 
 async fn start_server() -> (String, Seen) {
+    start_server_hanging(None).await
+}
+
+/// How the stand-in fails to answer one method.
+#[derive(Clone, Copy)]
+enum Hang {
+    /// Takes the request and sends nothing back, not even headers: a server that answers in JSON
+    /// and whose work never finishes.
+    Silent(&'static str),
+    /// Opens the event stream for the answer and never sends it: a streaming server whose work
+    /// never finishes.
+    Streaming(&'static str),
+}
+
+async fn start_server_hanging(hang: Option<Hang>) -> (String, Seen) {
     let seen = Seen::default();
 
-    let app = Router::new()
-        .route(
-            "/mcp",
-            post(
-                |State(seen): State<Seen>,
-                 headers: axum::http::HeaderMap,
-                 body: String| async move {
-                    if let Ok(mut slot) = seen.authorization.lock() {
-                        *slot = headers
-                            .get(axum::http::header::AUTHORIZATION)
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string);
-                    }
-                    if let Ok(mut slot) = seen.custom.lock() {
-                        *slot = headers
-                            .get("x-workspace")
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string);
-                    }
-
-                    let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                    let method = request
-                        .get("method")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let id = request.get("id").cloned();
-
-                    // A notification carries no id and expects no body — answering one with JSON
-                    // is a protocol error that some clients tolerate and some do not.
-                    let Some(id) = id else {
-                        return axum::http::StatusCode::ACCEPTED.into_response();
-                    };
-
-                    let result = match method.as_str() {
-                        "initialize" => json!({
-                            "protocolVersion": PROTOCOL_VERSION,
-                            "capabilities": { "tools": {} },
-                            "serverInfo": { "name": "stand-in", "version": "0.1.0" }
-                        }),
-                        "tools/list" => json!({
-                            "tools": [{
-                                "name": "send",
-                                "description": "Send a message",
-                                // Shaped like a zod- or pydantic-generated schema: a
-                                // `$schema` line, a `required` list, and an identity
-                                // property a remote server has no business asking the model
-                                // for.
-                                "inputSchema": {
-                                    "$schema": "http://json-schema.org/draft-07/schema#",
-                                    "type": "object",
-                                    "properties": {
-                                        "to": { "type": "string" },
-                                        "subject": { "type": "string" },
-                                        "coworkerId": { "type": "string" }
-                                    },
-                                    "required": ["to", "coworkerId"]
-                                }
-                            }, {
-                                "name": "repos.list",
-                                "description": "A tool whose own name contains a dot",
-                                "inputSchema": { "type": "object" }
-                            }]
-                        }),
-                        "tools/call" => {
-                            let params = request.get("params").cloned().unwrap_or(Value::Null);
-                            let name = params
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            let arguments =
-                                params.get("arguments").cloned().unwrap_or(Value::Null);
-                            if let Ok(mut calls) = seen.calls.lock() {
-                                calls.push((name.clone(), arguments.clone()));
-                            }
-                            json!({
-                                "content": [{
-                                    "type": "text",
-                                    "text": format!("{name} ran with {arguments}")
-                                }],
-                                "isError": false
-                            })
+    let app =
+        Router::new()
+            .route(
+                "/mcp",
+                post(
+                    move |State(seen): State<Seen>,
+                          headers: axum::http::HeaderMap,
+                          body: String| async move {
+                        if let Ok(mut slot) = seen.authorization.lock() {
+                            *slot = headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_string);
                         }
-                        other => {
-                            return Json(json!({
+                        if let Ok(mut slot) = seen.custom.lock() {
+                            *slot = headers
+                                .get("x-workspace")
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_string);
+                        }
+
+                        let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                        let method = request
+                            .get("method")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let id = request.get("id").cloned();
+
+                        if method == "notifications/cancelled"
+                            && let Ok(mut cancelled) = seen.cancelled.lock()
+                        {
+                            cancelled.push(request.get("params").cloned().unwrap_or(Value::Null));
+                        }
+                        // A notification carries no id and expects no body — answering one with JSON
+                        // is a protocol error that some clients tolerate and some do not.
+                        let Some(id) = id else {
+                            return axum::http::StatusCode::ACCEPTED.into_response();
+                        };
+                        if method == "initialize" {
+                            seen.initializes.fetch_add(1, Ordering::SeqCst);
+                        }
+                        match hang {
+                            Some(Hang::Silent(on)) if on == method => {
+                                std::future::pending::<()>().await;
+                            }
+                            Some(Hang::Streaming(on)) if on == method => {
+                                let never = futures::stream::pending::<
+                                    Result<axum::response::sse::Event, std::convert::Infallible>,
+                                >();
+                                return axum::response::sse::Sse::new(never).into_response();
+                            }
+                            _ => {}
+                        }
+
+                        let result = match method.as_str() {
+                            "initialize" => json!({
+                                "protocolVersion": PROTOCOL_VERSION,
+                                "capabilities": { "tools": {} },
+                                "serverInfo": { "name": "stand-in", "version": "0.1.0" }
+                            }),
+                            "tools/list" => json!({
+                                "tools": [{
+                                    "name": "send",
+                                    "description": "Send a message",
+                                    // Shaped like a zod- or pydantic-generated schema: a
+                                    // `$schema` line, a `required` list, and an identity
+                                    // property a remote server has no business asking the model
+                                    // for.
+                                    "inputSchema": {
+                                        "$schema": "http://json-schema.org/draft-07/schema#",
+                                        "type": "object",
+                                        "properties": {
+                                            "to": { "type": "string" },
+                                            "subject": { "type": "string" },
+                                            "coworkerId": { "type": "string" }
+                                        },
+                                        "required": ["to", "coworkerId"]
+                                    }
+                                }, {
+                                    "name": "repos.list",
+                                    "description": "A tool whose own name contains a dot",
+                                    "inputSchema": { "type": "object" }
+                                }]
+                            }),
+                            "tools/call" => {
+                                let params = request.get("params").cloned().unwrap_or(Value::Null);
+                                let name = params
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let arguments =
+                                    params.get("arguments").cloned().unwrap_or(Value::Null);
+                                if let Ok(mut calls) = seen.calls.lock() {
+                                    calls.push((name.clone(), arguments.clone()));
+                                }
+                                json!({
+                                    "content": [{
+                                        "type": "text",
+                                        "text": format!("{name} ran with {arguments}")
+                                    }],
+                                    "isError": false
+                                })
+                            }
+                            other => {
+                                return Json(json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
                                 "error": { "code": -32601, "message": format!("no method {other}") }
                             }))
                             .into_response();
-                        }
-                    };
+                            }
+                        };
 
-                    Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
-                },
-            ),
-        )
-        .with_state(seen.clone());
+                        Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+                            .into_response()
+                    },
+                ),
+            )
+            .with_state(seen.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -505,4 +552,348 @@ fn the_schema_budget_is_shared_and_spent_in_order() {
         within_budget(parameters, &mut budget),
         json!({ "type": "object" })
     );
+}
+
+/// Accepts every connection and never reads or writes a byte: a server behind a black-holing
+/// firewall, or one wedged mid-deploy.
+async fn start_black_hole() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind an ephemeral port");
+    let addr = listener.local_addr().expect("read the address");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    format!("http://{addr}/mcp")
+}
+
+/// Short enough to keep the suite quick, long enough for a loopback stand-in to answer.
+fn quick() -> Deadlines {
+    Deadlines {
+        connect: Duration::from_millis(500),
+        call: Duration::from_millis(500),
+    }
+}
+
+fn endpoint_for(plugin: &str, url: &str) -> Endpoint {
+    Endpoint {
+        plugin: plugin.to_string(),
+        ..endpoint(url, &[])
+    }
+}
+
+/// #199 AS FIRST SEEN: a server that accepts and never answers `initialize` hung every turn.
+#[tokio::test]
+async fn a_server_that_never_answers_initialize_is_reported_within_the_deadline() {
+    let url = start_black_hole().await;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        Session::connect_within(endpoint(&url, &[]), quick()),
+    )
+    .await;
+    let error = outcome
+        .expect("connect must give up on its own deadline")
+        .expect_err("nothing answered");
+    let message = error.to_string();
+    assert!(
+        message.contains("gmail.api"),
+        "it must name the server: {message}"
+    );
+    assert!(message.contains("did not answer"), "{message}");
+}
+
+/// Answering `initialize` and then going quiet is as unavailable as never answering.
+#[tokio::test]
+async fn a_server_that_never_lists_its_tools_is_reported_within_the_deadline() {
+    let (url, _) = start_server_hanging(Some(Hang::Silent("tools/list"))).await;
+    let session = Session::connect_within(endpoint(&url, &[]), quick())
+        .await
+        .expect("the handshake is answered");
+    let error = tokio::time::timeout(Duration::from_secs(5), session.tools())
+        .await
+        .expect("listing must give up on its own deadline")
+        .expect_err("nothing was listed");
+    let message = error.to_string();
+    assert!(message.contains("gmail.api"), "{message}");
+    assert!(message.contains("tools/list"), "{message}");
+}
+
+/// A call that never returns becomes a RESULT the model can reason about — one that says the
+/// action may still have happened — and a session wedged on it is never handed to another turn.
+#[tokio::test]
+async fn a_tool_call_that_never_returns_is_a_result_not_a_hang() {
+    let (url, _) = start_server_hanging(Some(Hang::Silent("tools/call"))).await;
+    let session = Arc::new(
+        Session::connect_within(endpoint(&url, &[]), quick())
+            .await
+            .expect("connect"),
+    );
+    let tools = session.tools().await.expect("list");
+    let executor = Executor::with_policy(std::sync::Arc::new(NoBox), everything_allowed())
+        .with_plugin_tools(
+            BTreeMap::from([("gmail.api".to_string(), session.clone())]),
+            tools,
+        );
+
+    let result = tokio::time::timeout(Duration::from_secs(5), send_through(&executor))
+        .await
+        .expect("the call must give up on its own deadline");
+
+    assert!(!result.ok, "{result:?}");
+    assert!(result.content.contains("did not answer"), "{result:?}");
+    assert!(
+        result.content.contains("may already have taken effect"),
+        "a timed-out send may have been sent: {result:?}"
+    );
+    assert!(
+        !session.is_usable(),
+        "a session stuck on a call must not be pooled for the next turn"
+    );
+}
+
+/// When the server is streaming its answer, the timeout reaches it as `notifications/cancelled`,
+/// so the work is called off rather than finished for nobody.
+#[tokio::test]
+async fn a_timed_out_call_is_called_off_at_the_server() {
+    let (url, seen) = start_server_hanging(Some(Hang::Streaming("tools/call"))).await;
+    let session = Session::connect_within(endpoint(&url, &[]), quick())
+        .await
+        .expect("connect");
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.call("send", json!({ "to": "someone@example.com" })),
+    )
+    .await
+    .expect("the call must give up on its own deadline")
+    .expect_err("nothing was answered");
+    assert!(error.to_string().contains("did not answer"), "{error}");
+
+    let called_off = async {
+        while seen.cancelled.lock().expect("lock").is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), called_off)
+        .await
+        .expect("the server is told the call was cancelled");
+}
+
+/// A tool of a server that did not answer this turn, called anyway (the model remembers it from an
+/// earlier one), is refused with the server's reason — not as a tool that never existed.
+#[tokio::test]
+async fn a_call_to_an_unavailable_server_says_why() {
+    let executor = Executor::with_policy(std::sync::Arc::new(NoBox), everything_allowed())
+        .with_plugins(Dialled {
+            unavailable: BTreeMap::from([(
+                "gmail.api".to_string(),
+                "gmail.api did not answer initialize and tools/list within 5s".to_string(),
+            )]),
+            ..Dialled::default()
+        });
+
+    for name in ["gmail_api_send", "gmail.api.send"] {
+        let result = call_through(&executor, name).await;
+        assert!(!result.ok, "{result:?}");
+        assert!(
+            result.content.contains("did not answer"),
+            "{name}: {result:?}"
+        );
+        assert!(
+            !result.content.contains("there is no tool"),
+            "{name}: {result:?}"
+        );
+    }
+    // A name that belongs to no server is still simply not a tool.
+    let unknown = call_through(&executor, "github_api_search").await;
+    assert!(unknown.content.contains("there is no tool"), "{unknown:?}");
+}
+
+async fn send_through(executor: &Executor) -> opengrok_tools::ToolResult {
+    call_through(executor, "gmail_api_send").await
+}
+
+async fn call_through(executor: &Executor, name: &str) -> opengrok_tools::ToolResult {
+    let context = opengrok_tools::ToolContext {
+        account_id: AccountId::from_stored("acct_1"),
+        coworker_id: CoworkerId::from_stored("cw_1"),
+        // A plugin tool never touches the box, but a coworker with none is refused before
+        // anything is routed.
+        box_id: Some(opengrok_core::id::BoxId::from_stored("box_1")),
+        group_box: None,
+        screen_hold: false,
+    };
+    let call = opengrok_tools::ToolCall {
+        id: "call_1".to_string(),
+        name: name.to_string(),
+        arguments: json!({ "to": "someone@example.com" }),
+    };
+    executor.execute(&context, &call).await
+}
+
+/// #199's acceptance: one dead server among several costs the turn the deadline, not a hang, and
+/// the others' tools are offered as usual.
+#[tokio::test]
+async fn one_black_holed_server_does_not_delay_the_others() {
+    let (good, _) = start_server().await;
+    let mut endpoints = Vec::new();
+    for n in 1..=4 {
+        endpoints.push(endpoint_for(&format!("slow{n}"), &start_black_hole().await));
+    }
+    endpoints.insert(2, endpoint_for("gmail", &good));
+    let pool = Pool::new(quick());
+
+    let started = Instant::now();
+    let dialled = pool.dial("acct_1/cw_1", endpoints, |_| true).await;
+    let took = started.elapsed();
+
+    // Concurrent: four dead servers cost one deadline (500 ms), not four (2 s). The margin is for
+    // a loaded CI machine, not for a serial dial to slip under.
+    assert!(took < Duration::from_millis(1_500), "took {took:?}");
+    let names: Vec<_> = dialled
+        .tools
+        .iter()
+        .map(|tool| tool.qualified_name.as_str())
+        .collect();
+    assert!(names.contains(&"gmail.api.send"), "{names:?}");
+    assert_eq!(
+        dialled.sessions.keys().collect::<Vec<_>>(),
+        vec!["gmail.api"]
+    );
+    assert_eq!(
+        dialled.unavailable.keys().collect::<Vec<_>>(),
+        vec!["slow1.api", "slow2.api", "slow3.api", "slow4.api"]
+    );
+    assert!(
+        dialled.unavailable["slow1.api"].contains("did not answer"),
+        "{:?}",
+        dialled.unavailable
+    );
+
+    // What the turn is told, so a person asking for the dead one hears it is down.
+    let executor = Executor::with_policy(std::sync::Arc::new(NoBox), everything_allowed())
+        .with_plugins(dialled);
+    let line = executor.unavailable_plugins_line();
+    assert!(
+        line.contains("slow1.api") && line.contains("slow2.api"),
+        "{line}"
+    );
+    assert!(!line.contains("gmail"), "{line}");
+}
+
+/// A server listed a moment ago is reused, not dialled again — and the ceiling is still applied to
+/// the pooled list on every dial.
+#[tokio::test]
+async fn a_second_dial_within_the_ttl_reuses_the_session() {
+    let (url, seen) = start_server().await;
+    let pool = Pool::new(quick());
+
+    let first = pool
+        .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |_| true)
+        .await;
+    assert_eq!(first.tools.len(), 2, "{:?}", first.tools);
+
+    let narrowed = pool
+        .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |tool| {
+            tool != "gmail.api.send"
+        })
+        .await;
+    assert_eq!(
+        seen.initializes.load(Ordering::SeqCst),
+        1,
+        "reused, not redialled"
+    );
+    let names: Vec<_> = narrowed
+        .tools
+        .iter()
+        .map(|tool| tool.qualified_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["gmail.api.repos.list"],
+        "the ceiling applies to a pooled list"
+    );
+    assert!(Arc::ptr_eq(
+        &first.sessions["gmail.api"],
+        &narrowed.sessions["gmail.api"]
+    ));
+}
+
+/// A session never outlives its credential and is never shared across coworkers: a different
+/// token, or a different coworker with the same token, is a new session.
+#[tokio::test]
+async fn a_pooled_session_is_never_handed_to_another_credential_or_coworker() {
+    let (url, seen) = start_server().await;
+    let pool = Pool::new(quick());
+    let with_token = |token: &str| endpoint(&url, &[("authorization", token)]);
+
+    pool.dial("acct_1/cw_1", vec![with_token("Bearer gho_first")], |_| {
+        true
+    })
+    .await;
+    pool.dial(
+        "acct_1/cw_1",
+        vec![with_token("Bearer gho_rotated")],
+        |_| true,
+    )
+    .await;
+    assert_eq!(
+        seen.initializes.load(Ordering::SeqCst),
+        2,
+        "a rotated token reconnects"
+    );
+    assert_eq!(
+        seen.authorization.lock().expect("lock").as_deref(),
+        Some("Bearer gho_rotated")
+    );
+
+    pool.dial(
+        "acct_1/cw_2",
+        vec![with_token("Bearer gho_rotated")],
+        |_| true,
+    )
+    .await;
+    assert_eq!(
+        seen.initializes.load(Ordering::SeqCst),
+        3,
+        "another coworker reconnects"
+    );
+}
+
+/// A dead server costs one deadline per retry window, not one per turn; once the window passes it
+/// is tried again.
+#[tokio::test]
+async fn a_failed_server_is_left_alone_until_its_retry_window_passes() {
+    let url = start_black_hole().await;
+    let pool = Pool::new(quick()).with_reuse(Pool::TTL, Duration::from_millis(800));
+
+    let first = pool
+        .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |_| true)
+        .await;
+    assert!(first.unavailable.contains_key("gmail.api"));
+
+    let started = Instant::now();
+    let again = pool
+        .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |_| true)
+        .await;
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(again.unavailable.contains_key("gmail.api"));
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let started = Instant::now();
+    let retried = pool
+        .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |_| true)
+        .await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(400),
+        "it was tried again"
+    );
+    assert!(retried.unavailable.contains_key("gmail.api"));
 }

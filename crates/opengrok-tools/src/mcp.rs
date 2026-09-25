@@ -30,6 +30,9 @@ pub enum McpError {
     Refused { server: String, detail: String },
     #[error("{tool} is not a tool this server offers")]
     NoSuchTool { tool: String },
+    /// Said in words a model can act on, because it reaches one as a tool result (#199).
+    #[error("{server} did not answer {detail}")]
+    TimedOut { server: String, detail: String },
 }
 
 /// A tool a plugin's server offers, as the model will be told about it.
@@ -207,6 +210,11 @@ impl std::fmt::Debug for Endpoint {
 impl Endpoint {
     pub fn qualify(&self, tool: &str) -> String {
         format!("{}.{}.{tool}", self.plugin, self.server)
+    }
+
+    /// `<plugin>.<server>` — how sessions are keyed and how a server is named to a person.
+    pub fn key(&self) -> String {
+        format!("{}.{}", self.plugin, self.server)
     }
 }
 
@@ -394,16 +402,84 @@ fn unique_openai_name(used: &mut BTreeSet<String>, name: &str) -> String {
 // the thin layer that actually speaks to a server.
 // ---------------------------------------------------------------------------
 
-use rmcp::ServiceExt;
-use rmcp::model::CallToolRequestParams;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest, ServerResult};
+use rmcp::service::PeerRequestOptions;
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
+use rmcp::{ServiceError, ServiceExt};
+
+/// How long a plugin server gets before it is treated as unavailable.
+///
+/// EVERY WAIT ON A REMOTE SERVER IS BOUNDED. `initialize`, `tools/list` and `tools/call` were
+/// awaited with nothing around them, and every turn, resume, autonomy run and MCP-door call waits
+/// on the listing before its first model call — so one server that accepted and never answered
+/// hung every chat on the deployment (#199).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deadlines {
+    /// `initialize` and `tools/list` TOGETHER: the most a turn waits before starting without the
+    /// server. `OG_PLUGIN_CONNECT_TIMEOUT_MS`.
+    pub connect: Duration,
+    /// One `tools/call`. `OG_PLUGIN_CALL_TIMEOUT_MS`.
+    pub call: Duration,
+}
+
+impl Default for Deadlines {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(5),
+            call: Duration::from_secs(60),
+        }
+    }
+}
+
+impl Deadlines {
+    /// The defaults, overridden by the environment where it says something usable.
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        Self {
+            connect: millis_from_env("OG_PLUGIN_CONNECT_TIMEOUT_MS").unwrap_or(defaults.connect),
+            call: millis_from_env("OG_PLUGIN_CALL_TIMEOUT_MS").unwrap_or(defaults.call),
+        }
+    }
+}
+
+/// A positive number of milliseconds, or `None` with a warning when the value was there but
+/// unusable. Zero is refused rather than read as "no deadline": an unbounded wait is the bug.
+fn millis_from_env(name: &str) -> Option<Duration> {
+    let raw = std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    match raw.trim().parse::<u64>() {
+        Ok(ms) if ms > 0 => Some(Duration::from_millis(ms)),
+        _ => {
+            tracing::warn!(
+                variable = name,
+                value = raw,
+                "not a positive number of milliseconds; using the default"
+            );
+            None
+        }
+    }
+}
+
+/// How long `tools/call` is given past its deadline to deliver the cancellation. rmcp sends
+/// `notifications/cancelled` when its own timeout fires; this outer bound only exists so a wedged
+/// send queue cannot turn the deadline back into a hang.
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
 /// A live session with one MCP server.
 pub struct Session {
     endpoint: Endpoint,
     service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    deadlines: Deadlines,
+    /// Set when the transport failed under a request. A pooled session in this state is dialled
+    /// again rather than handed to the next turn, which would fail the same way.
+    broken: AtomicBool,
 }
 
 impl std::fmt::Debug for Session {
@@ -415,11 +491,19 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// Connect, performing the MCP initialize handshake.
+    /// Connect with the default [`Deadlines`].
+    pub async fn connect(endpoint: Endpoint) -> Result<Self, McpError> {
+        Self::connect_within(endpoint, Deadlines::default()).await
+    }
+
+    /// Connect, performing the MCP initialize handshake, within `deadlines.connect`.
     ///
     /// The credential goes on the transport here — every request the session makes carries it, and
     /// nothing else in the process needs to know it.
-    pub async fn connect(endpoint: Endpoint) -> Result<Self, McpError> {
+    pub async fn connect_within(
+        endpoint: Endpoint,
+        deadlines: Deadlines,
+    ) -> Result<Self, McpError> {
         let mut config = StreamableHttpClientTransportConfig::with_uri(endpoint.url.clone());
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -465,18 +549,60 @@ impl Session {
             .filter_map(|(n, v)| n.map(|n| (n, v)))
             .collect();
 
-        let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
+        // A CONNECT timeout and never a whole-request one: the transport holds a long-lived
+        // stream open for server messages, and a request timeout would cut it mid-session. The
+        // handshake, the listing and each call are bounded one by one instead.
+        let client = reqwest::Client::builder()
+            .connect_timeout(deadlines.connect)
+            .build()
+            .map_err(|error| McpError::Unreachable {
+                server: endpoint.key(),
+                detail: error.to_string(),
+            })?;
+        let transport = StreamableHttpClientTransport::with_client(client, config);
 
         // `()` is the client handler: we consume tools and offer the server nothing back.
-        let service =
-            ().serve(transport)
-                .await
-                .map_err(|error| McpError::Unreachable {
-                    server: format!("{}.{}", endpoint.plugin, endpoint.server),
+        let service = match tokio::time::timeout(deadlines.connect, ().serve(transport)).await {
+            Ok(Ok(service)) => service,
+            Ok(Err(error)) => {
+                return Err(McpError::Unreachable {
+                    server: endpoint.key(),
                     detail: error.to_string(),
-                })?;
+                });
+            }
+            Err(_) => {
+                return Err(McpError::TimedOut {
+                    server: endpoint.key(),
+                    detail: format!("initialize within {:?}", deadlines.connect),
+                });
+            }
+        };
 
-        Ok(Self { endpoint, service })
+        Ok(Self {
+            endpoint,
+            service,
+            deadlines,
+            broken: AtomicBool::new(false),
+        })
+    }
+
+    /// Whether a pool may hand this session to another turn.
+    pub fn is_usable(&self) -> bool {
+        !self.broken.load(Ordering::Relaxed)
+            && !self.service.is_closed()
+            && !self.service.peer().is_transport_closed()
+    }
+
+    /// Refused, and remembered as broken when the failure was the transport's rather than the
+    /// server's own answer.
+    fn refused(&self, error: ServiceError) -> McpError {
+        if !matches!(error, ServiceError::McpError(_)) {
+            self.broken.store(true, Ordering::Relaxed);
+        }
+        McpError::Refused {
+            server: self.endpoint.key(),
+            detail: error.to_string(),
+        }
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -484,15 +610,22 @@ impl Session {
     }
 
     /// Every tool this server offers, namespaced.
+    ///
+    /// Bounded by the connect deadline: a server that pages its cursor forever, or answers
+    /// `initialize` and then goes quiet, is as unavailable to a turn as one that never answered.
     pub async fn tools(&self) -> Result<Vec<McpTool>, McpError> {
-        let tools = self
-            .service
-            .list_all_tools()
-            .await
-            .map_err(|error| McpError::Refused {
-                server: format!("{}.{}", self.endpoint.plugin, self.endpoint.server),
-                detail: error.to_string(),
-            })?;
+        let within = self.deadlines.connect;
+        let tools = match tokio::time::timeout(within, self.service.list_all_tools()).await {
+            Ok(Ok(tools)) => tools,
+            Ok(Err(error)) => return Err(self.refused(error)),
+            Err(_) => {
+                self.broken.store(true, Ordering::Relaxed);
+                return Err(McpError::TimedOut {
+                    server: self.endpoint.key(),
+                    detail: format!("tools/list within {within:?}"),
+                });
+            }
+        };
 
         let tools: Vec<McpTool> = tools
             .into_iter()
@@ -541,22 +674,271 @@ impl Session {
             params = params.with_arguments(arguments);
         }
 
-        let result = self
-            .service
-            .call_tool(params)
+        // Sent with rmcp's own timeout rather than only dropped at ours: on its timeout rmcp
+        // sends `notifications/cancelled`, so the server stops the work instead of finishing an
+        // action nobody is waiting for.
+        let within = self.deadlines.call;
+        let peer = self.service.peer();
+        let answered = tokio::time::timeout(within + CANCEL_GRACE, async {
+            peer.send_request_with_option(
+                ClientRequest::from(CallToolRequest::new(params)),
+                PeerRequestOptions::with_timeout(within),
+            )
+            .await?
+            .await_response()
             .await
-            .map_err(|error| McpError::Refused {
-                server: format!("{}.{}", self.endpoint.plugin, self.endpoint.server),
-                detail: error.to_string(),
-            })?;
+        })
+        .await;
 
-        Ok(render(&result))
+        match answered {
+            Ok(Ok(ServerResult::CallToolResult(result))) => Ok(render(&result)),
+            // Asking us for input mid-call, or handing back a task to poll, is something this
+            // client cannot answer — and saying so beats rendering a result that is not one.
+            Ok(Ok(_)) => Err(McpError::Refused {
+                server: self.endpoint.key(),
+                detail: format!(
+                    "{remote_name} answered with something other than a result (a request for \
+                     input, or a task to poll), which this server cannot follow up"
+                ),
+            }),
+            // A TIMED-OUT CALL MAY STILL HAVE HAPPENED. The email may have gone; the model must
+            // be told to check rather than to send it again.
+            //
+            // And the session is not pooled again: rmcp sends each request's POST in turn, so a
+            // server that never answers one holds every later request on this session behind it.
+            Ok(Err(ServiceError::Timeout { .. })) | Err(_) => {
+                self.broken.store(true, Ordering::Relaxed);
+                Err(McpError::TimedOut {
+                    server: self.endpoint.key(),
+                    detail: format!(
+                        "`{remote_name}` within {within:?}. It was cancelled, but it may already \
+                         have taken effect — check before trying it again"
+                    ),
+                })
+            }
+            Ok(Err(error)) => Err(self.refused(error)),
+        }
     }
 
-    /// Close the session politely, so the server can drop its state rather than time it out.
+    /// Close the session politely, so the server can drop its state rather than time it out —
+    /// within the connect deadline, because a session wedged on an unanswered request cannot
+    /// finish closing until that request does.
     pub async fn close(self) {
-        let _ = self.service.cancel().await;
+        let _ = tokio::time::timeout(self.deadlines.connect, self.service.cancel()).await;
     }
+}
+
+/// What reaching a turn's plugin servers produced.
+#[derive(Debug, Default)]
+pub struct Dialled {
+    /// By `<plugin>.<server>`.
+    pub sessions: BTreeMap<String, Arc<Session>>,
+    /// Only the tools the caller's `permitted` let through, in server order.
+    pub tools: Vec<McpTool>,
+    /// By `<plugin>.<server>`: why a server that should have been reached was not, in words fit
+    /// for the model — so a turn can say "GitHub is down right now" rather than nothing.
+    pub unavailable: BTreeMap<String, String>,
+}
+
+/// One server as reached for one principal and coworker with one set of credentials.
+///
+/// KEYED BY THE FILLED HEADERS THEMSELVES, never a hash of them: a rotated or revoked token is a
+/// different slot, so no session outlives the credential it was opened with, and two slots can
+/// never collide into sharing one. Scoped to the principal and coworker as well, because an MCP
+/// session can hold state, and a session one coworker opened must not be where another's calls
+/// land. Deliberately not `Debug`: the headers carry tokens (CLAUDE.md #4).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Slot {
+    scope: String,
+    url: String,
+    server: String,
+    headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+enum Pooled {
+    Ready {
+        session: Arc<Session>,
+        tools: Vec<McpTool>,
+        at: Instant,
+    },
+    /// Remembered briefly so a dead server costs one deadline per window, not one per turn.
+    Failed { reason: String, at: Instant },
+}
+
+/// Sessions and their tool lists, reused across turns for a short while (#199).
+///
+/// A CACHE, NOT STATE. Nothing depends on an entry being here — losing one costs a handshake — so
+/// it lives in process memory and a replica without it is merely slower (CLAUDE.md #5). The
+/// UNFILTERED list is kept: the ceiling is applied on every dial, cached or not, because a grant
+/// revoked a second ago must stop this turn (CLAUDE.md #6).
+///
+/// A server that restarted under a pooled session answers its next request with a 404, and rmcp's
+/// transport re-initializes once and replays that request (`reinit_on_expired_session`, on by
+/// default) — so reuse does not turn a server restart into a failed call.
+pub struct Pool {
+    deadlines: Deadlines,
+    ttl: Duration,
+    retry_after: Duration,
+    slots: std::sync::Mutex<BTreeMap<Slot, Pooled>>,
+}
+
+impl Pool {
+    /// A listed server is reused for this long before it is listed again.
+    pub const TTL: Duration = Duration::from_secs(60);
+    /// A server that failed is left alone for this long before it is tried again.
+    pub const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+    pub fn new(deadlines: Deadlines) -> Self {
+        Self {
+            deadlines,
+            ttl: Self::TTL,
+            retry_after: Self::RETRY_AFTER,
+            slots: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_reuse(mut self, ttl: Duration, retry_after: Duration) -> Self {
+        self.ttl = ttl;
+        self.retry_after = retry_after;
+        self
+    }
+
+    /// The process's pool, with deadlines from the environment.
+    pub fn global() -> &'static Pool {
+        static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+        POOL.get_or_init(|| Pool::new(Deadlines::from_env()))
+    }
+
+    pub fn deadlines(&self) -> Deadlines {
+        self.deadlines
+    }
+
+    /// Reach every endpoint at once, each within the connect deadline, reusing what is fresh.
+    ///
+    /// CONCURRENT, SO THE SLOWEST SERVER SETS THE WAIT, NOT THE SUM. And bounded, so the slowest
+    /// is at most the deadline: a server that does not answer in time is left out of this turn
+    /// and named in `unavailable`, and the others' tools are offered as usual.
+    pub async fn dial(
+        &self,
+        scope: &str,
+        endpoints: Vec<Endpoint>,
+        permitted: impl Fn(&str) -> bool,
+    ) -> Dialled {
+        enum Outcome {
+            Pooled(Pooled),
+            Dialling(tokio::task::JoinHandle<Result<(Session, Vec<McpTool>), McpError>>),
+        }
+
+        let mut pending = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            let slot = Slot {
+                scope: scope.to_string(),
+                url: endpoint.url.clone(),
+                server: endpoint.key(),
+                headers: endpoint.headers.clone(),
+            };
+            let key = endpoint.key();
+            let outcome = match self.fresh(&slot) {
+                Some(pooled) => Outcome::Pooled(pooled),
+                // Spawned rather than joined in place, so one server's handshake never waits on
+                // another's; each task is bounded by the deadline on its own.
+                None => Outcome::Dialling(tokio::spawn(connect_and_list(endpoint, self.deadlines))),
+            };
+            pending.push((key, slot, outcome));
+        }
+
+        // Collected in the order given, so the tools the model sees do not reorder from turn to
+        // turn with whichever server happened to answer first.
+        let mut dialled = Dialled::default();
+        for (key, slot, outcome) in pending {
+            let pooled = match outcome {
+                Outcome::Pooled(pooled) => pooled,
+                Outcome::Dialling(task) => {
+                    let result = task.await.unwrap_or_else(|error| {
+                        Err(McpError::Unreachable {
+                            server: key.clone(),
+                            detail: error.to_string(),
+                        })
+                    });
+                    let pooled = match result {
+                        Ok((session, tools)) => Pooled::Ready {
+                            session: Arc::new(session),
+                            tools,
+                            at: Instant::now(),
+                        },
+                        Err(error) => {
+                            tracing::warn!(%error, server = key, "a plugin server is unavailable; the turn goes on without it");
+                            Pooled::Failed {
+                                reason: error.to_string(),
+                                at: Instant::now(),
+                            }
+                        }
+                    };
+                    self.remember(slot, pooled.clone());
+                    pooled
+                }
+            };
+            match pooled {
+                Pooled::Ready { session, tools, .. } => {
+                    dialled.tools.extend(
+                        tools
+                            .into_iter()
+                            .filter(|tool| permitted(&tool.qualified_name)),
+                    );
+                    dialled.sessions.insert(key, session);
+                }
+                Pooled::Failed { reason, .. } => {
+                    dialled.unavailable.insert(key, reason);
+                }
+            }
+        }
+        dialled
+    }
+
+    /// A pooled entry still worth using, sweeping out every one that is not.
+    fn fresh(&self, slot: &Slot) -> Option<Pooled> {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ttl, retry_after) = (self.ttl, self.retry_after);
+        // Dropping an evicted session cancels its service (rmcp's drop guard). A transport still
+        // waiting on an unanswered request lets go when that request does, not before.
+        slots.retain(|_, pooled| match pooled {
+            Pooled::Ready { session, at, .. } => at.elapsed() < ttl && session.is_usable(),
+            Pooled::Failed { at, .. } => at.elapsed() < retry_after,
+        });
+        slots.get(slot).cloned()
+    }
+
+    fn remember(&self, slot: Slot, pooled: Pooled) {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(slot, pooled);
+    }
+}
+
+/// `initialize` and `tools/list` under ONE deadline — the wait a turn can be made to sit through.
+async fn connect_and_list(
+    endpoint: Endpoint,
+    deadlines: Deadlines,
+) -> Result<(Session, Vec<McpTool>), McpError> {
+    let server = endpoint.key();
+    let listed = tokio::time::timeout(deadlines.connect, async {
+        let session = Session::connect_within(endpoint, deadlines).await?;
+        let tools = session.tools().await?;
+        Ok((session, tools))
+    })
+    .await;
+    listed.unwrap_or_else(|_| {
+        Err(McpError::TimedOut {
+            server,
+            detail: format!("initialize and tools/list within {:?}", deadlines.connect),
+        })
+    })
 }
 
 /// Flatten a tool result into text the model can read.
