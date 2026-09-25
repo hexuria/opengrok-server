@@ -78,9 +78,10 @@ case "$answered" in
 esac
 
 echo "8. a run with no coworker still gets the deployment's model"
-# The default has to survive the fix: the AG-UI endpoint is also how a client with no coworker at
-# all just talks to a model, and that path must not start requiring one.
-plain=$(curl -sN -X POST "$BASE/ag-ui" -H 'content-type: application/json' \
+# The default has to survive the fix: the AG-UI endpoint is also how a signed-in client with no
+# coworker at all just talks to a model, and that path must not start requiring one.
+plain=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $token_one" \
+  -H 'content-type: application/json' \
   -d "{\"threadId\":\"t-plain-$T\",\"runId\":\"r-plain-$T\",\"messages\":[{\"id\":\"m1\",\"role\":\"user\",\"content\":\"hello\"}]}" \
   --max-time 20 | sed -n 's/^data: //p' | jq -r 'select(.delta != null) | .delta' | tr -d '\n')
 case "$plain" in

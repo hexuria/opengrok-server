@@ -220,7 +220,6 @@ async fn a_bot_allowlisted_command_runs_and_audits_success() {
         &account,
         &machine,
         "echo hi",
-        &["echo hi".to_string()],
         Origin::Bot("cw_1".to_string()),
         "appr",
         false,
@@ -258,7 +257,6 @@ async fn a_bot_unlisted_command_needs_approval_and_never_dispatches() {
         &account,
         &machine,
         "curl example.com",
-        &["curl example.com".to_string()],
         Origin::Bot("cw_1".to_string()),
         "appr",
         false,
@@ -294,7 +292,6 @@ async fn a_user_direct_command_skips_ask_and_runs() {
         &account,
         &machine,
         "whoami",
-        &["whoami".to_string()],
         Origin::User,
         "appr",
         false,
@@ -334,7 +331,6 @@ async fn a_denylisted_command_is_refused_for_the_user_too() {
         &account,
         &machine,
         "rm -rf /",
-        &["rm -rf /".to_string()],
         Origin::User,
         "appr",
         false,
@@ -368,7 +364,6 @@ async fn an_allowed_command_with_no_daemon_is_refused_not_hung() {
         &account,
         &machine,
         "echo hi",
-        &["echo hi".to_string()],
         Origin::User,
         "appr",
         false,
@@ -381,5 +376,162 @@ async fn an_allowed_command_with_no_daemon_is_refused_not_hung() {
         .await
         .expect("log");
     assert_eq!(log[0]["decision"], "allow");
-    assert_eq!(log[0]["outcome"], "spawnError");
+    // A Mac that is asleep or signed out is not a command that failed to spawn. The audit keeps
+    // the two apart so "what happened on my laptop" does not read as a broken daemon.
+    assert_eq!(log[0]["outcome"], "offline");
+}
+
+#[test]
+fn offline_outcome_is_its_own_case() {
+    let offline = ExecOutcome::offline("the daemon for this machine is not connected");
+    assert_eq!(offline.case, "offline");
+    assert_eq!(offline.exit_code, None);
+    assert!(!offline.succeeded());
+    assert_eq!(
+        offline.render(),
+        "offline: the daemon for this machine is not connected"
+    );
+    // A garbled reply is still spawnError: offline is only for a machine nobody could reach.
+    assert_eq!(ExecOutcome::malformed("garbled").case, "spawnError");
+}
+
+// -------------------------------------------------------------------------------------------------
+// #203/#204 end to end: the gate reads the shell line, not its first words, on the enqueue path.
+// -------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_chained_command_after_a_denied_word_is_refused_for_the_user_too() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let state = auth_state(store);
+    let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
+    let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
+    state
+        .store
+        .add_local_exec_rule(&account, &machine, "deny", "rm", 2)
+        .await
+        .expect("deny");
+
+    // The user skips Ask, so the deny rule is their only guard: `true; rm` must still meet it.
+    // No daemon — a deny returns before dispatch, so "not connected" would mean the gate missed.
+    let result = enqueue_and_wait(
+        &state,
+        &account,
+        &machine,
+        "true; rm -rf x",
+        Origin::User,
+        "appr",
+        false,
+    )
+    .await;
+    assert!(
+        matches!(&result, EnqueueResult::Refused(reason) if reason.contains("deny rule")),
+        "a chained rm must meet the deny rule"
+    );
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
+    assert_eq!(log[0]["decision"], "deny");
+    assert_eq!(log[0]["command"], "true; rm -rf x");
+}
+
+#[tokio::test]
+async fn a_bot_chained_command_after_an_allow_needs_approval() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let state = auth_state(store);
+    let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
+    let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "ask", 1)
+        .await
+        .expect("mode");
+    state
+        .store
+        .add_local_exec_rule(&account, &machine, "allow", "echo", 2)
+        .await
+        .expect("allow");
+
+    // A connected daemon that would run it: the only thing between `; rm -rf ~` and the Mac is
+    // the gate asking a person.
+    fake_daemon(&state, &machine, success()).await;
+    let result = enqueue_and_wait(
+        &state,
+        &account,
+        &machine,
+        "echo hi; rm -rf ~",
+        Origin::Bot("cw_1".to_string()),
+        "appr",
+        false,
+    )
+    .await;
+    assert!(matches!(result, EnqueueResult::NeedsApproval));
+    let log = state
+        .store
+        .local_exec_audit_log(&account, 10)
+        .await
+        .expect("log");
+    assert_eq!(log[0]["decision"], "ask");
+}
+
+#[tokio::test]
+async fn the_daemon_is_sent_the_servers_own_split() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let state = auth_state(store);
+    let account = format!("acct_{}", uuid::Uuid::now_v7().simple());
+    let machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
+    state
+        .store
+        .set_local_exec_mode(&account, &machine, "bypass", 1)
+        .await
+        .expect("mode");
+
+    // Capture the exec frame the daemon would receive, then answer it.
+    let broker = state.local_exec.clone();
+    let mut stream = broker.connect(&machine).await;
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    let daemon_machine = machine.clone();
+    tokio::spawn(async move {
+        while let Some(frame) = stream.recv().await {
+            if frame["kind"] == "exec" {
+                let request_id = frame["requestId"].as_str().unwrap_or_default().to_string();
+                let _ = seen_tx.send(frame["serverMessage"]["shellStreamArgs"].clone());
+                broker
+                    .resolve(&daemon_machine, &request_id, success())
+                    .await;
+                return;
+            }
+        }
+    });
+    let result = enqueue_and_wait(
+        &state,
+        &account,
+        &machine,
+        "cd src && cargo test",
+        Origin::User,
+        "appr",
+        false,
+    )
+    .await;
+    assert!(matches!(result, EnqueueResult::Ran(_)));
+    let args = seen_rx.await.expect("an exec frame");
+    assert_eq!(
+        args["simpleCommands"],
+        serde_json::json!(["cd src", "cargo test"])
+    );
+    // The line the shell runs is still the whole command, after the PATH preamble.
+    assert!(
+        args["command"]
+            .as_str()
+            .is_some_and(|line| line.ends_with("; cd src && cargo test"))
+    );
 }

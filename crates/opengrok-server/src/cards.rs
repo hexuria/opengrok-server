@@ -9,6 +9,11 @@ use opengrok_tools::user_form::sanitize_arguments;
 
 /// The `auto-review-approval` card for the judge's ask. Re-emit with the SAME `entry_id` and a
 /// new `status` to settle it — the renderer dedups on `auto-review-approval:${requestId}:${status}`.
+///
+/// The egress tunnel's ask shares the card and the suspend reason but carries NO rule: its
+/// "Always allow" wrote "Allow the computer tool." into the judge's allow text, which switched
+/// the judge on for every later call of that coworker instead of answering the tunnel (#165).
+/// The tunnel's standing answer is the computer's egress policy.
 pub fn auto_review_card(
     entry_id: &str,
     request_id: &str,
@@ -18,6 +23,8 @@ pub fn auto_review_card(
     reason: Option<&str>,
     timestamp_ms: i64,
 ) -> Value {
+    let rule = (reason != Some(opengrok_tools::review::EGRESS_TUNNEL_ASK_REASON))
+        .then(|| proposed_rule(tool, arguments));
     approval_card(
         entry_id,
         request_id,
@@ -25,7 +32,7 @@ pub fn auto_review_card(
         tool,
         arguments,
         reason,
-        Some(proposed_rule(tool, arguments)),
+        rule,
         timestamp_ms,
     )
 }
@@ -216,11 +223,65 @@ pub fn summary_for(tool: &str, arguments: &Value) -> String {
             string_arg(arguments, "content").map_or(0, str::len),
             clip(string_arg(arguments, "path").unwrap_or("a file"), 200)
         ),
+        "computer" => screen_summary(arguments),
+        "open_url" => format!(
+            "Open {} in the agent's own browser",
+            clip(page_of(arguments), 120)
+        ),
+        // The recipe's `values` stay off the card: a login recipe is handed a password.
+        opengrok_tools::RUN_RECIPE => format!(
+            "Play the recipe \"{}\" on the agent's own computer",
+            clip(string_arg(arguments, "recipe").unwrap_or("(unnamed)"), 80)
+        ),
         other => format!(
             "{other} — a plugin tool this agent wants to call, with {}",
             clip(&opengrok_tools::redact_arguments(arguments), 160)
         ),
     }
+}
+
+/// A `computer` call in words, from the same fields `ComputerArgs` reads. An action it does not
+/// know is named, not dropped; `into_action` refuses it before it reaches the screen.
+fn screen_summary(arguments: &Value) -> String {
+    let screen = if string_arg(arguments, "machine") == Some("group") {
+        "the group's shared screen"
+    } else {
+        "the agent's own screen"
+    };
+    let point = |key: &str| {
+        let xy = arguments.get(key).and_then(Value::as_array);
+        let at = |i: usize| xy.and_then(|xy| xy.get(i)).and_then(Value::as_i64);
+        match (at(0), at(1)) {
+            (Some(x), Some(y)) => format!("({x}, {y})"),
+            _ => "(no position)".to_string(),
+        }
+    };
+    let at = point("coordinate");
+    match string_arg(arguments, "action").unwrap_or("") {
+        "screenshot" => format!("Take a screenshot of {screen}"),
+        "click" | "left_click" => format!("Click at {at} on {screen}"),
+        "right_click" => format!("Right-click at {at} on {screen}"),
+        "double_click" => format!("Double-click at {at} on {screen}"),
+        "move" | "mouse_move" => format!("Move the pointer to {at} on {screen}"),
+        "drag" => format!("Drag from {at} to {} on {screen}", point("to")),
+        "type" => format!(
+            "Type \"{}\" on {screen}",
+            clip(string_arg(arguments, "text").unwrap_or(""), 60)
+        ),
+        "key" => format!(
+            "Press {} on {screen}",
+            clip(string_arg(arguments, "key").unwrap_or("a key"), 40)
+        ),
+        "scroll" => format!("Scroll at {at} on {screen}"),
+        other => format!("Screen action \"{}\" on {screen}", clip(other, 30)),
+    }
+}
+
+/// The page an `open_url` call names, without its query or fragment: a link's token rides
+/// there, and the card is journalled.
+fn page_of(arguments: &Value) -> &str {
+    let url = string_arg(arguments, "url").unwrap_or("a page");
+    url.split(['?', '#']).next().unwrap_or(url)
 }
 
 /// The pre-filled "Always allow" text. The client appends it to the coworker tier's allow
@@ -242,6 +303,18 @@ pub fn proposed_rule(tool: &str, arguments: &Value) -> String {
         "write_file" => format!(
             "Allow writing {} on the agent's own box.",
             clip(string_arg(arguments, "path").unwrap_or(""), 200)
+        ),
+        "computer" => format!(
+            "Allow the `{}` screen action on the agent's own computer.",
+            clip(string_arg(arguments, "action").unwrap_or(""), 30)
+        ),
+        "open_url" => format!(
+            "Allow opening {} in the agent's own browser.",
+            clip(page_of(arguments), 120)
+        ),
+        opengrok_tools::RUN_RECIPE => format!(
+            "Allow the recipe \"{}\" on the agent's own computer.",
+            clip(string_arg(arguments, "recipe").unwrap_or(""), 80)
         ),
         other => format!("Allow the {other} tool."),
     }
@@ -273,7 +346,13 @@ mod tests {
         for tool in [USER_MACHINE_SHELL, "shell"] {
             assert_eq!(command_for(tool, &args).as_deref(), Some("brew install jq"));
         }
-        for tool in ["read_file", "write_file", "gmail.api.send"] {
+        for tool in [
+            "read_file",
+            "write_file",
+            "gmail.api.send",
+            "computer",
+            "open_url",
+        ] {
             assert_eq!(command_for(tool, &args), None);
         }
         for tool in [
@@ -282,12 +361,94 @@ mod tests {
             "read_file",
             "write_file",
             "gmail.api.send",
+            "computer",
+            "open_url",
+            opengrok_tools::RUN_RECIPE,
         ] {
             let summary = summary_for(tool, &args);
             assert!(!summary.is_empty());
             assert!(!boilerplate(&summary), "{tool}: {summary}");
         }
         assert!(summary_for("write_file", &args).contains("3 bytes to /etc/hosts"));
+    }
+
+    /// #165: a screen action read as "a plugin tool … with {raw JSON}". The issue's own
+    /// arguments first: every field set, only `action` meaning anything.
+    #[test]
+    fn computer_and_open_url_summaries_name_the_action() {
+        let shot = json!({"to": [0, 0], "key": "", "text": "", "action": "screenshot",
+                          "button": 1, "scroll": [0, 0], "coordinate": [0, 0]});
+        let click = json!({"action": "click", "coordinate": [120, 40]});
+        let key = json!({"action": "key", "key": "ctrl+l"});
+        let typed = json!({"action": "type", "text": "x".repeat(300)});
+        let page = json!({"url": "https://example.com/inbox?token=s3cret#top"});
+        let recipe = json!({"recipe": "Open Gmail", "values": {"password": "s3cret"}});
+        let odd = json!({"action": "zoom", "coordinate": [1, 2]});
+        let cases = [
+            ("computer", &shot, "screenshot"),
+            ("computer", &click, "120, 40"),
+            ("computer", &key, "ctrl+l"),
+            ("computer", &typed, "xxxx"),
+            ("computer", &odd, "zoom"),
+            ("open_url", &page, "https://example.com/inbox"),
+            (opengrok_tools::RUN_RECIPE, &recipe, "Open Gmail"),
+        ];
+        for (tool, args, names) in cases {
+            let summary = summary_for(tool, args);
+            assert!(summary.contains(names), "{tool}: {summary}");
+            assert!(!summary.contains("plugin tool"), "{tool}: {summary}");
+            assert!(!summary.contains("coordinate"), "{tool}: {summary}");
+            assert!(!summary.contains("s3cret"), "{tool}: {summary}");
+            assert!(!boilerplate(&summary), "{tool}: {summary}");
+            assert!(summary.chars().count() < 160, "{tool}: {summary}");
+            let rule = proposed_rule(tool, args);
+            assert_ne!(rule, format!("Allow the {tool} tool."));
+            assert!(!rule.contains("s3cret"), "{tool}: {rule}");
+        }
+        assert!(!summary_for("computer", &shot).contains('{'));
+        let group = json!({"action": "screenshot", "machine": "group"});
+        assert!(summary_for("computer", &group).contains("shared"));
+    }
+
+    /// The tunnel's card asks about the network, not about the judge's instructions. Its
+    /// "Always allow" wrote "Allow the computer tool." into the allow text, which switched the
+    /// judge on for every later call of that coworker. With no rule the client's Always is a
+    /// plain approve (`transcript-card/auto-review-actions.ts:149-150`); the standing answer
+    /// is the computer's egress policy.
+    #[test]
+    fn a_tunnel_card_offers_no_rule_it_cannot_honour() {
+        let args = json!({"action": "click", "coordinate": [120, 40]});
+        let card = auto_review_card(
+            "e_t",
+            "call_t",
+            "pending",
+            "computer",
+            &args,
+            Some(opengrok_tools::review::EGRESS_TUNNEL_ASK_REASON),
+            9,
+        );
+        let approval = &card["message"]["approval"];
+        assert!(approval.get("proposedRule").is_none(), "{approval}");
+        assert_eq!(
+            approval["reason"],
+            opengrok_tools::review::EGRESS_TUNNEL_ASK_REASON
+        );
+        assert_eq!(approval["surface"], "computer");
+        let judged = auto_review_card(
+            "e_j",
+            "call_j",
+            "pending",
+            "computer",
+            &args,
+            Some(opengrok_tools::review::REVIEW_ASK_REASON),
+            9,
+        );
+        assert!(
+            judged["message"]["approval"]["proposedRule"]
+                .as_str()
+                .is_some_and(|rule| rule.contains("click")),
+            "{judged}"
+        );
     }
 
     #[test]

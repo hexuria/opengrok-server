@@ -79,7 +79,7 @@ pub struct ForgotRequest {
 /// Resend round-trip is the one thing that would otherwise tell them apart. Whether it was sent
 /// is logged, never returned — there is nothing the caller may do with it.
 async fn start_reset(state: &AuthState, email: &str) {
-    let Some(key) = state.resend_api_key.clone() else {
+    let Some(mailer) = state.mailer() else {
         return;
     };
     let Ok(Some(view)) = state.store.account_by_email(email.trim()).await else {
@@ -94,7 +94,7 @@ async fn start_reset(state: &AuthState, email: &str) {
     };
     let link = format!("{}/reset-password?token={token}", state.public_url);
     tokio::spawn(async move {
-        let sent = super::resend::send_password_reset(&key, &view.email, &link).await;
+        let sent = super::resend::send_password_reset(&mailer, &view.email, &link).await;
         tracing::info!(account = %view.id, sent, "password reset requested");
     });
 }

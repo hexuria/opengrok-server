@@ -101,11 +101,17 @@ async fn seed_account(
 }
 
 fn app_with(store: PgStore, secret: &[u8]) -> axum::Router {
+    app_with_dev_sign_in(store, secret, false)
+}
+
+/// `dev_sign_in` is `OG_DEV_SIGN_IN=1` — what the smokes' servers run with and nothing else does.
+fn app_with_dev_sign_in(store: PgStore, secret: &[u8], dev_sign_in: bool) -> axum::Router {
     let auth = AuthState::new(
         store,
         Arc::new(TokenMinter::new(secret)),
         "host@og.local".to_string(),
-    );
+    )
+    .with_dev_sign_in(dev_sign_in);
     let agui = AgUiState {
         auth,
         door: Arc::new(MockDoor::echoing()),
@@ -318,4 +324,151 @@ async fn logging_in_does_not_clobber_the_account_projection() {
     );
     assert_eq!(view.first_name, "Test");
     assert_eq!(view.last_name, "User");
+}
+
+/// Serve the way `crates/opengrok/src/main.rs` does, with the socket peer attached — the one fact
+/// about a caller that a request cannot write for itself.
+async fn spawn_with_peers(app: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("serve");
+    });
+    format!("http://127.0.0.1:{}", addr.port())
+}
+
+/// THE DEV SIGN-IN MINTS A SESSION WITH NO PASSWORD, so who may call it is the whole of its
+/// security. It used to read only the `Host` header — which the caller writes — so any machine
+/// that could reach the port (a coworker's own Docker box on the bridge among them) sent
+/// `Host: 127.0.0.1` and walked off with a session for any email, the org admin's included.
+#[tokio::test]
+async fn the_dev_sign_in_answers_only_a_local_caller_and_never_takes_over_a_real_account() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let admin = format!("devadmin-{}@og.local", uuid::Uuid::now_v7().simple());
+    seed_account(&store, &admin, "password1", true, true).await;
+    let secret = b"web-console-test-secret-web-console";
+    let client = reqwest::Client::new();
+    let dev = |base: &str, email: &str| {
+        format!("{base}/auth/cursor_dev_session_token?plan=pro&email={email}")
+    };
+
+    // A server that cannot see its peer cannot vouch for one: a forged loopback Host is not
+    // enough on its own.
+    let blind = spawn(app_with_dev_sign_in(store.clone(), secret, true)).await;
+    let fresh = format!("dev-{}@og.local", uuid::Uuid::now_v7().simple());
+    let res = client
+        .get(dev(&blind, &fresh))
+        .header(reqwest::header::HOST, "127.0.0.1")
+        .send()
+        .await
+        .expect("blind request");
+    assert_eq!(res.status(), 401, "no peer is a remote peer");
+    let body = res.text().await.expect("body");
+    assert!(
+        !body.contains("accessToken"),
+        "no token without a peer: {body}"
+    );
+
+    let base = spawn_with_peers(app_with_dev_sign_in(store.clone(), secret, true)).await;
+
+    // The smokes' path: a loopback caller, a fresh throwaway email.
+    let res = client.get(dev(&base, &fresh)).send().await.expect("fresh");
+    assert_eq!(res.status(), 200, "a local caller signs a fresh email in");
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert!(body["accessToken"].is_string());
+    // Idempotent per email (slice 1 re-signs the same address).
+    let again = client.get(dev(&base, &fresh)).send().await.expect("again");
+    assert_eq!(again.status(), 200, "the same dev email signs in twice");
+
+    // An account with a password is a person's, and only their password signs them in.
+    let res = client
+        .get(dev(&base, &admin))
+        .send()
+        .await
+        .expect("takeover");
+    assert_eq!(
+        res.status(),
+        401,
+        "dev sign-in must not take over a real account"
+    );
+    let body = res.text().await.expect("body");
+    assert!(!body.contains("accessToken"), "{body}");
+    assert!(body.contains("password"), "the refusal says why: {body}");
+
+    // A front on this machine (Caddy, `docs/setup/tls.md`) connects from loopback for every LAN
+    // caller; the header it adds is what tells them apart.
+    let res = client
+        .get(dev(&base, &fresh))
+        .header("x-forwarded-for", "192.168.1.9")
+        .send()
+        .await
+        .expect("proxied");
+    assert_eq!(res.status(), 401, "a proxied caller is not a local one");
+
+    // A non-loopback Host is still refused, as slice 16 has always checked.
+    let res = client
+        .get(dev(&base, &fresh))
+        .header(reqwest::header::HOST, "192.168.1.9:1447")
+        .send()
+        .await
+        .expect("lan host");
+    assert_eq!(res.status(), 401, "a LAN Host is refused");
+}
+
+/// A peer on another machine — or a container on the Docker bridge — with a forged loopback
+/// `Host`. This is the request that minted any session before; the socket says who it is.
+#[tokio::test]
+async fn a_remote_peer_with_a_forged_loopback_host_gets_no_dev_session() {
+    use tower::ServiceExt;
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let app = app_with_dev_sign_in(store, b"web-console-test-secret-web-console", true);
+    let peer: std::net::SocketAddr = "172.17.0.2:40000".parse().expect("addr");
+    let request = axum::http::Request::builder()
+        .uri("/auth/cursor_dev_session_token?plan=pro&email=bridge@og.local")
+        .header(axum::http::header::HOST, "127.0.0.1:1447")
+        .extension(axum::extract::ConnectInfo(peer))
+        .body(axum::body::Body::empty())
+        .expect("request");
+    let res = app.oneshot(request).await.expect("oneshot");
+    assert_eq!(res.status(), 401, "a bridge peer is not loopback");
+}
+
+/// LOCAL IS NOT ENOUGH. On Docker Desktop a coworker box's traffic to the host arrives through a
+/// host process — loopback peer, loopback Host, no forwarding header — so the local-caller check
+/// cannot tell it from the developer's shell. The switch is the only thing that can, and a
+/// deployment that never set it mints nothing, even for the caller the smokes are.
+#[tokio::test]
+async fn the_dev_sign_in_mints_nothing_unless_the_deployment_opted_in() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let base = spawn_with_peers(app_with(store, b"web-console-test-secret-web-console")).await;
+    let fresh = format!("off-{}@og.local", uuid::Uuid::now_v7().simple());
+    let res = reqwest::Client::new()
+        .get(format!(
+            "{base}/auth/cursor_dev_session_token?plan=pro&email={fresh}"
+        ))
+        .send()
+        .await
+        .expect("local caller");
+    assert_eq!(res.status(), 401, "off by default, even for a local peer");
+    let body: serde_json::Value = res.json().await.expect("json");
+    assert_eq!(
+        body["shouldLogout"], true,
+        "the SessionRejected shape: {body}"
+    );
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("OG_DEV_SIGN_IN"),
+        "names the switch: {error}"
+    );
+    assert!(body.get("accessToken").is_none(), "{body}");
 }
