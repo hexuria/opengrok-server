@@ -290,6 +290,19 @@ fn escalated(id: &str, call: Option<&str>) -> Value {
     entry
 }
 
+fn form_park(call: &str) -> FormPark {
+    FormPark {
+        calls: BTreeSet::from([call.to_string()]),
+        pending: opengrok_core::run::PendingApproval {
+            call_id: call.to_string(),
+            tool: "request_user_form".to_string(),
+            arguments: json!({}),
+            reason: opengrok_core::run::SuspendReason::UserForm,
+        },
+        parked_at_ms: 10,
+    }
+}
+
 /// #188. An old escalated form with no call used to make every later handoff look waited on, so a
 /// stopped run's handoff was never declined. It counts only while a form run whose card carries
 /// no call still waits.
@@ -300,9 +313,7 @@ fn an_old_escalated_form_with_no_call_does_not_keep_every_handoff_alive() {
 
     let carded = WaitingCalls {
         on: BTreeMap::from([("c-new".to_string(), "c-new".to_string())]),
-        forms: vec![FormPark {
-            calls: BTreeSet::from(["c-new".to_string()]),
-        }],
+        forms: vec![form_park("c-new")],
     };
     assert_eq!(
         handoff_call(&entries, &carded),
@@ -311,9 +322,7 @@ fn an_old_escalated_form_with_no_call_does_not_keep_every_handoff_alive() {
 
     let uncarded = WaitingCalls {
         on: BTreeMap::from([("c-legacy".to_string(), "c-legacy".to_string())]),
-        forms: vec![FormPark {
-            calls: BTreeSet::from(["c-legacy".to_string()]),
-        }],
+        forms: vec![form_park("c-legacy")],
     };
     assert_eq!(handoff_call(&entries, &uncarded), Some(None));
 }

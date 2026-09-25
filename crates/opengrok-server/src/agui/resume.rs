@@ -503,7 +503,7 @@ pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) 
 }
 
 /// The call a `run-awaiting-approval` frame parked on.
-fn park_call(frame: &Value) -> Option<&str> {
+pub(crate) fn park_call(frame: &Value) -> Option<&str> {
     (frame.get("type").and_then(Value::as_str) == Some("CUSTOM")
         && frame.get("name").and_then(Value::as_str) == Some("run-awaiting-approval"))
     .then(|| frame.get("callId").and_then(Value::as_str))

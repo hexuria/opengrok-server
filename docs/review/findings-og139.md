@@ -91,6 +91,13 @@ for those two tools entirely (NativeChat paints those cards from the CUSTOM + ca
 > `stopping_a_run_parked_on_a_form_closes_its_card_and_frees_the_screen`,
 > `stopping_a_run_whose_form_was_escalated_declines_its_handoff`,
 > `a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart`.
+>
+> *Verifier round.* "Dead" is only sound if every card the pass sees had its park committed before
+> the runs are read, so `settle_dead_holds` reads the transcript first and the runs second, and a
+> card judged dead is judged again against the runs just before it is closed
+> (`a_form_parked_after_the_waiting_set_was_read_stays_open`). A stop of a run parked on an
+> approval card (auto-review, policy, local-tool-permission) no longer claims that card is closed —
+> a stop settles only forms.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2995` (`stop_run`), and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/conversation.rs:355-370` (`interrupt_parked_hitl`'s `if stopped > 0` guard)
 
@@ -319,6 +326,12 @@ when the heuristic overrides the model.
 > still leaves parked runs alone. Tests: `a_form_past_its_deadline_times_out_on_the_next_turn_after_a_restart`,
 > `the_deadline_sweep_times_out_a_parked_form_after_a_restart`,
 > `a_live_handoff_past_its_deadline_times_out_and_resumes_its_run`.
+>
+> *Verifier round.* A run parked on a form whose card never landed (the process died between park
+> and card, or the append failed) is timed out from its own park frame
+> (`a_form_run_whose_card_never_landed_times_out_from_its_park`). The sweep looks again, until one
+> more deadline has passed, at every run it did not finish with — a failed write, or a handoff
+> minted after the run's last write (`the_sweep_looks_again_at_a_run_whose_handoff_is_not_yet_due`).
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:365-387`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/credential.rs:194-204`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/recovery.rs:99-102`
 

@@ -467,13 +467,20 @@ pub async fn resolve_box_handoff(
 /// parked and the screen held with nothing left to wake either. The deadline is the card's own
 /// `timestampMs`; the log only says which coworkers to look at. Each tick reads the runs whose
 /// last write crossed the deadline since the last tick — the first tick after a start reads them
-/// all, which is the restart's backlog — so a run a person is slow to answer is looked at once, not
-/// on every tick for as long as it waits.
+/// all, which is the restart's backlog — so a run a person is slow to answer is not read on every
+/// tick for as long as it waits.
+///
+/// ONCE WAS NOT ENOUGH for a run the pass did not finish with: a write that failed, or a hold
+/// minted after the run's last write (a handoff whose escalation could not be journaled onto the
+/// run), whose deadline comes after the run has left the window. Such a run is looked at again
+/// on every tick until the last of its holds could have reached its deadline.
 pub async fn hold_deadlines_forever(state: HostState) {
     let mut after_ms = i64::MIN;
+    let mut again: BTreeMap<opengrok_core::id::RunId, (AccountId, i64)> = BTreeMap::new();
     loop {
         let now = now_ms();
         let before_ms = now - hold_ms() - MINT_LAG_MS;
+        again.retain(|_, (_, until)| *until >= now);
         match state
             .agui
             .auth
@@ -481,8 +488,27 @@ pub async fn hold_deadlines_forever(state: HostState) {
             .parked_between(after_ms, before_ms)
             .await
         {
-            Ok(runs) => {
-                expire_parked_forms(&state, &runs, now).await;
+            Ok(fresh) => {
+                let mut runs: Vec<_> = again
+                    .iter()
+                    .map(|(run, (account, _))| (run.clone(), account.clone()))
+                    .collect();
+                runs.extend(
+                    fresh
+                        .into_iter()
+                        .filter(|(run, _)| !again.contains_key(run)),
+                );
+                let unfinished = expire_parked_forms(&state, &runs, now).await;
+                // A handoff is minted at most one deadline after its form, and its run crossed the
+                // window at least one deadline after that form: one more deadline covers it.
+                let until = now + hold_ms() + MINT_LAG_MS;
+                again = unfinished
+                    .into_iter()
+                    .map(|(run, account)| {
+                        let until = again.get(&run).map_or(until, |(_, first)| *first);
+                        (run, (account, until))
+                    })
+                    .collect();
                 after_ms = before_ms;
             }
             Err(error) => tracing::warn!(%error, "the form-hold sweep could not read the log"),
@@ -491,29 +517,50 @@ pub async fn hold_deadlines_forever(state: HostState) {
     }
 }
 
-/// Time out what the coworkers of these parked runs have held past its deadline at `now_ms`. The
-/// runs only say whom to look at; each card's own stamp decides.
+/// Time out what the coworkers of these parked runs have held past its deadline at `now_ms`, and
+/// answer the runs the pass did not finish with: its settle could not read or write, or the run is
+/// still parked on a form after it. The runs only say whom to look at; each card's own stamp
+/// decides.
 pub async fn expire_parked_forms(
     state: &HostState,
     runs: &[(opengrok_core::id::RunId, AccountId)],
     now_ms: i64,
-) {
-    let mut looked = BTreeSet::new();
-    for (run_id, account_id) in runs {
-        let Ok((run, _)) = state.agui.auth.store.load_run(run_id).await else {
-            continue;
-        };
-        let on_a_form = matches!(
+) -> Vec<(opengrok_core::id::RunId, AccountId)> {
+    let store = &state.agui.auth.store;
+    let on_a_form = |run: &opengrok_core::run::Run| {
+        matches!(
             run.pending.as_ref().map(|pending| pending.reason),
             Some(opengrok_core::run::SuspendReason::UserForm)
-        );
-        let Some(coworker_id) = resume::coworker_of(&run).filter(|_| on_a_form) else {
+        )
+    };
+    let mut settled: BTreeMap<(String, String), bool> = BTreeMap::new();
+    let mut unfinished = Vec::new();
+    for (run_id, account_id) in runs {
+        let Ok((run, _)) = store.load_run(run_id).await else {
+            unfinished.push((run_id.clone(), account_id.clone()));
             continue;
         };
-        if looked.insert((account_id.to_string(), coworker_id.to_string())) {
-            settle_dead_holds(state, account_id, &coworker_id, now_ms).await;
+        let Some(coworker_id) = resume::coworker_of(&run).filter(|_| on_a_form(&run)) else {
+            continue;
+        };
+        let key = (account_id.to_string(), coworker_id.to_string());
+        let written = match settled.get(&key) {
+            Some(written) => *written,
+            None => {
+                let written = settle_dead_holds(state, account_id, &coworker_id, now_ms).await;
+                settled.insert(key, written);
+                written
+            }
+        };
+        let still = store
+            .load_run(run_id)
+            .await
+            .map_or(true, |(run, _)| on_a_form(&run));
+        if !written || still {
+            unfinished.push((run_id.clone(), account_id.clone()));
         }
     }
+    unfinished
 }
 
 async fn start_box_handoff(
@@ -632,6 +679,25 @@ pub async fn settle_holds_seen(
             Err(()) => written = false,
         }
     }
+    // A FORM RUN WITH NO CARD holds the screen as surely as one with a card — form_hold_thread
+    // reads the park, not the card — and nothing above reaches it: its card was never appended,
+    // because the process died between the park and the card or the append failed. Past the
+    // deadline counted from its park it is answered as its card would have been, timed out.
+    for park in &waiting.forms {
+        let carded = entries
+            .iter()
+            .filter_map(call_id_of)
+            .any(|call| park.calls.contains(call));
+        if carded || park.parked_at_ms > now_ms.saturating_sub(hold_ms()) {
+            continue;
+        }
+        let arguments = &park.pending.arguments;
+        let form = form_request_from(arguments);
+        let none = BTreeMap::new();
+        let content = model_facing_result(arguments, &form, FormResolution::Dismissed, &none, true);
+        let call_id = Some(park.pending.call_id.as_str());
+        resume_user_form(state, account_id, coworker_id, content, call_id).await;
+    }
     let live: Vec<&Value> = entries
         .iter()
         .filter(|entry| is_live_handoff(entry))
@@ -685,10 +751,12 @@ pub struct WaitingCalls {
     forms: Vec<FormPark>,
 }
 
-/// A run parked on a form: every call it waits on.
+/// A run parked on a form: every call it waits on, the one it is parked on, and when it parked.
 #[derive(Debug, Clone)]
 struct FormPark {
     calls: BTreeSet<String>,
+    pending: opengrok_core::run::PendingApproval,
+    parked_at_ms: i64,
 }
 
 impl WaitingCalls {
@@ -723,7 +791,20 @@ pub async fn waiting_calls(
                 waiting.on.insert(call.clone(), pending.call_id.clone());
             }
             if pending.reason == opengrok_core::run::SuspendReason::UserForm {
-                waiting.forms.push(FormPark { calls });
+                // A park with no frame of its own (a row older than the frames) never reaches a
+                // deadline here; its card's, if it has one, still does.
+                let parked_at_ms = run
+                    .emitted
+                    .iter()
+                    .rev()
+                    .find(|frame| resume::park_call(frame) == Some(pending.call_id.as_str()))
+                    .and_then(|frame| frame.get("timestamp").and_then(Value::as_i64))
+                    .unwrap_or(i64::MAX);
+                waiting.forms.push(FormPark {
+                    calls,
+                    pending: pending.clone(),
+                    parked_at_ms,
+                });
             }
         }
     }

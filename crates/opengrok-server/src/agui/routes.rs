@@ -3995,8 +3995,13 @@ pub async fn stop_run(
         }
 
         // Read BEFORE the stop is applied: what the run was doing is what decides how honest the
-        // answer can be about when the stop takes hold.
+        // answer can be about when the stop takes hold, and what it was waiting on decides whether
+        // it can say the card is closed.
         let was = run.status;
+        let on_a_form = run
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.reason == opengrok_core::run::SuspendReason::UserForm);
 
         let at_ms = now_ms();
         let events = match run.decide(RunCommand::Stop {
@@ -4009,7 +4014,8 @@ pub async fn stop_run(
             // with the model is not their problem, and an error here would make a retry — a second
             // press, a client resending — look like a fault.
             Err(_) => {
-                return stopped_answer(&run_id, was, close_cards(&host, &account_id, &run).await);
+                let closed = close_cards(&host, &account_id, &run).await;
+                return stopped_answer(&run_id, was, on_a_form, closed);
             }
         };
 
@@ -4031,7 +4037,8 @@ pub async fn stop_run(
         {
             Ok(_) => {
                 tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
-                return stopped_answer(&run_id, was, close_cards(&host, &account_id, &run).await);
+                let closed = close_cards(&host, &account_id, &run).await;
+                return stopped_answer(&run_id, was, on_a_form, closed);
             }
             // Somebody wrote to this run between the read and the write. Re-read and decide again
             // against what is actually there: either the run is now ended, and the next pass
@@ -4077,7 +4084,7 @@ async fn close_cards(
 /// outcome of the REQUEST and not the run's own status — the run's status is unchanged and
 /// `GET /ag-ui/runs/{id}` still reports it. `takesEffect: already-ended` is what distinguishes the
 /// two for a client that cares.
-fn stopped_answer(run_id: &RunId, was: RunStatus, cards_closed: bool) -> Response {
+fn stopped_answer(run_id: &RunId, was: RunStatus, on_a_form: bool, cards_closed: bool) -> Response {
     let (takes_effect, note) = match was {
         // Nothing was running, and saying "stopped" is still the right answer: the person asked
         // for this run not to be running, and it is not.
@@ -4087,6 +4094,15 @@ fn stopped_answer(run_id: &RunId, was: RunStatus, cards_closed: bool) -> Respons
         ),
         // Waiting on a person is not working. No model call is in flight and no tool is running,
         // so the run is over the moment the log says so.
+        //
+        // Only a form's card is settled by a stop. An approval card (auto-review, policy,
+        // local-tool-permission) is left as it was painted, so the answer does not say it is
+        // closed — only what is true: the run has left the approvals queue and its card can no
+        // longer make anything run.
+        RunStatus::AwaitingApproval if !on_a_form => (
+            "immediately",
+            "That run was waiting on an approval and is stopped: nothing it asked for will run.",
+        ),
         RunStatus::AwaitingApproval if cards_closed => (
             "immediately",
             "That run was waiting on an approval, and the card it was waiting on is closed.",

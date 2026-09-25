@@ -3365,3 +3365,112 @@ async fn a_submit_that_cannot_read_the_run_log_leaves_the_card_open() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "submitted", "{body}");
 }
+
+/// #186. A run parked on a form whose card was never appended — the process died between the park
+/// and the card, or the append failed — holds the coworker's screen in every conversation, and
+/// nothing that settles cards reaches it. Past the deadline counted from its park it is answered
+/// as timed out, as its card would have been.
+#[tokio::test]
+async fn a_form_run_whose_card_never_landed_times_out_from_its_park() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-cardless-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let run = parked(&h).await.remove(0);
+    sqlx::query("delete from gateway_entry where coworker_id = $1 and entry->>'id' = $2")
+        .bind(agent.as_str())
+        .bind(form["id"].as_str().expect("entry id"))
+        .execute(h.store.pool())
+        .await
+        .expect("lose the card");
+
+    opengrok_server::agui::user_form::settle_dead_holds(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        now_ms(),
+    )
+    .await;
+    assert_eq!(
+        status_of(&h, &run).await,
+        opengrok_core::run::RunStatus::AwaitingApproval,
+        "inside its deadline the park is the person's"
+    );
+
+    opengrok_server::agui::user_form::settle_dead_holds(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        now_ms() + hold_ms() + 1_000,
+    )
+    .await;
+    assert_eq!(
+        wait_for_status(&h, &run, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished,
+        "a park with no card is woken by its deadline, not left holding the screen"
+    );
+}
+
+/// #186. The deadline sweep reads each run once, when its last write crosses the deadline. A
+/// hold minted after that write — a handoff whose escalation could not be journaled onto the run
+/// — reaches its own deadline later, so the sweep says which runs it did not finish with and looks
+/// at them again.
+#[tokio::test]
+async fn the_sweep_looks_again_at_a_run_whose_handoff_is_not_yet_due() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "hold-sweep-again-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let run = parked(&h).await.remove(0);
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/dismiss",
+            json!({ "entryId": form["id"], "agentId": agent, "mode": "escalated" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let handoff = h.wait_for_handoff(&agent).await;
+    let handoff_id = handoff["id"].as_str().expect("handoff id").to_string();
+    let mine = [(run.clone(), h.account.clone())];
+
+    let again =
+        opengrok_server::agui::user_form::expire_parked_forms(&h.gateway, &mine, now_ms()).await;
+    assert_eq!(
+        again,
+        mine.to_vec(),
+        "a handoff inside its deadline: look again"
+    );
+    assert!(
+        stored_card(&h, &agent, &handoff_id)
+            .await
+            .get("boxResolution")
+            .is_none()
+    );
+
+    let again = opengrok_server::agui::user_form::expire_parked_forms(
+        &h.gateway,
+        &mine,
+        now_ms() + hold_ms() + 1_000,
+    )
+    .await;
+    assert!(again.is_empty(), "{again:?}");
+    let settled = stored_card(&h, &agent, &handoff_id).await;
+    assert_eq!(settled["boxResolution"], "timed_out", "{settled}");
+    assert_eq!(
+        wait_for_status(&h, &run, opengrok_core::run::RunStatus::Finished).await,
+        opengrok_core::run::RunStatus::Finished
+    );
+}
