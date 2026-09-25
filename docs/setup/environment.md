@@ -91,9 +91,10 @@ false until that client is attached. Never publish 8791/8792.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `OG_LOGIN_EMAIL` | `host@opengrok.local` | the host account a browser login binds to on a single-user deployment |
+| `OG_LOGIN_EMAIL` | `host@opengrok.local` | read at boot and stored on the auth state, and **read by nothing after that** (grep `login_email`): it creates no account and no login uses it. The first admin is made from the shell — [`first-run.md`](first-run.md) |
 | `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
 | `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
+| `OG_WEB_CONSOLE_DIR` | unset (no console route) | directory holding the built SPA's `index.html`, normally `web/dist`; served at `/console` |
 
 No variable configures DNS: domain-ownership proof (`/admin/domains/{d}/verify`) resolves the
 `_opengrok-verify.<domain>` TXT record through hickory-resolver using the box's own resolver
@@ -103,7 +104,6 @@ without it `/forgot-password` says so and the operator resets with
 `opengrok admin account password --email <email>`. Run the smoke gate with the Resend key UNSET:
 `slice17-identity-smoke.sh` asserts the no-mailer path, and a set key sends real mail to the
 throwaway signup addresses.
-| `OG_WEB_CONSOLE_DIR` | unset (no console route) | directory holding the built SPA's `index.html`, normally `web/dist`; served at `/console` |
 
 ## Connectors and plugins
 
