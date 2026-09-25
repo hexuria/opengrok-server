@@ -50,6 +50,20 @@ export async function forgotPassword(email: string): Promise<{ accepted: boolean
   return (await res.json()) as { accepted: boolean; mailer: boolean };
 }
 
+/**
+ * Ask for a fresh verification link. Always 202, whether the address is unknown, verified or
+ * waiting; `mailer` false means this server cannot send email — the page points at the admin.
+ */
+export async function resendVerification(email: string): Promise<{ accepted: boolean; mailer: boolean }> {
+  const res = await fetch("/auth/verify/resend", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) throw new ApiError(res.status, "could not request a verification link");
+  return (await res.json()) as { accepted: boolean; mailer: boolean };
+}
+
 export function login(email: string, password: string): Promise<{ email: string }> {
   return postJson<{ email: string }>("/auth/login", { email, password });
 }

@@ -52,7 +52,7 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::agui::routes::{principal_from_bearer, tools_for_coworker};
+use crate::agui::routes::{BearerRefusal, principal_from_bearer, tools_for_coworker};
 
 /// How long an MCP call waits for a sleeping box before trying its command anyway. The MCP client
 /// (Claude Code) has its own request timeout, so this stays well under it; a box still starting
@@ -151,13 +151,12 @@ async fn guard(State(state): State<HostState>, mut req: Request, next: Next) -> 
             "this token names a person, not a coworker — mint a bot key \
              (POST /coworkers/{id}/keys) or sign in through OAuth and use that as the bearer",
         ),
-        Ok(None) => unauthorized(
+        Ok(None) | Err(BearerRefusal::NotOurs) => unauthorized(
             &public_url,
             "missing or unrecognised bearer — use a coworker's bot key, or sign in through OAuth",
         ),
-        // `principal_from_bearer`'s only Err today is a revoked key; a revoked key must be named
-        // revoked, never silently downgraded to anonymous.
-        Err(_) => unauthorized(&public_url, "this bot key has been revoked"),
+        // A revoked key must be named revoked, never silently downgraded to anonymous.
+        Err(BearerRefusal::Revoked) => unauthorized(&public_url, "this bot key has been revoked"),
     }
 }
 
@@ -374,14 +373,7 @@ fn to_mcp_tool(schema: &serde_json::Value) -> Option<Tool> {
     // MCP inputSchema and strict hosts reject it.
     let parameters: JsonObject = match function.get("parameters") {
         Some(serde_json::Value::Object(map)) if !map.is_empty() => map.clone(),
-        _ => {
-            let mut map = JsonObject::new();
-            map.insert(
-                "type".to_string(),
-                serde_json::Value::String("object".to_string()),
-            );
-            map
-        }
+        _ => opengrok_tools::mcp::open_object(),
     };
     let mut tool = Tool::new(name.to_string(), String::new(), parameters);
     // Omit description entirely when empty, rather than shipping `"description": ""`.
@@ -1254,3 +1246,8 @@ async fn fail_stuck_mcp_run(
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/mcp_door.rs"]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests;

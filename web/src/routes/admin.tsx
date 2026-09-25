@@ -33,6 +33,7 @@ import {
   setOrgMode,
   testBoxConnection,
   verifyDomain,
+  verifyUser,
   withdrawDomain,
   type GatewayKey,
   type OrgDomain,
@@ -59,6 +60,7 @@ function UserRow({ user }: { user: Account }) {
     mutationFn: () => (user.enabled ? disableUser(user.id) : enableUser(user.id)),
     onSuccess: refresh,
   });
+  const verify = useMutation({ mutationFn: () => verifyUser(user.id), onSuccess: refresh });
   const setMode = useMutation({
     mutationFn: (mode: SharingMode | "") =>
       mode === "" ? clearAccountMode(user.id) : setAccountMode(user.id, mode),
@@ -71,6 +73,17 @@ function UserRow({ user }: { user: Account }) {
       <td>{name}</td>
       <td>
         <span className={`pill ${user.enabled ? "on" : "off"}`}>{user.enabled ? "enabled" : "disabled"}</span>
+        {/* Login checks the address before the switch, so "enabled" alone was a lie for anyone
+            whose verification mail never arrived: they still could not sign in. */}
+        {!user.verified && (
+          <span
+            className="pill off"
+            style={{ marginLeft: "0.3rem" }}
+            title="Their address is unproven, so they cannot sign in yet"
+          >
+            unverified
+          </span>
+        )}
       </td>
       <td>
         <select
@@ -87,6 +100,17 @@ function UserRow({ user }: { user: Account }) {
         </select>
       </td>
       <td style={{ textAlign: "right" }}>
+        {!user.verified && (
+          <button
+            className="ghost sm"
+            onClick={() => verify.mutate()}
+            disabled={verify.isPending}
+            style={{ marginRight: "0.3rem" }}
+            title="Vouch for this address — for when the verification email never arrived"
+          >
+            Verify
+          </button>
+        )}
         <button className="ghost sm" onClick={() => toggle.mutate()} disabled={toggle.isPending}>
           {user.enabled ? "Disable" : "Enable"}
         </button>

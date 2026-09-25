@@ -74,10 +74,21 @@ pub async fn signup_form(
     let code = form.code.clone();
     match do_signup(&state, form).await {
         Ok(reply) => {
-            let msg = if reply.verified {
-                "Account created. Your administrator will enable it, then you can sign in."
-            } else {
-                "Account created. Check your email for a verification link, then your administrator                  will enable your account."
+            // THREE OUTCOMES, NOT TWO. Choosing on `verified` alone told a person whose mail was
+            // never sent to go and wait for it — the account was then stuck until someone read
+            // the server log.
+            let msg = match (reply.verified, reply.verification_email_sent) {
+                (true, _) => {
+                    "Account created. Your administrator will enable it, then you can sign in."
+                }
+                (false, true) => {
+                    "Account created. Check your email for a verification link, then your \
+                     administrator will enable your account."
+                }
+                (false, false) => {
+                    "Account created, but the verification email could not be sent. Ask your \
+                     administrator to verify and enable your account."
+                }
             };
             super::pages::message(StatusCode::OK, "Welcome to Open Grok", msg)
         }
@@ -206,15 +217,14 @@ async fn do_signup(
         .await;
 
     // Send the verification email, if a mailer is configured. A send failure does not fail the
-    // signup — the account exists and the operator can re-trigger; failing here would strand a
-    // real account behind a mail hiccup.
+    // signup — the account exists, and its org's admin vouches for the address instead
+    // (`POST /admin/users/{id}/verify`, `opengrok admin account verify`); failing here would
+    // strand a real account behind a mail hiccup.
     let mut sent = false;
-    if let Some(key) = &state.resend_api_key {
-        let token = mint_verify_token(state, account_id.as_str(), at_ms);
-        if let Some(token) = token {
-            let link = format!("{}/auth/verify?token={token}", state.public_url);
-            sent = super::resend::send_verification(key, &req.email, &link).await;
-        }
+    if let Some(mailer) = state.mailer()
+        && let Some(link) = verification_link(state, &account_id, at_ms)
+    {
+        sent = super::resend::send_verification(&mailer, &req.email, &link).await;
     }
 
     Ok(SignupReply {
@@ -234,15 +244,120 @@ pub async fn signup(State(state): State<AuthState>, Json(req): Json<SignupReques
     }
 }
 
-fn mint_verify_token(state: &AuthState, account_id: &str, at_ms: i64) -> Option<String> {
+/// The link a verification mail carries: a signed claim good for 24 hours from `at_ms`. Minted
+/// fresh for every mail, so a resent link has its own full day whatever became of the first.
+fn verification_link(state: &AuthState, account_id: &AccountId, at_ms: i64) -> Option<String> {
     state
         .minter
         .mint_claims(&VerifyClaims {
             purpose: "email-verify".to_string(),
-            sub: account_id.to_string(),
+            sub: account_id.as_str().to_string(),
             exp: at_ms / 1_000 + 24 * 60 * 60,
         })
         .ok()
+        .map(|token| format!("{}/auth/verify?token={token}", state.public_url))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResendRequest {
+    pub email: String,
+}
+
+/// Mail a fresh link to `email` if — and only if — it names a credential account still waiting to
+/// be verified. The mail goes out on its own task so every address answers in the same time: the
+/// Resend round trip is the one thing that would tell a stranded account from a stranger's guess.
+/// Whether it was sent is logged, never returned.
+async fn start_resend(state: &AuthState, email: &str) {
+    let Some(mailer) = state.mailer() else {
+        return;
+    };
+    let Ok(Some(view)) = state.store.account_by_email(email.trim()).await else {
+        return;
+    };
+    // A verified address has nothing to prove; a password-less (dev) account has no login that
+    // verification could unlock.
+    if view.verified || view.password_hash.is_none() {
+        return;
+    }
+    let Some(link) = verification_link(state, &view.id, now_ms()) else {
+        return;
+    };
+    tokio::spawn(async move {
+        let sent = super::resend::send_verification(&mailer, &view.email, &link).await;
+        tracing::info!(account = %view.id, sent, "verification mail resent");
+    });
+}
+
+/// Charged on the REQUEST, per address and per mailbox, whether or not a mailer is wired and
+/// whatever the address names — the same bargain as a reset, so the reply stays constant and one
+/// mailbox cannot be flooded from many peers.
+fn resend_budget(
+    state: &AuthState,
+    headers: &axum::http::HeaderMap,
+    email: &str,
+) -> Result<(), super::budget::Spent> {
+    use super::budget::{VERIFY_RESEND, email_key, peer_key};
+    state.budgets.take(&VERIFY_RESEND, &peer_key(headers))?;
+    state.budgets.take(&VERIFY_RESEND, &email_key(email))
+}
+
+fn too_many_resends(spent: super::budget::Spent) -> String {
+    format!(
+        "Too many verification-email requests. Try again in {} minutes.",
+        spent.retry_after_secs.div_ceil(60).max(1)
+    )
+}
+
+/// `POST /auth/verify/resend` — the JSON the console's login page calls. `202` whether the address
+/// is unknown, already verified or waiting; `mailer` tells the page whether to say "check your
+/// email" or "ask your administrator", which is deployment configuration, not identity.
+pub async fn resend_json(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ResendRequest>,
+) -> Response {
+    if let Err(spent) = resend_budget(&state, &headers, &req.email) {
+        return super::budget::too_many(spent, &too_many_resends(spent));
+    }
+    start_resend(&state, &req.email).await;
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "accepted": true, "mailer": state.resend_api_key.is_some() })),
+    )
+        .into_response()
+}
+
+/// `GET /resend-verification` — the styled card the sign-in page links to, honest about the mailer.
+pub async fn resend_page(State(state): State<AuthState>) -> Response {
+    super::pages::resend_verification(state.resend_api_key.is_some())
+}
+
+/// `POST /resend-verification` — the card's target. One answer for every address.
+pub async fn resend_form(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    axum::Form(form): axum::Form<ResendRequest>,
+) -> Response {
+    if let Err(spent) = resend_budget(&state, &headers, &form.email) {
+        return super::budget::with_retry_after(
+            super::pages::message(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many requests",
+                &too_many_resends(spent),
+            ),
+            spent,
+        );
+    }
+    if state.resend_api_key.is_none() {
+        return super::pages::resend_verification(false);
+    }
+    start_resend(&state, &form.email).await;
+    super::pages::message(
+        StatusCode::OK,
+        "Check your email",
+        "If that address has an account here that is still waiting to be verified, a new link is \
+         on its way. It expires in 24 hours.",
+    )
 }
 
 #[derive(Debug, Deserialize)]

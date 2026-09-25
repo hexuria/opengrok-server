@@ -4,21 +4,24 @@
 //! call anything), the arguments framed as DATA, one word back. It exits through the same
 //! `ModelDoor` as every other model call (CLAUDE.md #4) — the door is the gateway, and the route
 //! is the deployment's own (`OG_AUTO_REVIEW_MODEL`), never the coworker's: one call per tool call
-//! must be cheap, the reviewer must not be the reviewed, and a coworker-route outage must not
-//! become a wall of cards.
+//! must be cheap and the reviewer must not be the reviewed. The KEY and spend scope are the
+//! coworker's, though, so a coworker at its cap has its judge refused on every call.
 //!
-//! TOTAL BY CONSTRUCTION. Every failure — unreachable door, broken stream, timeout, empty or
-//! many-worded answer — is `ReviewVerdict::Unavailable`, which the executor's ladder turns into a
-//! card. Never `Allow`, never an error.
+//! TOTAL BY CONSTRUCTION. Every failure — refused or unreachable door, broken stream, timeout,
+//! empty or many-worded answer — is `ReviewVerdict::Unavailable` with its cause, logged here and
+//! named on the card the executor's ladder raises. Never `Allow`, never an error. A run whose
+//! judge keeps failing stops asking it (`judge_failure_streak`, `JUDGE_DOWN_AFTER`), so an outage
+//! is a few cards that say why and then one refusal, not a wall of cards.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use opengrok_tools::{ReviewAsk, ReviewJudge, ReviewVerdict};
+use opengrok_tools::{JudgeFailure, ReviewAsk, ReviewJudge, ReviewVerdict};
+use serde_json::Value;
 
-use crate::model::{ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelRequest};
+use crate::model::{ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelError, ModelRequest};
 use crate::timing::elapsed_ms;
 
 tokio::task_local! {
@@ -142,19 +145,79 @@ impl ModelJudge {
         )
     }
 
-    async fn collect_text(&self, request: ModelRequest) -> Option<String> {
-        let mut stream = self.door.stream(request).await.ok()?;
+    /// The answer, or why there is none with the door's own words for the log.
+    async fn collect_text(&self, request: ModelRequest) -> Result<String, (JudgeFailure, String)> {
+        let failed = |error: ModelError| (failure_of(&error), error.to_string());
+        let mut stream = self.door.stream(request).await.map_err(failed)?;
         let mut text = String::new();
         while let Some(delta) = stream.next().await {
             match delta {
                 Ok(ModelDelta::Text(piece)) => text.push_str(&piece),
                 Ok(_) => {}
                 // A broken stream is an unanswered question, not a partial answer.
-                Err(_) => return None,
+                Err(error) => return Err(failed(error)),
             }
         }
-        Some(text)
+        Ok(text)
     }
+}
+
+/// The cause a door error stands for. A `Stream` error at open is still a stream that broke.
+fn failure_of(error: &ModelError) -> JudgeFailure {
+    match error {
+        ModelError::SpendCap(_) => JudgeFailure::SpendCap,
+        ModelError::Held(_) => JudgeFailure::Held,
+        ModelError::Refused { status, .. } => JudgeFailure::Refused(*status),
+        ModelError::Unreachable(_) => JudgeFailure::Unreachable,
+        ModelError::Stream(_) => JudgeFailure::StreamBroke,
+    }
+}
+
+fn clipped(text: &str, max: usize) -> String {
+    let mut kept: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        kept.push('…');
+    }
+    kept
+}
+
+/// How many judge failures in a row this run has already carded, read back from its journal.
+///
+/// Every failure parks the run on a card and a resume rebuilds the runner and its judge, so a
+/// count kept in memory never passes one: the reviewer could be down for the whole run and each
+/// card would still be its first. Walking back from the newest frame, an auto-review card whose
+/// `why` is a judge failure adds one; any other card ends the streak, and so does a result for
+/// a call that raised no card, which the judge (or the gate) settled on its own. A result for a
+/// carded call is the person's answer being carried out, and neither adds nor ends.
+pub fn judge_failure_streak(emitted: &[Value]) -> u32 {
+    fn text<'a>(event: &'a Value, key: &str) -> Option<&'a str> {
+        event.get(key).and_then(Value::as_str)
+    }
+    let is_card = |event: &Value| {
+        text(event, "type") == Some("CUSTOM")
+            && text(event, "name") == Some("run-awaiting-approval")
+    };
+    let carded: std::collections::BTreeSet<&str> = emitted
+        .iter()
+        .filter(|event| is_card(event))
+        .filter_map(|event| text(event, "callId"))
+        .collect();
+    let mut streak = 0;
+    for event in emitted.iter().rev() {
+        if is_card(event) {
+            let failed = text(event, "reason") == Some("auto-review")
+                && text(event, "why").is_some_and(opengrok_tools::review::is_unavailable_reason);
+            if !failed {
+                break;
+            }
+            streak += 1;
+        } else if text(event, "type") == Some("TOOL_CALL_RESULT")
+            && text(event, "toolCallId").is_some_and(|id| !carded.contains(id))
+        {
+            break;
+        }
+    }
+    streak
 }
 
 /// Strict, and the reason the ladder can be trusted: exactly one bare word, case-insensitive,
@@ -167,13 +230,13 @@ pub fn parse_verdict(text: &str) -> ReviewVerdict {
         .trim_matches(|c: char| c == '`' || c == '"' || c == '\'' || c == '.' || c == '*')
         .trim();
     if word.split_whitespace().count() != 1 {
-        return ReviewVerdict::Unavailable;
+        return ReviewVerdict::Unavailable(JudgeFailure::Unparseable);
     }
     match word.to_ascii_lowercase().as_str() {
         "allow" => ReviewVerdict::Allow,
         "block" => ReviewVerdict::Block,
         "ask" => ReviewVerdict::Ask,
-        _ => ReviewVerdict::Unavailable,
+        _ => ReviewVerdict::Unavailable(JudgeFailure::Unparseable),
     }
 }
 
@@ -192,11 +255,29 @@ impl ReviewJudge for ModelJudge {
             tools: Vec::new(),
         };
         let started = Instant::now();
-        let verdict = match tokio::time::timeout(self.timeout, self.collect_text(request)).await {
-            Ok(Some(text)) => parse_verdict(&text),
-            Ok(None) | Err(_) => ReviewVerdict::Unavailable,
-        };
+        let (verdict, detail) =
+            match tokio::time::timeout(self.timeout, self.collect_text(request)).await {
+                Ok(Ok(text)) => (parse_verdict(&text), clipped(text.trim(), 80)),
+                Ok(Err((cause, said))) => (ReviewVerdict::Unavailable(cause), clipped(&said, 200)),
+                Err(_) => (
+                    ReviewVerdict::Unavailable(JudgeFailure::TimedOut),
+                    format!("no answer in {} ms", self.timeout.as_millis()),
+                ),
+            };
         add_judge_ms(elapsed_ms(started));
+        // The operator's half of #201: which coworker, which route, which call, and why. Never
+        // the arguments or the person's instructions, and never the key — the door's own words
+        // or the stray answer, clipped.
+        if let ReviewVerdict::Unavailable(cause) = verdict {
+            tracing::warn!(
+                coworker = self.scope.as_deref().unwrap_or("-"),
+                model = %self.model,
+                call = ask.call_id,
+                ?cause,
+                %detail,
+                "auto-review judge did not answer; the call is asked instead"
+            );
+        }
         verdict
     }
 }
@@ -226,12 +307,17 @@ mod tests {
             "allowed",
             "allow, but carefully",
         ] {
-            assert_eq!(parse_verdict(text), ReviewVerdict::Unavailable, "{text:?}");
+            assert_eq!(
+                parse_verdict(text),
+                ReviewVerdict::Unavailable(JudgeFailure::Unparseable),
+                "{text:?}"
+            );
         }
     }
 
     fn ask<'a>() -> ReviewAsk<'a> {
         ReviewAsk {
+            call_id: "call_1",
             tool: "shell",
             arguments: r#"{"command":"brew install jq"}"#,
             allow_instructions: "",
@@ -245,7 +331,57 @@ mod tests {
             Arc::new(MockDoor::failing_with("upstream hung up")),
             "oag/cheap",
         );
-        assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable);
+        assert_eq!(
+            judge.judge(ask()).await,
+            ReviewVerdict::Unavailable(JudgeFailure::StreamBroke)
+        );
+    }
+
+    /// A door that refuses before it streams, the way the gateway and the spend guard do.
+    struct RefusingDoor(fn() -> ModelError);
+    #[async_trait::async_trait]
+    impl ModelDoor for RefusingDoor {
+        async fn stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<crate::model::DeltaStream, ModelError> {
+            Err((self.0)())
+        }
+    }
+
+    /// #201: each refusal keeps its cause, so the card can say which one it was. A spend cap
+    /// is the one a capped coworker hits on every call, since the judge bills its key.
+    #[tokio::test]
+    async fn a_refusing_door_keeps_its_cause() {
+        let cases: [(fn() -> ModelError, JudgeFailure); 4] = [
+            (
+                || ModelError::SpendCap("Ada has reached her monthly limit".to_string()),
+                JudgeFailure::SpendCap,
+            ),
+            (
+                || ModelError::Refused {
+                    status: 404,
+                    body: "unknown model route".to_string(),
+                },
+                JudgeFailure::Refused(404),
+            ),
+            (
+                || ModelError::Unreachable("connection refused".to_string()),
+                JudgeFailure::Unreachable,
+            ),
+            (
+                || ModelError::Held("the meter did not answer".to_string()),
+                JudgeFailure::Held,
+            ),
+        ];
+        for (error, cause) in cases {
+            let judge = ModelJudge::new(Arc::new(RefusingDoor(error)), "oag/judge");
+            assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable(cause));
+        }
+        let words = opengrok_tools::review::unavailable_reason(JudgeFailure::SpendCap);
+        assert!(words.contains("spend limit"), "{words}");
+        let words = opengrok_tools::review::unavailable_reason(JudgeFailure::Refused(404));
+        assert!(words.contains("404"), "{words}");
     }
 
     #[tokio::test]
@@ -263,7 +399,16 @@ mod tests {
     async fn an_echoing_door_that_ignores_the_contract_is_unavailable() {
         // The plain echo door answers "You said: …" — many words — which must not be an allow.
         let judge = ModelJudge::new(Arc::new(MockDoor::echoing()), "oag/cheap");
-        assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable);
+        assert_eq!(
+            judge.judge(ask()).await,
+            ReviewVerdict::Unavailable(JudgeFailure::Unparseable)
+        );
+        let long = "You said: ".repeat(40);
+        assert_eq!(
+            clipped(&long, 80).chars().count(),
+            81,
+            "clipped, and says so"
+        );
     }
 
     /// Records the request it was handed, to prove the judge asks on its OWN route with no tools
@@ -328,7 +473,51 @@ mod tests {
     async fn a_hanging_door_times_out_to_unavailable() {
         let judge = ModelJudge::new(Arc::new(HangingDoor), "oag/cheap")
             .with_timeout(Duration::from_millis(50));
-        assert_eq!(judge.judge(ask()).await, ReviewVerdict::Unavailable);
+        assert_eq!(
+            judge.judge(ask()).await,
+            ReviewVerdict::Unavailable(JudgeFailure::TimedOut)
+        );
+    }
+
+    fn card(call: &str, reason: &str, why: &str) -> Value {
+        serde_json::json!({"type": "CUSTOM", "name": "run-awaiting-approval", "callId": call,
+                           "reason": reason, "why": why})
+    }
+
+    fn result(call: &str) -> Value {
+        serde_json::json!({"type": "TOOL_CALL_RESULT", "toolCallId": call, "ok": true})
+    }
+
+    /// The streak a resume seeds the executor with. The run parks at every failure, so only the
+    /// journal can count past one.
+    #[test]
+    fn the_streak_is_read_back_from_the_runs_own_journal() {
+        let down = opengrok_tools::review::unavailable_reason(JudgeFailure::SpendCap);
+        let asked = opengrok_tools::REVIEW_ASK_REASON;
+        assert_eq!(judge_failure_streak(&[]), 0);
+        // Three failures, each approved and run: the results are the person's answers.
+        let journal = vec![
+            card("c1", "auto-review", &down),
+            result("c1"),
+            card("c2", "auto-review", &down),
+            result("c2"),
+            card("c3", "auto-review", &down),
+        ];
+        assert_eq!(judge_failure_streak(&journal), 3);
+        // A call the judge let through, between two failures, starts the count again.
+        let mut answered = journal.clone();
+        answered.insert(2, result("c_allowed"));
+        assert_eq!(judge_failure_streak(&answered), 2);
+        // So does a card the judge DID answer, and any other kind of card.
+        for other in [
+            card("c0", "auto-review", asked),
+            card("c0", "user-form", "Waiting for you"),
+            card("c0", "policy-approval", &down),
+        ] {
+            let mut journal = vec![other];
+            journal.push(card("c9", "auto-review", &down));
+            assert_eq!(judge_failure_streak(&journal), 1);
+        }
     }
 
     /// The judge is a real model call made on a coworker's behalf. It used to carry neither a

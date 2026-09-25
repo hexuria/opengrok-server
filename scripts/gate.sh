@@ -88,6 +88,11 @@ cleanup_boxes() {
   fi
 }
 
+# Every smoke signs in through the password-free dev route, which a server mints from only when
+# told to (OG_DEV_SIGN_IN, docs/setup/environment.md). Exported so the smokes that start their
+# own servers inherit it; each of those also sets it on its own launch line to run standalone.
+export OG_DEV_SIGN_IN=1
+
 # Not 1337: grok-bot's local-docker box binds that port, and a clash here looks like a broken
 # server rather than a taken port.
 PORT="${OG_PORT:-1447}"
@@ -106,6 +111,7 @@ OG_BIND="127.0.0.1:$PORT" \
 OG_DATABASE_URL="$OG_DATABASE_URL" \
 OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
 OG_MODEL_DOOR=mock \
+OG_DEV_SIGN_IN=1 \
 RUST_LOG=warn \
 ./target/debug/opengrok >/dev/null 2>&1 &
 SERVER_PID=$!
@@ -137,6 +143,7 @@ OG_BIND="127.0.0.1:$PORT" \
 OG_DATABASE_URL="$OG_DATABASE_URL" \
 OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
 OG_MODEL_DOOR=mock-tools \
+OG_DEV_SIGN_IN=1 \
 RUST_LOG=warn \
 ./target/debug/opengrok >/dev/null 2>&1 &
 SERVER_PID=$!
