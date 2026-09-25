@@ -471,8 +471,9 @@ impl Computer for DockerComputer {
     }
 
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()> {
-        // Written through stdin rather than interpolated into a shell string: content with a quote
-        // in it would otherwise become part of the command.
+        // Written through stdin, and the path handed over as `$1`, rather than either being
+        // interpolated into a shell string: a quote in the content or the path would otherwise
+        // become part of the command — and a skill's bundle paths are often somebody else's.
         use tokio::io::AsyncWriteExt;
 
         let mut child = Command::new("docker")
@@ -482,7 +483,9 @@ impl Computer for DockerComputer {
                 box_id,
                 "sh",
                 "-c",
-                &format!("mkdir -p \"$(dirname '{path}')\" && cat > '{path}'"),
+                r#"mkdir -p "$(dirname "$1")" && cat > "$1""#,
+                "sh",
+                path,
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())

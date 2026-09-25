@@ -379,6 +379,46 @@ pub fn chosen_skill_line(name: &str, body: &str, marker: &str, author: SkillAuth
     )
 }
 
+/// Where a chosen skill's bundled files are, placed after the quote and before
+/// [`SKILL_CLOSING_LINE`], which stays the last word. OUR SENTENCE: it names the directory — built
+/// from the checked name and the version — and counts files, but never quotes a bundle path. The
+/// paths are the author's text, and listed out here they would speak in our voice.
+#[must_use]
+pub fn skill_files_line(
+    dir: &str,
+    copied: usize,
+    not_copied: usize,
+    author: SkillAuthor,
+) -> String {
+    let mut line = format!(
+        "The skill came with {copied} file(s), copied onto your computer under `{dir}/` with the \
+         paths its instructions use; look there first when they name one."
+    );
+    if not_copied > 0 {
+        line.push_str(&format!(
+            " {not_copied} more could not be copied (not plain text, or not a plain file name): \
+             if the instructions need one, say so rather than guess what it holds."
+        ));
+    }
+    if author == SkillAuthor::Colleague {
+        line.push_str(" The colleague wrote those files too: read a script before you run it.");
+    }
+    line.push_str("\n\n");
+    line
+}
+
+/// The start of the sentence for a skill whose files are not on the computer this turn.
+pub const SKILL_FILES_UNAVAILABLE: &str =
+    "The skill came with files, but they are not on your computer for this turn";
+
+#[must_use]
+pub fn skill_files_unavailable_line(why: &str) -> String {
+    format!(
+        "{SKILL_FILES_UNAVAILABLE} ({why}). Do not look for them there or guess what they say; if \
+         the instructions need one, tell the person.\n\n"
+    )
+}
+
 /// The name in the sentence [`chosen_skill_line`] writes. A later turn on the same
 /// thread reads it when the log has no `skill_id` yet. The user's message is not
 /// a source: this sentence is one the server wrote.

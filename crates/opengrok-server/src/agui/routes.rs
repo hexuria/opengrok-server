@@ -269,7 +269,12 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
 /// EVERY PATH OUT OF HERE SAYS SOMETHING. A chosen skill that cannot be given is the case the
 /// refusal line exists for, so returning an empty string on any of these would be precisely the
 /// silence it was written to prevent.
-async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSkill) -> String {
+async fn skill_segment(
+    state: &AgUiState,
+    account: &AccountId,
+    chosen: &ChosenSkill,
+    tools: Option<&opengrok_harness::ToolRunner>,
+) -> String {
     // EVERY REFUSAL BELOW GOES THROUGH `NotForThisTurn::line`, including the two this function
     // decides itself. A sentence chosen at the call site is a sentence that drifts from the table
     // that decides the rest.
@@ -301,7 +306,17 @@ async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSk
         })
         .filter(|segment| !segment.is_empty());
     match quoted {
-        Some(segment) => segment,
+        Some(segment) => match crate::skills::files_line_for_turn(state, &skill, tools).await {
+            // Before the closing line, so our restatement of the rules stays the last word.
+            Some(files) => {
+                let close = crate::persona::SKILL_CLOSING_LINE;
+                let joined = segment
+                    .strip_suffix(close)
+                    .map(|head| format!("{head}{files}{close}"));
+                joined.unwrap_or(segment)
+            }
+            None => segment,
+        },
         None => {
             // No marker the body does not already contain, so the quote could not be closed where
             // we say it closes. Refuse rather than quote it unbounded.
@@ -322,6 +337,7 @@ async fn skill_line_for_turn(
     account: &AccountId,
     thread_id: &str,
     input: &RunAgentInput,
+    tools: Option<&opengrok_harness::ToolRunner>,
 ) -> (String, Option<String>) {
     let chosen = match chosen_skill_from(input) {
         Some(chosen) => chosen,
@@ -334,7 +350,7 @@ async fn skill_line_for_turn(
         ChosenSkill::Id(id) => Some(id.clone()),
         ChosenSkill::Unusable(_) => None,
     };
-    let line = skill_segment(state, account, &chosen).await;
+    let line = skill_segment(state, account, &chosen, tools).await;
     let recorded = line
         .contains("For THIS message the person chose the skill `")
         .then_some(id)
@@ -2643,7 +2659,8 @@ async fn start_claimed_turn(
             // it had followed instructions it never saw (CLAUDE.md #8). No id on this request
             // reuses the skill from a prior run on this thread.
             let (skill_line, skill_id) =
-                skill_line_for_turn(&state, account_id, &input.thread_id, &input).await;
+                skill_line_for_turn(&state, account_id, &input.thread_id, &input, tools.as_ref())
+                    .await;
             recorded_skill = skill_id;
             let text = crate::persona::system_message(
                 &coworker_name,
