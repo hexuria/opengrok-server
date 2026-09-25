@@ -2707,7 +2707,10 @@ async fn a_missing_python_gets_a_python3_retry() {
 }
 
 /// Two different files that are not there are two outcomes, not a retry of one: a tool with no
-/// `command` argument is told apart by its arguments.
+/// `command` argument is told apart by its arguments. The fake answers a missing file the way
+/// the executor does: `cat` fails in the box, the box says `Refused`, and `read_file` returns a
+/// refusal. An earlier fake returned ok with "[exit code 1]", which the executor never produces,
+/// and so hid that every refusal still counted (#183, verifier's probe).
 #[tokio::test]
 async fn two_different_missing_files_do_not_end_the_turn() {
     fn read(id: &str, path: &str) -> Vec<ModelDelta> {
@@ -2742,9 +2745,15 @@ async fn two_different_missing_files_do_not_end_the_turn() {
                 *reads
             };
             if n < 3 {
-                opengrok_tools::ToolResult::ok(&call.id, "cat: no such file\n[exit code 1]")
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                opengrok_tools::ToolResult::refused(
+                    &call.id,
+                    format!(
+                        "the computer refused the request (1): cat: {path}: No such file or directory"
+                    ),
+                )
             } else {
-                opengrok_tools::ToolResult::ok(&call.id, "the notes\n[exit code 0]")
+                opengrok_tools::ToolResult::ok(&call.id, "the notes")
             }
         }),
     );
@@ -2999,6 +3008,41 @@ async fn a_recipe_is_played_at_most_once_per_request() {
         assistant_text(&events).contains("search-youtube"),
         "the turn says which recipe it did not replay: {events:?}"
     );
+}
+
+/// Two plays of one recipe in ONE completion both reached `run_all`: `played` learns a round's
+/// recipes only after the round ran, so neither looked like a replay and the box typed the
+/// search twice, the kabisado failure inside a single reply (#120, verifier's probe).
+#[tokio::test]
+async fn a_recipe_asked_twice_in_one_completion_plays_once() {
+    let door = Rounds::new(
+        vec![
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_deltas("c2", "search-youtube"),
+            ]
+            .concat(),
+        ],
+        "The results page is open.",
+    );
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let results = tool_results(&events);
+    assert_eq!(*plays.lock().unwrap(), 1, "{results:?}");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results[0].starts_with("played"), "{results:?}");
+    assert!(results[1].starts_with("Not played again"), "{results:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "The results page is open.");
 }
 
 /// A different recipe is a different task and still runs.
@@ -4054,6 +4098,43 @@ async fn a_second_home_directory_find_ends_the_turn() {
     assert!(!text.contains("AGENT.md"), "{text:?}");
     let timing = run_timing_value(&events).expect("run-timing");
     assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(2));
+}
+
+/// The Hog Rider turn walked `find ~`, then `find /Users/uriah`: two spellings of one walk. A
+/// refusal on an ordinary tool now counts only when it repeats the last failure (#183), and a
+/// home-directory walk is kept out of that rule, or a respelled second walk was one more round.
+#[tokio::test]
+async fn a_second_home_directory_find_spelled_differently_ends_the_turn() {
+    let door = Rounds::new(
+        vec![
+            ums_deltas("c1", "find ~ -name AGENT.md", "I'll look up AGENT.md"),
+            ums_deltas("c2", "find /Users/uriah -name AGENT.md", "I'll look again"),
+            ums_deltas("c3", "gpui-agent invoke profile.list", "I'll list them"),
+        ],
+        "unreachable",
+    );
+    let ran = Arc::new(Mutex::new(0usize));
+    let ran_tool = ran.clone();
+    let tool: LocalTool = Arc::new(move |call| {
+        *ran_tool.lock().unwrap() += 1;
+        opengrok_tools::ToolResult::ok(&call.id, "should not run")
+    });
+    let events = run_conversation(
+        &door,
+        Some(&ums_runner(tool)),
+        &MemoryJournal::new(),
+        request("open the profile"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*ran.lock().unwrap(), 0, "neither find is dispatched");
+    assert_eq!(door.calls(), 2, "the second walk ends the turn");
+    assert!(
+        assistant_text(&events).contains("home directory"),
+        "{events:?}"
+    );
 }
 
 /// Grey run 01a0c9ed: hello exited 0, then profile.search was skipped as a

@@ -291,20 +291,29 @@ fn played_recipe(
         .flatten()
 }
 
-fn is_replay(call: &opengrok_tools::ToolCall, played: &HashSet<String>) -> bool {
-    recipe_of(call).is_some_and(|recipe| played.contains(&recipe))
+/// Which of one completion's calls replay a recipe: one this request already played, or one an
+/// earlier call in the same completion names. The second is not in `played` yet, because a round's
+/// recipes are added only after the round ran, and every call in a completion reaches `run_all`
+/// together. Checking `played` alone let two plays of one recipe in one reply both type the
+/// search (#120, the kabisado failure inside a single completion).
+fn replays(calls: &[opengrok_tools::ToolCall], played: &HashSet<String>) -> Vec<bool> {
+    let mut asked = played.clone();
+    calls
+        .iter()
+        .map(|call| recipe_of(call).is_some_and(|recipe| !asked.insert(recipe)))
+        .collect()
 }
 
-/// A call the loop answers itself instead of running: a home-directory walk, or a recipe this
-/// request already played.
+/// A call the loop answers itself instead of running: a home-directory walk, or a recipe replay
+/// (see `replays`).
 fn answered_here(
     call: &opengrok_tools::ToolCall,
-    played: &HashSet<String>,
+    replay: bool,
 ) -> Option<opengrok_tools::ToolResult> {
     if is_broad_walk_call(call) {
         return Some(refused_broad_walk(call));
     }
-    let recipe = recipe_of(call).filter(|recipe| played.contains(recipe))?;
+    let recipe = recipe_of(call).filter(|_| replay)?;
     Some(opengrok_tools::ToolResult::ok(
         &call.id,
         format!(
@@ -334,7 +343,9 @@ fn is_readonly_listing_shell(call: &opengrok_tools::ToolCall) -> bool {
 
 /// What makes two failures the same one: a shell's invoke name or whole command, and for any
 /// other tool its name and arguments. Two different files a `read_file` could not find are two
-/// failures, not a retry.
+/// failures, not a retry. That holds for a refusal as much as for a non-zero exit: the executor
+/// answers a missing file with a refusal (`cat` fails, the box says `Refused`), so a streak that
+/// counted every refusal ended the turn on the second file looked for (#183).
 fn failure_key(call: &opengrok_tools::ToolCall) -> String {
     match shell_command(&call.arguments) {
         "" => format!("{}:{}", call.name, call.arguments),
@@ -1340,11 +1351,15 @@ async fn converse_raw(
                 if same_open && let Some((_, sentence)) = opened.clone() {
                     end_run!(round_events, Ending::Finish(Some(sentence)));
                 }
-                let replayed = calls.iter().any(|call| is_replay(call, &played));
+                // Read before `played` takes this round's recipes, or every recipe that just
+                // played would look like one the loop answered itself.
+                let replays = replays(&calls, &played);
+                let replayed = replays.contains(&true);
                 let replay_only = replayed
                     && calls
                         .iter()
-                        .all(|call| is_client_render_tool(&call.name) || is_replay(call, &played));
+                        .zip(&replays)
+                        .all(|(call, replay)| is_client_render_tool(&call.name) || *replay);
                 if replay_only && skipped_replay {
                     let recipe = calls.iter().find_map(recipe_of).unwrap_or_default();
                     end_run!(
@@ -1358,11 +1373,14 @@ async fn converse_raw(
                 emit_live(sink, &waking).await;
                 round_events.extend(waking);
                 let skip_listing = had_successful_listing && listing_only;
-                // Read before `played` takes this round's recipes, or every recipe that just
-                // played would look like one the loop answered itself.
-                let loop_answered: Vec<bool> = calls
+                let answers: Vec<Option<opengrok_tools::ToolResult>> = calls
                     .iter()
-                    .map(|call| skip_listing || answered_here(call, &played).is_some())
+                    .zip(&replays)
+                    .map(|(call, replay)| answered_here(call, *replay))
+                    .collect();
+                let loop_answered: Vec<bool> = answers
+                    .iter()
+                    .map(|answer| skip_listing || answer.is_some())
                     .collect();
                 let tool_started = std::time::Instant::now();
                 let ((results, per_tool), auto_review_ms) = if skip_listing {
@@ -1378,14 +1396,12 @@ async fn converse_raw(
                         .collect();
                     let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
                     ((results, times), 0)
-                } else if calls
-                    .iter()
-                    .any(|call| answered_here(call, &played).is_some())
-                {
+                } else if answers.iter().any(Option::is_some) {
                     let runnable: Vec<_> = calls
                         .iter()
-                        .filter(|call| answered_here(call, &played).is_none())
-                        .cloned()
+                        .zip(&answers)
+                        .filter(|(_, answer)| answer.is_none())
+                        .map(|(call, _)| call.clone())
                         .collect();
                     let (ran, ran_times, review_ms) = if runnable.is_empty() {
                         (Vec::new(), Vec::new(), 0)
@@ -1396,10 +1412,22 @@ async fn converse_raw(
                     };
                     let mut ran = ran.into_iter();
                     let mut ran_times = ran_times.into_iter();
+                    let times = calls
+                        .iter()
+                        .zip(&answers)
+                        .map(|(call, answer)| {
+                            if answer.is_some() {
+                                (call.name.clone(), 0)
+                            } else {
+                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
+                            }
+                        })
+                        .collect();
                     let results = calls
                         .iter()
-                        .map(|call| {
-                            answered_here(call, &played).unwrap_or_else(|| {
+                        .zip(answers)
+                        .map(|(call, answer)| {
+                            answer.unwrap_or_else(|| {
                                 ran.next().unwrap_or_else(|| {
                                     opengrok_tools::ToolResult::refused(
                                         &call.id,
@@ -1407,16 +1435,6 @@ async fn converse_raw(
                                     )
                                 })
                             })
-                        })
-                        .collect();
-                    let times = calls
-                        .iter()
-                        .map(|call| {
-                            if answered_here(call, &played).is_some() {
-                                (call.name.clone(), 0)
-                            } else {
-                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
-                            }
                         })
                         .collect();
                     ((results, times), review_ms)
@@ -1543,19 +1561,29 @@ async fn converse_raw(
                                     && intent::counts_as_work_failure(result.ok, &result.content)
                             })
                             .collect();
-                    // A refusal or a tool error counts every time. A command that ran and exited
-                    // non-zero counts only when it is the command that failed last time: a grep
-                    // with no match, then a failing test run, is two outcomes of ordinary work,
-                    // not a retry diary — and ending the turn on the second one showed the
-                    // person the first line of the test output as the answer (#183).
+                    // A failure counts only when it is the call that failed last time, by
+                    // `failure_key`: a grep with no match, then a failing test run, is two
+                    // outcomes of ordinary work, not a retry diary — and ending the turn on the
+                    // second one showed the person the first line of the test output as the
+                    // answer (#183). A refusal is held to the same test. The executor refuses a
+                    // file that is not there, and counting every refusal ended the turn on the
+                    // second, different file; the SAME refusal twice is already stopped by the
+                    // refused-the-same-way-twice check below.
                     //
-                    // Neither counts when the same round also moved: an edit, then the test
+                    // Two exceptions still count every refusal. A call on the BIR host's catalog
+                    // (the demo's quiet-loop rule, see `names_the_catalog`): a refused port, then
+                    // a refused listing, is the retry diary it was written to stop. And a
+                    // home-directory walk, which the loop itself refuses: the second one, however
+                    // it is spelled, ends the turn rather than walking again.
+                    //
+                    // No failure counts when the same round also moved: an edit, then the test
                     // that still fails, is the fix-then-test loop. Counting it ended a coding
                     // coworker's turn on "test result: FAILED" one edit before the pass. What
                     // bounds that loop is the run's budget, which ends in the model's words.
                     let repeated_or_refused = !progressed
                         && failed.iter().any(|(call, result)| {
-                            !result.ok || repeats_last_failure(call, last_failed_key.as_deref())
+                            (!result.ok && (names_the_catalog(call) || is_broad_walk_call(call)))
+                                || repeats_last_failure(call, last_failed_key.as_deref())
                         });
                     if failed
                         .iter()
