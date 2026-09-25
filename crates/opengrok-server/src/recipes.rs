@@ -575,7 +575,12 @@ pub(crate) async fn detail_body(
         .into_iter()
         .filter(|grant| relation == Relation::Owner || grant.granted_by == account.as_str())
         .collect();
-    let runs = store.recipe_runs(id, 50).await.unwrap_or_default();
+    // The caller's own runs only: a run's screenshots belong to the account that ran it, and the
+    // bytes route serves nobody else, so a colleague's run would be a history of broken pictures.
+    let runs = store
+        .recipe_runs_for_account(id, account.as_str(), 50)
+        .await
+        .unwrap_or_default();
     let shares = if relation == Relation::Owner {
         store.recipe_shares(id).await.unwrap_or_default()
     } else {
@@ -596,10 +601,14 @@ pub(crate) async fn detail_body(
     let now = now_ms();
     let mut runs_with_artifacts = Vec::with_capacity(runs.len());
     for run in &runs {
-        let of_run = store
+        // Filtered by the same rule `artifacts::read_bytes` refuses by, so no id listed here 404s.
+        let of_run: Vec<_> = store
             .artifacts_for_run(id, &run.id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|artifact| artifact.account_id == account.as_str())
+            .collect();
         let mut row = serde_json::to_value(run).unwrap_or_else(|_| json!({}));
         if let Some(object) = row.as_object_mut() {
             // `running`, `finished`, or `interrupted`. A run is a row before the box answers, so
@@ -1253,12 +1262,24 @@ pub(crate) async fn joined(played: tokio::task::JoinHandle<Response>, run_id: &s
     }
 }
 
-/// History is for reading, not for keeping: five runs per version is what the page shows, and
+/// History is for reading, not for keeping: five runs per version per runner is what the page
+/// shows (`prune_recipe_runs` says why per runner), and
 /// whatever the pruned runs produced goes with them — an artifact with no run has no page.
 /// Best effort and said in the log: a missed prune leaves one run too many for the next to take.
-pub(crate) async fn tidy_history(store: &PgStore, recipe_id: &str, version: i32) {
+pub(crate) async fn tidy_history(
+    store: &PgStore,
+    recipe_id: &str,
+    version: i32,
+    runner: &CoworkerId,
+) {
     if let Err(error) = store
-        .prune_recipe_runs(recipe_id, version, RUNS_KEPT_PER_VERSION, now_ms())
+        .prune_recipe_runs(
+            recipe_id,
+            version,
+            runner.as_str(),
+            RUNS_KEPT_PER_VERSION,
+            now_ms(),
+        )
         .await
     {
         tracing::warn!(recipe = %recipe_id, %error, "could not prune a recipe's run history");
@@ -1336,7 +1357,7 @@ async fn play(run: Played) -> Response {
     let written = source
         .record_run_as(&run_id, &recipe_id, version, &coworker, &receipt)
         .await;
-    tidy_history(&state.auth.store, &recipe_id, version).await;
+    tidy_history(&state.auth.store, &recipe_id, version, &coworker).await;
     let mut out = json!({
         "recipe": recipe_id,
         "version": version,
@@ -1441,7 +1462,12 @@ impl RecipeSource for StoreRecipes {
             .write_run(&id, recipe_id, version, coworker_id, receipt)
             .await
         {
-            Ok(()) => Some(id),
+            // Bounded like a run started from the page. A bot that plays a recipe on every turn
+            // otherwise grows a history nobody reads until somebody happens to press Run.
+            Ok(()) => {
+                tidy_history(&self.store, recipe_id, version, coworker_id).await;
+                Some(id)
+            }
             // `None` is "there is no run to point at", which is now the truth; the trail and the
             // model's result carry on, and the log says why the history is short.
             Err(error) => {
@@ -1497,11 +1523,12 @@ impl StoreRecipes {
         if let Some(object) = receipt_json.as_object_mut() {
             object.remove("screenshot");
         }
-        // And without what the box saw. Every run of a recipe is handed back to everyone who may
-        // read that recipe (`detail_body`), but a run happens on the box of whoever played it —
-        // and a recipient may run a recipe they were shared. Keeping the window titles and page
-        // URLs would make sharing a recipe a way to read a colleague's screen back to its author.
-        // What it cost to look is kept; what it saw is not.
+        // And without what the box saw. A run happens on the box of whoever played it, and a
+        // recipient may run a recipe they were shared. History is now shown only to the account
+        // that ran it (`recipe_runs_for_account`), but the row sits under the owner's recipe and
+        // outlives any one listing rule; keeping the window titles and page URLs would make one
+        // loosened query a way to read a colleague's screen back to its author. What it cost to
+        // look is kept; what it saw is not.
         opengrok_tools::observe::strip_observations(&mut receipt_json);
         self.store
             .record_recipe_run(

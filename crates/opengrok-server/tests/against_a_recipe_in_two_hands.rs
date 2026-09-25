@@ -736,3 +736,92 @@ async fn a_recipe_whose_tape_cannot_be_stored_is_not_a_200() {
         );
     }
 }
+
+/// Run a recipe on one of this person's bots and wait for it; the run's id.
+async fn run_on(h: &Harness, who: &Person, bot: &str, id: &str) -> String {
+    let (status, ran) = h
+        .call(
+            who,
+            "POST",
+            &format!("/recipes/{id}/run"),
+            Some(json!({ "coworkerId": bot })),
+        )
+        .await;
+    assert_eq!(status, 200, "{ran}");
+    ran["runId"].as_str().expect("run id").to_string()
+}
+
+/// Every run a person is shown, with every picture in it that they can open.
+async fn my_runs(h: &Harness, who: &Person, id: &str) -> Vec<Value> {
+    let (status, detail) = h.call(who, "GET", &format!("/recipes/{id}"), None).await;
+    assert_eq!(status, 200, "{detail}");
+    let runs = detail["runs"].as_array().cloned().unwrap_or_default();
+    for run in &runs {
+        for picture in run["artifacts"].as_array().cloned().unwrap_or_default() {
+            let artifact = picture["id"].as_str().expect("artifact id");
+            let (status, _) = h
+                .call(who, "GET", &format!("/artifacts/{artifact}/bytes"), None)
+                .await;
+            assert_eq!(
+                status, 200,
+                "a picture listed on this person's page opens for them: {run}"
+            );
+        }
+    }
+    runs
+}
+
+#[tokio::test]
+async fn a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let owner = h.person().await;
+    let colleague = h.person().await;
+    let id = h.taught(&owner, "Reconcile the bank").await;
+    let owners_bot = h.hire(&owner).await;
+    let bot = h.hire(&colleague).await;
+    let (status, body) = h
+        .call(
+            &owner,
+            "POST",
+            &format!("/recipes/{id}/share"),
+            Some(json!({ "scope": "account", "scopeId": colleague.id })),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = h
+        .call(&colleague, "POST", &format!("/recipes/{id}/accept"), None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+
+    let owners_run = run_on(&h, &owner, &owners_bot, &id).await;
+    for _ in 0..5 {
+        run_on(&h, &colleague, &bot, &id).await;
+    }
+
+    let mine = my_runs(&h, &owner, &id).await;
+    assert_eq!(
+        mine.iter().map(|run| run["id"].clone()).collect::<Vec<_>>(),
+        vec![json!(owners_run)],
+        "the owner sees their own run, and five runs by somebody else did not evict it"
+    );
+    let kept = h
+        .store
+        .artifacts_for_run(&id, &owners_run)
+        .await
+        .expect("artifacts");
+    assert_eq!(kept.len(), 1);
+    assert!(
+        kept[0].deleted_at_ms.is_none(),
+        "and its screenshot survived"
+    );
+
+    let theirs = my_runs(&h, &colleague, &id).await;
+    assert_eq!(theirs.len(), 5, "the colleague sees their own five");
+    assert!(theirs.iter().all(|run| run["coworkerId"] == bot.as_str()));
+
+    // A sixth prunes the colleague's own oldest, and nobody else's.
+    run_on(&h, &colleague, &bot, &id).await;
+    assert_eq!(my_runs(&h, &colleague, &id).await.len(), 5);
+    assert_eq!(my_runs(&h, &owner, &id).await.len(), 1);
+}

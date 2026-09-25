@@ -608,7 +608,7 @@ async fn walk(walked: Walked) -> Response {
             now_ms(),
         )
         .await;
-    crate::recipes::tidy_history(&store, &id, version).await;
+    crate::recipes::tidy_history(&store, &id, version, &coworker).await;
 
     let mut body = json!({
         "workflow": id,

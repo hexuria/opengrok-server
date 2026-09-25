@@ -295,7 +295,7 @@ async fn a_shared_recipe_is_seen_accepted_and_granted_per_person() {
             .expect("record");
     }
     let dropped = store
-        .prune_recipe_runs(&id, 3, 5, now_ms())
+        .prune_recipe_runs(&id, 3, &bot, 5, now_ms())
         .await
         .expect("prune");
     assert_eq!(dropped, 3, "eight runs of v3, five kept");
@@ -854,14 +854,31 @@ async fn a_run_is_a_row_before_the_box_answers_and_says_when_nobody_finished_it(
             .expect("start"),
         "one bot, one recipe at a time"
     );
-    // Six finished runs of the same version, all newer than the one still playing.
+    // Somebody else's run, older than everything: pruning is per runner, so it is not this
+    // bot's to evict.
+    let theirs = format!("rrun_{stamp}_theirs");
+    store
+        .record_recipe_run(
+            &theirs,
+            &id,
+            1,
+            &format!("cw_other_{stamp}"),
+            None,
+            true,
+            None,
+            &json!({"ok": true}),
+            stamp - 1,
+        )
+        .await
+        .expect("record");
+    // Six finished runs of the same version by the same bot, all newer than the one playing.
     for n in 1..=6 {
         store
             .record_recipe_run(
                 &format!("rrun_{stamp}_done_{n}"),
                 &id,
                 1,
-                &format!("cw_other_{stamp}"),
+                &bot,
                 None,
                 true,
                 None,
@@ -872,10 +889,19 @@ async fn a_run_is_a_row_before_the_box_answers_and_says_when_nobody_finished_it(
             .expect("record");
     }
     store
-        .prune_recipe_runs(&id, 1, 5, stamp + 10)
+        .prune_recipe_runs(&id, 1, &bot, 5, stamp + 10)
         .await
         .expect("prune");
     let runs = store.recipe_runs(&id, 50).await.expect("runs");
+    assert_eq!(
+        runs.iter().filter(|run| run.coworker_id == bot).count(),
+        6,
+        "five finished runs kept, and the one still playing"
+    );
+    assert!(
+        runs.iter().any(|run| run.id == theirs),
+        "another runner's history is not this bot's to prune"
+    );
     let row = runs
         .iter()
         .find(|run| run.id == playing)

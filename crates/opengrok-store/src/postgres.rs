@@ -2628,6 +2628,21 @@ impl RecipeRunRow {
     }
 }
 
+fn recipe_run_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRunRow> {
+    Ok(RecipeRunRow {
+        id: row.try_get("id")?,
+        recipe_id: row.try_get("recipe_id")?,
+        version: row.try_get("version")?,
+        coworker_id: row.try_get("coworker_id")?,
+        run_id: row.try_get("run_id")?,
+        ok: row.try_get("ok")?,
+        stopped_at: row.try_get("stopped_at")?,
+        receipt: row.try_get("receipt")?,
+        at_ms: row.try_get("at_ms")?,
+        lease_until_ms: row.try_get("lease_until_ms")?,
+    })
+}
+
 fn recipe_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeRow> {
     Ok(RecipeRow {
         id: row.try_get("id")?,
@@ -3294,8 +3309,13 @@ impl PgStore {
         Ok(done.rows_affected())
     }
 
-    /// Drop all but the newest `keep` runs of one version. Called after a run is written, so a
-    /// long-lived recipe cannot grow an unbounded history nobody reads.
+    /// Drop all but the newest `keep` runs of one version BY ONE ACCOUNT — the account whose bot
+    /// `coworker_id` is. Called after a run is written, so a long-lived recipe cannot grow an
+    /// unbounded history nobody reads.
+    ///
+    /// PER RUNNER, because a shared recipe is run by more than its owner: kept per version alone,
+    /// five runs by a recipient evicted the owner's history, and the orphan sweep then took the
+    /// owner's screenshots with it. A bot with no roster row (a stand-in) is its own runner.
     ///
     /// A run still playing is never pruned: its row is what keeps the orphan sweep off the
     /// screenshots it is filing, and the receipt it is about to write needs somewhere to land.
@@ -3303,27 +3323,63 @@ impl PgStore {
         &self,
         recipe_id: &str,
         version: i32,
+        coworker_id: &str,
         keep: i64,
         now_ms: i64,
     ) -> StoreResult<u64> {
         let done = sqlx::query(
-            "delete from recipe_run
+            "with runner as (
+                 select id from coworker_view
+                  where account_id in (select account_id from coworker_view where id = $3)
+                 union select $3
+             )
+             delete from recipe_run
               where recipe_id = $1 and version = $2
-                and (lease_until_ms is null or lease_until_ms <= $4)
+                and coworker_id in (select id from runner)
+                and (lease_until_ms is null or lease_until_ms <= $5)
                 and id not in (
                     select id from recipe_run
                      where recipe_id = $1 and version = $2
+                       and coworker_id in (select id from runner)
                      order by at_ms desc
-                     limit $3
+                     limit $4
                 )",
         )
         .bind(recipe_id)
         .bind(version)
+        .bind(coworker_id)
         .bind(keep)
         .bind(now_ms)
         .execute(&self.pool)
         .await?;
         Ok(done.rows_affected())
+    }
+
+    /// One account's runs of a recipe: the ones its own bots played, retired bots included.
+    ///
+    /// A run is shown only to the account that ran it, because that is the account its
+    /// screenshots belong to (`artifact.account_id`, the only thing the bytes route serves by),
+    /// and a history that listed a colleague's runs listed pictures that could never open.
+    pub async fn recipe_runs_for_account(
+        &self,
+        recipe_id: &str,
+        account_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<RecipeRunRow>> {
+        let rows = sqlx::query(
+            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms,
+                    lease_until_ms
+               from recipe_run
+              where recipe_id = $1
+                and coworker_id in (select id from coworker_view where account_id = $2)
+              order by at_ms desc limit $3",
+        )
+        .bind(recipe_id)
+        .bind(account_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(recipe_run_row).collect()
     }
 
     pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
@@ -3336,22 +3392,7 @@ impl PgStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(RecipeRunRow {
-                    id: row.try_get("id")?,
-                    recipe_id: row.try_get("recipe_id")?,
-                    version: row.try_get("version")?,
-                    coworker_id: row.try_get("coworker_id")?,
-                    run_id: row.try_get("run_id")?,
-                    ok: row.try_get("ok")?,
-                    stopped_at: row.try_get("stopped_at")?,
-                    receipt: row.try_get("receipt")?,
-                    at_ms: row.try_get("at_ms")?,
-                    lease_until_ms: row.try_get("lease_until_ms")?,
-                })
-            })
-            .collect()
+        rows.iter().map(recipe_run_row).collect()
     }
 }
 
