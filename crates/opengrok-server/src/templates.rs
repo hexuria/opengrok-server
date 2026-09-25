@@ -136,16 +136,10 @@ pub async fn apply_at_hire(
             "hired, but the template's points limit could not be set ({error}); set it by hand"
         ));
     }
-    if !template.description.trim().is_empty() {
-        let profile = serde_json::json!({
-            "description": template.description,
-            "title": "",
-            "avatarShape": "",
-            "avatarColor": "",
-        });
-        if let Err(error) = store.put_seamb_profile(coworker_id, &profile, at_ms).await {
-            tracing::warn!(%error, coworker = %coworker_id.as_str(), "template: description not written");
-        }
+    if let Some(profile) = hire_profile(template)
+        && let Err(error) = store.put_seamb_profile(coworker_id, &profile, at_ms).await
+    {
+        tracing::warn!(%error, coworker = %coworker_id.as_str(), "template: description not written");
     }
     if let Err(error) = store
         .record_template_use(coworker_id, &template.id, at_ms)
@@ -154,6 +148,20 @@ pub async fn apply_at_hire(
         tracing::warn!(%error, coworker = %coworker_id.as_str(), "template: use not recorded");
     }
     Ok(note)
+}
+
+/// The profile blob a hire from this template writes, or none. `hire` answers its reply from
+/// this same value rather than reading the blob back: a read that failed after the hire had
+/// committed could only become a 503, and a client that retries a 503 hires the coworker twice.
+pub fn hire_profile(template: &CoworkerTemplate) -> Option<serde_json::Value> {
+    (!template.description.trim().is_empty()).then(|| {
+        serde_json::json!({
+            "description": template.description,
+            "title": "",
+            "avatarShape": "",
+            "avatarColor": "",
+        })
+    })
 }
 
 /// The listing shape both the admin card and the member's hire picker read.

@@ -118,8 +118,10 @@ async fn may_use(
         opengrok_policy::Action::UseCoworker,
         &policy,
     );
+    // Through `refuse_use`, like the run door: a coworker the caller may not even see is the
+    // same 404 as the id that does not exist above, and only one on their roster is told why.
     if let Some(reason) = decision.reason() {
-        return Err((StatusCode::FORBIDDEN, reason.to_string()).into_response());
+        return Err(crate::agui::routes::refuse_use(state, account_id, coworker_id, reason).await);
     }
     Ok(())
 }
