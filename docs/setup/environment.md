@@ -144,8 +144,9 @@ false until that client is attached. Never publish 8791/8792.
 | Variable | Default | What it is |
 |---|---|---|
 | `OG_LOGIN_EMAIL` | `host@opengrok.local` | the host account a browser login binds to on a single-user deployment |
-| `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias) |
-| `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | — | the sender identity; the domain must be verified in the Resend account |
+| `OG_DEV_SIGN_IN` | unset (off) | `1` turns on the password-free dev sign-in (`GET /auth/cursor_dev_session_token`) that every smoke script signs in with. Off, it answers `401` "dev sign-in is off on this server". On, it still answers only a caller on this machine — loopback socket peer, loopback `Host`, no forwarding header — and never an account that has a password. That is **not** a credential: any local process passes it, and on Docker Desktop a coworker box's traffic to the host arrives through a host process on 127.0.0.1. So leave it unset on a shared or hosted server. `scripts/gate.sh` sets it on its own servers; `scripts/serve.sh` turns it on for a dev server unless `.env` says `0`; `.env.example` ships it on as a dev template |
+| `OG_RESEND_API_KEY` | unset (auto-verify) | Resend key; set ⇒ signup sends a verification email and requires it (`RESEND_API` is accepted as a legacy alias). A mail that never arrives is not a dead end: the person asks for a fresh 24-hour link ("Resend verification email" on the sign-in page, `POST /auth/verify/resend`; same `202` for every address, 5 an hour per peer and per mailbox), the org's admin clicks **Verify** in the console (`POST /admin/users/{id}/verify`), or the operator runs `opengrok admin account verify --email <e>` |
+| `RESEND_FROM_EMAIL` / `RESEND_FROM_NAME` | `support@goldcoders.dev` / `Open Grok Support Team` | the sender identity; the domain must be verified in the Resend account. **Set it whenever the key is set**: the default's domain is almost certainly not verified in your account, so Resend refuses every send — the binary warns at boot when the key is set and this is not |
 
 No variable configures DNS: domain-ownership proof (`/admin/domains/{d}/verify`) resolves the
 `_opengrok-verify.<domain>` TXT record through hickory-resolver using the box's own resolver

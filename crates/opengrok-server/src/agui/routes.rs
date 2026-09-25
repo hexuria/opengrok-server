@@ -2328,16 +2328,37 @@ async fn revoke_bot_key(
 /// documentation demands: without it, a stolen access token would verify here too.
 pub(crate) use crate::auth::bot_keys::BotKeyClaims;
 
+/// Why a bearer that was PRESENT did not name anybody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BearerRefusal {
+    /// A bot key that verifies but has been revoked.
+    Revoked,
+    /// Expired, signed by somebody else, or not one of our credentials at all.
+    NotOurs,
+}
+
+impl BearerRefusal {
+    pub(crate) fn sentence(self) -> &'static str {
+        match self {
+            Self::Revoked => "this bot key has been revoked",
+            Self::NotOurs => {
+                "this sign-in has expired or was not issued by this server; sign in again"
+            }
+        }
+    }
+}
+
 /// Who is calling, and — when the credential is a bot key — AS which coworker.
 ///
-/// Three outcomes, and the middle one matters most: `Err(response)` is a bot key that VERIFIES
-/// but is revoked or unknown. That must refuse rather than fall through to anonymous, or a
-/// revoked Bot silently keeps talking on the deployment's model and nobody notices the
-/// revocation did nothing.
+/// `Ok(None)` is ONLY "no bearer at all". A bearer that is present and does not name anybody is
+/// an `Err`, never a fall-through to anonymous: a revoked Bot must not keep talking on the
+/// deployment's model with nobody noticing the revocation did nothing, and a stale key must not
+/// look like success — on 1 Sep a Bot whose key had been minted for another account sent a turn
+/// that "worked" as an anonymous caller owning nothing (ROADMAP 10.3).
 pub(crate) async fn principal_from_bearer(
     state: &AgUiState,
     headers: &axum::http::HeaderMap,
-) -> Result<Option<(opengrok_core::id::AccountId, Option<CoworkerId>)>, Response> {
+) -> Result<Option<(opengrok_core::id::AccountId, Option<CoworkerId>)>, BearerRefusal> {
     let Some(token) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -2353,7 +2374,7 @@ pub(crate) async fn principal_from_bearer(
     }
     if let Ok(claims) = state.auth.minter.verify_claims::<BotKeyClaims>(token) {
         if claims.purpose != "bot-key" {
-            return Ok(None);
+            return Err(BearerRefusal::NotOurs);
         }
         let live = state
             .auth
@@ -2362,14 +2383,14 @@ pub(crate) async fn principal_from_bearer(
             .await
             .unwrap_or(false);
         if !live {
-            return Err((StatusCode::UNAUTHORIZED, "this bot key has been revoked").into_response());
+            return Err(BearerRefusal::Revoked);
         }
         return Ok(Some((
             opengrok_core::id::AccountId::from_stored(claims.sub),
             Some(CoworkerId::from_stored(claims.coworker)),
         )));
     }
-    Ok(None)
+    Err(BearerRefusal::NotOurs)
 }
 
 /// Start a run and stream its events.
@@ -2386,14 +2407,13 @@ pub async fn run(
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
     //
-    // Layer 1, every turn: may this principal talk to this coworker at all? An anonymous run gets
-    // no tools rather than being refused outright — the AG-UI endpoint is also how a client with
-    // no coworker just talks to a model.
+    // Layer 1, every turn: may this principal talk to this coworker at all?
     let (account_id, key_coworker) = match principal_from_bearer(&state, &headers).await {
         Ok(Some((account, coworker))) => (Some(account), coworker),
         Ok(None) => (None, None),
-        // A revoked bot key refuses; downgrading to anonymous would make revocation invisible.
-        Err(refusal) => return refusal,
+        // A bad bearer refuses; downgrading to anonymous would make revocation invisible and a
+        // stale key look like success.
+        Err(refusal) => return unauthorized(refusal.sentence()),
     };
     // A BOT KEY NAMES THE COWORKER. barok-works registers a Bot with an endpoint and a header —
     // it has no forwardedProps to send — so the key itself carries which coworker the Bot IS.
@@ -2411,14 +2431,44 @@ pub async fn run(
     // The guard was right, and the sentence was ours to prevent: it named our defect in a place the
     // person could only read as a limit they had hit.
     //
-    // Anonymous turns stay allowed. What is refused is naming somebody else's coworker while
-    // declining to say who you are.
-    if run_coworker.is_some() && account_id.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "that turn names a coworker, so it needs a signed-in caller; sign in and send it again",
-        )
-            .into_response();
+    // NO TURN IS ANONYMOUS ANY MORE, EITHER (25 Sep 2026). One naming nobody ran on the
+    // deployment's gateway key with no payer, so `GuardedDoor` — which meters a coworker's own key
+    // — never saw it: anyone who could reach the host spent its model credit, one run row per
+    // request. Refused here, before any journal write.
+    let Some(caller) = account_id.clone() else {
+        return unauthorized(if run_coworker.is_some() {
+            "that turn names a coworker, so it needs a signed-in caller; sign in and send it again"
+        } else {
+            "a turn needs a signed-in caller; sign in and send it again"
+        });
+    };
+    // A named caller with no coworker has a payer but no key of its own to meter it, so it runs
+    // on the deployment's key: bounded per account instead. Charged BEFORE the queued send below
+    // is drained, so a refusal here never costs the person a queued message — and refunded when
+    // the POST turns out to start nothing (a stale queued send, a retry that reattaches), so a
+    // client reconnecting to its own run does not spend the hour's turns doing it.
+    let unscoped_charge = run_coworker
+        .is_none()
+        .then(|| format!("account:{}", caller.as_str()));
+    if let Some(charge) = &unscoped_charge
+        && let Err(spent) = state
+            .auth
+            .budgets
+            .take(&crate::auth::budget::AGUI_UNSCOPED, charge)
+    {
+        // A spent budget still lets the person reach a run they already started: a dropped
+        // stream re-POSTs its own run id, and answering that 429 would strand the turn it paid
+        // for. Nothing new starts on this path, so nothing is charged.
+        if let Some(answer) =
+            answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
+        {
+            return answer;
+        }
+        return crate::auth::budget::too_many(
+            spent,
+            "too many turns without a coworker this hour; hire or pick a coworker, whose turns \
+             are metered on its own key, or wait",
+        );
     }
 
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
@@ -2449,9 +2499,8 @@ pub async fn run(
         // of those answers describing a choice that never happened — a coworker hired on one model
         // silently answered on another, and the only visible symptom was the bill.
         //
-        // AFTER the policy check and only for a named principal. An anonymous caller may still talk
-        // to the deployment's model, but must not learn a coworker's configuration by noticing
-        // which model replies.
+        // AFTER the policy check and only for a named principal: a caller that check refuses must
+        // not learn a coworker's configuration by noticing which model replies.
         //
         // A coworker that cannot be loaded keeps the default rather than failing the run: the model
         // is how the turn is answered, not whether it is allowed, and that question was just asked.
@@ -2467,10 +2516,11 @@ pub async fn run(
         if let Err(refusal) =
             crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
         {
+            refund_unscoped(&state, unscoped_charge.as_deref());
             return refusal;
         }
     } else if crate::agui::pending::pending_id_from(&input).is_some() {
-        return (StatusCode::UNAUTHORIZED, "sign in to send a queued message").into_response();
+        return unauthorized("sign in to send a queued message");
     }
 
     // PAST THE CLAIM, A HANG-UP MUST NOT CANCEL THE TURN. The queued send is drained now, and the
@@ -2485,6 +2535,7 @@ pub async fn run(
         model,
         coworker_name,
         coworker_role,
+        unscoped_charge,
     ));
     match turn.await {
         Ok(response) => response,
@@ -2499,7 +2550,29 @@ pub async fn run(
     }
 }
 
+/// The 401 every refusal of an unnamed or unrecognised caller answers with: `{"error": …}`, the
+/// shape the `/api/{method}` seam already guarantees and the desktop's error helper reads first
+/// (`docs/known-gaps.md` §4), so the sentence reaches the person rather than "failed (401)".
+fn unauthorized(sentence: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": sentence })),
+    )
+        .into_response()
+}
+
+/// Give back an `AGUI_UNSCOPED` hit taken for a POST that started no turn.
+fn refund_unscoped(state: &AgUiState, charge: Option<&str>) {
+    if let Some(charge) = charge {
+        state
+            .auth
+            .budgets
+            .refund(&crate::auth::budget::AGUI_UNSCOPED, charge);
+    }
+}
+
 /// Everything a turn does once any queued send it fires has been claimed.
+#[allow(clippy::too_many_arguments)]
 async fn start_claimed_turn(
     gateway: crate::host_state::HostState,
     input: RunAgentInput,
@@ -2508,6 +2581,7 @@ async fn start_claimed_turn(
     model: String,
     coworker_name: String,
     coworker_role: Option<String>,
+    unscoped_charge: Option<String>,
 ) -> Response {
     let state = gateway.agui.clone();
     // A RUN ID THAT ALREADY HAS A RUN IS NOT A NEW TURN. A client retrying its POST — its stream
@@ -2519,6 +2593,7 @@ async fn start_claimed_turn(
     // The claim further down is what makes it exact: two POSTs at once can both get past this.
     if let Some(answer) = answer_for_existing_run(&state, account_id.as_ref(), &input.run_id).await
     {
+        refund_unscoped(&state, unscoped_charge.as_deref());
         return answer;
     }
     if let (Some(account_id), Some(coworker_id)) = (&account_id, &run_coworker) {
@@ -2565,9 +2640,8 @@ async fn start_claimed_turn(
 
     // Who this coworker is, plus whose computer its tools touch. Desktop `sendPrompt` already
     // composes this; AG-UI used to send `system: None`, so a Description saved as the standing
-    // role never reached the model. Anonymous runs still compose nothing — there is nobody to
-    // introduce, and loading a named coworker's role without a principal would leak configuration
-    // by the shape of the reply.
+    // role never reached the model. A run with no coworker still composes nothing — there is
+    // nobody to introduce.
     let mut recorded_skill: Option<String> = None;
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
@@ -2686,8 +2760,8 @@ async fn start_claimed_turn(
         gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
             .await,
         spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
-        // An anonymous AG-UI run names nobody, so it is billed to nobody and the guard lets it
-        // through on the deployment's key — the same door an anonymous caller already had.
+        // No coworker ⇒ no scope, and the guard lets it through on the deployment's key; `run`
+        // has already bounded that per account (`budget::AGUI_UNSCOPED`).
         spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
         model,
         system: system.clone(),
@@ -2715,6 +2789,7 @@ async fn start_claimed_turn(
     match journal.claim(&input.run_id).await {
         Ok(true) => {}
         Ok(false) => {
+            refund_unscoped(&state, unscoped_charge.as_deref());
             return answer_for_existing_run(&state, account_id.as_ref(), &input.run_id)
                 .await
                 .unwrap_or_else(run_taken);

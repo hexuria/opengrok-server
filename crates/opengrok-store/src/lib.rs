@@ -38,7 +38,7 @@ pub mod vault_rows;
 
 pub use autonomy::{DueSchedule, HookRow, LogEvent};
 pub use gateway::{
-    CoworkerKeyView, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
+    CoworkerKeyView, KeyRefusal, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
 };
 pub use pending::{

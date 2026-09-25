@@ -758,6 +758,25 @@ create unique index if not exists coworker_gateway_key_pair
 -- and say so here. This is a marker, not a guess: without it a member whose secret was missing
 -- would fall back to the per-coworker id and quietly send somebody else's credential.
 alter table coworker_gateway_key add column if not exists secret_scoped boolean not null default false;
+-- WHY THIS KEY LAST FAILED TO SERVE (a 401 the gateway still knows the key for, or a 503 naming a
+-- credential), written by the model door and read by the console's spend, limit and usage
+-- replies. Without it an uncapped coworker whose key reached no seat ran every turn on the
+-- deployment's key and its console still read "metered" with nothing in it. Cleared by the next
+-- call the key serves and by a re-mint; a row, not a replica's memory, so the replica answering
+-- the console need not be the one that ran the turn.
+-- Guarded like secret_store.key_id: a bare `add column if not exists` takes ACCESS EXCLUSIVE on
+-- every boot, and the model door writes this table on every turn.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'coworker_gateway_key'
+           and column_name = 'refusal'
+    ) then
+        alter table coworker_gateway_key add column refusal text;
+        alter table coworker_gateway_key add column refusal_at_ms bigint;
+    end if;
+end $do$;
 -- Templates carry points, not USD windows; the USD columns stay unread until the cleanup.
 alter table coworker_template add column if not exists month_points bigint;
 alter table coworker_template add column if not exists day_points bigint;
