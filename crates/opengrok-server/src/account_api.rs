@@ -397,7 +397,16 @@ async fn decide_for_member(
     let account_id = AccountId::from_stored(id.to_string());
     let (account, seq) = match state.store.load_account(&account_id).await {
         Ok((account, seq)) if account.org_id.as_deref() == Some(org_id.as_str()) => (account, seq),
-        _ => return (StatusCode::NOT_FOUND, "no such user").into_response(),
+        Ok(_) => return (StatusCode::NOT_FOUND, "no such user").into_response(),
+        // An outage is not an answer about the member: a 404 here told an admin the person did
+        // not exist while the store was merely down.
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("the account could not be read: {error}"),
+            )
+                .into_response();
+        }
     };
     // `None` is "already so": the same answer with no second event in the log.
     let Some(command) = command(&account) else {
@@ -428,9 +437,10 @@ async fn enable_user(
     .await
 }
 
-/// `POST /admin/users/{id}/verify` — the admin vouches for the member's address. The ONLY way
-/// out when the verification mail never arrived: the link is sent once, dies in 24 hours, and a
-/// second signup is refused as a duplicate. Deliberately separate from Enable — an Enable that
+/// `POST /admin/users/{id}/verify` — the admin vouches for the member's address. The way out
+/// when no verification mail can arrive at all (a sender Resend refuses, a mailbox that drops
+/// it): a second signup is refused as a duplicate, and a resent link fails the same way the
+/// first one did. Deliberately separate from Enable — an Enable that
 /// also verified would let anyone holding a leaked invite sign up as a colleague and be let in
 /// by the admin's routine click; this one is a decision the admin makes on purpose.
 async fn verify_user(
