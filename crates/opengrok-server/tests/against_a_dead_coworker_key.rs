@@ -64,6 +64,7 @@ impl ModelDoor for RefusesOwnKeys {
             return Err(ModelError::Refused {
                 status: self.status,
                 body: self.body.clone(),
+                retry_after_s: None,
             });
         }
         Ok(Box::pin(futures::stream::iter(vec![Ok(ModelDelta::Text(
