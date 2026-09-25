@@ -177,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
             // A KEY THE GATEWAY REFUSES STOPS THE BOOT. `/health` answers for the event store
             // only, so a wrong token used to report ok:true and fail every turn after (#185).
             // An unreachable gateway is only a warning: it may simply be starting after us.
+            // After boot, `/ready` asks the same question each time it is called.
             match gateway.probe().await {
                 Ok(()) => {}
                 Err(opengrok_harness::ModelError::Refused {

@@ -202,11 +202,9 @@ impl ModelError {
     pub fn retry_wait(&self, attempt: u32) -> Option<std::time::Duration> {
         use std::time::Duration;
         match self {
-            Self::Unreachable(_) => match attempt {
-                0 => Some(Duration::from_millis(250)),
-                1 => Some(Duration::from_secs(1)),
-                _ => None,
-            },
+            // Once, as #185 asks: each try against a black-holed gateway costs the connect
+            // timeout, and two retries made a dead gateway take half a minute to say so.
+            Self::Unreachable(_) if attempt == 0 => Some(Duration::from_secs(1)),
             Self::Refused {
                 status,
                 body,
@@ -298,6 +296,12 @@ pub type DeltaStream = Pin<Box<dyn Stream<Item = Result<ModelDelta, ModelError>>
 #[async_trait::async_trait]
 pub trait ModelDoor: Send + Sync {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError>;
+
+    /// Whether what is behind this door would take a request, asked without billing one. `None`
+    /// for a door with nothing behind it to ask (a mock). A door that wraps another forwards it.
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -381,8 +385,7 @@ mod tests {
     fn only_what_cannot_bill_twice_is_retried() {
         let unreachable = ModelError::Unreachable("connection refused".to_string());
         assert!(unreachable.retry_wait(0).is_some());
-        assert!(unreachable.retry_wait(1).is_some());
-        assert!(unreachable.retry_wait(2).is_none());
+        assert!(unreachable.retry_wait(1).is_none());
         assert_eq!(
             refused(429, "rate_limit_error", "slow down", Some(2)).retry_wait(0),
             Some(std::time::Duration::from_secs(2))

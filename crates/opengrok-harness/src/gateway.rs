@@ -64,6 +64,9 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// that cannot answer, and the gateway's own sentence wins whenever it can still give one.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(200);
 
+/// How long listing the catalogue may take before the gateway counts as not answering.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl GatewayDoor {
     pub fn new(base_url: impl Into<String>, key: impl Into<String>) -> Self {
         Self::with_timeouts(base_url, key, CONNECT_TIMEOUT, READ_TIMEOUT)
@@ -100,14 +103,18 @@ impl GatewayDoor {
     /// Ask the gateway whether it will take this door's key, without asking a model anything:
     /// `GET /v1/models`, which lists the catalogue and bills nothing.
     ///
-    /// For boot. `/health` answers for the event store and stays that way — it is the
-    /// supervisor's liveness check, and a gateway outage must not restart this server — so a
-    /// wrong OG_GATEWAY_TOKEN used to report ok:true until the first turn failed (#185).
+    /// For boot and for `/ready`. `/health` answers for the event store and stays that way — it
+    /// is the supervisor's liveness check, and a gateway outage must not restart this server — so
+    /// a wrong OG_GATEWAY_TOKEN used to report ok:true until the first turn failed (#185).
+    ///
+    /// ITS OWN CLOCK, `PROBE_TIMEOUT`. On the door's 200 s read timeout a gateway that accepted
+    /// and hung held the boot, and would hold every readiness check, for as long.
     pub async fn probe(&self) -> Result<(), ModelError> {
         let response = self
             .http
             .get(format!("{}/v1/models", self.base_url))
             .bearer_auth(&self.key)
+            .timeout(PROBE_TIMEOUT)
             .send()
             .await
             .map_err(send_error)?;
@@ -440,6 +447,10 @@ fn message_content(message: &ChatMessage) -> serde_json::Value {
 
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        Some(self.probe().await)
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if let Some(system) = &request.system {
@@ -676,6 +687,29 @@ mod tests {
             "{probed:?}"
         );
         task.abort();
+    }
+
+    /// A probe of a gateway that accepts and never answers ends on its own clock, not on the
+    /// door's 200 s read timeout.
+    #[tokio::test]
+    async fn a_probe_of_a_hung_gateway_ends_on_its_own_clock() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                open.push(socket);
+            }
+        });
+        let door = GatewayDoor::new(format!("http://{address}"), "k");
+        let probed = tokio::time::timeout(PROBE_TIMEOUT * 2, door.ready())
+            .await
+            .expect("the probe has its own clock");
+        assert!(
+            matches!(probed, Some(Err(ModelError::TimedOut(_)))),
+            "{probed:?}"
+        );
+        held.abort();
     }
 
     /// A gateway that accepts the connection and never answers — a hung process, a proxy with

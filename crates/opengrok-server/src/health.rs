@@ -19,6 +19,7 @@ use crate::host_state::HostState;
 pub fn router(state: HostState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .with_state(state)
 }
 
@@ -87,6 +88,47 @@ async fn health(State(state): State<HostState>, headers: HeaderMap) -> Response 
             "activeAgentId": null,
             "startedAt": state.started_at_ms,
             "lastBusyAtMs": state.started_at_ms,
+        }),
+    )
+}
+
+/// `GET /ready` — would a turn get a model: does the gateway answer `GET /v1/models` with our
+/// token, and does the event store answer.
+///
+/// APART FROM `/health`, on purpose. `/health` is liveness: a supervisor restarts on it, and a
+/// gateway outage or a rotated OG_GATEWAY_TOKEN is not fixed by restarting this server. So a
+/// revoked token used to read ok:true until a turn failed (#185); this is where it reads false.
+/// The gateway is asked on every call (it bills nothing) and never named: its address is internal.
+/// `gateway` is "ok", "refused" with the gateway's status, "unreachable", or "unused" for a mock.
+async fn ready(State(state): State<HostState>, headers: HeaderMap) -> Response {
+    if headers.get(axum::http::header::ORIGIN).is_some() {
+        return refusal(403, "browser origins are not served");
+    }
+    let store = state.agui.auth.store.running_runs().await.is_ok();
+    let probed = state.agui.door.ready().await;
+    if let Some(Err(error)) = &probed {
+        tracing::warn!(%error, "ready: the gateway refused our token or did not answer");
+    }
+    let (gateway, status) = match probed {
+        None => ("unused", None),
+        Some(Ok(())) => ("ok", None),
+        Some(Err(opengrok_harness::ModelError::Refused { status, .. })) => {
+            ("refused", Some(status))
+        }
+        Some(Err(_)) => ("unreachable", None),
+    };
+    let ok = store && matches!(gateway, "ok" | "unused");
+    reply(
+        if ok {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        json!({
+            "ok": ok,
+            "store": if store { "ok" } else { "not answering" },
+            "gateway": gateway,
+            "gatewayStatus": status,
         }),
     )
 }

@@ -888,6 +888,10 @@ fn is_credential_refusal(error: &ModelError) -> bool {
 
 #[async_trait::async_trait]
 impl ModelDoor for GuardedDoor {
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        self.inner.ready().await
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         let Some(scope) = request.spend_scope.clone() else {
             return self.inner.stream(request).await;
