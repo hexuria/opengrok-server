@@ -245,10 +245,15 @@ pub(super) fn read(line: &str) -> Line {
     }
     r.end_word();
     r.end_segment();
+    // Bash evaluates an array subscript in `printf -v`, `read`, `declare`, `test -v`… with its
+    // substitutions, even when the text arrived quoted: `printf -v 'a[$(id)]' x` runs `id`.
     let unjudgeable = r.opaque
         || r.nested
         || quote.is_some()
         || r.program_expands
+        || r.words
+            .iter()
+            .any(|word| word.contains("$(") || word.contains('`'))
         || r.words
             .first()
             .is_none_or(|program| is_assignment(program) || runs_another(program));

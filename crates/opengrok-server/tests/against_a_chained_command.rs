@@ -318,6 +318,22 @@ fn a_long_line_is_refused_or_read_in_linear_time() {
     );
 }
 
+/// Bash evaluates an array subscript in `printf -v`, `read`, `declare`, `test -v` and the like,
+/// command substitution included, even when the text reached the builtin inside single quotes.
+#[test]
+fn a_literal_substitution_in_an_argument_is_not_allowed() {
+    let p = policy(&["printf", "test", "declare"], &[]);
+    for line in [
+        "printf -v 'a[$(id)]' x",
+        "printf -v a[\\$\\(id\\)] x",
+        "test -v 'a[`id`]'",
+        "declare \"a[\\$(id)]=1\"",
+    ] {
+        assert_eq!(decide(&p, line), LocalExecDecision::Ask, "{line:?}");
+    }
+    assert_eq!(decide(&p, "printf '%s' x"), LocalExecDecision::Allow);
+}
+
 /// Reading the line more closely must never make a deny rule match less than it did: a rule
 /// that is itself a chain still refuses the exact text it was written for.
 #[test]
