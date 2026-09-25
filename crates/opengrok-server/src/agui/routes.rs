@@ -3396,7 +3396,7 @@ fn run_time_window(emitted: &[serde_json::Value]) -> Option<(i64, i64)> {
         .iter()
         .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64));
     let first = times.next()?;
-    Some((first, times.last().unwrap_or(first)))
+    Some((first, times.next_back().unwrap_or(first)))
 }
 
 /// The window a run with no timestamps hydrates against: one no card falls inside. "Everything"

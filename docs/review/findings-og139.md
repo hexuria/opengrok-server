@@ -167,6 +167,12 @@ asserts holds only for the first attempt. The same `None` is passed by `abandon_
 > `journal_agui_custom` (so a settled frame and the save-login offer land on the card's own run)
 > and the hand-back resume (a handoff card has no call; its escalated form's is used) all name it.
 > Test: `submit_resumes_the_run_parked_on_its_own_call_not_the_oldest`.
+>
+> *Verifier round.* A run's parked calls are counted from its last answered park, not its whole
+> log, so a twin left behind by an earlier completion is not waited on again when the run parks a
+> second time (`a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer`). An old
+> escalated form with no `callId` no longer makes every later handoff look waited on
+> (`an_old_escalated_form_with_no_call_does_not_keep_every_handoff_alive`).
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:951-985`
 
@@ -382,6 +388,9 @@ credential, so it is worth fixing both together.)
 > appends a card only to the run whose own frames carry its `callId`, so a card paints once. A
 > card with no `callId` (older rows) keeps the time-window rule. Tests:
 > `hydrate_does_not_inject_another_runs_form`, `a_run_with_no_timestamps_gets_no_transcript_cards`.
+>
+> *Verifier round.* The empty window is for hydration only: `GET /ag-ui/runs/{id}` reports
+> `startedAtMs: 0` for a run with no timestamp yet, as before, not the window's `i64::MAX` bound.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:1325-1341` and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2561-2571` (`run_time_window`)
 
@@ -438,6 +447,9 @@ suspension.
 > card settles `fill_failed` with nothing typed. The remaining window is a stop landing between the
 > check and the typing. Tests: `a_submit_for_a_card_whose_run_is_no_longer_parked_types_nothing`,
 > `a_twin_answered_after_its_run_moved_on_types_nothing`.
+>
+> *Verifier round.* A run log the check cannot read is not "nothing waits": the submit answers 503
+> and leaves the card open for a retry (`a_submit_that_cannot_read_the_run_log_leaves_the_card_open`).
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:175` (`fill_on_box` runs before any resume check)
 
