@@ -10,6 +10,8 @@ license.workspace = true
 # milliseconds of virtual time rather than by making the suite sit out a real budget.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 axum.workspace = true
+# A stand-in server whose event stream never delivers, for the call-deadline tests.
+futures.workspace = true
 
 [lints]
 workspace = true

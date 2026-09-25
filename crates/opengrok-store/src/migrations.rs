@@ -188,6 +188,22 @@ create table if not exists secret_store (
     ciphertext    bytea  not null,
     updated_at_ms bigint not null
 );
+-- Which OG_CREDENTIAL_KEK sealed the row (a hash of the key, never the key). Null on rows sealed
+-- before it existed: those are tried under every key held, and `opengrok vault reseal` fills it.
+--
+-- GUARDED, like `skill.approved_at_ms` below: a bare `add column if not exists` takes ACCESS
+-- EXCLUSIVE before deciding there is nothing to do, and this file replays on every boot. Bare, it
+-- deadlocked concurrent site-login saves against another harness's boot in CI (25 Sep 2026).
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'secret_store'
+           and column_name = 'key_id'
+    ) then
+        alter table secret_store add column key_id text;
+    end if;
+end $do$;
 
 -- Who may make which coworker do what. A row here is permission; its absence is refusal, which is
 -- why nothing in the schema grants by default and why `policy_for` returns an empty context rather
@@ -565,8 +581,8 @@ create index if not exists local_exec_audit_acct_idx
     on local_exec_audit (account_id, machine_id, requested_at_ms desc);
 
 -- The command's OUTCOME (the ShellResult oneof case: success / failure / timeout / rejected /
--- spawnError / permissionDenied), distinct from `decision` (the gate's verdict at enqueue). A
--- refusal is a case, not a non-zero exit, so the two are recorded separately.
+-- spawnError / permissionDenied, or the server's `offline` for a machine with no daemon), distinct
+-- from `decision` (the gate's verdict at enqueue). A refusal is a case, not a non-zero exit.
 alter table local_exec_audit add column if not exists outcome text;
 
 -- Registered devices for the passkey step-up (reverse-exec slice 7). Each row is ONE WebAuthn
@@ -1150,6 +1166,32 @@ create table if not exists credential_hint (
     updated_at_ms  bigint not null,
     primary key (account_id, coworker_id, origin)
 );
+
+-- A RECIPE RUN IS A ROW BEFORE THE BOX IS TOUCHED, and this is how the row says it is still
+-- playing. A run used to be written only after the box answered, inside the request that asked for
+-- it — so a closed tab dropped the handler, the box finished clicking, and the server kept no run,
+-- no screenshots and no error. Now the row comes first and the work is detached from the request.
+--
+-- A LEASE, NOT A STATUS, for the reason `recovery.rs` gives: a live process pushes the expiry out
+-- as it works and a dead one cannot, so a row whose lease has passed had nobody finishing it. Read
+-- that way, a restart needs no sweep and two replicas cannot disagree. Null is a finished run —
+-- every row written before this column existed, and every row once its receipt lands.
+--
+-- Guarded like `skill.approved_at_ms` above, and for the same deadlock: a bare `add column if not
+-- exists` takes ACCESS EXCLUSIVE on every boot before deciding there is nothing to do. The index
+-- is inside the guard so it, too, is built once; it serves "is this bot already playing?".
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'recipe_run'
+           and column_name = 'lease_until_ms'
+    ) then
+        alter table recipe_run add column lease_until_ms bigint;
+        create index recipe_run_live_idx on recipe_run (coworker_id)
+            where lease_until_ms is not null;
+    end if;
+end $do$;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

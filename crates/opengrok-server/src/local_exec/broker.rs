@@ -20,8 +20,8 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 /// code only when the process actually ran).
 #[derive(Debug, Clone)]
 pub struct ExecOutcome {
-    /// The ShellResult oneof case: success / failure / timeout / rejected / spawnError /
-    /// permissionDenied. This is what the audit row's `outcome` records.
+    /// The ShellResult oneof case (success / failure / timeout / rejected / spawnError /
+    /// permissionDenied), or the server's own `offline`. This is what the audit's `outcome` records.
     pub case: String,
     /// The process exit code — `Some` only for `success`/`failure`. A refusal has none.
     pub exit_code: Option<i32>,
@@ -41,6 +41,16 @@ impl ExecOutcome {
             stdout: String::new(),
             stderr: String::new(),
             detail: reason.to_string(),
+        }
+    }
+
+    /// No daemon holds this machine's stream. A server-only word, never read off the wire
+    /// (`wire::RESULT_CASES` must not learn it, or a daemon could claim it): an asleep Mac and a
+    /// garbled reply were both `spawnError`, and the audit could not tell them apart (#147).
+    pub fn offline(reason: &str) -> Self {
+        Self {
+            case: "offline".to_string(),
+            ..Self::malformed(reason)
         }
     }
 

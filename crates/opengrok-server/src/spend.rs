@@ -88,7 +88,8 @@ async fn availability(
     };
     let Some(vault) = state.vault.clone() else {
         return Err(
-            "this deployment has no vault (OG_VAULT_KEK) to keep a coworker's key in".to_string(),
+            "this deployment has no vault (OG_CREDENTIAL_KEK) to keep a coworker's key in"
+                .to_string(),
         );
     };
     let org_id = match state.auth.store.load_account(account_id).await {
@@ -327,7 +328,7 @@ pub async fn key_for(
     };
     let Some(vault) = state.vault.as_ref() else {
         return Some(GatewayKey::unavailable(
-            "this deployment has no vault to open it with (OG_VAULT_KEK)",
+            "this deployment has no vault to open it with (OG_CREDENTIAL_KEK)",
         ));
     };
     match state
@@ -343,9 +344,9 @@ pub async fn key_for(
         ))),
         Err(error) => {
             tracing::error!(%error, coworker = %coworker_id.as_str(), "spend cap: the sealed key could not be opened");
-            Some(GatewayKey::unavailable(
-                "the sealed key could not be opened".to_string(),
-            ))
+            Some(GatewayKey::unavailable(format!(
+                "the sealed key could not be opened: {error}"
+            )))
         }
     }
 }

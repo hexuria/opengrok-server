@@ -51,7 +51,7 @@ fn parse_flags(args: &[String], allowed: &[&str]) -> Result<HashMap<String, Stri
     Ok(flags)
 }
 
-async fn store() -> Result<PgStore, String> {
+pub(crate) async fn store() -> Result<PgStore, String> {
     let url =
         std::env::var("OG_DATABASE_URL").map_err(|_| "OG_DATABASE_URL is required".to_string())?;
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -126,14 +126,15 @@ fn split_name(full: &str) -> (String, String) {
     (first, last)
 }
 
-/// Returns `Some(exit_code)` when argv names an admin command (handled here), `None` to fall
-/// through to the server.
+/// Returns `Some(exit_code)` when argv names an admin or vault command (handled here), `None` to
+/// fall through to the server.
 pub async fn maybe_run() -> Option<i32> {
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) != Some("admin") {
-        return None;
-    }
-    let result = run(&argv[2..]).await;
+    let result = match argv.get(1).map(String::as_str) {
+        Some("admin") => run(&argv[2..]).await,
+        Some("vault") => crate::kek::run(&argv[2..]).await,
+        _ => return None,
+    };
     match result {
         Ok(()) => Some(0),
         Err(message) => {
@@ -442,7 +443,8 @@ async fn run(args: &[String]) -> Result<(), String> {
             "  opengrok admin account enable --email <email>\n",
             "  opengrok admin account verify --email <email>   (the operator vouches for an address whose mail never arrived)\n",
             "  opengrok admin account password --email <email> [--password <p>]   (the no-mailer reset)\n",
-            "  opengrok admin purge --keep <email[,email]> [--commit 1]   (dry run by default; --commit 1 deletes every other account and all it owns)"
+            "  opengrok admin purge --keep <email[,email]> [--commit 1]   (dry run by default; --commit 1 deletes every other account and all it owns)\n",
+            "  opengrok vault status | reseal   (the credential key: which key sealed what, and rotation)"
         )
         .to_string()),
     }

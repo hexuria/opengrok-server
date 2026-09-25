@@ -55,8 +55,8 @@ pub struct AgUiState {
     /// call per reviewed tool call must be cheap, the reviewer must not be the reviewed, and a
     /// coworker-route outage must not become a wall of cards. `OG_AUTO_REVIEW_MODEL`.
     pub auto_review_model: String,
-    /// Seals connector credentials. `None` means no connector can be stored, which is a legitimate
-    /// deployment — and must read as "connectors unavailable" rather than as a crash.
+    /// Seals every credential: connector tokens, org computer keys, coworker gateway keys, saved
+    /// site logins. `None` is a legitimate deployment that stores none, not a crash.
     pub vault: Option<Arc<opengrok_store::Vault>>,
     /// Provider configuration and the callback URL.
     pub connectors: crate::connections::routes::Connectors,
@@ -511,7 +511,7 @@ pub(crate) async fn tools_for_coworker(
         .ok()?;
 
     // The plugins this coworker may use, connected with its own credentials.
-    let (sessions, tools) = connect_plugins(state, account_id, &coworker_id, &policy).await;
+    let plugins = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
     // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
     // reset or re-provision changes the account's box while the aggregate id stays put — and this is
@@ -574,7 +574,7 @@ pub(crate) async fn tools_for_coworker(
         .with_on_woken(on_woken)
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
-        .with_plugin_tools(sessions, tools)
+        .with_plugins(plugins)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
         .with_egress_tunnel_mode(egress_tunnel)
@@ -666,11 +666,14 @@ async fn live_token(
     vault: &opengrok_store::Vault,
     chosen: &opengrok_core::connection::ConnectionView,
 ) -> Option<String> {
+    // Logged, not swallowed: a token sealed under a lost key used to read as "not connected", and
+    // the plugin that needed it just quietly went missing.
     let stored = state
         .auth
         .store
         .open_credential(vault, &chosen.id)
         .await
+        .inspect_err(|error| tracing::error!(%error, connection = %chosen.id, "a connection's token will not open"))
         .ok()
         .flatten();
 
@@ -692,7 +695,14 @@ async fn live_token(
         return stored;
     };
 
-    match crate::connections::flow::refresh(&reqwest::Client::new(), config, &refresh_token).await {
+    // Bounded like a plugin's own connect: this runs before any server is dialled, and a token
+    // endpoint that never answers would otherwise hold the turn just as a dead server did (#199).
+    let within = opengrok_tools::mcp::Pool::global().deadlines().connect;
+    let client = reqwest::Client::builder()
+        .timeout(within)
+        .build()
+        .unwrap_or_default();
+    match crate::connections::flow::refresh(&client, config, &refresh_token).await {
         Ok(token) => {
             let at_ms = now_ms();
             let expires_at = token.expires_at_ms(at_ms);
@@ -778,23 +788,17 @@ async fn disconnect_revoked(state: &AgUiState, id: &str) -> Result<(), opengrok_
 /// a connected tool without a token is a tool that fails at the moment of use rather than at the
 /// moment of offer.
 ///
-/// A server that will not connect is skipped with a warning rather than failing the run: the other
-/// tools still work, and a turn that dies because one connector is down is worse than a turn that
-/// proceeds without it.
+/// A server that will not connect in time is left out with a warning rather than failing the run,
+/// and the turn is told it is unavailable: the other tools still work, and a turn that dies — or
+/// waits forever — because one connector is down is worse than one that proceeds without it.
 async fn connect_plugins(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     policy: &opengrok_policy::Context,
-) -> (
-    BTreeMap<String, Arc<opengrok_tools::mcp::Session>>,
-    Vec<opengrok_tools::mcp::McpTool>,
-) {
-    let mut sessions = BTreeMap::new();
-    let mut tools = Vec::new();
-
+) -> opengrok_tools::mcp::Dialled {
     if state.plugins.is_empty() {
-        return (sessions, tools);
+        return opengrok_tools::mcp::Dialled::default();
     }
 
     // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
@@ -826,50 +830,31 @@ async fn connect_plugins(
         }
     }
 
+    let mut endpoints = Vec::new();
     for plugin in state.plugins.values() {
-        let (endpoints, problems) = opengrok_tools::mcp::endpoints_for(plugin, &values);
+        let (reachable, problems) = opengrok_tools::mcp::endpoints_for(plugin, &values);
         for problem in problems {
             tracing::debug!(%problem, plugin = plugin.manifest.name, "a plugin server is unavailable");
         }
-
-        for endpoint in endpoints {
-            let key = format!("{}.{}", endpoint.plugin, endpoint.server);
-
-            let session = match opengrok_tools::mcp::Session::connect(endpoint).await {
-                Ok(session) => Arc::new(session),
-                Err(error) => {
-                    tracing::warn!(%error, server = key, "could not reach a plugin server");
-                    continue;
-                }
-            };
-
-            match session.tools().await {
-                Ok(offered) => {
-                    // The ceiling gate. A tool the coworker may not run is not offered at all —
-                    // being told about a tool that always refuses is a dead end a model retries.
-                    for tool in offered {
-                        let decision = opengrok_policy::decide(
-                            account_id,
-                            coworker_id,
-                            opengrok_policy::Action::RunTool(&tool.qualified_name),
-                            policy,
-                        );
-                        if decision.is_allowed() || decision.needs_approval() {
-                            tools.push(tool);
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, server = key, "a plugin server would not list its tools");
-                    continue;
-                }
-            }
-
-            sessions.insert(key, session);
-        }
+        // A server the ceiling leaves nothing to offer is not dialled at all.
+        endpoints.extend(reachable.into_iter().filter(|endpoint| {
+            let prefix = endpoint.qualify("");
+            opengrok_policy::may_run_any_under(account_id, coworker_id, &prefix, policy)
+        }));
     }
 
-    (sessions, tools)
+    // The ceiling gate, per tool and on every turn, whether the listing is fresh or pooled. A tool
+    // the coworker may not run is not offered at all — being told about a tool that always
+    // refuses is a dead end a model retries.
+    let permitted = |tool: &str| {
+        let action = opengrok_policy::Action::RunTool(tool);
+        let decision = opengrok_policy::decide(account_id, coworker_id, action, policy);
+        decision.is_allowed() || decision.needs_approval()
+    };
+    let scope = format!("{account_id}/{coworker_id}");
+    opengrok_tools::mcp::Pool::global()
+        .dial(&scope, endpoints, permitted)
+        .await
 }
 
 /// `POST /ag-ui` lives on `HostState` so a UserForm CUSTOM can mint the gateway card and
@@ -2710,7 +2695,7 @@ async fn start_claimed_turn(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2719,6 +2704,10 @@ async fn start_claimed_turn(
                         user_machine_label.as_deref(),
                     ),
                     crate::persona::network_off_line(network_off, network_unconfirmed),
+                    tools
+                        .as_ref()
+                        .map(ToolRunner::unavailable_plugins_line)
+                        .unwrap_or_default(),
                     crate::persona::preferred_tools_line(&preferred),
                     chosen_line,
                     // LAST, AFTER EVERY SEGMENT THAT SAYS WHAT THIS COWORKER MAY DO. A skill body
@@ -4413,11 +4402,14 @@ async fn continue_run(
     // rest of this run: one card per run, not one per click. A no is not: this once consented on
     // any answer, so a Deny on the tunnel card let the model's next screen action through with
     // no card at all (21 Sep 2026).
-    let runner = runner.with_egress_consented(
-        matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
-            && answered.reason == opengrok_core::run::SuspendReason::AutoReview
-            && opengrok_tools::leaves_the_box(&answered.tool),
-    );
+    let runner = runner
+        .with_egress_consented(
+            matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+                && answered.reason == opengrok_core::run::SuspendReason::AutoReview
+                && opengrok_tools::needs_egress_consent(&answered.tool, &answered.arguments),
+        )
+        // Every judge failure parks the run, so only its journal can count them in a row (#201).
+        .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled
