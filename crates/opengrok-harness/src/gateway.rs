@@ -39,7 +39,10 @@ fn logged_prefix(key: &str) -> String {
 pub struct GatewayDoor {
     base_url: String,
     key: String,
-    http: reqwest::Client,
+    /// `Err` holds why the client could not be built. There is no clockless fallback:
+    /// `reqwest::Client::new()` panics on the same TLS or resolver failure the builder reports,
+    /// so the door says the gateway cannot be reached, and says it on every call.
+    http: Result<reqwest::Client, String>,
 }
 
 impl std::fmt::Debug for GatewayDoor {
@@ -87,17 +90,23 @@ impl GatewayDoor {
             .connect_timeout(connect)
             .read_timeout(read)
             .build()
-            .unwrap_or_else(|error| {
-                // Only a TLS backend that cannot start fails here, and `Client::new` would then
-                // fail the same way on first use. Loud, because the door has lost its clocks.
-                tracing::error!(%error, "the gateway client could not be built with timeouts");
-                reqwest::Client::new()
+            .map_err(|error| {
+                tracing::error!(%error, "the gateway client could not be built");
+                error.to_string()
             });
         Self {
             base_url: base_url.into(),
             key: key.into(),
             http,
         }
+    }
+
+    /// The client, or the refusal every call gets when it could not be built. Nothing was sent,
+    /// so it is `Unreachable`; the person reads the unreachable sentence, the log the reason.
+    fn client(&self) -> Result<&reqwest::Client, ModelError> {
+        self.http.as_ref().map_err(|why| {
+            ModelError::Unreachable(format!("the gateway client could not start: {why}"))
+        })
     }
 
     /// Ask the gateway whether it will take this door's key, without asking a model anything:
@@ -111,7 +120,7 @@ impl GatewayDoor {
     /// and hung held the boot, and would hold every readiness check, for as long.
     pub async fn probe(&self) -> Result<(), ModelError> {
         let response = self
-            .http
+            .client()?
             .get(format!("{}/v1/models", self.base_url))
             .bearer_auth(&self.key)
             .timeout(PROBE_TIMEOUT)
@@ -504,7 +513,7 @@ impl ModelDoor for GatewayDoor {
             }
         };
         let response = self
-            .http
+            .client()?
             .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(key)
             .json(&payload)
@@ -611,6 +620,28 @@ struct SseState {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// A client that could not be built answers every call as an unreachable gateway. The old
+    /// fallback, `reqwest::Client::new()`, panics on the failure it was there to survive.
+    #[tokio::test]
+    async fn a_door_whose_client_did_not_build_is_unreachable_not_a_panic() {
+        let door = GatewayDoor {
+            base_url: "http://gateway.invalid".to_string(),
+            key: "k".to_string(),
+            http: Err("no TLS backend".to_string()),
+        };
+        let error = door
+            .stream(ModelRequest::default())
+            .await
+            .err()
+            .expect("no client, no stream");
+        assert!(matches!(error, ModelError::Unreachable(_)), "{error:?}");
+        assert!(error.to_string().contains("no TLS backend"), "{error}");
+        assert!(matches!(
+            door.probe().await,
+            Err(ModelError::Unreachable(_))
+        ));
+    }
 
     /// The internal gateway address is not the person's business. An unreachable gateway used
     /// to print the reqwest error whole, URL and path included, into the chat.
