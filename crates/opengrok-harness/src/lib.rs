@@ -305,23 +305,32 @@ fn replays(calls: &[opengrok_tools::ToolCall], played: &HashSet<String>) -> Vec<
 }
 
 /// A call the loop answers itself instead of running: a home-directory walk, or a recipe replay
-/// (see `replays`).
+/// (see `replays`). The answer is chosen before the round runs, so a replay of a call earlier
+/// in the same completion must not claim that call "already ran": it may yet be refused before
+/// the box, and the model, told it played, would report a search that never happened.
 fn answered_here(
     call: &opengrok_tools::ToolCall,
     replay: bool,
+    played: &HashSet<String>,
 ) -> Option<opengrok_tools::ToolResult> {
     if is_broad_walk_call(call) {
         return Some(refused_broad_walk(call));
     }
     let recipe = recipe_of(call).filter(|_| replay)?;
-    Some(opengrok_tools::ToolResult::ok(
-        &call.id,
+    let answer = if played.contains(&recipe) {
         format!(
             "Not played again: the recipe `{recipe}` already ran in this request, and a replay \
              repeats what it did rather than correcting it. Say what its screenshot showed, \
              finish by hand with `computer`, or ask."
-        ),
-    ))
+        )
+    } else {
+        format!(
+            "Not played twice: an earlier call in this reply already asks for the recipe \
+             `{recipe}`, and a recipe plays at most once per request. Read that call's result; \
+             if it was refused, correct it and ask once more."
+        )
+    };
+    Some(opengrok_tools::ToolResult::ok(&call.id, answer))
 }
 
 /// A read-only catalog read (`profile.list`, `profile.search`, `dues.list`), on either shell.
@@ -1376,7 +1385,7 @@ async fn converse_raw(
                 let answers: Vec<Option<opengrok_tools::ToolResult>> = calls
                     .iter()
                     .zip(&replays)
-                    .map(|(call, replay)| answered_here(call, *replay))
+                    .map(|(call, replay)| answered_here(call, *replay, &played))
                     .collect();
                 let loop_answered: Vec<bool> = answers
                     .iter()
@@ -1450,11 +1459,17 @@ async fn converse_raw(
                     auto_review_ms,
                 );
                 skipped_replay |= replayed;
+                // Only calls the box really ran. A replay the loop answered is an `ok` result
+                // too, so taking it counted the recipe as played when the earlier call in the
+                // same completion was refused before the box: the corrected call next round
+                // became a "replay" and the search never ran (#120 again, from one reply).
                 played.extend(
                     calls
                         .iter()
                         .zip(results.iter())
-                        .filter_map(|(call, result)| played_recipe(call, result)),
+                        .zip(loop_answered.iter())
+                        .filter(|(_, answered)| !**answered)
+                        .filter_map(|((call, result), _)| played_recipe(call, result)),
                 );
 
                 // Before the results, where the words came: the model said them, then asked.

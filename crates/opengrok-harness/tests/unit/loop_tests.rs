@@ -3040,7 +3040,7 @@ async fn a_recipe_asked_twice_in_one_completion_plays_once() {
     assert_eq!(*plays.lock().unwrap(), 1, "{results:?}");
     assert_eq!(results.len(), 2, "{results:?}");
     assert!(results[0].starts_with("played"), "{results:?}");
-    assert!(results[1].starts_with("Not played again"), "{results:?}");
+    assert!(results[1].starts_with("Not played twice"), "{results:?}");
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
     assert_eq!(assistant_text(&events), "The results page is open.");
 }
@@ -3171,6 +3171,62 @@ async fn a_recipe_refused_before_the_box_still_plays_when_corrected() {
         tool_results(&events)
     );
     assert_eq!(assistant_text(&events), "The results page is open.");
+}
+
+/// One completion names a recipe twice and the first call is refused before the box. The second
+/// was answered by the loop with an `ok` result, and `played` took it, so the recipe counted as
+/// played although nothing ran: next round's corrected call was a "replay", the turn ended
+/// saying the recipe "already ran", and the search never happened (#120 again, verifier's
+/// probes A and B on 9e4b6d1).
+#[tokio::test]
+async fn a_refused_recipe_named_twice_in_one_completion_still_plays_when_corrected() {
+    for (probe, first_round) in [
+        (
+            "both calls lack values",
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_deltas("c2", "search-youtube"),
+            ]
+            .concat(),
+        ),
+        (
+            "only the first lacks values",
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_with_values("c2", "search-youtube"),
+            ]
+            .concat(),
+        ),
+    ] {
+        let door = Rounds::new(
+            vec![first_round, recipe_with_values("c3", "search-youtube")],
+            "The results page is open.",
+        );
+        let (runner, plays) = binding_recipe_runner();
+        let events = run_conversation(
+            &door,
+            Some(&runner),
+            &MemoryJournal::new(),
+            request("search youtube for kabisado"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let results = tool_results(&events);
+        assert_eq!(*plays.lock().unwrap(), 1, "{probe}: {results:?}");
+        assert_eq!(results.len(), 3, "{probe}: {results:?}");
+        assert!(
+            results[1].starts_with("Not played twice"),
+            "{probe}: the answer must not claim a refused call ran: {results:?}"
+        );
+        assert!(results[2].starts_with("played"), "{probe}: {results:?}");
+        assert_eq!(
+            assistant_text(&events),
+            "The results page is open.",
+            "{probe}"
+        );
+    }
 }
 
 /// A recipe the box played until a step failed did play: asking for it again is a replay.
