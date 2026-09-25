@@ -3254,3 +3254,66 @@ async fn a_timed_out_twin_wakes_a_run_parked_on_a_settled_sibling() {
         opengrok_core::run::RunStatus::Finished
     );
 }
+
+/// #186 / #188. A card judged dead from a waiting set read before its park — the order
+/// `settle_dead_holds` used to read in, with another conversation parking a sign-in between the
+/// two reads — was dismissed as it appeared, and its run sat parked behind a closed card. A dead
+/// card is judged again against the runs as they are just before it is closed, so the stale pair
+/// settles nothing; once the run really has moved on, the same pair closes it.
+#[tokio::test]
+async fn a_form_parked_after_the_waiting_set_was_read_stays_open() {
+    use opengrok_server::agui::user_form::{settle_holds_seen, waiting_calls};
+    let database_url = database_or_skip!();
+    let email = format!("hold-stale-set-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
+
+    let before = waiting_calls(&h.gateway, &h.account, &coworker)
+        .await
+        .expect("the log reads");
+    h.turn_on(&token, &agent, &thread("b"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let run = parked(&h).await.remove(0);
+    let entries = h
+        .store
+        .gateway_transcript(&coworker, &h.account)
+        .await
+        .expect("transcript");
+
+    let written = settle_holds_seen(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        &entries,
+        &before,
+        now_ms(),
+    )
+    .await;
+    assert!(written, "nothing failed to write");
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert!(
+        card.get("formResolution").is_none(),
+        "a sign-in whose run waits on it is the person's: {card}"
+    );
+    assert_eq!(
+        status_of(&h, &run).await,
+        opengrok_core::run::RunStatus::AwaitingApproval
+    );
+
+    stop_in_store(&h, &run).await;
+    settle_holds_seen(
+        &h.gateway,
+        &h.account,
+        &coworker,
+        &entries,
+        &before,
+        now_ms(),
+    )
+    .await;
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert_eq!(card["formResolution"], "dismissed", "{card}");
+    assert!(card.get("timedOut").is_none(), "{card}");
+}

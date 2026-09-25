@@ -422,7 +422,7 @@ pub async fn resolve_box_handoff(
                 .gateway_transcript(&coworker_id, account_id)
                 .await
                 .ok()
-                .and_then(|entries| handoff_call(&entries, &waiting)),
+                .and_then(|entries| handoff_call(&entries, &waiting.on)),
             None => None,
         },
     };
@@ -543,6 +543,13 @@ async fn start_box_handoff(
 /// conversation dismissed a sign-in waiting in another. A card with no `callId` (written before
 /// cards carried one) cannot be tied to a run and is left alone too.
 ///
+/// THE TRANSCRIPT IS READ FIRST, THE RUNS SECOND, and the order is what makes the rule above true.
+/// Every card the transcript read sees had its park committed before the runs are read, so a
+/// `callId` missing from them means that run really moved on. Read the other way round, a sign-in
+/// another conversation parked between the two reads looked dead and was dismissed as it appeared,
+/// with nothing resumed — its run then sat parked behind a closed card that no settle or sweep
+/// looks at again.
+///
 /// A handoff card carries no `callId` — the transcribed shape has none — so it lives as long as an
 /// escalated form's run still waits.
 ///
@@ -555,9 +562,6 @@ pub async fn settle_dead_holds(
     coworker_id: &CoworkerId,
     now_ms: i64,
 ) -> bool {
-    let Some(waiting) = waiting_calls(state, account_id, coworker_id).await else {
-        return false;
-    };
     let Ok(entries) = state
         .agui
         .auth
@@ -567,6 +571,24 @@ pub async fn settle_dead_holds(
     else {
         return false;
     };
+    let Some(waiting) = waiting_calls(state, account_id, coworker_id).await else {
+        return false;
+    };
+    settle_holds_seen(state, account_id, coworker_id, &entries, &waiting, now_ms).await
+}
+
+/// `settle_dead_holds` on a transcript and a waiting set already read. Public so a test can hand
+/// it a waiting set read before a park — the stale pair the read order exists to prevent, and the
+/// one a dead card's re-check in `settle_open_form` still has to survive.
+pub async fn settle_holds_seen(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    entries: &[Value],
+    waiting: &WaitingCalls,
+    now_ms: i64,
+) -> bool {
+    let waiting = &waiting.on;
     let expired = |entry: &Value| minted_at(entry) <= now_ms.saturating_sub(hold_ms());
     // Still to be answered when this pass began: an open sibling either times out below and
     // answers its own call or is the person's, and an escalated one is answered by its handoff.
@@ -576,7 +598,7 @@ pub async fn settle_dead_holds(
         .filter_map(call_id_of)
         .collect();
     let mut written = true;
-    for entry in &entries {
+    for entry in entries {
         let dead = call_id_of(entry).is_some_and(|call| !waiting.contains_key(call));
         if !is_unresolved(entry) || !(dead || expired(entry)) {
             continue;
@@ -605,7 +627,7 @@ pub async fn settle_dead_holds(
         .filter(|entry| is_live_handoff(entry))
         .collect();
     if let Some(first) = live.first() {
-        if handoff_call(&entries, &waiting).is_none() {
+        if handoff_call(entries, waiting).is_none() {
             let settled =
                 settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
             written &= settled.len() >= live.len();
@@ -636,27 +658,33 @@ fn handoff_call(entries: &[Value], waiting: &BTreeMap<String, String>) -> Option
         })
 }
 
-/// Every call a parked run of this coworker waits on, with the call that run is parked on.
-/// `None` when the log cannot be read: a caller deciding which cards are dead must then decide
-/// nothing.
-async fn waiting_calls(
+/// What the parked runs of one coworker wait on, as one read of the log saw them.
+#[derive(Debug, Clone, Default)]
+pub struct WaitingCalls {
+    /// Every call a parked run waits on, with the call that run is parked on.
+    on: BTreeMap<String, String>,
+}
+
+/// Every call a parked run of this coworker waits on. `None` when the log cannot be read: a
+/// caller deciding which cards are dead must then decide nothing.
+pub async fn waiting_calls(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-) -> Option<BTreeMap<String, String>> {
+) -> Option<WaitingCalls> {
     let store = &state.agui.auth.store;
-    let mut calls = BTreeMap::new();
+    let mut waiting = WaitingCalls::default();
     for run_id in store.awaiting_approval(account_id).await.ok()? {
         let (run, _) = store.load_run(&run_id).await.ok()?;
         if let Some(pending) = run.pending.as_ref()
             && resume::run_belongs_to(&run, coworker_id)
         {
             for call in resume::parked_calls(&run) {
-                calls.insert(call, pending.call_id.clone());
+                waiting.on.insert(call, pending.call_id.clone());
             }
         }
     }
-    Some(calls)
+    Some(waiting)
 }
 
 /// Settle one open form as dismissed, re-read first so an answer that landed meanwhile wins.
@@ -681,6 +709,17 @@ async fn settle_open_form(
     let Some((seq, current)) = found.filter(|(_, current)| is_unresolved(current)) else {
         return Ok(None);
     };
+    // A CARD JUDGED DEAD IS JUDGED AGAIN, against the runs as they are now. The pass decided on a
+    // waiting set that may predate this card's park, and a dead card is closed with nothing
+    // resumed: a live one closed here leaves its run parked behind a card nobody answers.
+    if !timed_out {
+        let Some(now) = waiting_calls(state, account_id, coworker_id).await else {
+            return Err(());
+        };
+        if call_id_of(&current).is_some_and(|call| now.on.contains_key(call)) {
+            return Ok(None);
+        }
+    }
     let settled = settle_entry(
         current,
         FormResolution::Dismissed,
