@@ -95,6 +95,10 @@ struct StandIn {
     reference: Option<f64>,
     /// Every batch pool read, for the count a test asserts on.
     pool_reads: usize,
+    /// When true a completion on a coworker's own (known) key answers 503 naming a credential:
+    /// the key authenticates, but its org principal's route reaches no provider seat — the 8 Sep
+    /// shape after the re-mint.
+    no_credential: bool,
 }
 
 const FIVE_HOURS_MS: i64 = 5 * 60 * 60 * 1_000;
@@ -225,7 +229,9 @@ async fn spawn_stand_in(shared: Shared) -> String {
                             Json(json!({"error": "no principal with that email, or no route with that name"})),
                         );
                     }
-                    let n = stand_in.keys.len() + 1;
+                    // Numbered by mint, not by how many keys survive: a wipe (`keys.clear()`)
+                    // must not hand the next mint the very string the dead key had.
+                    let n = stand_in.mint_attempts;
                     let key = StandInKey {
                         id: uuid::Uuid::now_v7().to_string(),
                         prefix: format!("oag_live_stand{n:03}"),
@@ -455,6 +461,7 @@ async fn spawn_stand_in(shared: Shared) -> String {
                     stand_in.bearers.push(bearer.clone());
                     let seat = stand_in.seat;
                     if bearer != DEPLOYMENT_KEY {
+                        let no_credential = stand_in.no_credential;
                         let Some(key) = stand_in.keys.iter_mut().find(|k| k.key == bearer && !k.revoked) else {
                             return axum::response::Response::builder()
                                 .status(StatusCode::UNAUTHORIZED)
@@ -464,6 +471,15 @@ async fn spawn_stand_in(shared: Shared) -> String {
                                 ))
                                 .unwrap();
                         };
+                        if no_credential {
+                            return axum::response::Response::builder()
+                                .status(StatusCode::SERVICE_UNAVAILABLE)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(
+                                    json!({"error": {"message": "no credential available for provider xai on this route"}}).to_string(),
+                                ))
+                                .unwrap();
+                        }
                         // Every completion costs a dollar, on the key's ledger, now — or, on a
                         // seat, nothing, against the list price it displaced.
                         key.events.push(if seat {
@@ -1294,12 +1310,12 @@ async fn a_hirer_outside_any_org_hires_on_the_deployment_key_and_the_console_say
     assert_eq!(h.usage_reads(), 0);
 }
 
-/// An org admin, signed in, with the stand-in refusing every mint from the start.
-async fn org_admin_with_mints_refused(database_url: &str) -> (Harness, String) {
+/// An org admin, signed in, on a stand-in that mints.
+async fn org_admin(database_url: &str) -> (Harness, String, AccountId, OrgId) {
     let tag = uuid::Uuid::now_v7().simple().to_string();
     let domain = format!("late-{tag}.test");
     let store = store_from(database_url).await;
-    let (_org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let (org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
     let account_id = store
         .account_by_email(&admin_email)
         .await
@@ -1308,6 +1324,12 @@ async fn org_admin_with_mints_refused(database_url: &str) -> (Harness, String) {
         .id;
     let h = harness(database_url, &admin_email).await;
     let access = h.access_token(&account_id, &admin_email);
+    (h, access, account_id, org_id)
+}
+
+/// An org admin, signed in, with the stand-in refusing every mint from the start.
+async fn org_admin_with_mints_refused(database_url: &str) -> (Harness, String) {
+    let (h, access, _, _) = org_admin(database_url).await;
     h.stand_in.lock().unwrap().refuse_mints = true;
     (h, access)
 }
@@ -1460,4 +1482,260 @@ async fn a_seats_usage_shows_its_requests_and_the_bill_it_displaced() {
         "the month's count always was there: {spend}"
     );
     assert!(spend["seat"].is_null(), "{spend}");
+}
+
+/// A KEY THE GATEWAY FORGOT USED TO BE PRESENTED FOREVER. The 8 Sep wipe left every row naming a
+/// key the gateway no longer had: an uncapped coworker paid two requests a turn (the dead key,
+/// then the deployment's) and vanished from its own usage, for good; nothing marked the row.
+/// Now the first refusal asks the gateway whether it still knows the key, retires the row when
+/// it does not, and the next turn mints a fresh one and is metered again.
+#[tokio::test]
+async fn a_key_the_gateway_forgot_is_re_minted_rather_than_retried_forever() {
+    let database_url = database_or_skip!();
+    let (h, access, owner, _) = org_admin(&database_url).await;
+    let ada = hire(&h, &access, "Ada").await;
+    let ada_id = CoworkerId::from_stored(ada.clone());
+    let (old_key, old_id) = {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.keys.len(), 1, "minted at hire");
+        (stand_in.keys[0].key.clone(), stand_in.keys[0].id.clone())
+    };
+    // The wipe.
+    h.stand_in.lock().unwrap().keys.clear();
+
+    // The turn that meets the dead key still finishes, on the deployment's key.
+    let (status, failure) = h.turn(&ada, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let row = h
+        .store
+        .coworker_key(&ada_id, &owner)
+        .await
+        .expect("row")
+        .expect("the row stays");
+    assert!(row.revoked_at_ms.is_some(), "the dead key's row is retired");
+
+    // The next one mints a fresh key and goes out on it — one request, metered.
+    let (status, failure) = h.turn(&ada, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let fresh = {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.keys.len(), 1, "a fresh key: {:?}", stand_in.keys);
+        let fresh = stand_in.keys[0].clone();
+        assert_ne!(fresh.key, old_key);
+        assert_eq!(
+            stand_in.bearers,
+            vec![
+                old_key.clone(),
+                DEPLOYMENT_KEY.to_string(),
+                fresh.key.clone()
+            ],
+            "the dead key was presented once, not every turn"
+        );
+        fresh
+    };
+    assert_eq!(
+        fresh.events.len(),
+        1,
+        "turn 2 is on the coworker's own meter"
+    );
+    let row = h
+        .store
+        .coworker_key(&ada_id, &owner)
+        .await
+        .expect("row")
+        .expect("row");
+    assert_eq!(row.key_id, fresh.id);
+    assert_ne!(row.key_id, old_id);
+    assert!(row.revoked_at_ms.is_none(), "the re-minted row is live");
+    // A turn still holding the dead key's id cannot retire the fresh one minted over it.
+    let late = h
+        .store
+        .mark_coworker_key_revoked(&ada_id, &owner, &old_id, now_ms())
+        .await
+        .expect("late retire");
+    assert!(late.is_none(), "a stale retire touches nothing");
+    let row = h
+        .store
+        .coworker_key(&ada_id, &owner)
+        .await
+        .expect("row")
+        .expect("row");
+    assert!(
+        row.revoked_at_ms.is_none(),
+        "the fresh key survives a stale retire"
+    );
+    let (_, spend) = h.spend(&access, &ada).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+}
+
+/// A CAPPED coworker cannot fall back to the deployment's key, so the wipe held every one of its
+/// turns with "Retire and re-hire it" — a demo that shows points showed nothing but that. It still
+/// fails closed on the turn that finds the key gone (it could not be counted), but it says so, and
+/// the very next turn is back on a fresh key of its own.
+#[tokio::test]
+async fn a_capped_coworker_whose_key_was_forgotten_is_held_once_and_then_runs_on_a_fresh_key() {
+    let database_url = database_or_skip!();
+    let (h, access, owner, _) = org_admin(&database_url).await;
+    let bo = hire(&h, &access, "Bo").await;
+    h.store
+        .put_points_limit(
+            opengrok_store::PointsScope::Coworker,
+            &bo,
+            opengrok_store::PointsLimit {
+                month_points: Some(1_000_000),
+                day_points: None,
+            },
+            owner.as_str(),
+            now_ms(),
+        )
+        .await
+        .expect("cap");
+    h.stand_in.lock().unwrap().keys.clear();
+
+    let (status, failure) = h.turn(&bo, 1).await;
+    assert!(status.contains("failed"), "{status} {failure:?}");
+    let failure = failure.unwrap_or_default();
+    assert!(failure.contains("no longer"), "{failure}");
+    assert!(failure.contains("send it again"), "{failure}");
+    assert!(
+        !failure.contains("re-hire"),
+        "no heavier remedy than needed: {failure}"
+    );
+
+    let (status, failure) = h.turn(&bo, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let stand_in = h.stand_in.lock().unwrap();
+    assert_eq!(stand_in.keys.len(), 1, "{:?}", stand_in.keys);
+    assert_eq!(stand_in.bearers, vec![stand_in.keys[0].key.clone()]);
+    assert!(
+        !stand_in.bearers.contains(&DEPLOYMENT_KEY.to_string()),
+        "a capped coworker never runs on the deployment's key"
+    );
+}
+
+/// A key that authenticates but whose route reaches no provider seat is NOT dead, and minting
+/// another on the same principal would land on the same route — so it is left alone. An uncapped
+/// turn still survives on the deployment's key; a capped one is held with a sentence that names
+/// the route an admin has to fix, instead of a bare 503.
+#[tokio::test]
+async fn a_key_whose_route_reaches_no_credential_is_named_not_re_minted() {
+    let database_url = database_or_skip!();
+    let (h, access, owner, org_id) = org_admin(&database_url).await;
+    let ada = hire(&h, &access, "Ada").await;
+    let bo = hire(&h, &access, "Bo").await;
+    h.store
+        .put_points_limit(
+            opengrok_store::PointsScope::Coworker,
+            &bo,
+            opengrok_store::PointsLimit {
+                month_points: Some(1_000_000),
+                day_points: None,
+            },
+            owner.as_str(),
+            now_ms(),
+        )
+        .await
+        .expect("cap");
+    h.stand_in.lock().unwrap().no_credential = true;
+
+    let (status, failure) = h.turn(&ada, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (status, failure) = h.turn(&bo, 1).await;
+    assert!(status.contains("failed"), "{status} {failure:?}");
+    let failure = failure.unwrap_or_default();
+    assert!(
+        failure.contains(&GatewayAdmin::org_principal_email(org_id.as_str())),
+        "the sentence names the route: {failure}"
+    );
+    assert!(failure.contains("seat"), "and what fixes it: {failure}");
+
+    let keys = h.stand_in.lock().unwrap().keys.len();
+    assert_eq!(keys, 2, "nothing was re-minted");
+    for coworker in [&ada, &bo] {
+        let row = h
+            .store
+            .coworker_key(&CoworkerId::from_stored(coworker.clone()), &owner)
+            .await
+            .expect("row")
+            .expect("row");
+        assert!(row.revoked_at_ms.is_none(), "a live key is not retired");
+    }
+
+    // THE CONSOLE SAYS WHY instead of "metered" over a key that counts nothing. Ada's turn ran on
+    // the deployment's key, so her own meter is empty; Bo's was held. Each reply names the route.
+    let principal = GatewayAdmin::org_principal_email(org_id.as_str());
+    for coworker in [&ada, &bo] {
+        for path in [
+            format!("/coworkers/{coworker}/spend"),
+            format!("/coworkers/{coworker}/limit"),
+            format!("/coworkers/{coworker}/usage?window=month"),
+        ] {
+            let (status, reply) = h.get_json(&access, &path).await;
+            assert_eq!(status, 200, "{path}: {reply}");
+            assert_eq!(reply["metered"], json!(false), "{path}: {reply}");
+            let note = reply["note"].as_str().unwrap_or_default();
+            assert!(
+                note.starts_with("this coworker's key cannot serve: "),
+                "{path}: {note}"
+            );
+            assert!(note.contains(&principal), "{path} names the route: {note}");
+        }
+    }
+
+    // A seat bound to the route: the next call the key serves clears the flag.
+    h.stand_in.lock().unwrap().no_credential = false;
+    let (status, failure) = h.turn(&ada, 2).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    let (_, spend) = h.spend(&access, &ada).await;
+    assert_eq!(spend["metered"], json!(true), "{spend}");
+    assert!(spend["note"].is_null(), "{spend}");
+    let (_, spend) = h.spend(&access, &bo).await;
+    assert_eq!(
+        spend["metered"],
+        json!(false),
+        "Bo has not been served since: {spend}"
+    );
+}
+
+/// A 401 on a key the gateway STILL KNOWS is somebody's decision there (revoked or disabled), so
+/// it is not re-minted — but it is not "metered" either. Every uncapped turn falls back to the
+/// deployment's key and vanishes from the coworker's usage; the console now says so, and why.
+#[tokio::test]
+async fn a_key_the_gateway_refuses_but_still_knows_is_named_in_the_console_not_re_minted() {
+    let database_url = database_or_skip!();
+    let (h, access, owner, _) = org_admin(&database_url).await;
+    let ada = hire(&h, &access, "Ada").await;
+    let key = {
+        let mut stand_in = h.stand_in.lock().unwrap();
+        stand_in.keys[0].revoked = true;
+        stand_in.keys[0].key.clone()
+    };
+
+    let (status, failure) = h.turn(&ada, 1).await;
+    assert!(status.contains("finished"), "{status} {failure:?}");
+    {
+        let stand_in = h.stand_in.lock().unwrap();
+        assert_eq!(stand_in.keys.len(), 1, "not re-minted");
+        assert_eq!(stand_in.bearers, vec![key, DEPLOYMENT_KEY.to_string()]);
+    }
+    let row = h
+        .store
+        .coworker_key(&CoworkerId::from_stored(ada.clone()), &owner)
+        .await
+        .expect("row")
+        .expect("row");
+    assert!(
+        row.revoked_at_ms.is_none(),
+        "not retired: the gateway knows it"
+    );
+
+    let (status, spend) = h.spend(&access, &ada).await;
+    assert_eq!(status, 200);
+    assert_eq!(spend["metered"], json!(false), "{spend}");
+    let note = spend["note"].as_str().unwrap_or_default();
+    assert!(
+        note.starts_with("this coworker's key cannot serve: "),
+        "{note}"
+    );
+    assert!(note.contains("revoked or disabled"), "{note}");
 }

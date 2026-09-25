@@ -123,6 +123,15 @@ impl ToolRunner {
         self
     }
 
+    /// The judge's failures in a row so far in this run. See `judge_failure_streak`.
+    #[must_use]
+    pub fn with_judge_failures(mut self, failures: u32) -> Self {
+        if let Some((executor, context)) = self.executor.take() {
+            self.executor = Some((executor.with_judge_failures(failures), context));
+        }
+        self
+    }
+
     /// Bring the coworker's own box up before typing into it outside `computer_use`, through the
     /// executor's memo and in-use stamp.
     pub async fn wake_fill_target(&self) -> Result<(), String> {
@@ -158,6 +167,15 @@ impl ToolRunner {
             self.executor = Some((executor.with_chosen_recipe(recipe_id, values), context));
         }
         self
+    }
+
+    /// The system-message sentence naming plugin servers that could not be reached this turn, or
+    /// nothing. See `Executor::unavailable_plugins_line`.
+    pub fn unavailable_plugins_line(&self) -> String {
+        self.executor
+            .as_ref()
+            .map(|(executor, _)| executor.unavailable_plugins_line())
+            .unwrap_or_default()
     }
 
     /// Whether this runner offers `run_recipe`: a screen plus at least one granted recipe.

@@ -30,7 +30,7 @@ pub use model::{
     ModelRequest,
 };
 pub use projection::Projection;
-pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
+pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, judge_failure_streak, parse_verdict};
 pub use timing::RUN_TIMING_NAME;
 pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 

@@ -31,6 +31,11 @@ if [ -z "${OG_BOX_SHARE:-}" ]; then
   export OG_BOX_SHARE=per-bot
 fi
 
+# The smoke scripts sign in through the password-free dev route, which the binary serves only
+# when OG_DEV_SIGN_IN=1. On for a dev server unless .env says otherwise (OG_DEV_SIGN_IN=0); even
+# on, it answers only a caller on this machine and never an account that has a password.
+export OG_DEV_SIGN_IN="${OG_DEV_SIGN_IN:-1}"
+
 # The gate owns its database; a dev server there would race the smoke suite's sweeps.
 case "${OG_DATABASE_URL:-}" in
   *_gate) echo "OG_DATABASE_URL points at a gate database; refusing (docs/setup/gate.md)" >&2; exit 1 ;;

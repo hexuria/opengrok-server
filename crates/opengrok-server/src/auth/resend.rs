@@ -11,10 +11,23 @@
 
 use serde_json::json;
 
+/// Resend's send endpoint. A field on `AuthState` rather than a literal in `send`, so a test can
+/// stand a mailbox in for it and read the link a mail carried instead of trusting a reply that is
+/// constant by design.
+pub const ENDPOINT: &str = "https://api.resend.com/emails";
+
+/// Where a send goes and the key it goes with. Built per send from `AuthState`
+/// (`AuthState::mailer`); `None` there means this deployment sends no mail.
+#[derive(Debug, Clone)]
+pub struct Mailer {
+    pub endpoint: String,
+    pub key: String,
+}
+
 /// Send the signup verification email. Returns whether Resend accepted it.
-pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
+pub async fn send_verification(mailer: &Mailer, to: &str, link: &str) -> bool {
     send(
-        api_key,
+        mailer,
         to,
         "Verify your Open Grok email",
         &format!(
@@ -27,9 +40,9 @@ pub async fn send_verification(api_key: &str, to: &str, link: &str) -> bool {
 }
 
 /// Send the password-reset email. The link is good for one hour and for one change.
-pub async fn send_password_reset(api_key: &str, to: &str, link: &str) -> bool {
+pub async fn send_password_reset(mailer: &Mailer, to: &str, link: &str) -> bool {
     send(
-        api_key,
+        mailer,
         to,
         "Reset your Open Grok password",
         &format!(
@@ -42,11 +55,17 @@ pub async fn send_password_reset(api_key: &str, to: &str, link: &str) -> bool {
     .await
 }
 
-async fn send(api_key: &str, to: &str, subject: &str, html: &str) -> bool {
-    // The sender identity. Its DOMAIN must be verified in the Resend account, or Resend rejects
-    // the send — so this is a real address under a domain the operator controls, not a placeholder.
-    let from_email =
-        std::env::var("RESEND_FROM_EMAIL").unwrap_or_else(|_| "support@goldcoders.dev".to_string());
+/// The sender when `RESEND_FROM_EMAIL` is unset. Its DOMAIN must be verified in the Resend
+/// account or every send is refused — which on anyone else's deployment it is not, so the binary
+/// warns at startup when a key is set without a sender of the operator's own.
+pub const DEFAULT_FROM_EMAIL: &str = "support@goldcoders.dev";
+
+async fn send(mailer: &Mailer, to: &str, subject: &str, html: &str) -> bool {
+    // An empty value is the `.env` line left blank, not a sender: read as unset.
+    let from_email = std::env::var("RESEND_FROM_EMAIL")
+        .ok()
+        .filter(|from| !from.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_FROM_EMAIL.to_string());
     let from_name =
         std::env::var("RESEND_FROM_NAME").unwrap_or_else(|_| "Open Grok Support Team".to_string());
     let from = format!("{from_name} <{from_email}>");
@@ -58,8 +77,8 @@ async fn send(api_key: &str, to: &str, subject: &str, html: &str) -> bool {
     });
     let client = reqwest::Client::new();
     match client
-        .post("https://api.resend.com/emails")
-        .bearer_auth(api_key)
+        .post(&mailer.endpoint)
+        .bearer_auth(&mailer.key)
         .json(&body)
         .send()
         .await
