@@ -339,13 +339,22 @@ fn repeats_last_failure(call: &opengrok_tools::ToolCall, last: Option<&str>) -> 
     last.is_some_and(|last| failure_key(call) == last)
 }
 
+/// A command on the BIR host's catalog binary, from either shell.
+///
+/// THE DEMO'S QUIET-LOOP RULES STOP AT THIS LINE. A final answer filtered for intent, a diary
+/// swapped for the failure fact, a stalled "I'll look up the profiles." answered with the listing:
+/// all were written for this host. Applied to every coworker, they cut "Let me explain." off an
+/// explanation and showed "grep: no match" instead of the model's answer (#180).
+fn names_the_catalog(call: &opengrok_tools::ToolCall) -> bool {
+    shell_command(&call.arguments).contains("gpui-agent")
+}
+
 /// The host catalog's own binary is missing. No rewording finds it, so the turn stops on the
 /// first miss (the Hog Rider run burned all eight calls on it). Any OTHER missing command is an
 /// ordinary failure: `python` missing on the box is fixed by `python3`, and setting the streak
 /// to its ceiling on every exit 127 never let that retry be asked for (#183).
 fn is_missing_catalog_binary(call: &opengrok_tools::ToolCall, content: &str) -> bool {
-    shell_command(&call.arguments).contains("gpui-agent")
-        && intent::is_unrecoverable_command_miss(content)
+    names_the_catalog(call) && intent::is_unrecoverable_command_miss(content)
 }
 
 /// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
@@ -737,9 +746,10 @@ pub async fn resume_conversation(
     all
 }
 
-/// Paint what the round withheld: the text past its opening intent, or the last failure fact.
-/// `blank` is what to show when that leaves nothing — `None` where the run already said
-/// something or ends with its own sentence.
+/// Paint what a round that never finished its answer withheld (a chart round, a broken stream,
+/// a plan past its bound): the text past its opening intent, or the last failure fact. `blank`
+/// is what to show when that leaves nothing — `None` where the run already said something or
+/// ends with its own sentence. A round that called no tool is not this: it is painted as written.
 async fn flush_withheld_text(
     projection: &mut Projection,
     sink: Option<&dyn EventSink>,
@@ -755,8 +765,8 @@ async fn flush_withheld_text(
     emit_visible_text(projection, sink, round_events, visible).await;
 }
 
-/// What a text-only round shows when stripping its intent leaves nothing and the run has said
-/// nothing yet: the listing it read, else the model's own words.
+/// What a round shows when stripping its intent leaves nothing and the run has said nothing
+/// yet: the listing it read, else the model's own words.
 ///
 /// NEVER AN EMPTY SUCCESS (CLAUDE.md, three facts №3). A turn that said "I'll pull the profile"
 /// and stopped used to finish with no text at all, which the person blames on the app.
@@ -1034,6 +1044,8 @@ async fn converse_raw(
     let mut last_failed_key: Option<String> = None;
     let mut had_successful_listing = false;
     let mut skipped_redundant_listing = false;
+    // This run called the BIR host's catalog, so its final answer keeps the demo's filter.
+    let mut on_the_catalog = false;
     // A recipe replay was already answered without playing; asking again ends the turn.
     let mut skipped_replay = false;
     // The catalog sentence to show if a later round only repeats the listing.
@@ -1144,8 +1156,9 @@ async fn converse_raw(
         let mut said = String::new();
         let mut withheld = String::new();
         // A round with no work tool on offer streams from its first word. One with a work tool
-        // withholds until `intent::live_from` says the words are an answer, not a preamble.
+        // withholds until `intent::goes_live` says the words are an answer, not a preamble.
         let mut text_live = !tools_offered;
+        let mut round_tool = false;
         let mut round_work_tool = false;
         if let Some(mut stream) = stream {
             while let Some(delta) = budget.next(&mut stream).await {
@@ -1154,6 +1167,7 @@ async fn converse_raw(
                         any_delta = true;
                         if let ModelDelta::ToolCallStart { name, .. } = &delta {
                             started_a_tool = true;
+                            round_tool = true;
                             if !is_client_render_tool(name) {
                                 round_work_tool = true;
                             }
@@ -1166,10 +1180,12 @@ async fn converse_raw(
                                 plan_only_chars =
                                     plan_only_chars.saturating_add(text.chars().count());
                             }
-                            if let Some(from) = intent::live_from(&withheld, LIVE_TEXT_AFTER) {
+                            // ALL OF IT, OPENING INTENT INCLUDED. This is an answer now, and a
+                            // round that ends without a tool call must reach the person as the
+                            // model wrote it: "Let me explain." is part of the explanation.
+                            if intent::goes_live(&withheld, LIVE_TEXT_AFTER) {
                                 text_live = true;
-                                let shown = withheld.split_off(from);
-                                withheld.clear();
+                                let shown = std::mem::take(&mut withheld);
                                 said.push_str(&shown);
                                 emit_visible_text(&mut projection, sink, &mut round_events, shown)
                                     .await;
@@ -1229,6 +1245,12 @@ async fn converse_raw(
             timing.record_model(timing::elapsed_ms(model_started));
             if round_work_tool {
                 withheld.clear();
+            } else if !text_live && !round_tool && !on_the_catalog && !withheld.trim().is_empty() {
+                // A ROUND THAT CALLED NO TOOL IS THE ANSWER, shown as written (#180). Filtered,
+                // an answer lost its opening "Let me explain.", and one that opened with "I'll"
+                // was swapped for the last failure fact: "grep: no match".
+                let answer = std::mem::take(&mut withheld);
+                emit_visible_text(&mut projection, sink, &mut round_events, answer).await;
             } else if !text_live {
                 let blank =
                     blank_turn_text(&all, &round_events, last_listing.as_deref(), &withheld);
@@ -1255,6 +1277,7 @@ async fn converse_raw(
                 calls.retain(|call| !is_client_render_tool(&call.name));
                 calls.push(ui);
             }
+            on_the_catalog |= calls.iter().any(names_the_catalog);
             if let (Some(runner), false) = (tools, calls.is_empty()) {
                 // WHERE A STOP LANDS, THE SECOND AND MORE USEFUL PLACE. The model has just
                 // asked to do something to the world — play the recipe again, type into the

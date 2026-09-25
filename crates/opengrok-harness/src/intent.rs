@@ -106,22 +106,15 @@ const CLOSERS: &[&str] = &[
     "i will be here",
 ];
 
+/// A status line that carries a number worth reading (a TIN, a list of form codes) is not
+/// narration. Ports like 17421 are not facts, so it takes six digits.
+///
+/// NUMBERS ONLY, NO DOMAIN WORDS. This held "tin", "deadline", "form 1", "1701" and "2550" for
+/// one demo, applied to every coworker ("tin" matched "setting" and "continue"). What a BIR
+/// answer leads with is the drive-bir skill's to say (`docs/skills/drive-bir.md`, reply style),
+/// and a final answer is no longer filtered at all (#180).
 fn has_fact_signal(text: &str) -> bool {
-    let digits = text.chars().filter(char::is_ascii_digit).count();
-    // Ports like 17421 are not facts; a TIN / form list is.
-    if digits >= 6 {
-        return true;
-    }
-    let lower = text.to_ascii_lowercase();
-    // A WORD, not a substring: `contains("tin")` made "setting", "testing" and "continue"
-    // facts, which kept intent sentences that carried them.
-    lower
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|word| word == "tin")
-        || lower.contains("deadline")
-        || lower.contains("form 1")
-        || lower.contains("1701")
-        || lower.contains("2550")
+    text.chars().filter(char::is_ascii_digit).count() >= 6
 }
 
 /// Starts by announcing what the coworker is about to do: "I'll pull…", "Let me check…".
@@ -222,26 +215,30 @@ fn leading_intent_end(text: &str, finished: bool) -> usize {
         }
         from = end;
     }
+    // No intent, no cut: an answer that opens with an indented code line keeps its indent.
+    if from == 0 {
+        return 0;
+    }
     from + (text[from..].len() - text[from..].trim_start().len())
 }
 
-/// Where withheld text may start streaming: past any opening intent, once what follows is at
-/// least `min_chars` long and does not itself open with intent. `None` keeps withholding.
+/// Whether withheld text may start streaming: once what follows any opening intent is at least
+/// `min_chars` long and does not itself open with intent. It then streams whole, opening intent
+/// included, because an answer is shown as written.
 ///
 /// THE LENGTH IS WHAT TELLS A PREAMBLE FROM AN ANSWER. NativeChat paints every TEXT_MESSAGE as
 /// a bubble, so a streamed "Sure! Checking now." before a tool call cannot be taken back; a
 /// preamble is short, and an answer long enough to need streaming is not.
-pub fn live_from(text: &str, min_chars: usize) -> Option<usize> {
-    let from = leading_intent_end(text, false);
-    let rest = &text[from..];
+pub fn goes_live(text: &str, min_chars: usize) -> bool {
+    let rest = &text[leading_intent_end(text, false)..];
     if rest.chars().count() < min_chars {
-        return None;
+        return false;
     }
     let first = sentence_spans(rest)
         .first()
         .map(|(start, end, _)| &rest[*start..*end])
         .unwrap_or(rest);
-    (!opens_with_intent(first)).then_some(from)
+    !opens_with_intent(first)
 }
 
 /// Drop the opening intent sentences and keep the rest exactly as written. `None` if nothing
@@ -551,13 +548,15 @@ mod tests {
         assert!(sentence_is_intent("Let me check the forms."));
     }
 
-    /// `tin` as a substring made "setting", "testing" and "continue" facts.
+    /// `tin` as a substring made "setting", "testing" and "continue" facts; the demo's words are
+    /// the skill's now, and a fact is a number.
     #[test]
-    fn a_real_word_is_not_a_fact_signal() {
+    fn a_fact_signal_is_a_number_not_a_domain_word() {
         assert!(!has_fact_signal("setting up the testing"));
         assert!(!has_fact_signal("continue"));
+        assert!(!has_fact_signal("the deadline for form 1701"));
+        assert!(!has_fact_signal("isn't answering on 17421"));
         assert!(has_fact_signal("TIN 123-456-789"));
-        assert!(has_fact_signal("your tin is on file"));
     }
 
     #[test]
@@ -588,12 +587,17 @@ mod tests {
     #[test]
     fn withheld_text_goes_live_after_its_opening_intent() {
         let answer = "The borrow checker tracks who owns each value. ".repeat(6);
-        let text = format!("I'll explain. {answer}");
-        let from = live_from(&text, 200).unwrap();
-        assert_eq!(&text[from..], answer);
-        assert!(live_from("I'll check the host. ", 10).is_none());
-        assert!(live_from(&"I'll check the host and then ".repeat(20), 200).is_none());
-        assert!(live_from("Short answer.", 200).is_none());
+        assert!(goes_live(&format!("I'll explain. {answer}"), 200));
+        assert!(!goes_live("I'll explain. The borrow checker.", 200));
+        assert!(!goes_live("I'll check the host. ", 10));
+        assert!(!goes_live(&"I'll check the host and then ".repeat(20), 200));
+        assert!(!goes_live("Short answer.", 200));
+    }
+
+    #[test]
+    fn text_with_no_intent_is_not_trimmed() {
+        let code = "    let x = 1;\n    let y = 2;";
+        assert_eq!(strip_intent_keep_facts(code).as_deref(), Some(code));
     }
 
     #[test]

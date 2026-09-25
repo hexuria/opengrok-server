@@ -1177,10 +1177,11 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
 
 /// A LONG ANSWER IS NOT A STALL. Any coworker with a computer answering "explain X" or a
 /// routine's daily briefing past ~250 words used to end in RUN_ERROR "plan-only text", and
-/// the withheld answer was never shown.
+/// the withheld answer was never shown. Five thousand characters, #178's size.
 #[tokio::test]
 async fn a_long_answer_with_tools_offered_is_delivered_not_failed() {
-    let answer = long_answer();
+    let answer = format!("{0} {0} {0}", long_answer());
+    assert!(answer.chars().count() >= 5_000, "{}", answer.len());
     let events = run_conversation(
         &MockDoor::with_script(words(&answer)),
         Some(&tool_runner()),
@@ -1953,33 +1954,69 @@ async fn an_intent_only_reply_is_shown_rather_than_an_empty_success() {
     );
 }
 
+/// A round that calls no tool is the answer, and the answer is shown as the model wrote it
+/// (#180). The intent filter is for words before a tool call; on a final answer it cut
+/// "Let me explain." off an explanation and "I'll look up the TIN." off a BIR answer.
 #[tokio::test]
-async fn mixed_intent_then_facts_flushes_only_the_facts() {
-    struct MixedDoor;
-    #[async_trait::async_trait]
-    impl ModelDoor for MixedDoor {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            Ok(Box::pin(futures::stream::iter(
-                vec![Ok(ModelDelta::Text(
-                    "I'll look up the TIN.\n\nTIN 123-456-789. Forms: 1701.".to_string(),
-                ))]
-                .into_iter(),
-            )))
-        }
+async fn a_final_answer_that_opens_with_intent_is_shown_as_written() {
+    for reply in [
+        "Let me explain. Ownership moves a value; borrowing lends it.",
+        "I'll look up the TIN.\n\nTIN 123-456-789. Forms: 1701.",
+        "    let x = 1; // an indented code line keeps its indent",
+    ] {
+        let events = run_conversation(
+            &MockDoor::with_script(words(reply)),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("explain"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        assert_eq!(assistant_text(&events), reply);
     }
+}
+
+/// A long answer goes live part way through; its opening sentence is part of it (#178).
+#[tokio::test]
+async fn a_long_answer_that_opens_with_intent_keeps_its_opening() {
+    let answer = format!("Let me explain. {}", long_answer());
     let events = run_conversation(
-        &MixedDoor,
+        &MockDoor::with_script(words(&answer)),
         Some(&tool_runner()),
         &MemoryJournal::new(),
-        request("tin"),
+        request("explain the borrow checker"),
         "t1",
         "r1",
         1,
     )
     .await;
-    let text = assistant_text(&events);
-    assert!(!text.to_ascii_lowercase().contains("i'll look"), "{text:?}");
-    assert!(text.contains("TIN 123-456-789"), "{text:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), answer);
+}
+
+/// A non-empty answer is never swapped for the last failure fact. After a grep with no match,
+/// "I'll need a different pattern: nothing in src mentions foo." reached the person as
+/// "grep: no match" (verifier's probe).
+#[tokio::test]
+async fn a_final_answer_after_a_failed_command_is_not_swapped_for_the_failure() {
+    let reply = "I'll need a different pattern: nothing in src mentions foo.";
+    let door = Rounds::new(vec![shell_deltas("c1", "grep -rn foo src")], reply);
+    let (runner, _) = shell_runner(&[("grep -rn foo src", "grep: no match\n[exit code 1]")]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("where is foo used"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), reply);
 }
 
 /// Live NativeChat: wrong port, then missing profiles, with a diary of "isn't answering"
