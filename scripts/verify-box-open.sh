@@ -82,7 +82,8 @@ print("OK: Hexuria", hexuria)
 status, _ = req("GET", f"/coworkers/{hexuria}/computer", token=token)
 if "state" not in status or "agentId" not in status:
     raise SystemExit(f"bad computer json {status}")
-print("OK: GET computer", status.get("state"), "vncUrl", status.get("vncUrl"))
+# vncUrl carries the box's VNC password and a screen ticket: say whether it is there, never print it.
+print("OK: GET computer", status.get("state"), "vncUrl set", bool(status.get("vncUrl")))
 
 try:
     admin, code = req("GET", "/admin/computers", token=token)
@@ -95,12 +96,16 @@ probe_id = hired.get("id") or hired.get("coworkerId")
 print("OK: hired", probe_id, "box_id", hired.get("boxId") or hired.get("box_id"))
 if probe_id:
     ensured, _ = req("POST", f"/coworkers/{probe_id}/computer", token=token)
-    print("OK: POST computer", ensured.get("state"), "vncUrl", ensured.get("vncUrl"))
+    print("OK: POST computer", ensured.get("state"), "vncUrl set", bool(ensured.get("vncUrl")))
     if ensured.get("vncUrl"):
+        # A Local VM's page is proxied by OpenGrok (`/coworkers/{id}/computer/vnc/{ticket}/…`),
+        # opened with no Authorization header, the way the app's webview opens it.
         vnc = ensured["vncUrl"].split("?")[0]
+        if "/computer/vnc/" not in vnc:
+            raise SystemExit("vncUrl is not served through OpenGrok")
         import urllib.request as u
         code = u.urlopen(vnc, timeout=5).status
-        print("OK: probe noVNC", code, vnc)
+        print("OK: probe noVNC through OpenGrok", code)
 PY
 
 coworkers=$(curl -sS -H "Authorization: Bearer $token" "$BASE/coworkers")
@@ -121,7 +126,7 @@ import json,sys
 d=json.load(sys.stdin)
 assert "state" in d, d
 assert "agentId" in d, d
-print("state", d.get("state"), "vncUrl", d.get("vncUrl"), "keys", sorted(d.keys()))
+print("state", d.get("state"), "vncUrl set", bool(d.get("vncUrl")), "keys", sorted(d.keys()))
 '
 pass "GET /coworkers/{id}/computer returns box status JSON"
 

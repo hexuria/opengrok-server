@@ -24,3 +24,5 @@ thiserror.workspace = true
 tracing.workspace = true
 grok-box.workspace = true
 getrandom = "0.2"
+# The digest a placed bundle is remembered by (`bundle`).
+sha2.workspace = true
