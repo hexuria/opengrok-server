@@ -248,3 +248,188 @@ fn the_gate_databases_the_doc_creates_are_the_ones_ci_creates() {
     assert!(!ci.is_empty());
     assert_eq!(doc, ci, "docs/setup/postgres.md and ci.yml disagree");
 }
+
+// ---- #202: onboarding onto the client we actually serve --------------------------------------
+
+/// The banner `6714eb5` gave the removed client's own reference, which PORT-PRIORITY — a plan made
+/// entirely of that client's commands — never got.
+#[test]
+fn port_priority_carries_the_removal_banner() {
+    let banner_line = read("docs/research/client-grok-bot.md")
+        .lines()
+        .find(|line| line.starts_with("> **"))
+        .expect("client-grok-bot.md's banner")
+        .to_string();
+    // The bold lead sentence; what follows it names each document's own doors.
+    let close = banner_line[4..].find("**").expect("the lead's closing **") + 6;
+    let banner = &banner_line[..close];
+    let head: String = read("docs/PORT-PRIORITY.md")
+        .lines()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        head.contains(banner),
+        "PORT-PRIORITY.md's head lacks: {banner}"
+    );
+}
+
+#[test]
+fn handover_is_current() {
+    let handover = read("docs/HANDOVER.md");
+    for stale in [
+        "Open Grok.app",
+        "Rewritten 2 Sep 2026",
+        "**#61",
+        "desktop-client",
+    ] {
+        assert!(
+            !handover.contains(stale),
+            "HANDOVER.md still says {stale:?}"
+        );
+    }
+    assert!(handover.contains("NativeChat"));
+    assert!(handover.contains("setup/nativechat.md"));
+}
+
+/// P0-E removed prost, tonic and the `opengrok-proto` crate with seam B; a stack table that still
+/// names them sends a newcomer looking for a gRPC service that is not there.
+#[test]
+fn goal_stack_matches_the_code() {
+    let goal = read("docs/GOAL.md");
+    let rpc = line_starting(&goal, "| RPC |");
+    assert!(
+        !rpc.contains("**tonic + prost**"),
+        "the decision cell: {rpc}"
+    );
+    assert!(rpc.contains("AG-UI"), "{rpc}");
+    for entry in std::fs::read_dir(repo().join("crates")).expect("crates") {
+        let manifest = entry.expect("entry").path().join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+        for dependency in ["tonic", "prost"] {
+            assert!(
+                !text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(dependency)),
+                "{} depends on {dependency} again; GOAL.md's stack row needs to say so",
+                manifest.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn roadmap_reflects_p0e_and_shipped_artifacts() {
+    let roadmap = read("docs/ROADMAP.md");
+    assert!(
+        !roadmap
+            .lines()
+            .any(|line| line.starts_with("- [ ] **16.later**")),
+        "16.later says nothing else is pending and is still unticked"
+    );
+    assert!(
+        !roadmap
+            .lines()
+            .any(|line| line.contains("Artifacts/uploads") && line.contains("parked")),
+        "the artifact store shipped in cf0a512"
+    );
+    for heading in ["## Slice 7 ", "## Slice 8 ", "## Slice 9 "] {
+        let line = line_starting(&roadmap, heading);
+        assert!(line.contains("removed in P0-E"), "{line}");
+    }
+    for tier in ["- [x] P5 ", "- [x] P6 ", "- [x] P7 ", "- [x] P8 "] {
+        let line = line_starting(&roadmap, tier);
+        assert!(line.contains("removed in P0-E"), "{line}");
+    }
+}
+
+#[test]
+fn nativechat_has_a_setup_page_in_the_chain() {
+    assert!(setup_steps().iter().any(|step| step == "nativechat.md"));
+    let page = read("docs/setup/nativechat.md");
+    for needle in [
+        "tls.md",
+        "first-run.md",
+        "POST /ag-ui",
+        "/ag-ui/approvals",
+        "/coworkers/{id}/computer",
+        "POST /schedules",
+        "client-nativechat.md",
+    ] {
+        assert!(
+            page.contains(needle),
+            "nativechat.md never mentions {needle}"
+        );
+    }
+    let readme = read("README.md");
+    assert!(
+        !readme.contains("Grok Bot desktop app connects"),
+        "README.md still onboards onto the removed client"
+    );
+}
+
+/// Every path the server mounts, read from the source: `.route(` then the first string literal,
+/// which also catches the multi-line calls (`/ag-ui/host-settings`, `/.well-known/*`, …).
+fn mounted_paths() -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read");
+            let text = text.split("#[cfg(test)]").next().unwrap_or_default();
+            for (at, _) in text.match_indices(".route(") {
+                let rest = text[at + ".route(".len()..].trim_start();
+                if let Some(literal) = rest.strip_prefix('"')
+                    && let Some(end) = literal.find('"')
+                {
+                    out.push(literal[..end].to_string());
+                }
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    walk(&repo().join("crates/opengrok-server/src"), &mut paths);
+    paths.push("/mcp".to_string());
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The route map is held to the router: a route added without a row, or a row whose NativeChat
+/// cell is blank, fails here. A blank cell is the dangerous one — it reads as "nobody calls this"
+/// when the truth is "nobody has looked".
+#[test]
+fn every_route_the_server_mounts_is_in_the_route_map() {
+    let map = read("docs/research/client-nativechat.md");
+    let paths = mounted_paths();
+    assert!(
+        paths.len() > 90,
+        "the route walk found only {}",
+        paths.len()
+    );
+    let missing: Vec<&String> = paths
+        .iter()
+        .filter(|path| !map.contains(&format!("`{path}`")))
+        .collect();
+    assert!(missing.is_empty(), "routes with no row: {missing:?}");
+    let rows: Vec<&str> = map
+        .lines()
+        .filter(|line| line.starts_with("| `/"))
+        .collect();
+    assert!(!rows.is_empty());
+    for row in rows {
+        let cells: Vec<&str> = row.split(" | ").collect();
+        assert!(
+            cells.len() >= 5,
+            "a row needs route, methods, mounted at, reply, NativeChat: {row}"
+        );
+        let nativechat = cells[cells.len() - 1].trim_end_matches('|').trim();
+        assert!(!nativechat.is_empty(), "blank NativeChat cell: {row}");
+    }
+}

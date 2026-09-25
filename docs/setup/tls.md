@@ -1,8 +1,10 @@
 # TLS in front of the dev server
 
 Status: installed on the dev Mac 2 Sep 2026 (by the peer session, with the operator's ok — trusting
-a certificate authority is a change to the Mac, not to this repo). The desktop app talks to the
-server through it. This page describes the layout as installed; if the Caddyfile on the Mac and
+a certificate authority is a change to the Mac, not to this repo). The desktop app of the time
+(the Grok Bot client, removed 20 Sep 2026) talked to the server through it; whether NativeChat is
+pointed at the `https://` address or the plain one is recorded in
+[`nativechat.md`](nativechat.md) once read from its source. This page describes the layout as installed; if the Caddyfile on the Mac and
 this page disagree, the Mac is right and this page needs the fix.
 
 ## Why
@@ -45,7 +47,7 @@ brew install caddy
 # HTTPS front for the OpenGrok dev server, on the LAN address only; the server itself listens on
 # loopback at the same port. Certificate from Caddy's local CA; the CA root is trusted into the
 # login keychain by `caddy trust` below. The LAN address is DHCP — when it moves, change it here
-# (twice), in OG_PUBLIC_GATEWAY_URL and in the app's openGrokGatewayUrl.
+# (twice), in OG_PUBLIC_GATEWAY_URL and in every client's saved server address.
 {
     # No plain-http listener redirecting to https: :80 is not ours to take, and the http side of
     # this port is the server's own loopback listener.

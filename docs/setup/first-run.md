@@ -123,4 +123,5 @@ nothing but text, with no `TOOL_*` events, is a route that cannot act. Test it i
 
 ## What this page does not cover
 
+- Connecting the NativeChat client, and the demo runbook: [`nativechat.md`](nativechat.md).
 - A database that survives a Docker restart, and backups: [`postgres.md`](postgres.md).
