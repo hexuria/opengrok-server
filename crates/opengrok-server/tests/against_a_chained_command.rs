@@ -345,8 +345,8 @@ fn every_deny_that_matched_the_raw_line_still_matches() {
 }
 
 /// #203: the daemon's `simpleCommands` is the server's own split, as written, one entry per
-/// simple command. A line the split would cut through (a substitution, a subshell, a group) goes
-/// whole.
+/// simple command. A line the split would cut through (a substitution, a subshell, a group, a
+/// redirection to a path, a heredoc) goes whole.
 #[test]
 fn the_daemon_is_sent_the_servers_split() {
     let split = |line: &str| simple_commands(line);
@@ -359,6 +359,17 @@ fn the_daemon_is_sent_the_servers_split() {
     assert_eq!(split("{ a; b; }"), ["{ a; b; }"]);
     assert_eq!(split("  "), Vec::<String>::new());
     assert_eq!(split("ls # a; b\nc"), ["ls # a; b", "c"]);
+    // Each was cut at the `&` or the newline, and the daemon was shown `ls >`, `out`, `> out`.
+    for line in [
+        "ls >&out",
+        "ls >&-",
+        "ls 2>&1-",
+        "ls &> out",
+        "ls > out; rm x",
+        "cat <<EOF\na; b\nEOF",
+    ] {
+        assert_eq!(split(line), [line], "{line:?}");
+    }
 }
 
 /// #203 asks #147's Always to store one parsed simple command, never a chain. The server holds

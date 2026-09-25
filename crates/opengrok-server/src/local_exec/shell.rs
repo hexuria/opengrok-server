@@ -38,7 +38,9 @@ const FIND_RUNS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 /// A line as the allow side reads it.
 pub(super) struct Line {
     /// The simple commands between top-level control operators, as written. The whole line when
-    /// it nests, since a split through `$( … )` or `{ …; }` would cut a command in half.
+    /// it nests or redirects to a path: a split through `$( … )`, `{ …; }`, `>&out`, `&> out` or
+    /// a heredoc's body cuts a command in half (`ls >&out` read as `ls >` and `out`), and the
+    /// machine's own approval would be shown commands that are not in the line.
     pub simple_commands: Vec<String>,
     /// The words after quote removal, only when the line is one simple command the gate can
     /// follow. `None` means no allow rule may match it.
@@ -59,6 +61,7 @@ struct Reader {
     segment: String,
     opaque: bool,
     nested: bool,
+    redirects: bool,
 }
 
 impl Reader {
@@ -228,6 +231,7 @@ pub(super) fn read(line: &str) -> Line {
                     } else {
                         r.segment.push(c);
                         r.opaque = true;
+                        r.redirects = true;
                     }
                 }
                 c if is_operator(c) => {
@@ -257,7 +261,7 @@ pub(super) fn read(line: &str) -> Line {
         || r.words
             .first()
             .is_none_or(|program| is_assignment(program) || runs_another(program));
-    let simple_commands = if r.nested {
+    let simple_commands = if r.nested || r.redirects {
         let whole = line.trim();
         if whole.is_empty() {
             Vec::new()
