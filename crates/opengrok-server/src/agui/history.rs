@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::run::Run;
-use opengrok_harness::ChatMessage;
+use opengrok_harness::{ChatMessage, ImagePart, ToolCallRef};
 use opengrok_wire::agui::{Message, RunAgentInput};
 use serde_json::{Value, json};
 
@@ -201,6 +201,9 @@ pub(crate) enum Said {
     Result {
         id: String,
         content: String,
+        /// The screen, when the frame kept its bytes (a shot the run pinned, or one from before
+        /// shots were `agent`-only).
+        image: Option<ImagePart>,
     },
 }
 
@@ -239,6 +242,15 @@ pub(crate) fn said_in(emitted: &[Value]) -> Vec<Said> {
             "TOOL_CALL_RESULT" => said.push(Said::Result {
                 id: field("toolCallId").to_string(),
                 content: field("content").to_string(),
+                image: payload.get("image").and_then(|image| {
+                    let part = |key: &str| image.get(key).and_then(Value::as_str);
+                    Some(ImagePart {
+                        mime: part("mime")?.to_string(),
+                        base64: part("base64")
+                            .filter(|bytes| !bytes.is_empty())?
+                            .to_string(),
+                    })
+                }),
             }),
             _ => {}
         }
@@ -256,52 +268,90 @@ pub(crate) fn said_in(emitted: &[Value]) -> Vec<Said> {
     last_first
 }
 
+/// What was said, as the model's own conversation: its words, each round of calls as one
+/// assistant message, and each result answering its call by id (#189).
+///
+/// `earlier` bounds a turn that is over — the last `STEER_TOOL_CAP` calls that have a result,
+/// each result clipped and its screen left behind — so a long session on the computer does not
+/// become the next prompt. A call it leaves out goes with its result: a result whose call is
+/// missing, or the reverse, is a request the provider refuses. Otherwise every call is kept,
+/// including one still waiting for the result a resume is about to add.
+pub(crate) fn conversation_of(said: &[Said], earlier: bool) -> Vec<ChatMessage> {
+    let recent: HashSet<&str> = said
+        .iter()
+        .rev()
+        .filter_map(|said| match said {
+            Said::Result { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .take(STEER_TOOL_CAP)
+        .collect();
+    let kept = |id: &str| !earlier || recent.contains(id);
+    let mut messages = Vec::new();
+    let mut calls = Vec::new();
+    let flush = |messages: &mut Vec<ChatMessage>, calls: &mut Vec<ToolCallRef>| {
+        if !calls.is_empty() {
+            messages.push(ChatMessage::calls("", std::mem::take(calls)));
+        }
+    };
+    for entry in said {
+        match entry {
+            Said::Text(text) => {
+                flush(&mut messages, &mut calls);
+                messages.push(ChatMessage::text("assistant", text.clone()));
+            }
+            Said::Call {
+                id,
+                name,
+                arguments,
+            } if kept(id) => calls.push(ToolCallRef {
+                id: id.clone(),
+                name: name.clone(),
+                arguments: if earlier {
+                    bounded_arguments(arguments)
+                } else {
+                    arguments.clone()
+                },
+            }),
+            Said::Result { id, content, image } if kept(id) => {
+                flush(&mut messages, &mut calls);
+                messages.push(ChatMessage {
+                    images: image.iter().filter(|_| !earlier).cloned().collect(),
+                    ..ChatMessage::tool_result(
+                        id.clone(),
+                        if earlier {
+                            clip_chars(content, STEER_TOOL_CHARS)
+                        } else {
+                            content.clone()
+                        },
+                    )
+                });
+            }
+            _ => {}
+        }
+    }
+    flush(&mut messages, &mut calls);
+    messages
+}
+
+/// An earlier call's arguments, still JSON: a provider that turns them into its own tool-use
+/// shape parses them, and clipped text would not parse.
+fn bounded_arguments(arguments: &str) -> String {
+    if arguments.chars().count() <= EARLIER_ARGS_CHARS {
+        return arguments.to_string();
+    }
+    json!({ "clipped": clip_chars(arguments, EARLIER_ARGS_CHARS) }).to_string()
+}
+
 /// One earlier run's part of a conversation: the person's messages, then what the coworker said
-/// and a bounded line per call it made — the last `STEER_TOOL_CAP` of them, so a long session on
-/// the screen does not become the next prompt.
+/// and did, bounded (`conversation_of`).
 fn earlier_run(run: &Run) -> Vec<ChatMessage> {
     let sent = prompt_of(run);
     let mut messages: Vec<ChatMessage> = sent
         .iter()
         .filter_map(|message| chat_message(message, &sent))
         .collect();
-    let said = said_in(&run.emitted);
-    let results = said
-        .iter()
-        .filter(|said| matches!(said, Said::Result { .. }))
-        .count();
-    let mut skip = results.saturating_sub(STEER_TOOL_CAP);
-    for entry in &said {
-        match entry {
-            Said::Text(text) => messages.push(ChatMessage::text("assistant", text.clone())),
-            Said::Result { id, content } if !content.is_empty() => {
-                if skip > 0 {
-                    skip -= 1;
-                    continue;
-                }
-                let (name, arguments) = said
-                    .iter()
-                    .find_map(|said| match said {
-                        Said::Call {
-                            id: call,
-                            name,
-                            arguments,
-                        } if call == id => Some((name.as_str(), arguments.as_str())),
-                        _ => None,
-                    })
-                    .unwrap_or(("tool", ""));
-                messages.push(ChatMessage::text(
-                    "user",
-                    format!(
-                        "[earlier {name} {}] {}",
-                        clip_chars(arguments, EARLIER_ARGS_CHARS),
-                        clip_chars(content, STEER_TOOL_CHARS)
-                    ),
-                ));
-            }
-            _ => {}
-        }
-    }
+    messages.extend(conversation_of(&said_in(&run.emitted), true));
     messages
 }
 

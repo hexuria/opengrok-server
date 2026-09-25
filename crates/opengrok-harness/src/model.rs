@@ -105,14 +105,38 @@ pub struct ModelRequest {
     pub spend_actor: Option<String>,
 }
 
+/// One message of a conversation, in the OpenAI chat dialect the gateway speaks.
+///
+/// A TOOL ROUND IS TWO KINDS OF MESSAGE, NOT ONE. The assistant's own message names the calls it
+/// made (`tool_calls`), and each result answers one of them by id (`role: "tool"`,
+/// `tool_call_id`). Results used to come back as `user` lines keyed by ids the model had never
+/// been shown, so it could not tell two parallel results apart or see that it had already run a
+/// command (#189).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
     /// Pictures that go with the words: the screen after a `computer` action, which the model
     /// must see to act on it. Sent to the door as image parts; empty for a message of words only.
+    /// On a `tool` message the gateway door moves them to a user message after the round, since
+    /// the dialect carries no image in a tool result.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImagePart>,
+    /// The calls an assistant message made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallRef>,
+    /// The call a `tool` message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// A call as the assistant message that made it carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallRef {
+    pub id: String,
+    pub name: String,
+    /// The arguments as JSON text: the dialect carries them as a string, not an object.
+    pub arguments: String,
 }
 
 impl ChatMessage {
@@ -122,6 +146,42 @@ impl ChatMessage {
             role: role.into(),
             content: content.into(),
             ..Self::default()
+        }
+    }
+
+    /// The assistant's message for a round of calls, with what it said alongside them.
+    pub fn calls(content: impl Into<String>, calls: Vec<ToolCallRef>) -> Self {
+        Self {
+            tool_calls: calls,
+            ..Self::text("assistant", content)
+        }
+    }
+
+    /// What a call returned.
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: Some(call_id.into()),
+            ..Self::text("tool", content)
+        }
+    }
+
+    /// The message in words alone, for a reader that speaks no tool dialect: the mock door, and a
+    /// provider that would refuse a result whose call it cannot see. A call reads as the line it
+    /// made, a result as the line the loop has always written.
+    pub fn as_text(&self) -> String {
+        let mut text = self.content.clone();
+        for call in &self.tool_calls {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "[called {} {} as {}]",
+                call.name, call.arguments, call.id
+            ));
+        }
+        match &self.tool_call_id {
+            Some(id) => format!("[tool {id} result] {text}"),
+            None => text,
         }
     }
 }

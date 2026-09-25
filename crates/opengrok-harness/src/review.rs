@@ -186,11 +186,7 @@ impl ReviewJudge for ModelJudge {
             spend_actor: self.actor.clone(),
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
-            messages: vec![ChatMessage {
-                images: Vec::new(),
-                role: "user".to_string(),
-                content: Self::prompt_for(&ask),
-            }],
+            messages: vec![ChatMessage::text("user", Self::prompt_for(&ask))],
             // Deliberately empty: the door then sends no tool fields at all, and the judge is a
             // plain completion that cannot call anything.
             tools: Vec::new(),

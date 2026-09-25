@@ -25,7 +25,7 @@ pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{
     ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
-    ModelRequest,
+    ModelRequest, ToolCallRef,
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, parse_verdict};
@@ -1142,6 +1142,18 @@ async fn converse_raw(
                     auto_review_ms,
                 );
 
+                // THE MODEL SEES WHAT IT CALLED (#189): its own message naming this round's
+                // calls, then one `tool` message per result below, each keyed by the id it gave.
+                // Without the first, a result arrived answering a call the model could not see.
+                // A work round's words stay out (F8: withheld intent is not replayed).
+                request.messages.push(ChatMessage::calls(
+                    if round_work_tool {
+                        String::new()
+                    } else {
+                        std::mem::take(&mut said)
+                    },
+                    calls.iter().map(tool_call_ref).collect(),
+                ));
                 for (result, call) in results.iter().zip(calls.iter()) {
                     let produced = projection.push_tool_result(result);
                     emit_live(sink, &produced).await;
@@ -1309,16 +1321,6 @@ async fn converse_raw(
                             "the screen has not changed after {SAME_SCREEN_LIMIT} looks; stopping instead of waiting"
                         ))
                     );
-                }
-
-                // Work-tool preamble was withheld from chat AND from `said` (F8).
-                // Replaying it as an assistant message is how rounds got slower.
-                if !said.is_empty() && !round_work_tool {
-                    request.messages.push(ChatMessage {
-                        images: Vec::new(),
-                        role: "assistant".to_string(),
-                        content: said,
-                    });
                 }
 
                 if work_fail_streak >= intent::MAX_FAILED_WORK_ROUNDS {
@@ -1623,15 +1625,10 @@ fn screen_hash(base64: &str) -> u64 {
     hasher.finish()
 }
 
-/// What the model is told a tool said, in its own transcript — with the picture, when there is one.
+/// What the model is told a tool said, answering the call by its id — with the picture, when
+/// there is one.
 fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
     ChatMessage {
-        role: "user".to_string(),
-        content: format!(
-            "[tool {} result] {}",
-            result.call_id,
-            intent::annotate_empty_result(&result.content)
-        ),
         images: result
             .image
             .iter()
@@ -1640,6 +1637,20 @@ fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
                 base64: image.base64.clone(),
             })
             .collect(),
+        ..ChatMessage::tool_result(
+            result.call_id.clone(),
+            intent::annotate_empty_result(&result.content),
+        )
+    }
+}
+
+/// A call as its assistant message names it. Arguments that cannot be written back as JSON text
+/// go as `{}`, the same as fragments that never assembled.
+fn tool_call_ref(call: &opengrok_tools::ToolCall) -> ToolCallRef {
+    ToolCallRef {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string()),
     }
 }
 

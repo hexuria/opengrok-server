@@ -4717,36 +4717,56 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 }
 
 /// One AG-UI message in the model's vocabulary; `sent` is what a reply's quote is looked up in.
+///
+/// Transcribed from `@ag-ui/core` 0.0.57 (dist/index.js:4-13, 97-113): an assistant message may
+/// carry `toolCalls: [{id, type: "function", function: {name, arguments}}]` and no content at all,
+/// and a `tool` message answers one by `toolCallId`. Both stay tool calls here, because the model
+/// has to see its own calls to read their results (#189); a call-only assistant message used to
+/// be dropped for having no words.
 pub(crate) fn chat_message(
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],
 ) -> Option<ChatMessage> {
+    let content = message.content.clone().unwrap_or_default();
     match message.role.as_str() {
-        "user" | "assistant" | "system" => message.content.as_ref().map(|content| ChatMessage {
-            images: Vec::new(),
-            role: message.role.clone(),
-            // Only a person replies: the field on anything else is not a quote the model
-            // should be read to.
-            content: match message.role.as_str() {
-                "user" => with_reply_context(content, message, sent),
-                _ => content.clone(),
-            },
-        }),
-        // NativeChat continues a frontend tool by POSTing the result as a tool
-        // message. The door only speaks user/assistant/system, so this is the
-        // same sentence the in-process loop would have appended.
-        "tool" => {
-            let content = message.content.clone().unwrap_or_default();
-            let call_id = message
+        "assistant" => {
+            let calls: Vec<opengrok_harness::ToolCallRef> = message
+                .extra
+                .get("toolCalls")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|call| {
+                    let field = |key: &str| call.pointer(key).and_then(serde_json::Value::as_str);
+                    Some(opengrok_harness::ToolCallRef {
+                        id: field("/id")?.to_string(),
+                        name: field("/function/name")?.to_string(),
+                        arguments: field("/function/arguments").unwrap_or("{}").to_string(),
+                    })
+                })
+                .collect();
+            (message.content.is_some() || !calls.is_empty())
+                .then(|| ChatMessage::calls(content, calls))
+        }
+        // Only a person replies: the field on anything else is not a quote the model should be
+        // read to.
+        "user" => message
+            .content
+            .as_ref()
+            .map(|words| ChatMessage::text("user", with_reply_context(words, message, sent))),
+        "system" => message
+            .content
+            .as_ref()
+            .map(|words| ChatMessage::text("system", words.clone())),
+        // NativeChat continues a frontend tool by POSTing the result as a tool message.
+        "tool" => Some(ChatMessage::tool_result(
+            message
                 .extra
                 .get("toolCallId")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or(message.id.as_str());
-            Some(ChatMessage::text(
-                "user",
-                format!("[tool {call_id} result] {content}"),
-            ))
-        }
+                .unwrap_or(message.id.as_str()),
+            content,
+        )),
         _ => None,
     }
 }
@@ -5127,14 +5147,15 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_result_becomes_the_in_process_sentence() {
+    fn a_tool_result_answers_its_call_by_id() {
         let mut tool = message("tool", Some("shown in the chat"));
-        tool.id = "c1".to_string();
+        tool.id = "m9".to_string();
         tool.extra.insert("toolCallId".to_string(), json!("c1"));
         let messages = to_chat_messages(&input(vec![tool]));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "[tool c1 result] shown in the chat");
+        assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(messages[0].content, "shown in the chat");
     }
 
     /// The desktop's reply chip has to reach the model as words, or "what am I replying to?"
