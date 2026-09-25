@@ -1,6 +1,7 @@
 //! OpenGrok — the server the coworkers live on.
 
 mod admin;
+mod kek;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -77,18 +78,39 @@ async fn main() -> anyhow::Result<()> {
     // per-account: their own). Auth only announces; the listener below does the provisioning
     // once the full state exists.
     let (account_created, mut new_accounts) = tokio::sync::mpsc::unbounded_channel();
+    let resend_key = std::env::var("OG_RESEND_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("RESEND_API").ok())
+        .filter(|key| !key.is_empty());
+    // A Resend key with no sender of our own sends from the built-in default, whose domain the
+    // operator's Resend account has almost certainly never verified — so EVERY verification mail
+    // is refused, and each signup is an account stranded until someone resends or vouches for it.
+    if resend_key.is_some()
+        && std::env::var("RESEND_FROM_EMAIL")
+            .map(|from| from.trim().is_empty())
+            .unwrap_or(true)
+    {
+        tracing::warn!(
+            default = opengrok_server::auth::resend::DEFAULT_FROM_EMAIL,
+            "OG_RESEND_API_KEY is set but RESEND_FROM_EMAIL is not; mail goes out from the default \
+             sender, and Resend refuses every send unless that domain is verified in your account"
+        );
+    }
+    let dev_sign_in = std::env::var("OG_DEV_SIGN_IN").as_deref() == Ok("1");
+    if dev_sign_in {
+        tracing::warn!(
+            "OG_DEV_SIGN_IN=1: /auth/cursor_dev_session_token mints a password-free session for \
+             any local caller; leave it unset on a shared host"
+        );
+    }
     let auth = AuthState::new(
         PgStore::new(pool),
         Arc::new(TokenMinter::new(token_secret.as_bytes())),
         login_email,
     )
     .with_account_created(account_created)
-    .with_resend(
-        std::env::var("OG_RESEND_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("RESEND_API").ok()),
-        public_url,
-    )
+    .with_resend(resend_key, public_url)
+    .with_dev_sign_in(dev_sign_in)
     .with_dns(
         match opengrok_server::domain_proof::SystemDns::from_system() {
             Ok(resolver) => Arc::new(resolver),
@@ -229,18 +251,12 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
-    // Seals connector credentials. Absent is a legitimate deployment — one with no connectors —
-    // and must read as "connectors unavailable" rather than as a crash at boot.
-    let vault = match std::env::var("OG_CREDENTIAL_KEK") {
-        Ok(kek) if !kek.is_empty() => Some(Arc::new(
-            opengrok_store::Vault::from_base64_key(&kek)
-                .map_err(|error| anyhow::anyhow!("{error}"))?,
-        )),
-        _ => {
-            tracing::info!("no OG_CREDENTIAL_KEK — connectors are unavailable on this server");
-            None
-        }
-    };
+    // Seals every credential: connector tokens, org computer keys, coworker gateway keys, saved
+    // site logins and passkeys. Absent is a legitimate deployment that stores none, not a crash; a
+    // key that no longer opens what is sealed is logged loudly here and reported on `/health`.
+    let vault = kek::from_env().map_err(|error| anyhow::anyhow!("{error}"))?;
+    kek::check_at_boot(&auth.store, vault.as_ref()).await;
+    let vault = vault.map(Arc::new);
 
     let connectors = load_connectors()?;
     let plugins = load_plugins();
@@ -308,10 +324,15 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("could not bind {bind}"))?;
 
     tracing::info!(%bind, "opengrok listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server stopped unexpectedly")?;
+    // The socket peer rides along because the dev sign-in must know who is REALLY calling: a
+    // `Host` header is whatever the caller wrote (`auth/routes.rs::is_local_caller`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server stopped unexpectedly")?;
     Ok(())
 }
 

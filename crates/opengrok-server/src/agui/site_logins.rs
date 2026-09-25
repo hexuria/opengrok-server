@@ -68,6 +68,11 @@ fn no_vault() -> Response {
     )
 }
 
+fn store_unavailable(error: &opengrok_store::StoreError, what: &str) -> Response {
+    tracing::error!(%error, "{what}");
+    reply(500, json!({ "error": "store unavailable" }))
+}
+
 fn row_json(row: &opengrok_store::SiteLoginRow) -> Value {
     json!({
         "id": row.id,
@@ -93,10 +98,7 @@ async fn list(State(state): State<HostState>, headers: HeaderMap) -> Response {
     };
     match state.agui.auth.store.site_logins(&account_id).await {
         Ok(rows) => reply(200, Value::Array(rows.iter().map(row_json).collect())),
-        Err(error) => {
-            tracing::error!(%error, "could not list site logins");
-            reply(500, json!({ "error": "store unavailable" }))
-        }
+        Err(error) => store_unavailable(&error, "could not list site logins"),
     }
 }
 
@@ -191,10 +193,7 @@ async fn save(
             tracing::info!(account = %account_id, origin = %row.origin, kind = %row.kind, "saved a site login");
             reply(200, row_json(&row))
         }
-        Err(error) => {
-            tracing::error!(%error, "could not save a site login");
-            reply(500, json!({ "error": "store unavailable" }))
-        }
+        Err(error) => store_unavailable(&error, "could not save a site login"),
     }
 }
 
@@ -233,10 +232,7 @@ async fn update(
     {
         Ok(true) => reply(200, json!({ "ok": true, "id": id })),
         Ok(false) => reply(404, json!({ "error": "no such site login" })),
-        Err(error) => {
-            tracing::error!(%error, "could not update a site login");
-            reply(500, json!({ "error": "store unavailable" }))
-        }
+        Err(error) => store_unavailable(&error, "could not update a site login"),
     }
 }
 
@@ -257,10 +253,7 @@ async fn remove(
     {
         Ok(true) => reply(200, json!({ "ok": true, "id": id })),
         Ok(false) => reply(404, json!({ "error": "no such site login" })),
-        Err(error) => {
-            tracing::error!(%error, "could not delete a site login");
-            reply(500, json!({ "error": "store unavailable" }))
-        }
+        Err(error) => store_unavailable(&error, "could not delete a site login"),
     }
 }
 
@@ -297,10 +290,13 @@ async fn reveal(
             )
         }
         Ok(None) => reply(404, json!({ "error": "no such site login" })),
-        Err(error) => {
-            tracing::error!(%error, "could not open a site login");
-            reply(500, json!({ "error": "store unavailable" }))
+        // Not a 500: the database answered, and the cure is a key only the operator can put back
+        // or the person saving the login again. The store's sentence names both, and no key id.
+        Err(error @ opengrok_store::StoreError::Unopenable(_)) => {
+            tracing::error!(%error, account = %account_id, id = %id, "a site login will not open");
+            reply(409, json!({ "error": error.to_string() }))
         }
+        Err(error) => store_unavailable(&error, "could not open a site login"),
     }
 }
 

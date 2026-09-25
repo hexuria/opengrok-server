@@ -78,10 +78,24 @@ async fn health(State(state): State<HostState>, headers: HeaderMap) -> Response 
             );
         }
     };
+    // Additive, and never folded into `ok`: a server whose sealed credentials will not open still
+    // runs coworkers, and every reader of this probe reads only `ok`. No counts or key ids here —
+    // the boot log and `opengrok vault status` carry those; this door is unauthenticated.
+    let store = &state.agui.auth.store;
+    let check = store
+        .vault_check(state.agui.vault.as_deref())
+        .await
+        .inspect_err(
+            |error| tracing::error!(%error, "health: the sealed credentials could not be checked"),
+        );
+    let unchecked = Some("the sealed credentials could not be checked");
+    let problem = check.as_ref().map_or(unchecked, |c| c.problem());
+    let vault = json!({ "ok": problem.is_none(), "configured": state.agui.vault.is_some(), "reason": problem });
     reply(
         StatusCode::OK,
         json!({
             "ok": true,
+            "vault": vault,
             "pid": std::process::id(),
             "isBusy": busy,
             "activeAgentId": null,

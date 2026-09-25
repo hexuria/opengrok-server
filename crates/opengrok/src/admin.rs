@@ -51,7 +51,7 @@ fn parse_flags(args: &[String], allowed: &[&str]) -> Result<HashMap<String, Stri
     Ok(flags)
 }
 
-async fn store() -> Result<PgStore, String> {
+pub(crate) async fn store() -> Result<PgStore, String> {
     let url =
         std::env::var("OG_DATABASE_URL").map_err(|_| "OG_DATABASE_URL is required".to_string())?;
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -126,14 +126,15 @@ fn split_name(full: &str) -> (String, String) {
     (first, last)
 }
 
-/// Returns `Some(exit_code)` when argv names an admin command (handled here), `None` to fall
-/// through to the server.
+/// Returns `Some(exit_code)` when argv names an admin or vault command (handled here), `None` to
+/// fall through to the server.
 pub async fn maybe_run() -> Option<i32> {
     let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) != Some("admin") {
-        return None;
-    }
-    let result = run(&argv[2..]).await;
+    let result = match argv.get(1).map(String::as_str) {
+        Some("admin") => run(&argv[2..]).await,
+        Some("vault") => crate::kek::run(&argv[2..]).await,
+        _ => return None,
+    };
     match result {
         Ok(()) => Some(0),
         Err(message) => {
@@ -330,7 +331,16 @@ async fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
 
-        Some("account") if args.get(1).map(String::as_str) == Some("enable") => {
+        // `verify` is the way out for a member whose verification mail never arrived: the link
+        // is sent once and dies in 24 hours, and a second signup is refused as a duplicate.
+        // Separate from `enable` on purpose — the operator vouches for the address knowingly.
+        Some("account")
+            if matches!(
+                args.get(1).map(String::as_str),
+                Some("enable") | Some("verify")
+            ) =>
+        {
+            let verb = args.get(1).map(String::as_str).unwrap_or_default();
             let flags = parse_flags(&args[2..], &["email"])?;
             let email = flags.get("email").ok_or("--email is required")?;
             let store = store().await?;
@@ -340,10 +350,17 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("no account with email {email}"))?;
             let (account, seq) = store.load_account(&view.id).await.map_err(|e| e.to_string())?;
+            if verb == "verify" && account.verified {
+                println!("already verified: {email}");
+                return Ok(());
+            }
             let at_ms = now_ms();
-            let events = account
-                .decide(AccountCommand::Enable { at_ms })
-                .map_err(|e| e.to_string())?;
+            let command = if verb == "verify" {
+                AccountCommand::VerifyEmail { at_ms }
+            } else {
+                AccountCommand::Enable { at_ms }
+            };
+            let events = account.decide(command).map_err(|e| e.to_string())?;
             let mut after = account;
             for event in &events {
                 after.apply(event);
@@ -366,7 +383,14 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .append_account(&view.id, seq, &events, &updated)
                 .await
                 .map_err(|e| e.to_string())?;
-            println!("account enabled: {email}");
+            println!(
+                "account {}: {email}",
+                if verb == "verify" {
+                    "verified"
+                } else {
+                    "enabled"
+                }
+            );
             Ok(())
         }
 
@@ -417,8 +441,10 @@ async fn run(args: &[String]) -> Result<(), String> {
             "  opengrok admin invite --org <org_id>\n",
             "  opengrok admin account create --email <email> --org <org_id> --name \"<First Last>\" [--password <p>]\n",
             "  opengrok admin account enable --email <email>\n",
+            "  opengrok admin account verify --email <email>   (the operator vouches for an address whose mail never arrived)\n",
             "  opengrok admin account password --email <email> [--password <p>]   (the no-mailer reset)\n",
-            "  opengrok admin purge --keep <email[,email]> [--commit 1]   (dry run by default; --commit 1 deletes every other account and all it owns)"
+            "  opengrok admin purge --keep <email[,email]> [--commit 1]   (dry run by default; --commit 1 deletes every other account and all it owns)\n",
+            "  opengrok vault status | reseal   (the credential key: which key sealed what, and rotation)"
         )
         .to_string()),
     }
