@@ -153,6 +153,7 @@ The coworker's computer, and the person's own machine (reverse-exec).
 | `/coworkers/{coworker_id}/computer/egress-policy` | GET PUT | `agui/routes.rs:939` | GET: JSON policy; PUT: 204 (422 "unknown mode") | *unverified* |
 | `/coworkers/{coworker_id}/computer/reset` | POST | `agui/routes.rs:943` | the status record after the reset | *unverified* |
 | `/coworkers/{coworker_id}/computer/update` | POST | `agui/routes.rs:935` | 202 + the status record | *unverified* |
+| `/coworkers/{coworker_id}/computer/vnc/{ticket}/{*rest}` | GET | `agui/routes.rs:942` | the box's noVNC page, its files and its websocket, proxied for one ticket; every answer carries `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock`, and a redirect from the box is refused with a 502 | the `vncUrl` of the computer status record points here (`docs/setup/environment.md`, `OG_DOCKER_IMAGE`). NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/screen` | GET | `agui/routes.rs:933` | JSON carrying a screenshot | *unverified* |
 | `/local-exec/audit` | GET | `local_exec.rs:244` | `{entries: […]}` | *unverified* |
 | `/local-exec/daemon` | POST GET | `local_exec.rs:239` | POST: `{machineId, token}` (one token per machine); GET: `{machines: […]}` | `ensure_daemon` enrols the Mac — `src/opengrok/local_exec.rs` (#147; the route is inferred) |
@@ -213,10 +214,12 @@ The web console, browser pages, the MCP door and its OAuth, probes.
 | `/admin/users` | GET | `account_api.rs:35` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/users/{id}/disable` | POST | `account_api.rs:37` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/users/{id}/enable` | POST | `account_api.rs:36` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
+| `/admin/users/{id}/verify` | POST | `account_api.rs:39` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/auth/login` | POST | `auth/routes.rs:187` | see the mount | not NativeChat: the console, `web/src/api/account.ts`. NativeChat: *unverified* |
 | `/auth/logout` | POST | `auth/routes.rs:188` | see the mount | not NativeChat: the console, `web/src/api/account.ts`. NativeChat: *unverified* |
 | `/auth/password/forgot` | POST | `auth/routes.rs:202` | see the mount | not NativeChat: the console, `web/src/api/account.ts`. NativeChat: *unverified* |
 | `/auth/refresh` | POST | `auth/routes.rs:189` | see the mount | not NativeChat: the console, `web/src/api/client.ts`. NativeChat: *unverified* |
+| `/auth/verify/resend` | POST | `auth/routes.rs:242` | `202 {accepted, mailer}`, the same for an unknown, a verified and a waiting address | not NativeChat: the console, `web/src/api/account.ts`. NativeChat: *unverified* |
 | `/console` | GET | `lib.rs:228` | the built SPA (`OG_WEB_CONSOLE_DIR`) | a browser: the SPA |
 | `/console/` | GET | `lib.rs:229` | the built SPA (`OG_WEB_CONSOLE_DIR`) | a browser: the SPA |
 | `/console/{*rest}` | GET | `lib.rs:230` | the built SPA (`OG_WEB_CONSOLE_DIR`) | a browser: the SPA |
@@ -227,5 +230,7 @@ The web console, browser pages, the MCP door and its OAuth, probes.
 | `/oauth/mcp/authorize` | GET POST | `auth/oauth_mcp.rs:140` | OAuth metadata / registration / consent page / tokens, per the MCP authorization spec | MCP clients during OAuth (`against_mcp_oauth.rs`) — not NativeChat |
 | `/oauth/mcp/register` | POST | `auth/oauth_mcp.rs:139` | OAuth metadata / registration / consent page / tokens, per the MCP authorization spec | MCP clients during OAuth (`against_mcp_oauth.rs`) — not NativeChat |
 | `/oauth/mcp/token` | POST | `auth/oauth_mcp.rs:144` | OAuth metadata / registration / consent page / tokens, per the MCP authorization spec | MCP clients during OAuth (`against_mcp_oauth.rs`) — not NativeChat |
+| `/ready` | GET | `health.rs:22` | `{ok, store, gateway, gatewayStatus}`, 503 when not ok; `gateway` is `ok`, `refused`, `unreachable` or `unused` | readiness probes (`docs/setup/environment.md`, `OG_GATEWAY_TOKEN`). NativeChat: *unverified* |
+| `/resend-verification` | GET POST | `auth/routes.rs:244` | see the mount | a browser page: the "Resend verification email" link on the sign-in card |
 | `/reset-password` | GET POST | `auth/routes.rs:206` | see the mount | a browser page: the emailed link |
 | `/signup` | GET POST | `auth/routes.rs:192` | see the mount | a browser: the invite link's page |
