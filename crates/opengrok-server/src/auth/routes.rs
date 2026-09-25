@@ -90,6 +90,11 @@ pub struct AuthState {
     /// Just-rotated-away refresh plaintext, held for `REFRESH_GRACE_MS` so a concurrent refresh
     /// with the old cookie can reuse the current pair. See `refresh_grace`.
     refresh_grace: std::sync::Arc<super::refresh_grace::RefreshGrace>,
+    /// `OG_DEV_SIGN_IN=1`: whether `/auth/cursor_dev_session_token` mints at all. OFF unless a
+    /// deployment says otherwise, because the local-caller check cannot tell a person's shell from
+    /// any other process on the host — and on Docker Desktop a coworker box's traffic to the host
+    /// is proxied by a host process, so it arrives from 127.0.0.1 with no forwarding header.
+    pub dev_sign_in: bool,
 }
 
 impl AuthState {
@@ -120,7 +125,16 @@ impl AuthState {
             cimd_allow_loopback: false,
             account_created: None,
             refresh_grace: std::sync::Arc::new(super::refresh_grace::RefreshGrace::default()),
+            dev_sign_in: false,
         }
+    }
+
+    /// Turn the password-free dev sign-in on (see `dev_sign_in`). The binary passes
+    /// `OG_DEV_SIGN_IN=1`; a test passes `true` to drive the smokes' path.
+    #[must_use]
+    pub fn with_dev_sign_in(mut self, on: bool) -> Self {
+        self.dev_sign_in = on;
+        self
     }
 
     /// Tests only: allow a client id metadata document on a loopback address.
@@ -642,10 +656,19 @@ pub async fn dev_session_token(
     headers: axum::http::HeaderMap,
     Query(query): Query<DevSessionQuery>,
 ) -> Result<Json<DevSessionReply>, AuthFailure> {
-    // LOOPBACK ONLY. This mints a real account token with no browser step, which is exactly right
-    // for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the desktop
-    // test binds 0.0.0.0, and an unauthenticated token mint reachable across the network is the
-    // hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
+    // OPT-IN FIRST. Refused with the client's SessionRejected shape (`cursor-auth.ts:313`) rather
+    // than a 404: the sentence is what tells an operator whose smokes stopped signing in which
+    // switch to flip.
+    if !state.dev_sign_in {
+        return Err(AuthFailure::SessionRejected(
+            "dev sign-in is off on this server (OG_DEV_SIGN_IN is not 1); use the browser login"
+                .to_string(),
+        ));
+    }
+    // THEN LOOPBACK ONLY. This mints a real account token with no browser step, which is exactly
+    // right for the smoke scripts (they hit 127.0.0.1) and exactly wrong for a LAN host — the
+    // desktop test binds 0.0.0.0, and an unauthenticated token mint reachable across the network
+    // is the hole the browser login leg exists to close. Off-loopback callers use /loginDeepControl.
     let peer = peer.map(|axum::Extension(axum::extract::ConnectInfo(addr))| addr);
     if !is_local_caller(peer, &headers) {
         return Err(AuthFailure::SessionRejected(

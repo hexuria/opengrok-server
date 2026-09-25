@@ -77,18 +77,25 @@ async fn main() -> anyhow::Result<()> {
     // per-account: their own). Auth only announces; the listener below does the provisioning
     // once the full state exists.
     let (account_created, mut new_accounts) = tokio::sync::mpsc::unbounded_channel();
+    let resend_key = std::env::var("OG_RESEND_API_KEY")
+        .ok()
+        .or_else(|| std::env::var("RESEND_API").ok())
+        .filter(|key| !key.is_empty());
+    let dev_sign_in = std::env::var("OG_DEV_SIGN_IN").as_deref() == Ok("1");
+    if dev_sign_in {
+        tracing::warn!(
+            "OG_DEV_SIGN_IN=1: /auth/cursor_dev_session_token mints a password-free session for \
+             any local caller; leave it unset on a shared host"
+        );
+    }
     let auth = AuthState::new(
         PgStore::new(pool),
         Arc::new(TokenMinter::new(token_secret.as_bytes())),
         login_email,
     )
     .with_account_created(account_created)
-    .with_resend(
-        std::env::var("OG_RESEND_API_KEY")
-            .ok()
-            .or_else(|| std::env::var("RESEND_API").ok()),
-        public_url,
-    )
+    .with_resend(resend_key, public_url)
+    .with_dev_sign_in(dev_sign_in)
     .with_dns(
         match opengrok_server::domain_proof::SystemDns::from_system() {
             Ok(resolver) => Arc::new(resolver),

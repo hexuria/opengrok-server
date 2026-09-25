@@ -119,13 +119,15 @@ issuer (`OG_PUBLIC_GATEWAY_URL`) and the address it talks to disagree.
 3. Confirm a turn lands on the new address — the server's request log shows every call with its
    `X-Request-Id`.
 4. Sign in through the browser. The dev sign-in shortcut
-   (`GET /auth/cursor_dev_session_token`) answers only a caller on this machine talking to the
-   plain port directly: the socket peer is loopback, the `Host` names a loopback address, and no
-   `X-Forwarded-For` is present (`auth/routes.rs::is_local_caller`). Through Caddy — even
-   `https://127.0.0.1`, because Caddy stamps that header — or from any other machine, it refuses
-   with "dev sign-in is loopback-only; use the browser login". It also never signs in an account
-   that has a password. This surprised a capture mid-flow on 2 Sep 2026 — it is the intended
-   posture, not a fault.
+   (`GET /auth/cursor_dev_session_token`) is off unless the server runs with `OG_DEV_SIGN_IN=1`
+   (`setup/environment.md`); a deployment behind TLS is the kind that leaves it unset, and then
+   it refuses everyone with "dev sign-in is off on this server". Switched on, it answers only a
+   caller on this machine talking to the plain port directly: the socket peer is loopback, the
+   `Host` names a loopback address, and no `X-Forwarded-For` is present
+   (`auth/routes.rs::is_local_caller`). Through Caddy — even `https://127.0.0.1`, because Caddy
+   stamps that header — or from any other machine, it refuses with "dev sign-in is
+   loopback-only; use the browser login". It also never signs in an account that has a password.
+   This surprised a capture mid-flow on 2 Sep 2026 — it is the intended posture, not a fault.
 
 Claude Code (16.oauth is on main):
 
