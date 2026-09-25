@@ -153,8 +153,18 @@ pub async fn submit_user_form(
     // then put an email into whatever field the page had focused. A card that names no call
     // cannot be tied to a run and types nothing either. A collect card types nothing anyway. A
     // stop landing between this check and the typing still types: the window is that interval,
-    // no longer the card's whole life.
-    if !collect && !waits_on(state, account_id, &coworker_id, call_id_of(&entry)).await {
+    // no longer the card's whole life. A log that cannot be read says nothing either way, and the
+    // card stays open for a retry: settled on it, a run still parked would sit behind a closed
+    // card that no settle or sweep looks at again.
+    let waited = if collect {
+        Some(true)
+    } else {
+        waits_on(state, account_id, &coworker_id, call_id_of(&entry)).await
+    };
+    let Some(waited) = waited else {
+        return (503, json!({ "error": "run log unavailable; try again" }));
+    };
+    if !waited {
         let settled = settle_entry(
             entry,
             FormResolution::FillFailed,
@@ -422,7 +432,7 @@ pub async fn resolve_box_handoff(
                 .gateway_transcript(&coworker_id, account_id)
                 .await
                 .ok()
-                .and_then(|entries| handoff_call(&entries, &waiting.on)),
+                .and_then(|entries| handoff_call(&entries, &waiting)),
             None => None,
         },
     };
@@ -588,7 +598,7 @@ pub async fn settle_holds_seen(
     waiting: &WaitingCalls,
     now_ms: i64,
 ) -> bool {
-    let waiting = &waiting.on;
+    let calls = &waiting.on;
     let expired = |entry: &Value| minted_at(entry) <= now_ms.saturating_sub(hold_ms());
     // Still to be answered when this pass began: an open sibling either times out below and
     // answers its own call or is the person's, and an escalated one is answered by its handoff.
@@ -599,7 +609,7 @@ pub async fn settle_holds_seen(
         .collect();
     let mut written = true;
     for entry in entries {
-        let dead = call_id_of(entry).is_some_and(|call| !waiting.contains_key(call));
+        let dead = call_id_of(entry).is_some_and(|call| !calls.contains_key(call));
         if !is_unresolved(entry) || !(dead || expired(entry)) {
             continue;
         }
@@ -612,7 +622,7 @@ pub async fn settle_holds_seen(
                 // Its own call; or, when its run is parked on a sibling from the same completion
                 // whose card is no longer open (so nothing else will answer it), the sibling's —
                 // a timed-out form must not leave its run parked with nothing left to wake it.
-                let call_id = call_id_of(&settled).map(|call| match waiting.get(call) {
+                let call_id = call_id_of(&settled).map(|call| match calls.get(call) {
                     Some(pending) if !open.contains(pending.as_str()) => pending.as_str(),
                     _ => call,
                 });
@@ -646,16 +656,24 @@ pub async fn settle_holds_seen(
 /// The call a live handoff answers, which is its escalated form's: `Some(Some(call))` for the
 /// form whose run still waits, `Some(None)` for a form written before cards carried a call (the
 /// first parked form run is all there is to go on), `None` when no escalated form's run waits.
-fn handoff_call(entries: &[Value], waiting: &BTreeMap<String, String>) -> Option<Option<String>> {
-    entries
+///
+/// AN OLD FORM WITH NO CALL COUNTS ONLY WHILE A FORM RUN WITH NO CARD OF ITS OWN WAITS. Counted
+/// whenever it was anywhere in the transcript, it made every later handoff look waited on, so a
+/// stopped run's handoff was never declined — only timed out, ten minutes on.
+fn handoff_call(entries: &[Value], waiting: &WaitingCalls) -> Option<Option<String>> {
+    let mut escalated = entries
         .iter()
         .rev()
-        .filter(|entry| is_escalated_form(entry))
-        .find_map(|form| match call_id_of(form) {
-            Some(call) if waiting.contains_key(call) => Some(Some(call.to_string())),
-            Some(_) => None,
-            None => Some(None),
-        })
+        .filter(|entry| is_escalated_form(entry));
+    if let Some(call) = escalated
+        .clone()
+        .filter_map(call_id_of)
+        .find(|call| waiting.on.contains_key(*call))
+    {
+        return Some(Some(call.to_string()));
+    }
+    (escalated.any(|form| call_id_of(form).is_none()) && waiting.a_form_without_its_card(entries))
+        .then_some(None)
 }
 
 /// What the parked runs of one coworker wait on, as one read of the log saw them.
@@ -663,6 +681,27 @@ fn handoff_call(entries: &[Value], waiting: &BTreeMap<String, String>) -> Option
 pub struct WaitingCalls {
     /// Every call a parked run waits on, with the call that run is parked on.
     on: BTreeMap<String, String>,
+    /// The runs parked on a form.
+    forms: Vec<FormPark>,
+}
+
+/// A run parked on a form: every call it waits on.
+#[derive(Debug, Clone)]
+struct FormPark {
+    calls: BTreeSet<String>,
+}
+
+impl WaitingCalls {
+    /// Whether some run parked on a form has no card in `entries` that names one of its calls —
+    /// its card was written before cards carried a call.
+    fn a_form_without_its_card(&self, entries: &[Value]) -> bool {
+        self.forms.iter().any(|park| {
+            !entries
+                .iter()
+                .filter_map(call_id_of)
+                .any(|call| park.calls.contains(call))
+        })
+    }
 }
 
 /// Every call a parked run of this coworker waits on. `None` when the log cannot be read: a
@@ -679,8 +718,12 @@ pub async fn waiting_calls(
         if let Some(pending) = run.pending.as_ref()
             && resume::run_belongs_to(&run, coworker_id)
         {
-            for call in resume::parked_calls(&run) {
-                waiting.on.insert(call, pending.call_id.clone());
+            let calls = resume::parked_calls(&run);
+            for call in &calls {
+                waiting.on.insert(call.clone(), pending.call_id.clone());
+            }
+            if pending.reason == opengrok_core::run::SuspendReason::UserForm {
+                waiting.forms.push(FormPark { calls });
             }
         }
     }
@@ -1016,20 +1059,23 @@ fn nothing_filled(form: &FormRequest) -> Vec<FieldOutcome> {
         .collect()
 }
 
-/// Whether a parked run still waits on this call.
+/// Whether a run parked on a form still waits on this call; `None` when the log cannot be read.
 async fn waits_on(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     call_id: Option<&str>,
-) -> bool {
+) -> Option<bool> {
     let Some(call_id) = call_id else {
-        return false;
+        return Some(false);
     };
-    let reason = opengrok_core::run::SuspendReason::UserForm;
-    pending_suspended(state, account_id, coworker_id, reason, Some(call_id))
-        .await
-        .is_some()
+    let waiting = waiting_calls(state, account_id, coworker_id).await?;
+    Some(
+        waiting
+            .forms
+            .iter()
+            .any(|park| park.calls.contains(call_id)),
+    )
 }
 
 async fn heal_or_already(

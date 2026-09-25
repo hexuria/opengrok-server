@@ -502,24 +502,40 @@ pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) 
         || run.thread_id == format!("gateway-{}", agent.as_str())
 }
 
+/// The call a `run-awaiting-approval` frame parked on.
+fn park_call(frame: &Value) -> Option<&str> {
+    (frame.get("type").and_then(Value::as_str) == Some("CUSTOM")
+        && frame.get("name").and_then(Value::as_str) == Some("run-awaiting-approval"))
+    .then(|| frame.get("callId").and_then(Value::as_str))
+    .flatten()
+    .filter(|call| !call.is_empty())
+}
+
 /// The calls a parked run is waiting on: every `run-awaiting-approval` it raised and has not had
 /// answered, not only `pending`. Forms raised in one completion park together and `pending` is
 /// the last of them, so a card for an earlier one is still this run's to answer. Empty for a run
 /// that is not parked — a card's run that has moved on no longer waits on anything.
+///
+/// ONLY SINCE ITS LAST ANSWER. An answer is always to the call the run is parked on, the last of
+/// its completion's parks, so an unanswered sibling raised before it belongs to a completion the
+/// run has moved past. Counted from the whole log, that sibling's card looked waited on again the
+/// moment the run parked a second time, and held the screen for as long as it did.
 pub(crate) fn parked_calls(run: &opengrok_core::run::Run) -> std::collections::BTreeSet<String> {
     let mut calls = std::collections::BTreeSet::new();
     if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
         return calls;
     }
-    for frame in &run.emitted {
-        if frame.get("type").and_then(Value::as_str) == Some("CUSTOM")
-            && frame.get("name").and_then(Value::as_str) == Some("run-awaiting-approval")
-            && let Some(call) = frame.get("callId").and_then(Value::as_str)
-            && !call.is_empty()
-        {
-            calls.insert(call.to_string());
-        }
-    }
+    let since = run
+        .emitted
+        .iter()
+        .rposition(|frame| park_call(frame).is_some_and(|call| run.answered.contains(call)))
+        .map_or(0, |at| at + 1);
+    calls.extend(
+        run.emitted[since..]
+            .iter()
+            .filter_map(park_call)
+            .map(str::to_string),
+    );
     calls.extend(run.pending.iter().map(|pending| pending.call_id.clone()));
     calls.retain(|call| !run.answered.contains(call));
     calls

@@ -3241,9 +3241,9 @@ fn attach(state: AgUiState, account_id: AccountId, run_id: RunId) -> Response {
                 let _ = tx.send(unreadable(""));
                 return;
             };
-            let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+            let window = run_time_window(&run.emitted);
             let frames = log_frames(
-                events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+                events_for_client(&state, &account_id, &run, window).await,
                 run.emitted.len(),
             );
             for frame in frames.into_iter().skip(sent) {
@@ -3372,8 +3372,8 @@ pub async fn replay_run(
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     }
 
-    let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
-    let events = events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await;
+    let window = run_time_window(&run.emitted);
+    let events = events_for_client(&state, &account_id, &run, window).await;
 
     Json(serde_json::json!({
         "runId": run_id.as_str(),
@@ -3382,7 +3382,7 @@ pub async fn replay_run(
         // When the turn began. A client that picks a run up after a restart has no bubble for
         // it and has to make one; without this it would stamp that bubble with the moment it
         // noticed, and the turn would sort to the wrong place in the thread for good.
-        "startedAtMs": started_at_ms,
+        "startedAtMs": started_at_ms(window),
         "failure": run.failure,
         "pending": run.pending,
         "events": events,
@@ -3390,26 +3390,32 @@ pub async fn replay_run(
     .into_response()
 }
 
-fn run_time_window(emitted: &[serde_json::Value]) -> (i64, i64) {
-    let times: Vec<i64> = emitted
+/// The first and last timestamps a run has logged; `None` before it has logged any.
+fn run_time_window(emitted: &[serde_json::Value]) -> Option<(i64, i64)> {
+    let mut times = emitted
         .iter()
-        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64))
-        .collect();
-    match (times.first(), times.last()) {
-        (Some(&first), Some(&last)) => (first, last),
-        // An empty window. "Everything" folded every card the coworker ever raised into a run
-        // that had not logged a timestamp yet.
-        _ => (i64::MAX, i64::MIN),
-    }
+        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64));
+    let first = times.next()?;
+    Some((first, times.last().unwrap_or(first)))
+}
+
+/// The window a run with no timestamps hydrates against: one no card falls inside. "Everything"
+/// folded every card the coworker ever raised into a run that had not logged a timestamp yet.
+const EMPTY_WINDOW: (i64, i64) = (i64::MAX, i64::MIN);
+
+/// `startedAtMs` for a run: 0 until it has logged a timestamp, as it always said. The empty
+/// window's bound is not a time — past JavaScript's safe integers, and an Invalid Date.
+fn started_at_ms(window: Option<(i64, i64)>) -> i64 {
+    window.map_or(0, |(started, _)| started)
 }
 
 async fn events_for_client(
     state: &AgUiState,
     account_id: &AccountId,
     run: &opengrok_core::run::Run,
-    started_at_ms: i64,
-    updated_at_ms: i64,
+    window: Option<(i64, i64)>,
 ) -> Vec<serde_json::Value> {
+    let (started_at_ms, updated_at_ms) = window.unwrap_or(EMPTY_WINDOW);
     let forms = match run.coworker_id.as_ref() {
         Some(coworker_id) => state
             .auth
@@ -5457,7 +5463,7 @@ mod tests {
                 "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
             }
         });
-        let (from, to) = run_time_window(&[]);
+        let (from, to) = run_time_window(&[]).unwrap_or(EMPTY_WINDOW);
         let hydrated = crate::agui::user_form::hydrate_agui_events(
             Vec::new(),
             std::slice::from_ref(&card),
@@ -5487,7 +5493,13 @@ mod tests {
             }
         });
         let emitted = vec![json!({"type": "RUN_STARTED"})];
-        let (from, to) = run_time_window(&emitted);
+        let window = run_time_window(&emitted);
+        assert_eq!(
+            started_at_ms(window),
+            0,
+            "a run with no timestamp yet reports no start, not the empty window's bound"
+        );
+        let (from, to) = window.unwrap_or(EMPTY_WINDOW);
         let out = crate::agui::user_form::hydrate_agui_events(
             emitted,
             std::slice::from_ref(&card),

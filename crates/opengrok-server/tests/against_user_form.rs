@@ -3317,3 +3317,51 @@ async fn a_form_parked_after_the_waiting_set_was_read_stays_open() {
     assert_eq!(card["formResolution"], "dismissed", "{card}");
     assert!(card.get("timedOut").is_none(), "{card}");
 }
+
+/// #188. A submit that cannot read the run log cannot tell whether the card's run still waits, and
+/// says so: 503, nothing typed, the card left open for a retry. Settled fill_failed instead, a run
+/// still parked would sit behind a closed card that no settle or sweep looks at again.
+#[tokio::test]
+async fn a_submit_that_cannot_read_the_run_log_leaves_the_card_open() {
+    let database_url = database_or_skip!();
+    let email = format!("hold-unread-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+
+    h.turn_on(&token, &agent, &thread("a"), "sign in").await;
+    let form = h.wait_for_form(&agent).await;
+    let entry_id = form["id"].as_str().expect("entry id").to_string();
+    let run = parked(&h).await.remove(0);
+    let stream = opengrok_store::run_stream(&run);
+    let original: Value =
+        sqlx::query_scalar("select payload from events where stream_id = $1 and stream_seq = 1")
+            .bind(&stream)
+            .fetch_one(h.store.pool())
+            .await
+            .expect("first event");
+    let rewrite = |payload: Value| {
+        sqlx::query("update events set payload = $2 where stream_id = $1 and stream_seq = 1")
+            .bind(stream.clone())
+            .bind(payload)
+            .execute(h.store.pool())
+    };
+    rewrite(json!({"unreadable": true}))
+        .await
+        .expect("break the log");
+
+    let submit = json!({ "entryId": entry_id, "agentId": agent, "values": { "email": EMAIL, "password": SECRET } });
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", submit.clone())
+        .await;
+    assert_eq!(status, 503, "{body}");
+    assert!(!body.to_string().contains(SECRET), "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed");
+    let card = stored_card(&h, &agent, &entry_id).await;
+    assert!(card.get("formResolution").is_none(), "{card}");
+
+    rewrite(original).await.expect("mend the log");
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", submit).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+}

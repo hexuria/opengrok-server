@@ -281,3 +281,110 @@ fn hydrate_does_not_inject_another_runs_form() {
         "the run that made the call still gets its card: {out:?}"
     );
 }
+
+fn escalated(id: &str, call: Option<&str>) -> Value {
+    let mut entry = email_form(id, Some("escalated"), 10);
+    if let Some(call) = call {
+        entry["callId"] = json!(call);
+    }
+    entry
+}
+
+/// #188. An old escalated form with no call used to make every later handoff look waited on, so a
+/// stopped run's handoff was never declined. It counts only while a form run whose card carries
+/// no call still waits.
+#[test]
+fn an_old_escalated_form_with_no_call_does_not_keep_every_handoff_alive() {
+    let entries = vec![escalated("e_old", None), escalated("e_new", Some("c-new"))];
+    assert_eq!(handoff_call(&entries, &WaitingCalls::default()), None);
+
+    let carded = WaitingCalls {
+        on: BTreeMap::from([("c-new".to_string(), "c-new".to_string())]),
+        forms: vec![FormPark {
+            calls: BTreeSet::from(["c-new".to_string()]),
+        }],
+    };
+    assert_eq!(
+        handoff_call(&entries, &carded),
+        Some(Some("c-new".to_string()))
+    );
+
+    let uncarded = WaitingCalls {
+        on: BTreeMap::from([("c-legacy".to_string(), "c-legacy".to_string())]),
+        forms: vec![FormPark {
+            calls: BTreeSet::from(["c-legacy".to_string()]),
+        }],
+    };
+    assert_eq!(handoff_call(&entries, &uncarded), Some(None));
+}
+
+fn park(call: &str) -> Value {
+    json!({"type": "CUSTOM", "name": "run-awaiting-approval", "reason": "user-form", "callId": call})
+}
+
+/// #188. A twin raised with the call its run was answered on belongs to a completion the run has
+/// moved past: when the run parks again, that twin's card is not waited on.
+#[test]
+fn a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer() {
+    use opengrok_core::run::{Run, RunCommand, SuspendReason};
+    let mut run = Run::default();
+    let step = |run: &mut Run, command: RunCommand| {
+        for event in run.decide(command).unwrap() {
+            run.apply(&event);
+        }
+    };
+    step(
+        &mut run,
+        RunCommand::Start {
+            thread_id: "thr".into(),
+            coworker_id: None,
+            model: None,
+            system: None,
+            skill_id: None,
+            at_ms: 1,
+        },
+    );
+    let suspend = |call: &str| RunCommand::Suspend {
+        call_id: call.into(),
+        tool: "request_user_form".into(),
+        arguments: json!({}),
+        reason: SuspendReason::UserForm,
+        at_ms: 2,
+    };
+    for call in ["x", "y"] {
+        step(
+            &mut run,
+            RunCommand::Emit {
+                payload: park(call),
+                at_ms: 2,
+            },
+        );
+    }
+    step(&mut run, suspend("y"));
+    assert_eq!(
+        resume::parked_calls(&run),
+        BTreeSet::from(["x".to_string(), "y".to_string()]),
+        "twins from one completion both wait"
+    );
+    step(
+        &mut run,
+        RunCommand::Answer {
+            call_id: "y".into(),
+            approved: true,
+            by: "me".into(),
+            at_ms: 3,
+        },
+    );
+    step(
+        &mut run,
+        RunCommand::Emit {
+            payload: park("z"),
+            at_ms: 4,
+        },
+    );
+    step(&mut run, suspend("z"));
+    assert_eq!(
+        resume::parked_calls(&run),
+        BTreeSet::from(["z".to_string()])
+    );
+}
