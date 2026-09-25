@@ -725,6 +725,7 @@ async fn call_through(executor: &Executor, name: &str) -> opengrok_tools::ToolRe
         box_id: Some(opengrok_core::id::BoxId::from_stored("box_1")),
         group_box: None,
         screen_hold: false,
+        screen_held_in: None,
     };
     let call = opengrok_tools::ToolCall {
         id: "call_1".to_string(),
