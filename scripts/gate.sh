@@ -35,14 +35,50 @@ cargo fmt --all --check || fail "formatting (run: cargo fmt --all)"
 step "scripts/crate-size.sh"
 scripts/crate-size.sh || fail "crate size (a crate grew past its ceiling)"
 
+step "scripts/check-architecture.sh"
+scripts/check-architecture.sh || fail "architecture (a crate edge scripts/architecture.txt does not allow)"
+
+# cargo-deny is CI's `supply-chain` job. It is optional here because it reads the RustSec
+# advisory feed over the network; scripts/install-ci-tools.sh installs the pinned binary.
+if command -v cargo-deny >/dev/null 2>&1; then
+  step "cargo deny check"
+  cargo deny check --hide-inclusion-graph || fail "cargo deny (see deny.toml for how an ignore is justified)"
+else
+  step "cargo deny check: skipped, cargo-deny is not installed (scripts/install-ci-tools.sh)"
+fi
+
+# CI runs this as its own `formal` job; here it runs when the pinned tools are installed
+# (scripts/install-tla.sh, scripts/install-lean.sh, and a JVM), and says so when they are not.
+if [ -f "$HOME/.local/tla/tla2tools.jar" ] && command -v java >/dev/null 2>&1; then
+  step "scripts/formal.sh"
+  scripts/formal.sh || fail "formal models (formal/README.md says what each configuration shows)"
+else
+  step "scripts/formal.sh: skipped, TLC is not installed (scripts/install-tla.sh)"
+fi
+
 step "cargo check --workspace --all-targets"
 cargo check --workspace --all-targets || fail "check"
+
+# CLAUDE.md names this build as one that must stay clean (one reqwest, one hyper), and no gate
+# ran it, so it could break unseen.
+step "cargo check -p opengrok --no-default-features"
+cargo check -p opengrok --no-default-features || fail "check without default features"
 
 step "cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
 
-step "cargo test --workspace"
-cargo test --workspace || fail "tests"
+# nextest runs every test binary at once instead of one after another, which is most of what the
+# test step spent. It does not run doctests, so those keep cargo test. Without nextest installed
+# the gate falls back to cargo test, which runs the same tests.
+if command -v cargo-nextest >/dev/null 2>&1; then
+  step "cargo nextest run --workspace"
+  cargo nextest run --workspace --no-fail-fast || fail "tests"
+  step "cargo test --workspace --doc"
+  cargo test --workspace --doc || fail "doctests"
+else
+  step "cargo test --workspace"
+  cargo test --workspace || fail "tests"
+fi
 
 if [ "${1:-}" != "--smoke" ]; then
   echo

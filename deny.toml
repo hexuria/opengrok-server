@@ -1,0 +1,66 @@
+# cargo deny check: advisories, licences, bans and sources, in CI's `supply-chain` job and in
+# scripts/gate.sh when cargo-deny is installed (scripts/install-ci-tools.sh). Adopted from
+# hexuria/gol.
+#
+# Every ignore below names the crate that pins the vulnerable version and why no upgrade exists.
+# An ignore without a reason is how an advisory stays forever; when the pinning crate ships a
+# release, the ignore goes, and cargo-deny then fails on the next advisory, as it should.
+
+[graph]
+all-features = true
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # typesafe-sdk 0.1.2 (the `jev` feature, opengrok-server) is the newest release and requires
+    # reqwest 0.11, which pins hyper 0.14 / h2 0.3 / rustls 0.21. Every other client here is on
+    # reqwest 0.13 and the patched lines.
+    { id = "RUSTSEC-2026-0258", reason = "h2 0.3.27 is the last 0.3 release and has no backport; only typesafe-sdk 0.1.2's reqwest 0.11 reaches it" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101.7 is only reachable through typesafe-sdk 0.1.2's reqwest 0.11; the patched 0.103 line is used everywhere else" },
+    { id = "RUSTSEC-2026-0099", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2026-0104", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1.0.4 is unmaintained with no upgrade; typesafe-sdk 0.1.2 pulls it through reqwest 0.11" },
+    # jsonwebtoken 11 with `rust_crypto` links rsa whatever algorithm is used. Our tokens are HS256
+    # only, and every Validation is built with Algorithm::HS256, which refuses an RS* token before
+    # any RSA code runs (crates/opengrok-server/src/auth/token.rs). rsa has no fixed release.
+    { id = "RUSTSEC-2023-0071", reason = "rsa is linked by jsonwebtoken but never called: tokens are HS256 only and validation refuses other algorithms" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Our own crates, pinned in Cargo.lock. Anything else from git is refused: a git dependency
+# skips crates.io's yanking and advisory feed.
+allow-git = [
+    "https://github.com/hexuria/box",
+    "https://github.com/hexuria/cred-swap",
+]

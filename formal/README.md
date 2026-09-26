@@ -3,7 +3,10 @@
 Three TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
 facts the loop and the run lifecycle branch on — no events, HTTP, SQL or serialisation. They
 were written against `4a25af6` and drove the fixes that ship with them; each fix exists because
-TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
+TLC printed a trace without it. `scripts/formal.sh` re-runs all of it, and CI's `formal` job
+runs it on every change that is not docs only (TLC 1.7.4 and Lean 4.23, both pinned by sha256
+in `scripts/install-tla.sh` and `scripts/install-lean.sh`; under a minute). When a change
+must touch the models, and what to do with a counterexample: [`POLICY.md`](POLICY.md).
 
 | File | What it is |
 |---|---|
@@ -11,7 +14,7 @@ TLC printed a trace without it. `scripts/formal.sh` re-runs all of it.
 | `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases, and a client retrying its POST with the same run id. |
 | `tla/JournalAppend.tla` | One journal write racing a Stop, as the store sees it: read the run, append at the next seq, lose the race with a `Conflict`. Which errors a write may retry. |
 | `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
-| `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose. |
+| `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose; its `\* VIOLATES:` line names the one invariant it must break, and breaking any other fails the check. |
 
 ## Model
 

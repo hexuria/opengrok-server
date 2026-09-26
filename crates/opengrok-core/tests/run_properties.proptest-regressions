@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7b5828f3748335ed81a5be031419cb1a919c88655b9212e762e855a2bf74c654 # shrinks to commands = [Finish { at_ms: 0 }, Start { thread_id: "t", coworker_id: None, model: None, system: None, skill_id: None, prompt: None, at_ms: 0 }]
+cc 89a58b6c02d7bb7e565466adf4139f60ce553d519e94d1da805945ef5b321b27 # shrinks to commands = [Finish { at_ms: 0 }, Start { thread_id: "t", coworker_id: None, model: None, system: None, skill_id: None, prompt: None, at_ms: 0 }]
+cc 7a71b2988e4b5b52a1d9c1db5c674ba8734f85240a37cd281a22707b60967189 # shrinks to commands = [Suspend { call_id: "c1", tool: "computer", arguments: Object {}, reason: PolicyApproval, at_ms: 0 }, Finish { at_ms: 0 }, Answer { call_id: "c1", approved: false, by: "person", at_ms: 0 }]

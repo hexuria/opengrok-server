@@ -281,6 +281,8 @@ pub enum RunError {
     NotAwaiting,
     #[error("that call has already been answered")]
     AlreadyAnswered,
+    #[error("that run has already started")]
+    AlreadyStarted,
 }
 
 #[derive(Debug, Clone)]
@@ -426,6 +428,16 @@ impl Run {
 
     pub fn decide(&self, command: RunCommand) -> Result<Vec<RunEvent>, RunError> {
         match command {
+            // A RUN STARTS ONCE, AND NEVER AFTER IT ENDED. `Started` puts the status back to
+            // `Running`, so a second one, or one after an ending (an ending may come first: a
+            // run can be failed or stopped before its Start is written), would reopen the run,
+            // and its next Finish would be a second ending in the log: what `ExactlyOneEnding`
+            // (formal/tla) and `Ending.at_most_one_terminal` (formal/lean) say cannot happen.
+            // The store's sequence check already refused both, since a Start is only appended at
+            // seq 0; the aggregate now says so itself. tests/run_properties.rs found both.
+            RunCommand::Start { .. } if self.started || self.status.is_terminal() => {
+                Err(RunError::AlreadyStarted)
+            }
             RunCommand::Start {
                 thread_id,
                 coworker_id,
@@ -528,6 +540,14 @@ impl Run {
                 // re-reads to find the call already answered.
                 if self.answered.contains(&call_id) {
                     return Err(RunError::AlreadyAnswered);
+                }
+                // An ended run takes no answer. A Stop clears the card, but a run failed or
+                // finished while parked (a hold that timed out, a close that wrote the ending)
+                // kept it pending, and `Answered` sets the status back to `Running`: a late
+                // answer revived a run the log had ended. tests/run_properties.rs found it.
+                // `NotAwaiting`, as a stopped run has always answered: an ended run is not.
+                if self.status.is_terminal() {
+                    return Err(RunError::NotAwaiting);
                 }
                 let Some(pending) = &self.pending else {
                     return Err(RunError::NotAwaiting);
@@ -1080,6 +1100,70 @@ mod tests {
             Err(RunError::NotAwaiting),
             "and answering it cannot restart the run"
         );
+    }
+
+    fn start_command() -> RunCommand {
+        RunCommand::Start {
+            thread_id: "t1".to_string(),
+            coworker_id: None,
+            model: None,
+            system: None,
+            skill_id: None,
+            prompt: None,
+            at_ms: 30,
+        }
+    }
+
+    fn apply_all(run: &mut Run, command: RunCommand) {
+        for event in run.decide(command).unwrap() {
+            run.apply(&event);
+        }
+    }
+
+    /// The property test's first counterexample: a second Start reopened a finished run, and
+    /// its next Finish was a second ending.
+    #[test]
+    fn a_finished_run_cannot_be_started_again() {
+        let mut run = started();
+        apply_all(&mut run, RunCommand::Finish { at_ms: 2 });
+        assert_eq!(run.decide(start_command()), Err(RunError::AlreadyStarted));
+        assert_eq!(run.status, RunStatus::Finished);
+    }
+
+    /// Its second: an ending recorded before the Start, then the Start.
+    #[test]
+    fn a_run_ended_before_it_started_cannot_start() {
+        let mut run = Run::default();
+        apply_all(&mut run, RunCommand::Finish { at_ms: 1 });
+        assert_eq!(run.decide(start_command()), Err(RunError::AlreadyStarted));
+    }
+
+    /// Its third: a run failed while parked kept its card pending, and a late answer set it
+    /// back to running. A Stop always closed the card; a failure and a finish now refuse too.
+    #[test]
+    fn a_run_failed_while_waiting_takes_no_answer() {
+        for ending in [
+            RunCommand::Fail {
+                reason: "the hold timed out".to_string(),
+                at_ms: 20,
+            },
+            RunCommand::Finish { at_ms: 20 },
+        ] {
+            let mut run = suspended();
+            apply_all(&mut run, ending);
+            let status = run.status;
+            assert_eq!(
+                run.decide(RunCommand::Answer {
+                    call_id: "c1".to_string(),
+                    approved: true,
+                    by: "acct_1".to_string(),
+                    at_ms: 21,
+                }),
+                Err(RunError::NotAwaiting),
+                "a late answer revives nothing"
+            );
+            assert!(status.is_terminal());
+        }
     }
 
     /// The whole point of the log: a process that comes back must reach the same conclusion, or a

@@ -1,0 +1,61 @@
+# What is worth running on main every night rather than on every pull request. Adopted from
+# hexuria/gol's nightly.yml.
+#
+# - advisories: a RustSec advisory published today fails a Cargo.lock nobody changed. The PR
+#   gate only finds it on the next pull request, which may be days away and about something else.
+# - properties: tests/run_properties.rs at 100,000 cases instead of the gate's 2,000.
+# - miri: undefined behaviour in the crates that are pure enough to run under it. The rest open
+#   sockets, spawn processes or talk to Postgres, which Miri cannot execute (gol hit the same wall
+#   and runs Miri on its pure crates only). `unsafe_code` is forbidden workspace-wide, so this
+#   checks our dependencies as much as our code.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - name: install the pinned CI tools
+        run: scripts/install-ci-tools.sh | tail -1 >> "$GITHUB_PATH"
+      - name: cargo deny check advisories
+        run: cargo deny check advisories --hide-inclusion-graph
+
+  properties:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - name: run properties at 100,000 cases
+        env:
+          PROPTEST_CASES: "100000"
+        run: cargo test -p opengrok-core --test run_properties --release
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - name: miri on opengrok-core and opengrok-wire
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+          # chrono reads the realtime clock, which isolation rejects; the tests pass without it.
+          MIRIFLAGS: -Zmiri-disable-isolation
+          # A property case under Miri costs what thousands do natively.
+          PROPTEST_CASES: "16"
+        run: |
+          cargo miri setup
+          cargo miri test -p opengrok-core
+          cargo miri test -p opengrok-wire
