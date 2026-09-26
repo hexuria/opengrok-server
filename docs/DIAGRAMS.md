@@ -34,11 +34,14 @@ building once", written to a ledger and fanned out in parallel.
 ## 2. Two Doors to the Server — *how the desktop client is reused*
 
 **https://claude.ai/code/artifact/a6abb218-83a2-4225-93e7-a66f0532be88**
-Source: [`artifacts/two-doors.html`](artifacts/two-doors.html)
+Source: [`archive/artifacts/two-doors.html`](archive/artifacts/two-doors.html)
+
+> **Removed 20 Sep 2026.** Both doors and the desktop client they served were deleted in P0-E;
+> clients now speak AG-UI (№3). Kept as the record of why door B was chosen.
 
 The workflow for putting a backend behind the Grok Bot desktop app, drawn as the fork it actually
 is. Door A — reimplement the vendor's private gRPC/proto server — is marked blocked, because the
-repo's own `NOTICE.md` and disparity inventory forbid exactly that. Door B — keep the shell, speak
+client repo's own notice and disparity inventory forbid exactly that. Door B — keep the shell, speak
 our own contract — is the chosen path.
 
 ---

@@ -26,7 +26,7 @@ makes it true, and its unticked boxes are the remaining work.
 The two doors built for the discontinued Grok Bot desktop client — seam A (`POST /api/{method}`
 and the `/events` stream) and seam B (ConnectRPC + its gRPC mirror) — were **deleted on
 20 Sep 2026**. What a client talks to now is AG-UI, the REST routes beside it, `/mcp` and
-`/health`. `docs/research/client-grok-bot.md` and `docs/setup/desktop-client.md` are kept as the
+`/health`. `docs/research/client-grok-bot.md` and `docs/archive/desktop-client.md` are kept as the
 record of what was there.
 
 ## Quick start

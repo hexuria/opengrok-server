@@ -31,7 +31,7 @@ Proven 31 Aug 2026 through the server-mode path, packaged app on `:1447`:
   `opengrok/docs/consent-model-B5-acceptance.md` and the screenshots in
   `opengrok/docs/consent-model-evidence/` (computer tab, general tab, per-agent auto-review,
   the auto-review card raised in the live app).
-- **Server half:** [`../auto-review/README.md`](../auto-review/README.md) — prompts sent from
+- **Server half:** [`../../../verification/auto-review/README.md`](../../../verification/auto-review/README.md) — prompts sent from
   that app landing as real runs on this server (streams `run_01a057f0-…`, `run_01a057f5-…`,
   `run_01a057f6-…`), answers and cards streamed back to it, transcript rows in `gateway_entry`.
 

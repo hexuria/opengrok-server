@@ -801,7 +801,7 @@ alter table coworker_template add column if not exists day_points bigint;
 alter table coworker_template add column if not exists role text;
 create index if not exists coworker_template_use_template_idx
     on coworker_template_use (template_id);
--- Groups (`plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.
+-- Groups (`docs/archive/plan-rooms.md` §2): a coworker with members. The roster's isGroup/memberIds.
 alter table coworker_view add column if not exists members jsonb not null default '[]'::jsonb;
 
 -- WHEN THIS PERSON LAST LOOKED AT THIS COWORKER. The roster's `hasUnread`/`unreadCount` are read

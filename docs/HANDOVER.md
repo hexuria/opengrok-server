@@ -3,7 +3,7 @@
 You are picking up OpenGrok in a fresh session. This page is the state of play; everything else
 is reference. Rewritten 25 Sep 2026 for the client served today. Previous versions:
 `git show d73042b:docs/HANDOVER.md` (last updated 6 Sep, the Grok Bot era),
-[`HANDOVER-9v-10.3.md`](HANDOVER-9v-10.3.md) (1 Sep) and
+[`archive/handover-2026-09-01.md`](archive/handover-2026-09-01.md) (1 Sep) and
 [`archive/handover-2026-08-29.md`](archive/handover-2026-08-29.md) (P0 era).
 
 **Read [`../CLAUDE.md`](../CLAUDE.md) first** (it loads automatically), then this, then act.

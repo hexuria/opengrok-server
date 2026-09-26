@@ -20,7 +20,7 @@ what is already decided, and your first task.
    connects through its own OpenGrok server mode (`boxRuntime: "opengrok"` + the
    `openGrokGatewayUrl` setting); launching it with `SAND_HOST_GATEWAY_URL` deadlocks it before
    the window opens. Either way it **throws if the gateway host starts with `127.0.0.1` or
-   `localhost`** — serve on a non-loopback address. `docs/setup/desktop-client.md`.
+   `localhost`** — serve on a non-loopback address. `docs/archive/desktop-client.md`.
 2. **The gateway is embeddable — `oag_server::public_router()` returns a wired Axum router.** But if
    you skip `oag_server::serve()` you must spawn the catalogue refresh yourself, or a replica
    serves a **stale catalogue while reporting healthy**. `docs/research/gateway-open-ai-gateway.md` §8.
@@ -29,7 +29,7 @@ what is already decided, and your first task.
    `countAgents` must be a number, `getTrays` an array, or the renderer diverts or throws.
    And if the roster silently stops updating, check the client's `inferenceProvider` setting —
    and its persisted gateway address against the machine's current LAN address — before
-   suspecting us. `docs/setup/desktop-client.md`.
+   suspecting us. `docs/archive/desktop-client.md`.
 
 ---
 
@@ -72,7 +72,7 @@ crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
+  opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/archive/verification/plan-mode-wire/`)
   opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do

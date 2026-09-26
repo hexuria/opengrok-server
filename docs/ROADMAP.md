@@ -85,7 +85,7 @@ built and verified for the discontinued Grok Bot client, not what the server ser
 - [x] **7.v** The packaged app boots against us and shows a populated sidebar — via the
   client's **OpenGrok server mode** (`boxRuntime: "opengrok"` + the `openGrokGatewayUrl`
   setting), not the `SAND_HOST_GATEWAY_URL` env var, which still deadlocks the app and is a
-  dead path now (B1 re-checked 1 Sep). Evidence: `docs/verification/real-client/README.md`
+  dead path now (B1 re-checked 1 Sep). Evidence: `docs/archive/verification/real-client/README.md`
   and the 31 Aug acceptance run it cites. (`0ae194e`)
 
 ## Slice 8 — A conversation from the real app (P4) — removed in P0-E
@@ -114,7 +114,7 @@ The milestone that proves the port; everything after it is breadth, not risk.
 - [x] **8.v** A message sent from the packaged app runs on this server and the answer streams
   back — the 31 Aug acceptance flows (real-judge refusal, auto-review cards) each began with a
   prompt typed in the app and ended with its reply rendered there. Evidence:
-  `docs/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
+  `docs/archive/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
   (streams `run_01a057f0-…`, `run_01a057f5-…`). (`0ae194e`)
 
 ## Slice 9 — Seam B: identity and the mint (P0 + P1) — removed in P0-E
@@ -151,7 +151,7 @@ Axum edge; a bare tonic gRPC server cannot answer the client.
 - [x] **9.v** The client mints its own connection through us: packaged Open Grok.app called
   `signInToOpenGrokServer`, PKCE login bound a throwaway account, `/auth/poll` went 404→200,
   `EnsureSandBox` returned `OG_PUBLIC_GATEWAY_URL` and the bearer, and
-  `boxRuntime`/`openGrokGatewayUrl` persisted. `docs/verification/real-client/9v-mint.md`.
+  `boxRuntime`/`openGrokGatewayUrl` persisted. `docs/archive/verification/real-client/9v-mint.md`.
   *(this commit)*
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
@@ -351,7 +351,7 @@ the proof, not construction.
   on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
   runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
   `verification/policy-card/` (the card with the grant's reason verbatim, Allow once, the run
-  continues). Plan: `plan-slice16-later.md` Part A. (`8580a54` + follow-up)
+  continues). Plan: `archive/plan-slice16-later.md` Part A. (`8580a54` + follow-up)
 - [x] **16.oauth** OAuth 2.1 on `/mcp` — "mint a bot key from the browser". An embedded
   authorization server (`auth/oauth_mcp.rs`) under `/oauth/mcp/*`, never `/oauth/token` (that is
   the desktop's refresh): RFC 9728 metadata at both `/.well-known/oauth-protected-resource[/mcp]`
@@ -429,7 +429,7 @@ key that opens the model door, sets the org's budget and that member's cap, and 
 
 A coworker's model was decided once, at hire, and could never change; every create path except
 REST ignored a requested model and stored the deployment default. Investigation:
-`plan-coworker-model-pins.md` (this pass corrected several of its claims — see below).
+`archive/plan-coworker-model-pins.md` (this pass corrected several of its claims — see below).
 
 - [x] **18.1** `CoworkerCommand::Repin` / `CoworkerEvent::Repinned` — a pin is a decision that can
   be revisited, with the same `alive()` guard every command but `Hire` takes. And `Hire` finally
@@ -671,12 +671,12 @@ every record that sharing would otherwise break carry whose it is.
   multipliers), #53 (per-model usage, the rolling day, points per window, the batch read).
   `tests/against_spend_caps.rs`, `against_templates.rs`. #49.
 - [ ] Commands: `goal`, `plan`, `review`. Parked: the packaged app's `sendPrompt` has no
-  `mode` field and no Plan-mode picker (`docs/verification/plan-mode-wire/`). Honouring
+  `mode` field and no Plan-mode picker (`docs/archive/verification/plan-mode-wire/`). Honouring
   one here would invent a contract. A client composer control is the prerequisite.
   Auto-review (the consent judge) is a different product and already shipped.
 - [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
   `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
-- [x] **Groups** (`plan-rooms.md` §2; the rooms half of the old channels plan, as the client
+- [x] **Groups** (`archive/plan-rooms.md` §2; the rooms half of the old channels plan, as the client
   actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
   `SetMembers`, roster `isGroup`/`memberIds`), no computer, key or model of its own;
   `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules
@@ -690,7 +690,7 @@ every record that sharing would otherwise break carry whose it is.
   name; the room pauses where the round stood (`room_pause`), and the answer — given naming the
   group, as the desktop does — resumes that member inside the room and then the members still
   to speak. `tests/against_group_card.rs`.
-- [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
+- [ ] Cross-account shared rooms — parked (`archive/plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
 - [x] **Artifacts.** One store for what a run produces and what a person attaches: `POST

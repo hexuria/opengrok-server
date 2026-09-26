@@ -9,7 +9,7 @@
 //! mints, bound to one account and one coworker, revocable from the coworker's key list. The
 //! flow adds no authority; it replaces `curl` + paste with a browser tab.
 //!
-//! WHAT IS IMPLEMENTED, AND WHAT THE SPECS SAY (`docs/plan-slice16-later.md` §2.1, cited):
+//! WHAT IS IMPLEMENTED, AND WHAT THE SPECS SAY (`docs/archive/plan-slice16-later.md` §2.1, cited):
 //! - RFC 9728 protected-resource metadata, served at both the path-suffixed
 //!   (`/.well-known/oauth-protected-resource/mcp`) and root forms — clients probe both.
 //! - RFC 8414 authorization-server metadata at `/.well-known/oauth-authorization-server`.
