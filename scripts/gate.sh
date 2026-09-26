@@ -7,7 +7,8 @@
 # predicting the remote one and people stop trusting either.
 #
 # Usage:
-#   scripts/gate.sh              # checks and tests only
+#   scripts/gate.sh --checks     # checks only: fmt, sizes, architecture, deny, formal, clippy
+#   scripts/gate.sh              # checks and tests
 #   scripts/gate.sh --smoke      # also stands the server up and runs the smoke scripts
 set -euo pipefail
 
@@ -66,6 +67,14 @@ cargo check -p opengrok --no-default-features || fail "check without default fea
 
 step "cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings || fail "clippy"
+
+# CI's `checks` suite, which is what a push to main runs: its pull request already ran the tests
+# on this same merge result, and the nightly run repeats them (docs/setup/gate.md, "CI suites").
+if [ "${1:-}" = "--checks" ]; then
+  echo
+  echo "GATE PASSED (checks only). Drop --checks to also run the tests."
+  exit 0
+fi
 
 # nextest runs every test binary at once instead of one after another, which is most of what the
 # test step spent. It does not run doctests, so those keep cargo test. Without nextest installed

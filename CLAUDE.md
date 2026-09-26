@@ -109,11 +109,16 @@ cargo clippy --workspace --all-targets
 cargo test --workspace          # many tests need Postgres; they skip loudly without it
 scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
+scripts/gate.sh --checks         # the checks without the tests: what a push to main runs in CI
 scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
 scripts/check-architecture.sh    # fail on a crate edge scripts/architecture.txt does not allow
 scripts/formal.sh                # TLC + Lean on formal/ (install: scripts/install-tla.sh, install-lean.sh)
 scripts/install-ci-tools.sh      # pinned cargo-deny + cargo-nextest; gate.sh uses them when present
 ```
+
+**CI runs by branch prefix:** `doc-*` runs only the doc tests, `formal-*` only TLA+/Lean, `web-*`
+only the console; a prefixed branch that touches anything else fails. Other branches run by what
+changed; the Actions tab runs one suite on demand (`docs/setup/gate.md`, "CI suites").
 
 **`OG_MODEL_DOOR=mock-cards` REFUSES TO START.** It served the mock transcript catalogue, which
 was deleted on 20 Sep 2026 with the desktop client's door it rendered into. It fails closed and
