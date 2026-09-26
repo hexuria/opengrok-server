@@ -49,7 +49,7 @@ pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
     ArtifactRow, CredentialUpdate, PasskeyMeta, PasskeyWrite, PgStore, RecipeGrantRow, RecipeRow,
     RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, SiteLoginRow, SiteLoginSecrets,
-    SiteLoginWrite, ThreadRun,
+    SiteLoginWrite, ThreadListing, ThreadRun,
 };
 pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};

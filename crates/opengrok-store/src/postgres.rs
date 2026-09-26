@@ -36,6 +36,23 @@ pub struct ThreadRun {
     pub updated_at_ms: i64,
 }
 
+/// One conversation as `GET /ag-ui/threads` lists it (`PgStore::threads_owned_by`).
+#[derive(Debug, Clone)]
+pub struct ThreadListing {
+    pub thread_id: String,
+    /// The last run's; `None` for a turn with no coworker or one never started.
+    pub coworker_id: Option<CoworkerId>,
+    pub last_run_id: RunId,
+    /// The stored status word, as `ThreadRun::status`.
+    pub last_status: String,
+    pub updated_at_ms: i64,
+    /// The first started run's journaled prompt, verbatim; `None` when none was journaled.
+    pub first_prompt: Option<Vec<serde_json::Value>>,
+    /// The caller's own routine this thread is, and its name (a monitor has none). Another
+    /// account's routine id used as a chat thread is `None`.
+    pub routine: Option<(crate::FiredBy, String)>,
+}
+
 /// One `run_view` row as a `ThreadRun`, shared by the two readers of a thread's history so they
 /// cannot drift in what they make of a row. `started_at_ms` is absent on runs projected before
 /// that column existed, and the last time the run moved is the closest honest answer for those.
@@ -583,6 +600,92 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(thread_run_from_row).collect()
+    }
+
+    /// The caller's conversations, newest first — `GET /ag-ui/threads`.
+    ///
+    /// OWNER-FILTERED IN EVERY PART: on an org-shared coworker two members write the same
+    /// `thread_id`, and a lateral without `account_id` hands one the other's last run or first
+    /// words. The routine joins match the owner too, so a guessed routine id lends nothing.
+    ///
+    /// THE CURSOR IS ON THE THREAD, IN `having`: on each run it kept a thread's older runs past the
+    /// cursor and listed the thread again. With no thread id, `''` makes it a plain "older than".
+    ///
+    /// `audit_prefix` is the MCP door's, passed in so the literal lives once; the exclusion is
+    /// exact against the last run's own coworker, never a prefix (`mcp_door::is_mcp_audit_run`).
+    pub async fn threads_owned_by(
+        &self,
+        account: &AccountId,
+        coworker: Option<&CoworkerId>,
+        before: Option<(i64, Option<&str>)>,
+        audit_prefix: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<ThreadListing>> {
+        let rows = sqlx::query(
+            "select page.*, first.prompt as first_prompt, coalesce(s.name, '') as routine_name,
+                    case when m.id is not null then 'monitor' else s.kind end as routine
+             from (
+               select t.thread_id, t.updated_at_ms, last.id as last_run_id,
+                      last.status as last_status, started.payload->>'coworker_id' as coworker_id
+               from (
+                 select thread_id, max(updated_at_ms) as updated_at_ms from run_view
+                 where account_id = $1 and hidden_at_ms is null group by thread_id
+                 having $2::bigint is null
+                     or (max(updated_at_ms), thread_id) < ($2::bigint, coalesce($3::text, ''))
+               ) t
+               join (
+                 select distinct on (thread_id) thread_id, id, status from run_view
+                 where account_id = $1 and hidden_at_ms is null
+                 order by thread_id, coalesce(started_at_ms, updated_at_ms) desc, id desc
+               ) last on last.thread_id = t.thread_id
+               left join lateral (select payload from events where stream_id = 'run/' || last.id
+                 and stream_seq = 1 and event_type = 'run-started') started on true
+               where ($4::text is null or started.payload->>'coworker_id' = $4::text)
+                 and not coalesce(t.thread_id = $5::text || (started.payload->>'coworker_id'), false)
+               order by t.updated_at_ms desc, t.thread_id desc limit $6
+             ) page
+             left join lateral (
+               select e.payload->'prompt' as prompt from run_view f join events e
+                 on e.stream_id = 'run/' || f.id and e.stream_seq = 1 and e.event_type = 'run-started'
+               where f.thread_id = page.thread_id and f.account_id = $1 and f.hidden_at_ms is null
+               order by coalesce(f.started_at_ms, f.updated_at_ms), f.id limit 1
+             ) first on true
+             left join schedule_view s on s.id = page.thread_id and s.account_id = $1
+             left join monitor_view m on m.id = page.thread_id and m.account_id = $1
+             order by page.updated_at_ms desc, page.thread_id desc",
+        )
+        .bind(account.as_str())
+        .bind(before.map(|(at_ms, _)| at_ms))
+        .bind(before.and_then(|(_, thread)| thread))
+        .bind(coworker.map(CoworkerId::as_str))
+        .bind(audit_prefix)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let name: String = row.try_get("routine_name")?;
+                let routine = match row.try_get::<Option<String>, _>("routine")?.as_deref() {
+                    Some("monitor") => Some(crate::FiredBy::Monitor),
+                    Some("webhook") => Some(crate::FiredBy::Webhook),
+                    Some(_) => Some(crate::FiredBy::Schedule),
+                    None => None,
+                };
+                Ok(ThreadListing {
+                    thread_id: row.try_get("thread_id")?,
+                    coworker_id: row
+                        .try_get::<Option<String>, _>("coworker_id")?
+                        .map(CoworkerId::from_stored),
+                    last_run_id: RunId::from_stored(row.try_get::<String, _>("last_run_id")?),
+                    last_status: row.try_get("last_status")?,
+                    updated_at_ms: row.try_get("updated_at_ms")?,
+                    first_prompt: row
+                        .try_get::<Option<serde_json::Value>, _>("first_prompt")?
+                        .and_then(|prompt| prompt.as_array().cloned()),
+                    routine: routine.map(|by| (by, name)),
+                })
+            })
+            .collect()
     }
 
     /// Whose run this is, if the projection knows. Recovery needs it: a run's aggregate carries
@@ -2533,58 +2636,6 @@ impl PgStore {
 
     pub async fn clear_account_computer_error(&self, account_id: &str) -> StoreResult<()> {
         sqlx::query("delete from account_computer_error where account_id = $1")
-            .bind(account_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    // ---- The account's one shared computer (1 account = 1 computer) ----
-
-    /// The account's computer, if it has one — the box id and its kind.
-    pub async fn account_computer(
-        &self,
-        account_id: &str,
-    ) -> StoreResult<Option<(String, String)>> {
-        let row = sqlx::query("select box_id, kind from account_computer where account_id = $1")
-            .bind(account_id)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|row| {
-            Ok((
-                row.try_get::<String, _>("box_id")?,
-                row.try_get::<String, _>("kind")?,
-            ))
-        })
-        .transpose()
-    }
-
-    /// Record the account's computer (created on its first agent). One row per account.
-    pub async fn set_account_computer(
-        &self,
-        account_id: &str,
-        box_id: &str,
-        kind: &str,
-        at_ms: i64,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into account_computer (account_id, box_id, kind, updated_at_ms)
-             values ($1, $2, $3, $4)
-             on conflict (account_id) do update set
-               box_id = excluded.box_id, kind = excluded.kind, updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(account_id)
-        .bind(box_id)
-        .bind(kind)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Forget the account's computer (its last agent was deleted and the box destroyed).
-    pub async fn clear_account_computer(&self, account_id: &str) -> StoreResult<()> {
-        sqlx::query("delete from account_computer where account_id = $1")
             .bind(account_id)
             .execute(&self.pool)
             .await?;

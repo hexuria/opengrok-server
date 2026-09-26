@@ -359,17 +359,6 @@ impl PgStore {
         row.as_ref().map(skill_version_row).transpose()
     }
 
-    /// Every version, newest first, for a history list.
-    pub async fn skill_versions(&self, skill_id: &str) -> StoreResult<Vec<SkillVersionRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{SKILL_VERSION_SELECT} where skill_id = $1 order by version desc"
-        )))
-        .bind(skill_id)
-        .fetch_all(self.pool())
-        .await?;
-        rows.iter().map(skill_version_row).collect()
-    }
-
     /// The files that came with one version, in path order so a listing is stable.
     pub async fn skill_files(
         &self,
