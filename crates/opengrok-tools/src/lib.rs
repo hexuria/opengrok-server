@@ -414,6 +414,14 @@ impl RecipeReceipt {
     }
 }
 
+/// A run written down before the box is touched, holding the bot's screen until it is dropped.
+/// `hold` is whatever keeps the claim alive (the server's lease renewal); dropping the claim
+/// stops it, and a run that never lands then reads as interrupted once its lease lapses.
+pub struct RecipeClaim {
+    pub id: String,
+    pub hold: Box<dyn Send + Sync>,
+}
+
 /// Where the executor gets a recipe's steps from, and tells what a run did — the server
 /// implements it over the store, so this crate stays free of Postgres.
 #[async_trait::async_trait]
@@ -427,14 +435,26 @@ pub trait RecipeSource: Send + Sync {
     ) -> Result<(i32, Value), String>;
     /// Write the run down, and say what id it was written under — what a workflow's trail points
     /// at, so a person reading a branch can open the recipe run that branch actually made.
-    /// `None` from an implementation that keeps no history to point at.
+    /// `None` from an implementation that keeps no history to point at. `claimed` is the id
+    /// `claim_run` wrote, finished in place; without one a new row is written.
     async fn record_run(
         &self,
         recipe_id: &str,
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
+        claimed: Option<&str>,
     ) -> Option<String>;
+    /// Take the bot's screen for one run before the box is touched, or the sentence saying why
+    /// not (another run is playing on it). `None`: a source that keeps no leases.
+    async fn claim_run(
+        &self,
+        _recipe_id: &str,
+        _version: i32,
+        _coworker_id: &CoworkerId,
+    ) -> Result<Option<RecipeClaim>, String> {
+        Ok(None)
+    }
     /// Whether this bot may play the recipe NOW, or the sentence saying why not.
     ///
     /// The offers a turn carries were read when the turn began, and a turn can outlast the share
@@ -1911,6 +1931,16 @@ impl Executor {
             Ok(found) => found,
             Err(why) => return ToolResult::refused(call_id, why),
         };
+        // The bot's screen is taken the way the page's Run button takes it (#227), before the box
+        // is touched: a chat play on top of a page run was two recipes clicking on one screen.
+        let claim = match source
+            .claim_run(recipe_id, version, &context.coworker_id)
+            .await
+        {
+            Ok(claim) => claim,
+            Err(why) => return ToolResult::refused(call_id, why),
+        };
+        let claimed = claim.as_ref().map(|claim| claim.id.as_str());
         // ASK THE BOX WHAT IT SAW. A receipt on its own answers "did any step throw", and a model
         // that gets `ok` back for the twenty-fifth identical replay has been told the truth and
         // learnt nothing. The observation is what lets it tell a run that landed where the tape
@@ -1931,10 +1961,24 @@ impl Executor {
                 )
                 .part_way();
             }
-            Err(error) => return ToolResult::refused(call_id, describe(error)),
+            // A claimed row is ended as a failed run that says why, as the page does; left to its
+            // lease it would read "interrupted", which is not what happened. An interrupted play
+            // (above) is left to lapse: part way is all that is known of it.
+            Err(error) => {
+                let why = describe(error);
+                if claimed.is_some() {
+                    let failed = RecipeReceipt::from_value(
+                        serde_json::json!({ "ok": false, "ran": 0, "error": why }),
+                    );
+                    let _ = source
+                        .record_run(recipe_id, version, &context.coworker_id, &failed, claimed)
+                        .await;
+                }
+                return ToolResult::refused(call_id, why);
+            }
         };
         let _ = source
-            .record_run(recipe_id, version, &context.coworker_id, &receipt)
+            .record_run(recipe_id, version, &context.coworker_id, &receipt, claimed)
             .await;
         let mut said = if receipt.ok {
             format!(

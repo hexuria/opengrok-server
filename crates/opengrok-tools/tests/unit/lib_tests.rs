@@ -2313,6 +2313,11 @@ struct SpyRecipes {
     asked: Mutex<Vec<(String, opengrok_recipes::Values)>>,
     /// A recipe whose share was taken back after the turn's offers were read.
     withdrawn: Option<&'static str>,
+    /// What `claim_run` answers: `None` keeps no leases, `Ok(id)` claims under `id`, `Err(why)`
+    /// is another run playing on the bot's screen.
+    claim: Option<Result<&'static str, &'static str>>,
+    /// The claimed id each `record_run` finished, in order.
+    finished: Mutex<Vec<Option<String>>>,
 }
 
 #[async_trait]
@@ -2347,11 +2352,30 @@ impl RecipeSource for SpyRecipes {
         version: i32,
         _by: &CoworkerId,
         receipt: &RecipeReceipt,
+        claimed: Option<&str>,
     ) -> Option<String> {
         if let Ok(mut runs) = self.runs.lock() {
             runs.push((recipe_id.to_string(), version, receipt.ok));
         }
+        if let Ok(mut finished) = self.finished.lock() {
+            finished.push(claimed.map(str::to_string));
+        }
         Some(format!("rrun_spy_{recipe_id}"))
+    }
+    async fn claim_run(
+        &self,
+        _recipe_id: &str,
+        _version: i32,
+        _by: &CoworkerId,
+    ) -> Result<Option<RecipeClaim>, String> {
+        match self.claim {
+            None => Ok(None),
+            Some(Ok(id)) => Ok(Some(RecipeClaim {
+                id: id.to_string(),
+                hold: Box::new(()),
+            })),
+            Some(Err(why)) => Err(why.to_string()),
+        }
     }
     async fn still_granted(&self, recipe_id: &str, _by: &CoworkerId) -> Result<(), String> {
         if self.withdrawn == Some(recipe_id) {
@@ -2479,6 +2503,68 @@ async fn a_recipe_taken_back_mid_turn_is_refused_before_the_box_is_touched() {
     assert!(spy.last_box().is_none(), "nothing was played");
     assert!(recipes.runs.lock().unwrap().is_empty());
     assert!(recipes.asked.lock().unwrap().is_empty());
+}
+
+/// #227: a chat play is refused while a run started from the page holds the bot's screen, and
+/// the box is never asked: two recipes clicking on one screen is neither's recipe.
+#[tokio::test]
+async fn a_recipe_is_refused_while_another_run_holds_the_bots_screen() {
+    let spy = Arc::new(SpyComputer::default());
+    let recipes = Arc::new(SpyRecipes {
+        claim: Some(Err(
+            "this bot is already playing a recipe; wait for that run to finish",
+        )),
+        ..SpyRecipes::default()
+    });
+    let executor = allowing(spy.clone())
+        .with_screen(true)
+        .with_recipes(offers(), recipes.clone());
+    let result = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})),
+        )
+        .await;
+    assert!(!result.ok, "{result:?}");
+    assert!(result.content.contains("already playing"), "{result:?}");
+    assert!(spy.last_box().is_none(), "nothing was played");
+    assert!(recipes.runs.lock().unwrap().is_empty());
+}
+
+/// The claimed row is the one finished, played or failed, so no second row appears beside it
+/// and a failed box does not leave the claim to lapse into "interrupted".
+#[tokio::test]
+async fn a_claimed_run_is_finished_under_its_claim_whether_it_played_or_failed() {
+    for fail_with in [None, Some(BoxError::Unreachable("gone".to_string()))] {
+        let failing = fail_with.is_some();
+        let spy = Arc::new(SpyComputer {
+            fail_with,
+            ..SpyComputer::default()
+        });
+        let recipes = Arc::new(SpyRecipes {
+            claim: Some(Ok("rrun_claimed")),
+            ..SpyRecipes::default()
+        });
+        let executor = allowing(spy.clone())
+            .with_screen(true)
+            .with_recipes(offers(), recipes.clone());
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})),
+            )
+            .await;
+        assert_eq!(result.ok, !failing, "{result:?}");
+        assert_eq!(
+            recipes.finished.lock().unwrap().as_slice(),
+            &[Some("rrun_claimed".to_string())],
+            "failing: {failing}"
+        );
+        assert_eq!(
+            recipes.runs.lock().unwrap().as_slice(),
+            &[("rcp_gmail".to_string(), 2, !failing)]
+        );
+    }
 }
 
 #[tokio::test]

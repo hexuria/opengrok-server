@@ -1170,6 +1170,9 @@ async fn run(
 /// process died reads as interrupted while somebody still cares.
 pub(crate) const RUN_LEASE_MS: i64 = crate::recovery::LEASE_MS;
 
+/// The refusal for a start while another run holds the bot's screen, from the page or from chat.
+const BOT_IS_PLAYING: &str = "this bot is already playing a recipe; wait for that run to finish";
+
 /// Write the run row before anything is played, or refuse to play.
 ///
 /// A RUN THAT CANNOT BE WRITTEN DOWN IS NOT STARTED. The row is what survives a closed tab, keeps
@@ -1195,11 +1198,7 @@ pub(crate) async fn begin_run(
         .await
     {
         Ok(true) => Ok(()),
-        Ok(false) => Err((
-            StatusCode::CONFLICT,
-            "this bot is already playing a recipe; wait for that run to finish",
-        )
-            .into_response()),
+        Ok(false) => Err((StatusCode::CONFLICT, BOT_IS_PLAYING).into_response()),
         Err(error) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             format!("the run could not be written down, so nothing was played: {error}"),
@@ -1337,6 +1336,9 @@ async fn play(run: Played) -> Response {
             {
                 tracing::warn!(run = %run_id, %error, "could not write a failed recipe run");
             }
+            // Pruned like a run that played: a bot whose box is down otherwise grows a failed row
+            // per try, and nothing ever takes them away (#227).
+            tidy_history(&state.auth.store, &recipe_id, version, &coworker).await;
             return (StatusCode::BAD_GATEWAY, why).into_response();
         }
     };
@@ -1450,14 +1452,50 @@ impl RecipeSource for StoreRecipes {
         ))
     }
 
+    /// The lease `begin_run` takes for the page, taken for a chat play, and renewed while the
+    /// claim is held: a play longer than the lease would otherwise lose it mid-run.
+    async fn claim_run(
+        &self,
+        recipe_id: &str,
+        version: i32,
+        coworker_id: &CoworkerId,
+    ) -> Result<Option<opengrok_tools::RecipeClaim>, String> {
+        let id = format!("rrun_{}", uuid::Uuid::now_v7());
+        let at_ms = now_ms();
+        match self
+            .store
+            .start_recipe_run(
+                &id,
+                recipe_id,
+                version,
+                coworker_id.as_str(),
+                at_ms + RUN_LEASE_MS,
+                at_ms,
+            )
+            .await
+        {
+            Ok(true) => Ok(Some(opengrok_tools::RecipeClaim {
+                hold: Box::new(hold_run(self.store.clone(), id.clone())),
+                id,
+            })),
+            Ok(false) => Err(BOT_IS_PLAYING.to_string()),
+            Err(error) => Err(format!(
+                "the run could not be written down, so nothing was played: {error}"
+            )),
+        }
+    }
+
     async fn record_run(
         &self,
         recipe_id: &str,
         version: i32,
         coworker_id: &CoworkerId,
         receipt: &RecipeReceipt,
+        claimed: Option<&str>,
     ) -> Option<String> {
-        let id = format!("rrun_{}", uuid::Uuid::now_v7());
+        // A claimed row is finished in place: `record_recipe_run` upserts on the id and clears
+        // the lease, so the claim ends with the write rather than when its lease lapses.
+        let id = claimed.map_or_else(|| format!("rrun_{}", uuid::Uuid::now_v7()), str::to_string);
         match self
             .write_run(&id, recipe_id, version, coworker_id, receipt)
             .await
