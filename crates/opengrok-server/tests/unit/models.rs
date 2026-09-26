@@ -114,6 +114,12 @@ fn a_pin_finds_its_window_through_aliases_and_channels() {
         "the shipping pin, unlisted"
     );
     assert_eq!(context_of(&models, "openai/gpt-5.5@sub"), Some(400_000));
+    // Two channels of one model, the pin on neither: the smaller window, never the larger.
+    let seats = vec![
+        model("anthropic/x@api", Some(1_000_000), Some("anthropic/x")),
+        model("anthropic/x@team", Some(200_000), Some("anthropic/x")),
+    ];
+    assert_eq!(context_of(&seats, "anthropic/x@sub"), Some(200_000));
     assert_eq!(context_of(&models, "oag/auto"), None);
     assert_eq!(context_of(&models, "anthropic/opus"), None);
 }
@@ -125,23 +131,33 @@ async fn without_a_catalogue_the_setting_decides() {
     assert_eq!(context_for(None, None, "any").await, None);
 }
 
-/// A gateway that cannot be reached costs a turn one short lookup, and falls back.
+/// A gateway that answers nothing useful is asked once a minute, not once a turn, and every turn
+/// falls back. Counted on a listener of our own: a refused port would pass with the limit gone.
 #[tokio::test]
-async fn an_unreachable_catalogue_falls_back_to_the_setting() {
-    let catalogue = ModelCatalogue::new("http://127.0.0.1:9", "oag_live_x");
-    let started = Instant::now();
-    assert_eq!(
-        context_for(Some(&catalogue), Some(64_000), "xai/grok-4.6").await,
-        Some(64_000)
-    );
-    // The second turn inside the minute does not ask again.
-    assert_eq!(
-        context_for(Some(&catalogue), Some(64_000), "xai/grok-4.6").await,
-        Some(64_000)
-    );
-    assert!(
-        started.elapsed() < CONTEXT_LOOKUP * 2,
-        "{:?}",
-        started.elapsed()
-    );
+async fn a_failing_catalogue_is_asked_once_a_minute_and_falls_back() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        }
+    });
+    let catalogue = ModelCatalogue::new(format!("http://127.0.0.1:{port}"), "oag_live_x");
+    for _ in 0..3 {
+        assert_eq!(
+            context_for(Some(&catalogue), Some(64_000), "xai/grok-4.6").await,
+            Some(64_000)
+        );
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
 }

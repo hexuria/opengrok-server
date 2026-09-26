@@ -1131,8 +1131,9 @@ async fn converse_raw(
             // The wall clock calls this at the top of a round, before that round's fit, so the
             // last round's results are unmeasured. The run's own window, not a new one: a boundary
             // searched for now would land on the "[harness]" line just pushed.
-            match window.clone().fit(&mut ask) {
-                Ok(estimate) => timing.context(ask.context_tokens, estimate, window.left_out()),
+            let mut last = window.clone();
+            match last.fit(&mut ask) {
+                Ok(estimate) => timing.context(ask.context_tokens, estimate, last.left_out()),
                 Err(too_long) => {
                     tracing::warn!(
                         too_long,

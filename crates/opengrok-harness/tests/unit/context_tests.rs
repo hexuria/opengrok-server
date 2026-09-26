@@ -192,3 +192,22 @@ fn with_no_user_message_everything_is_protected_and_it_fails_closed() {
     assert_eq!(request.messages.len(), 2);
     assert_eq!(window.left_out(), 0);
 }
+
+/// A client's own `system` message is configuration, not an earlier turn: a turn with no
+/// coworker keeps it at the front, and trimming starts after it.
+#[test]
+fn a_clients_system_message_is_never_left_out() {
+    let mut messages = vec![ChatMessage::text("system", "Answer in French.")];
+    for _ in 0..6 {
+        messages.push(words("user", 6_000));
+        messages.push(words("assistant", 6_000));
+    }
+    messages.push(ChatMessage::text("user", "now"));
+    let mut request = asked("m", Some(16_000), messages);
+    request.system = None;
+    let mut window = Window::at_entry(&request);
+    window.fit(&mut request).unwrap();
+    assert!(window.left_out() > 0);
+    assert_eq!(request.messages[0].content, "Answer in French.");
+    assert_eq!(request.messages[1].role, "user");
+}

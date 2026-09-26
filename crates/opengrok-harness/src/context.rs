@@ -16,7 +16,9 @@ const IMAGE_TOKENS: u64 = 1_600;
 /// The framing every message costs beyond its words.
 const MESSAGE_TOKENS: u64 = 4;
 /// Room kept for the answer. No request sets `max_tokens`, so the provider's own default applies;
-/// a prompt that fills the window exactly leaves the model no room to answer.
+/// a prompt that fills the window exactly leaves the model no room to answer. A route that
+/// reserves more than this for its answer (a reasoning model's 32k–64k) can still refuse a prompt
+/// near the brim; the catalogue's `max_output_tokens` is the number to read if that is seen.
 const ANSWER_TOKENS: u64 = 8_192;
 
 fn text_tokens(text: &str) -> u64 {
@@ -55,6 +57,9 @@ pub fn estimate_tokens(request: &ModelRequest) -> u64 {
 /// protects back to the previous prompt, which is more than needed and never less.
 #[derive(Debug, Clone)]
 pub(crate) struct Window {
+    /// Leading `system` messages: a client's own configuration, never left out. The server
+    /// drops the client's when it composes one, but a turn with no coworker composes none.
+    keep: usize,
     /// Messages before this index are earlier turns.
     head: usize,
     left_out: usize,
@@ -63,14 +68,21 @@ pub(crate) struct Window {
 
 impl Window {
     pub(crate) fn at_entry(request: &ModelRequest) -> Self {
+        let keep = request
+            .messages
+            .iter()
+            .take_while(|message| message.role == "system")
+            .count();
         // No user message at all (an old run resumed with no stored prompt): protect everything,
         // and let `fit` fail closed if even that is too long.
         let head = request
             .messages
             .iter()
             .rposition(|message| message.role == "user")
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(keep);
         Self {
+            keep,
             head,
             left_out: 0,
             system: request.system.clone(),
@@ -86,10 +98,11 @@ impl Window {
     ///
     /// WHOLE TURNS, oldest first: a user message and everything up to the next one, so no
     /// question is left without its answer and no call without its result. Once trimming starts
-    /// it goes down to 80% of the room, not to the brim: a window that slides one message a turn
-    /// changes the prompt's prefix every turn, and the provider's prompt cache never hits.
+    /// it goes down to 80% of the room, not to the brim, so the rounds after it in the same run
+    /// keep one prefix and the provider's prompt cache can hit. Across turns the prefix moves
+    /// anyway: the server's own history window slides one run a turn.
     pub(crate) fn fit(&mut self, request: &mut ModelRequest) -> Result<u64, String> {
-        let mut estimate = estimate_tokens(request);
+        let estimate = estimate_tokens(request);
         let Some(limit) = request.context_tokens else {
             return Ok(estimate);
         };
@@ -98,20 +111,25 @@ impl Window {
             return Ok(estimate);
         }
         let target = room / 10 * 8;
-        while estimate > target && self.head > 0 {
+        let mut cut = self.keep;
+        let mut freed = 0;
+        while estimate.saturating_sub(freed) > target && cut < self.head {
             loop {
-                let dropped = request.messages.remove(0);
-                estimate = estimate.saturating_sub(message_tokens(&dropped));
-                self.head -= 1;
-                self.left_out += 1;
+                freed += request.messages.get(cut).map_or(0, message_tokens);
+                cut += 1;
                 let next_is_a_turn = request
                     .messages
-                    .first()
+                    .get(cut)
                     .is_none_or(|next| next.role == "user");
-                if self.head == 0 || next_is_a_turn {
+                if cut >= self.head || next_is_a_turn {
                     break;
                 }
             }
+        }
+        if cut > self.keep {
+            request.messages.drain(self.keep..cut);
+            self.head -= cut - self.keep;
+            self.left_out += cut - self.keep;
         }
         if self.left_out > 0 {
             let note = format!(
@@ -130,7 +148,8 @@ impl Window {
         }
         Err(format!(
             "This conversation is too long for {} (about {estimate} of {limit} tokens) even with \
-             its earlier messages left out. Start a new conversation, or send less at once.",
+             its earlier messages left out. Start a new conversation, or ask for less at once: a \
+             command whose output is this long will not fit the next time either.",
             request.model
         ))
     }

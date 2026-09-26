@@ -79,7 +79,9 @@ async fn harness(database_url: &str, context_tokens: Option<u64>) -> Harness {
     let door = Arc::new(RecordingDoor::default());
     let agui = AgUiState {
         auth: AuthState::new(store.clone(), minter.clone(), "host@og.local".to_string())
-            .with_context_tokens(context_tokens),
+            .with_context_tokens(context_tokens)
+            // No gateway, whatever the environment says: the limit is the one each test sets.
+            .with_model_catalogue(None),
         door: door.clone(),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),

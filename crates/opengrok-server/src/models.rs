@@ -112,9 +112,11 @@ pub async fn context_for(
     }
 }
 
-/// The advertised window for `pin`: its own entry, else the entry it is a channel of, else the
-/// same model on another channel. An exact entry with no window (a virtual route) is final: its
-/// model is picked per request, and borrowing another's window would be a guess.
+/// The advertised window for `pin`: its own entry, else the entries it shares a model with — the
+/// one it is a channel of, or the same model on another channel. An exact entry with no window
+/// (a virtual route) is final: its model is picked per request, and borrowing another's window
+/// would be a guess. Among several matches the SMALLEST wins: a subscription seat and an API key
+/// on one model can differ, and guessing the larger one lets the provider's 400 back in.
 fn context_of(models: &[Model], pin: &str) -> Option<u64> {
     if let Some(exact) = models.iter().find(|model| model.id == pin) {
         return exact.context_window;
@@ -122,14 +124,13 @@ fn context_of(models: &[Model], pin: &str) -> Option<u64> {
     let base = crate::points::base_model(pin);
     models
         .iter()
-        .find(|model| model.alias_of.as_deref() == Some(pin))
-        .or_else(|| {
-            models.iter().find(|model| {
-                crate::points::base_model(&model.id) == base
-                    || model.alias_of.as_deref() == Some(base)
-            })
+        .filter(|model| {
+            model.alias_of.as_deref() == Some(pin)
+                || model.alias_of.as_deref() == Some(base)
+                || crate::points::base_model(&model.id) == base
         })
-        .and_then(|model| model.context_window)
+        .filter_map(|model| model.context_window)
+        .min()
 }
 
 /// What the catalogue answered, and why it is empty when it is.

@@ -248,8 +248,9 @@ WrapUpCall ==
 \* lib.rs `window.fit` (#90) — the context guard, before a round's call or the wrap-up's. A request
 \* the model cannot read is not sent: the run fails with a sentence and spends no model call. Not
 \* switched: the door-error branch of Call already ends the same way one call later, so this adds
-\* no ending the invariants did not already admit, only one that costs less. A Stop does not race
-\* it: at "wrap" it waits for WrapUpCall to see the Stop first, and at "call" Top has just asked.
+\* no ending the invariants did not already admit, only one that costs less. At "wrap" a recorded
+\* Stop wins first, as WrapUpCall has it. At "call" a Stop pressed since Top asked can still end
+\* the run failed, the same gap a door error has; StopIsHonoured allows it, as it allows that.
 TooLong ==
     /\ (pc = "call" \/ (pc = "wrap" /\ ~stop))
     /\ EndWith("failed")
