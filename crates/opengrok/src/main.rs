@@ -164,8 +164,15 @@ async fn main() -> anyhow::Result<()> {
 
     // OG_MODEL_DOOR=mock runs the whole stack with no provider, no key and no spend. It is also
     // what CI uses, so the streaming path is exercised on every push rather than only by hand.
-    let door: Arc<dyn ModelDoor> = match std::env::var("OG_MODEL_DOOR").as_deref() {
-        Ok("mock") => {
+    let chosen = match std::env::var("OG_MODEL_DOOR") {
+        Ok(value) => door_choice(Some(&value))?,
+        Err(std::env::VarError::NotPresent) => door_choice(None)?,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("OG_MODEL_DOOR is not valid UTF-8; {DOOR_NAMES}")
+        }
+    };
+    let door: Arc<dyn ModelDoor> = match chosen {
+        DoorChoice::Mock => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
             Arc::new(with_mock_verdict(
                 MockDoor::echoing()
@@ -174,22 +181,9 @@ async fn main() -> anyhow::Result<()> {
                     .max_turn_ms(ceiling),
             ))
         }
-        // REFUSES TO BOOT, and does not fall through. The catalogue this door served — every
-        // renderable transcript shape on demand, for working on the desktop client's renderers
-        // with no provider — was deleted with that client's door, so there is nothing left for
-        // it to serve. Silently starting a REAL door instead would be the worse answer: an
-        // operator who asked for a mock would be billed for models. An operator who names a door
-        // this binary does not have has made a mistake worth stopping for (CLAUDE.md #8: fail
-        // closed and say why).
-        Ok("mock-cards") => anyhow::bail!(
-            "OG_MODEL_DOOR=mock-cards no longer exists. It served the mock transcript catalogue, \
-             which was deleted on 20 Sep 2026 with the desktop client's door it was built to \
-             render into. Use OG_MODEL_DOOR=mock (a scripted stream) or mock-tools (one shell \
-             call per turn), or leave it unset to exit through the gateway."
-        ),
         // The tool path, without a model: the echoing door never reaches for a tool, so a suite
         // built only on it exercises talking and never doing.
-        Ok("mock-tools") => {
+        DoorChoice::MockTools => {
             tracing::warn!("OG_MODEL_DOOR=mock-tools — no model, and every turn asks for a tool");
             Arc::new(with_mock_verdict(
                 MockDoor::asking_for_a_tool()
@@ -198,14 +192,33 @@ async fn main() -> anyhow::Result<()> {
                     .max_turn_ms(ceiling),
             ))
         }
-        _ => {
+        DoorChoice::Gateway => {
             let url = std::env::var("OG_GATEWAY_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:29080".to_string());
             // An oag_live_ key, never a provider key: a coworker's pin is a route (CLAUDE.md #4).
             let key = std::env::var("OG_GATEWAY_TOKEN").context(
                 "OG_GATEWAY_TOKEN is required unless OG_MODEL_DOOR=mock; see .env.example",
             )?;
-            Arc::new(GatewayDoor::new(url, key))
+            let gateway = GatewayDoor::new(url, key);
+            // A KEY THE GATEWAY REFUSES STOPS THE BOOT. `/health` answers for the event store
+            // only, so a wrong token used to report ok:true and fail every turn after (#185).
+            // An unreachable gateway is only a warning: it may simply be starting after us.
+            // After boot, `/ready` asks the same question each time it is called.
+            match gateway.probe().await {
+                Ok(()) => {}
+                Err(opengrok_harness::ModelError::Refused {
+                    status: status @ (401 | 403),
+                    ..
+                }) => anyhow::bail!(
+                    "the gateway at OG_GATEWAY_URL refused OG_GATEWAY_TOKEN ({status}); no model \
+                     call can succeed with it. Mint an oag_live_ key and see .env.example"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "the gateway did not answer the boot probe; turns fail until it does"
+                ),
+            }
+            Arc::new(gateway)
         }
     };
 
@@ -468,6 +481,44 @@ async fn shutdown_signal() {
     }
 }
 
+/// The doors this binary has.
+#[derive(Debug, PartialEq, Eq)]
+enum DoorChoice {
+    Mock,
+    MockTools,
+    Gateway,
+}
+
+const DOOR_NAMES: &str = "use OG_MODEL_DOOR=mock (a scripted stream) or mock-tools (one shell \
+     call per turn), or leave it unset or empty (or set it to gateway) to exit through the gateway";
+
+/// Which door `OG_MODEL_DOOR` names.
+///
+/// A VALUE THIS BINARY DOES NOT KNOW REFUSES TO BOOT, like `mock-cards` always has. It used to
+/// fall through to the real gateway: a typo (`mokc`) or the retired `rig` door started a billed
+/// door for an operator who had asked for something else (CLAUDE.md #8: fail closed and say
+/// why). Unset, empty and `gateway` are the gateway — `.env.example` ships the empty value and
+/// the handovers write `gateway`.
+fn door_choice(value: Option<&str>) -> anyhow::Result<DoorChoice> {
+    match value.map(str::trim) {
+        None | Some("" | "gateway") => Ok(DoorChoice::Gateway),
+        Some("mock") => Ok(DoorChoice::Mock),
+        Some("mock-tools") => Ok(DoorChoice::MockTools),
+        // The catalogue this door served — every renderable transcript shape on demand, for
+        // working on the desktop client's renderers with no provider — was deleted with that
+        // client's door, so there is nothing left for it to serve.
+        Some("mock-cards") => anyhow::bail!(
+            "OG_MODEL_DOOR=mock-cards no longer exists. It served the mock transcript catalogue, \
+             which was deleted on 20 Sep 2026 with the desktop client's door it was built to \
+             render into. {DOOR_NAMES}."
+        ),
+        Some(other) => anyhow::bail!(
+            "OG_MODEL_DOOR={other} is not a door this server has, and it will not guess one that \
+             bills; {DOOR_NAMES}."
+        ),
+    }
+}
+
 /// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask` makes a mock door answer the auto-review judge
 /// with that word, so the card and the refusal can be driven in the real app with no provider.
 fn with_mock_verdict(door: MockDoor) -> MockDoor {
@@ -501,8 +552,30 @@ fn chosen_models(hire: Option<String>, review: Option<String>) -> (String, Strin
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_model_door_refuses_to_boot() {
+        for value in ["rig", "mokc", "mock-cards", "Gateway!"] {
+            let refused = door_choice(Some(value)).unwrap_err().to_string();
+            assert!(refused.contains("mock-tools"), "{refused}");
+            assert!(refused.contains("unset"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn unset_empty_and_gateway_are_the_gateway() {
+        assert_eq!(door_choice(None).unwrap(), DoorChoice::Gateway);
+        assert_eq!(door_choice(Some("")).unwrap(), DoorChoice::Gateway);
+        assert_eq!(door_choice(Some("gateway")).unwrap(), DoorChoice::Gateway);
+        assert_eq!(door_choice(Some("mock")).unwrap(), DoorChoice::Mock);
+        assert_eq!(
+            door_choice(Some("mock-tools")).unwrap(),
+            DoorChoice::MockTools
+        );
+    }
 
     #[test]
     fn the_default_route_is_one_verified_to_call_tools() {

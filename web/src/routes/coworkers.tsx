@@ -354,6 +354,9 @@ function CoworkerCard({ coworker, models }: { coworker: Coworker; models: string
 export function CoworkersPage() {
   const queryClient = useQueryClient();
   const coworkers = useQuery({ queryKey: ["coworkers"], queryFn: listCoworkers, retry: false });
+  // This page manages what you hired. A coworker an org-mate shared is on your roster too, but
+  // every control on its card would be refused, so it is not listed here.
+  const hired = coworkers.data?.filter((coworker) => coworker.mine !== false);
   const catalogue = useQuery({ queryKey: ["models"], queryFn: listModels, retry: false });
   const templates = useQuery({ queryKey: ["templates"], queryFn: listTemplates, retry: false });
   const [name, setName] = useState("");
@@ -435,13 +438,13 @@ export function CoworkersPage() {
             <section className="card">
               <h2>
                 Your roster
-                {coworkers.data ? <span className="count">{coworkers.data.length}</span> : null}
+                {hired ? <span className="count">{hired.length}</span> : null}
               </h2>
               {coworkers.isLoading ? (
                 <p className="empty">Loading…</p>
-              ) : coworkers.data && coworkers.data.length > 0 ? (
+              ) : hired && hired.length > 0 ? (
                 <div className="list">
-                  {coworkers.data.map((coworker) => (
+                  {hired.map((coworker) => (
                     <CoworkerCard key={coworker.id} coworker={coworker} models={ids} />
                   ))}
                 </div>

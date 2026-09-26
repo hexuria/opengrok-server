@@ -681,7 +681,7 @@ impl Computer for DockerComputer {
             .await?
             .recipe(request)
             .await
-            .map_err(guest_error)
+            .map_err(recipe_error)
     }
 
     async fn act(&self, box_id: &str, action: &CuaAction) -> BoxResult<()> {
@@ -899,6 +899,26 @@ fn guest_error(error: grok_box::Error) -> BoxError {
     }
 }
 
+/// A recipe POST that failed, told apart by whether the guest could have played any of it.
+///
+/// An HTTP status is the guest's own answer, and at the pinned hexuria/box it answers with one
+/// only before its first step (`validate_recipe`, `ensure_ready`, the artifact directory in
+/// box-cua `recipe.rs`); once a step has run, every outcome is a 200 receipt. A connect error
+/// sent nothing. Anything else on the transport — a reset mid-play, a body that stopped, a
+/// receipt that would not parse — came after the steps may have run, and is `Interrupted`.
+///
+/// The connect case is read from hyper-util's `client error (Connect)`, the only place grok-box
+/// keeps it. If that wording changes, a connect error reads as `Interrupted`: the recipe counts
+/// as played and a retry is refused, which is the side a replay guard has to fail on.
+fn recipe_error(error: grok_box::Error) -> BoxError {
+    match error {
+        grok_box::Error::Transport(why) if !why.contains("client error (Connect)") => {
+            BoxError::Interrupted(format!("box-exec: {why}"))
+        }
+        other => guest_error(other),
+    }
+}
+
 fn host_port(mapping: &str) -> Option<u16> {
     let line = mapping.lines().next()?.trim();
     let host = line.rsplit_once(':')?.1;
@@ -977,6 +997,33 @@ fn uuid_like() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Whether a failed recipe POST could have played: only a connect error or the guest's own
+    /// status is known to have played nothing.
+    #[test]
+    fn a_recipe_error_after_the_request_was_sent_is_interrupted() {
+        let connect = recipe_error(grok_box::Error::Transport(
+            "client error (Connect)".to_string(),
+        ));
+        assert!(matches!(connect, BoxError::Unreachable(_)), "{connect:?}");
+        let refused = recipe_error(grok_box::Error::Http {
+            status: 400,
+            message: "no steps".to_string(),
+            body: serde_json::Value::Null,
+        });
+        assert!(
+            matches!(refused, BoxError::Refused { status: 400, .. }),
+            "{refused:?}"
+        );
+        for mid_play in [
+            "client error (SendRequest)",
+            "error reading a body from connection",
+            "expected value at line 1 column 1",
+        ] {
+            let error = recipe_error(grok_box::Error::Transport(mid_play.to_string()));
+            assert!(matches!(error, BoxError::Interrupted(_)), "{error:?}");
+        }
+    }
 
     #[test]
     fn a_box_is_created_on_loopback_and_labelled_as_ours() {
