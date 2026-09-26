@@ -263,17 +263,29 @@ fn screen_summary(arguments: &Value) -> String {
         "right_click" => format!("Right-click at {at} on {screen}"),
         "double_click" => format!("Double-click at {at} on {screen}"),
         "move" | "mouse_move" => format!("Move the pointer to {at} on {screen}"),
-        "drag" => format!("Drag from {at} to {} on {screen}", point("to")),
+        "drag" | "left_click_drag" => format!("Drag from {at} to {} on {screen}", point("to")),
         "type" => format!(
             "Type \"{}\" on {screen}",
-            clip(string_arg(arguments, "text").unwrap_or(""), 60)
+            shown(string_arg(arguments, "text").unwrap_or(""), 60)
         ),
         "key" => format!(
             "Press {} on {screen}",
-            clip(string_arg(arguments, "key").unwrap_or("a key"), 40)
+            shown(string_arg(arguments, "key").unwrap_or("a key"), 40)
         ),
         "scroll" => format!("Scroll at {at} on {screen}"),
         other => format!("Screen action \"{}\" on {screen}", clip(other, 30)),
+    }
+}
+
+/// Typed text as the card may show it. The card is journalled and read by whoever holds the
+/// thread, so a key the model is about to type stays off it. The whole text is checked before
+/// `clip`, which would otherwise cut a token below the length the check needs. The check is the
+/// judge's own and as coarse: a secret in the middle of a sentence still shows.
+fn shown(text: &str, max: usize) -> String {
+    if opengrok_tools::looks_like_a_secret(text) {
+        "«redacted»".to_string()
+    } else {
+        clip(text, max)
     }
 }
 

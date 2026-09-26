@@ -19,7 +19,7 @@ pub mod review;
 pub use review::{
     AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, JudgeFailure, Outcome, REVIEW_ASK_REASON,
     ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
-    redact_arguments,
+    looks_like_a_secret, redact_arguments,
 };
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};

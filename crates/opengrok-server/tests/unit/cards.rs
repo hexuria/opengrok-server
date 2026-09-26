@@ -56,7 +56,8 @@ fn computer_and_open_url_summaries_name_the_action() {
                       "button": 1, "scroll": [0, 0], "coordinate": [0, 0]});
     let click = json!({"action": "click", "coordinate": [120, 40]});
     let key = json!({"action": "key", "key": "ctrl+l"});
-    let typed = json!({"action": "type", "text": "x".repeat(300)});
+    // Spaced: one unbroken 300-char run is key-shaped and is redacted, not clipped (#222).
+    let typed = json!({"action": "type", "text": "say x ".repeat(50)});
     let page = json!({"url": "https://example.com/inbox?token=s3cret#top"});
     let recipe = json!({"recipe": "Open Gmail", "values": {"password": "s3cret"}});
     let odd = json!({"action": "zoom", "coordinate": [1, 2]});
@@ -64,7 +65,7 @@ fn computer_and_open_url_summaries_name_the_action() {
         ("computer", &shot, "screenshot"),
         ("computer", &click, "120, 40"),
         ("computer", &key, "ctrl+l"),
-        ("computer", &typed, "xxxx"),
+        ("computer", &typed, "say x say x"),
         ("computer", &odd, "zoom"),
         ("open_url", &page, "https://example.com/inbox"),
         (opengrok_tools::RUN_RECIPE, &recipe, "Open Gmail"),
@@ -84,6 +85,35 @@ fn computer_and_open_url_summaries_name_the_action() {
     assert!(!summary_for("computer", &shot).contains('{'));
     let group = json!({"action": "screenshot", "machine": "group"});
     assert!(summary_for("computer", &group).contains("shared"));
+}
+
+/// #222: the card is journalled and shown to whoever holds the thread, so a key the model is
+/// about to type must not be written into it. And `left_click_drag` is a drag `into_action`
+/// performs; it read as an unknown screen action.
+#[test]
+fn a_typed_secret_stays_off_the_card_and_a_left_click_drag_reads_as_a_drag() {
+    let key = format!("sk-live-{}", "a1".repeat(24));
+    let typed_key = json!({"action": "type", "text": key});
+    let summary = summary_for("computer", &typed_key);
+    assert!(!summary.contains("a1a1"), "{summary}");
+    assert!(summary.contains("«redacted»"), "{summary}");
+    let long_token = "Z".repeat(30) + &"9".repeat(30);
+    let typed_token = json!({"action": "type", "text": long_token});
+    assert!(!summary_for("computer", &typed_token).contains("ZZZZ"));
+    let pressed = json!({"action": "key", "key": key});
+    assert!(!summary_for("computer", &pressed).contains("a1a1"));
+
+    let plain = json!({"action": "type", "text": "hello world"});
+    assert!(summary_for("computer", &plain).contains("\"hello world\""));
+    let enter = json!({"action": "key", "key": "Return"});
+    assert!(summary_for("computer", &enter).contains("Press Return"));
+
+    let drag = json!({"action": "left_click_drag", "coordinate": [1, 2], "to": [30, 40]});
+    let summary = summary_for("computer", &drag);
+    assert!(
+        summary.starts_with("Drag from (1, 2) to (30, 40)"),
+        "{summary}"
+    );
 }
 
 /// The tunnel's card asks about the network, not about the judge's instructions. Its

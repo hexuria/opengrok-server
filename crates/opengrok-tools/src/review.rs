@@ -287,7 +287,7 @@ fn redact_value(value: &Value, key: Option<&str>) -> Value {
 /// A bearer token or key-shaped string: one long run of token characters with no spaces, or a
 /// known key prefix. Deliberately coarse — a false positive hides a value from the judge (it asks),
 /// a false negative shows a secret to a model.
-fn looks_like_a_secret(text: &str) -> bool {
+pub fn looks_like_a_secret(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.starts_with("Bearer ") || trimmed.starts_with("sk-") || trimmed.starts_with("xoxb-")
     {
