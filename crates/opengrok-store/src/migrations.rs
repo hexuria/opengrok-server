@@ -348,6 +348,22 @@ create table if not exists monitor_firing (
     run_id     text not null,
     primary key (monitor_id, run_id)
 );
+-- When the firing was recorded, so the in-flight cap can count a run that was fired but has not
+-- journaled its first frame yet — without counting forever one that never will. NULL on rows
+-- written before the cap existed, which the cap reads as "long since settled".
+--
+-- Guarded like secret_store.key_id: a bare `add column if not exists` takes ACCESS EXCLUSIVE on
+-- every boot, and the sweep writes this table while another harness boots.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'monitor_firing'
+           and column_name = 'fired_at_ms'
+    ) then
+        alter table monitor_firing add column fired_at_ms bigint;
+    end if;
+end $do$;
 
 -- Where the monitor sweep has read to in `events`. One row; advanced under a row lock so two
 -- replicas never process the same span. Seeded at the log's current end on first use — a new

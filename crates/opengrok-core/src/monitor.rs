@@ -11,10 +11,73 @@
 //! firing is recorded (`Fired { run_id }`), and the sweep must never match an event that
 //! originates from a run this monitor started or from the monitor's own stream. The aggregate
 //! keeps the record; the store enforces the exclusion.
+//!
+//! "OUR OWN EVENT LOG" IS EVERY TENANT'S. A monitor sees only the streams that resolve to the
+//! account that created it (`PgStore::stream_owner` has the table); a stream with no single owner
+//! matches nobody.
 
 use serde::{Deserialize, Serialize};
 
 use crate::id::{CoworkerId, RunId};
+
+/// The event types a monitor may watch — the published list a `watches` value is checked against.
+///
+/// Each is spelled exactly as its aggregate's `event_type()` spells it, and each lands on a stream
+/// the sweep can name one owning account for (`PgStore::stream_owner`), so a monitor on any of
+/// them can fire for its owner and nobody else. Left out on purpose:
+/// - `run-emitted`: written once per streamed frame, so a monitor on it would fire a run per token.
+/// - `session-*`, `account-registered`, `credentials-set`: a sign-in, a refresh, a signup — noise
+///   at best, and nothing a coworker should be woken to reason about.
+/// - `org-*`: an org's stream has several members and no single owner, so it can match nobody.
+/// - `monitor-*`: watching firings is the cascade `WatchingItself` exists to refuse.
+///
+/// A TYPO MAY ONLY NARROW. Before this list, `run-faild` was accepted and silently never fired; a
+/// value not here is now a refusal that names what can be watched.
+pub const WATCHABLE: &[&str] = &[
+    // run/{id} — the account whose run it was
+    "run-started",
+    "run-suspended",
+    "run-answered",
+    "run-finished",
+    "run-failed",
+    "run-stopped",
+    // coworker/{id} — the account that hired it
+    "coworker-hired",
+    "coworker-renamed",
+    "coworker-repinned",
+    "coworker-role-set",
+    "coworker-visibility-set",
+    "computer-assigned",
+    "computer-released",
+    "coworker-retired",
+    "group-hired",
+    "members-set",
+    // connection/{id} — the signed-in account, or the account that hired the coworker it is for
+    "connection-connected",
+    "connection-refreshed",
+    "connection-loaned",
+    "connection-loan-revoked",
+    "connection-disconnected",
+    // schedule/{id} — the account that wrote the routine
+    "schedule-created",
+    "schedule-updated",
+    "schedule-paused",
+    "schedule-resumed",
+    "schedule-deleted",
+    "schedule-secret-rotated",
+    "schedule-fired",
+    // account/{id} — the account itself
+    "plan-changed",
+    "email-verified",
+    "account-enabled",
+    "account-disabled",
+    "account-profile-updated",
+    "account-password-changed",
+];
+
+pub fn is_watchable(event_type: &str) -> bool {
+    WATCHABLE.contains(&event_type)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -87,6 +150,8 @@ pub enum MonitorError {
     EmptyPrompt,
     #[error("a monitor may not watch monitor firings: that is the loop it exists to avoid")]
     WatchingItself,
+    #[error("{0:?} is not an event a monitor can watch; watchable events are: {list}", list = WATCHABLE.join(", "))]
+    NotWatchable(String),
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +234,9 @@ impl Monitor {
                 // not its own. Refused at the root instead.
                 if watches == "monitor-fired" {
                     return Err(MonitorError::WatchingItself);
+                }
+                if !is_watchable(&watches) {
+                    return Err(MonitorError::NotWatchable(watches));
                 }
                 if prompt.trim().is_empty() {
                     return Err(MonitorError::EmptyPrompt);
@@ -279,6 +347,37 @@ mod tests {
             }),
             Err(MonitorError::EmptyPrompt)
         ));
+    }
+
+    /// A typo is not a monitor that never fires: it is a refusal that names what can be watched.
+    #[test]
+    fn an_unknown_watch_is_refused() {
+        let create = |watches: &str| {
+            Monitor::default().decide(MonitorCommand::Create {
+                coworker_id: CoworkerId::from_stored("cw_1"),
+                watches: watches.to_string(),
+                prompt: "hi".to_string(),
+                at_ms: 0,
+            })
+        };
+        for refused in [
+            "run-faild",
+            "not-an-event",
+            "run-emitted",
+            "session-refreshed",
+        ] {
+            assert!(
+                matches!(create(refused), Err(MonitorError::NotWatchable(ref named)) if named == refused),
+                "{refused} must be refused"
+            );
+        }
+        let said = create("run-faild").expect_err("refused").to_string();
+        assert!(
+            said.contains("run-failed"),
+            "the refusal lists what can be watched: {said}"
+        );
+        assert!(create("run-failed").is_ok());
+        assert!(create(" connection-disconnected ").is_ok());
     }
 
     #[test]

@@ -990,7 +990,7 @@ pub(crate) async fn resume_settled(
     call_id: Option<&str>,
 ) -> bool {
     let Some((run_id, mut run, seq, pending)) =
-        pending_suspended(state, account_id, coworker_id, reason).await
+        pending_suspended(state, account_id, coworker_id, reason, call_id).await
     else {
         return false;
     };
@@ -1054,11 +1054,20 @@ pub(crate) async fn resume_settled(
     true
 }
 
+/// The run this coworker has parked on a card of this kind: the one whose pending call is
+/// `call_id` when one is, else the first.
+///
+/// MATCHED BY CALL WHEN IT CAN BE. A coworker's chat turn and one of its routines can both be
+/// parked on a form at once — a routine mints its card like a chat turn does (#177) — and taking
+/// the first would answer the chat's run with the routine's card, and leave the routine parked.
+/// The first is still the fallback: a stacked form whose call is not the parked one settles its
+/// card and journals onto that run, as it always has.
 pub(crate) async fn pending_suspended(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,
+    call_id: Option<&str>,
 ) -> Option<(
     opengrok_core::id::RunId,
     opengrok_core::run::Run,
@@ -1072,6 +1081,8 @@ pub(crate) async fn pending_suspended(
         .awaiting_approval(account_id)
         .await
         .ok()?;
+    let want = call_id.filter(|id| !id.is_empty());
+    let mut first = None;
     for run_id in run_ids {
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
@@ -1085,9 +1096,14 @@ pub(crate) async fn pending_suspended(
         if pending.reason != reason {
             continue;
         }
-        return Some((run_id, run, seq, pending));
+        if want.is_none_or(|want| pending.call_id == want) {
+            return Some((run_id, run, seq, pending));
+        }
+        if first.is_none() {
+            first = Some((run_id, run, seq, pending));
+        }
     }
-    None
+    first
 }
 
 fn now_ms() -> i64 {
@@ -1127,8 +1143,12 @@ pub(crate) async fn journal_agui_custom(
     reason: opengrok_core::run::SuspendReason,
     frame: Value,
 ) {
+    let call_id = frame
+        .get("callId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let Some((run_id, mut run, seq, pending)) =
-        pending_suspended(state, account_id, coworker_id, reason).await
+        pending_suspended(state, account_id, coworker_id, reason, call_id.as_deref()).await
     else {
         return;
     };
