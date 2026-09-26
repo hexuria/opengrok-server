@@ -27,6 +27,9 @@
 pub mod routes;
 pub mod sweep;
 
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
 
@@ -97,6 +100,12 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         tracing::warn!(%origin, coworker = %coworker_id, "a firing named a coworker that does not load");
         return;
     };
+    // Asked here as well as at the door: a routine made before its coworker was retired still
+    // names it, and a retired coworker's key is revoked — its turn would bill the deployment.
+    if coworker.retired || coworker.is_group() {
+        tracing::warn!(%origin, coworker = %coworker_id, "a firing named a coworker that cannot take work");
+        return;
+    }
 
     let tools = crate::agui::routes::tools_for_coworker(
         &state,
@@ -166,6 +175,89 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     // card nobody settles would sit pending for good.
     crate::agui::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &events)
         .await;
+}
+
+/// The 429 for a routine that already has `MAX_RUNS_IN_FLIGHT` unfinished runs of its owner's,
+/// or `None` to go ahead. Shared by the webhook door and "run now": a person mashing the button is
+/// as much a stampede of billed runs as a retry loop at the other end of a hook.
+///
+/// ONLY THE OWNER'S RUNS COUNT. Thread ids are the client's to choose, so anybody who learned a
+/// routine's id could otherwise park three runs on it and hold its owner at 429 for good.
+///
+/// A BRAKE, NOT A LOCK. Two wakes in the same millisecond can both read the same number, and a
+/// run counts only once it journals its first row, after policy and the coworker load. What this
+/// exists to stop is the thousandth press, not the fourth.
+pub(crate) async fn too_busy(
+    state: &AgUiState,
+    account_id: &AccountId,
+    thread_id: &str,
+) -> Option<Response> {
+    // Unfinished runs are the newest, so a hundred rows reach every one that could matter.
+    match state
+        .auth
+        .store
+        .runs_for_thread_owned_by(thread_id, account_id, 100)
+        .await
+    {
+        Ok(runs) => {
+            let in_flight = runs
+                .iter()
+                .filter(|run| {
+                    !opengrok_core::run::RunStatus::from_stored(&run.status).is_terminal()
+                })
+                .count();
+            if i64::try_from(in_flight).unwrap_or(i64::MAX) >= MAX_RUNS_IN_FLIGHT {
+                tracing::warn!(routine = %thread_id, %in_flight, "refused a wake: too much already running");
+                return Some(json_reply(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "this routine already has three runs in flight; wait for one to end",
+                ));
+            }
+            None
+        }
+        Err(error) => {
+            tracing::error!(%error, routine = %thread_id, "could not count a routine's runs in flight");
+            Some(json_reply(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage failed",
+            ))
+        }
+    }
+}
+
+/// Start the run whose `Fired` the log already holds (`sweep.rs` says why the event goes first),
+/// and answer `202 {accepted, runId}` — the half of the webhook door and "run now" that is the
+/// same. `after` is the aggregate that append produced, so the coworker is the one the routine
+/// has NOW, not whichever one a client last listed.
+pub(crate) fn start_fired(
+    host: &HostState,
+    after: &opengrok_core::schedule::Schedule,
+    account_id: AccountId,
+    thread_id: &str,
+    run_id: RunId,
+    prompt: String,
+    origin: String,
+) -> Response {
+    let Some(coworker_id) = after.coworker_id.clone() else {
+        return json_reply(StatusCode::CONFLICT, "that routine has no coworker");
+    };
+    let reply = serde_json::json!({ "accepted": true, "runId": run_id.as_str() });
+    tokio::spawn(fire(
+        host.clone(),
+        Firing {
+            origin,
+            account_id,
+            coworker_id,
+            prompt,
+            thread_id: thread_id.to_string(),
+            run_id,
+        },
+    ));
+    (StatusCode::ACCEPTED, Json(reply)).into_response()
+}
+
+fn json_reply(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
 /// A routine's newest run, as its row on `GET /schedules` carries it: `null` for a routine that

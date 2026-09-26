@@ -116,11 +116,40 @@ now=$(runs_in_thread "$sid")
 [ "$now" = "$frozen" ] || fail "a paused schedule kept firing ($frozen -> $now)"
 ok "paused, and $frozen stayed $frozen"
 
+echo "6b. edit, run now, and the history lists it — while still paused"
+# Run now is the one wake a pause does not refuse (#235); it must not resume the clock either.
+edited=$(curl -fsS -X PATCH "$BASE/schedules/$sid" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' -d '{"prompt":"say edited-heartbeat"}')
+echo "$edited" | jq -e '.prompt == "say edited-heartbeat" and .active == false' >/dev/null \
+  || fail "the edit did not land, or it resumed the routine: $edited"
+ran=$(curl -sS -w '\n%{http_code}' -X POST "$BASE/schedules/$sid/run" -H "authorization: Bearer $token")
+[ "$(echo "$ran" | tail -1)" = "202" ] || fail "run now answered: $ran"
+manual=$(echo "$ran" | sed '$d' | jq -r '.runId')
+[ -n "$manual" ] && [ "$manual" != "null" ] || fail "run now answered no runId: $ran"
+listed=""
+for _ in $(seq 1 15); do
+  listed=$(curl -fsS "$BASE/schedules/$sid/runs" -H "authorization: Bearer $token")
+  echo "$listed" | jq -e --arg r "$manual" 'any(.[]; .runId == $r and .cause == "manual" and .status == "ok")' \
+    >/dev/null && break
+  sleep 1
+done
+echo "$listed" | jq -e --arg r "$manual" 'any(.[]; .runId == $r and .cause == "manual" and .status == "ok")' \
+  >/dev/null || fail "the history does not list the manual run as ok: $listed"
+curl -fsS "$BASE/ag-ui/runs/$manual" -H "authorization: Bearer $token" \
+  | jq -r '.events[] | select(.delta != null) | .delta' | tr -d '\n' | grep -q "edited-heartbeat" \
+  || fail "the manual run did not open with the edited prompt"
+sleep 3
+[ "$(runs_in_thread "$sid")" = "$((frozen + 1))" ] || fail "run now resumed the clock"
+ok "edited, ran once by hand with the new prompt, listed as manual, and stayed paused"
+
 echo "7. somebody else's schedule is a 404, not a 403"
 other=$(curl -fsS "$BASE/auth/cursor_dev_session_token?plan=pro&email=other-$(date +%s)@og.local" | jq -r '.accessToken')
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/schedules/$sid/resume" \
   -H "authorization: Bearer $other")
 [ "$code" = "404" ] || fail "a stranger got $code, expected 404"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/schedules/$sid" \
+  -H "authorization: Bearer $other" -H 'content-type: application/json' -d '{"name":"mine"}')
+[ "$code" = "404" ] || fail "a stranger's edit got $code, expected 404"
 ok "existence is not leaked"
 
 echo "8. a monitor reacts to the event log — exactly once"
