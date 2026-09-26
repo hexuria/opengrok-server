@@ -1160,9 +1160,11 @@ impl Walker<'_> {
                         }
                     };
                     let receipt = RecipeReceipt::from_value(raw);
+                    // No claim per step: the workflow route holds the bot's lease for the whole
+                    // walk (`begin_run`), so a step's own claim would be refused by its own walk.
                     let run_id = self
                         .recipes
-                        .record_run(recipe, version, self.coworker, &receipt)
+                        .record_run(recipe, version, self.coworker, &receipt, None)
                         .await;
                     facts.insert("last.recipe".to_string(), recipe.clone());
                     facts.insert("last.ok".to_string(), receipt.ok.to_string());
@@ -1647,6 +1649,7 @@ mod tests {
             _version: i32,
             _by: &CoworkerId,
             _receipt: &RecipeReceipt,
+            _claimed: Option<&str>,
         ) -> Option<String> {
             Some(format!("rrun_{recipe_id}"))
         }

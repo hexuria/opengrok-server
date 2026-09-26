@@ -1,0 +1,10 @@
+# nextest runs every test in a process of its own, so an in-process lock such as a test file's
+# `static SERIAL` mutex serialises nothing. A file whose tests share one global in the database
+# declares that here instead. against_monitors: the monitor sweep walks ONE cursor over every
+# event, and a tick in one test drains the events another just seeded (it failed 2 runs in 6).
+[test-groups]
+one-cursor = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(against_monitors)"
+test-group = "one-cursor"

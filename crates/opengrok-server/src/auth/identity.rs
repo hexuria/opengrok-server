@@ -146,17 +146,21 @@ async fn do_signup(
     };
 
     let account_id = AccountId::new();
-    // Redeem first — this is where invite-open AND domain-match are enforced, atomically, and it
-    // is the step that refuses a stranger's gmail even with a real code.
-    let redeem = match org.decide(OrgCommand::RedeemInvite {
-        code: req.code.clone(),
-        email_domain: domain,
-        account: account_id.clone(),
-        at_ms: now_ms(),
-    }) {
-        Ok(events) => events,
-        Err(reason) => return Err((StatusCode::FORBIDDEN, reason.to_string())),
-    };
+    // SPENT FIRST, THEN CREATED (#237). The code used to be spent after the account existed, and
+    // a conflict on that append was ignored: two signups with one code both got accounts, and a
+    // signup racing any other org write (an invite issued, a domain claimed) kept its account
+    // while the code stayed open for the next person. A double-spend is a security bug; a spent
+    // code with no account behind it is an admin issuing a new one. So the second is the failure
+    // this order can leave, and `append_account` below says so when it does.
+    redeem_invite(
+        &state.store,
+        &org_id,
+        (org, org_seq),
+        &req.code,
+        &domain,
+        &account_id,
+    )
+    .await?;
 
     // No mailer ⇒ verified immediately; a mailer ⇒ pending until the link is clicked.
     let auto_verified = state.resend_api_key.is_none();
@@ -192,30 +196,31 @@ async fn do_signup(
         enabled: false,
         avatar_url: None,
     };
-    if state
+    // Not rare: the email check above is a read, so two codes signing up one address at once both
+    // pass it, and the second append conflicts on the unique email after its code is spent.
+    if let Err(error) = state
         .store
         .append_account(&account_id, 0, &register, &view)
         .await
-        .is_err()
     {
+        tracing::error!(
+            %error,
+            org = %org_id.as_str(),
+            // Never the code: with an address on the org's domain it is a working credential, and
+            // the org stream's InviteRedeemed already ties this account to it.
+            account = %account_id.as_str(),
+            "signup: the invite was spent but the account could not be created"
+        );
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            "could not create the account".to_string(),
+            "the invite was used but the account could not be created; ask your admin for a \
+             new invite"
+                .to_string(),
         ));
     }
     if let Some(created) = &state.account_created {
         let _ = created.send(account_id.clone());
     }
-    // The invite is spent only after the account exists.
-    let mut org_state = org;
-    for event in &redeem {
-        org_state.apply(event);
-    }
-    let _ = state
-        .store
-        .append_org(&org_id, org_seq, &redeem, &org_state, at_ms)
-        .await;
-
     // Send the verification email, if a mailer is configured. A send failure does not fail the
     // signup — the account exists, and its org's admin vouches for the address instead
     // (`POST /admin/users/{id}/verify`, `opengrok admin account verify`); failing here would
@@ -232,6 +237,69 @@ async fn do_signup(
         verification_email_sent: sent,
         verified: account.verified,
     })
+}
+
+/// How many times a redemption re-reads the org after another write took its seq. Each retry
+/// follows a write that DID land, so running out means the org is busier than a signup should
+/// wait for, not that anything is wrong.
+const REDEEM_ATTEMPTS: usize = 5;
+
+/// Spend `code` on `account` in the org loaded as `loaded` (the org and its stream seq). Checking
+/// the code is open and the domain matches happens in `decide`, and the append at the seq it was
+/// decided on is what makes that check atomic: exactly one writer wins each seq. Only `Conflict`
+/// is retried, on a fresh read, where a racing signup now finds the code spent (403). Any other
+/// error may be a commit whose reply was lost (`formal/tla/JournalAppend_truth.cfg`), so it is
+/// never retried and the reply does not claim the code is still unused.
+pub async fn redeem_invite(
+    store: &opengrok_store::PgStore,
+    org_id: &opengrok_core::id::OrgId,
+    loaded: (opengrok_core::org::Org, i64),
+    code: &str,
+    email_domain: &str,
+    account: &AccountId,
+) -> Result<(), (StatusCode, String)> {
+    let (mut org, mut org_seq) = loaded;
+    for _ in 0..REDEEM_ATTEMPTS {
+        let at_ms = now_ms();
+        let redeem = org
+            .decide(OrgCommand::RedeemInvite {
+                code: code.to_string(),
+                email_domain: email_domain.to_string(),
+                account: account.clone(),
+                at_ms,
+            })
+            .map_err(|reason| (StatusCode::FORBIDDEN, reason.to_string()))?;
+        let mut after = org.clone();
+        for event in &redeem {
+            after.apply(event);
+        }
+        match store
+            .append_org(org_id, org_seq, &redeem, &after, at_ms)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(opengrok_store::StoreError::Conflict) => {
+                (org, org_seq) = store.load_org(org_id).await.map_err(|error| {
+                    tracing::error!(%error, org = %org_id.as_str(), "signup: the org could not be re-read");
+                    (StatusCode::INTERNAL_SERVER_ERROR, "org unavailable".to_string())
+                })?;
+            }
+            Err(error) => {
+                // Not the code: on this path it may still be open.
+                tracing::error!(%error, org = %org_id.as_str(), "signup: the invite could not be redeemed");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the invite could not be redeemed, and it may have been used; ask your admin \
+                     whether it is still open"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the organization is busy; try again in a moment".to_string(),
+    ))
 }
 
 /// `POST /auth/signup` — the JSON endpoint the client calls. Wraps `do_signup`.

@@ -337,7 +337,7 @@ pub async fn key_for(
         .open_credential(vault, &secret_id_of(&row, coworker_id))
         .await
     {
-        Ok(Some(key)) => Some(GatewayKey::new(key)),
+        Ok(Some(key)) => Some(GatewayKey::with_id(key, row.key_id.clone())),
         Ok(None) => Some(GatewayKey::unavailable(format!(
             "the sealed key {} is missing",
             row.key_prefix
@@ -587,6 +587,14 @@ struct Reading {
 const FRESH_MS: i64 = 15_000;
 /// Under a failed read, a reading this young stands in; older than this the turn is held.
 const STALE_OK_MS: i64 = 60_000;
+/// How long a key the gateway refused while still knowing it is taken as still refused. That is
+/// an operator's decision on the gateway and lasts; asking again on every turn is a meter read and
+/// a row write per turn that learns nothing. A key that serves ends it at once (`key_served`).
+const STILL_KNOWN_MS: i64 = 10 * 60_000;
+/// Shown when the gateway refuses a key it still knows.
+const STILL_KNOWN_REASON: &str = "the gateway refuses it although it still knows it, so it may \
+     have been revoked or disabled there; an admin re-enables it on the gateway, or retires and \
+     re-hires the coworker";
 /// How long a model call waits for the meter.
 const METER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -614,6 +622,13 @@ pub struct GuardedDoor {
     /// per call; a pair whose key this replica just saw refused is dropped from here, so the next
     /// call it serves clears the row at once.
     served_cleared: Mutex<HashMap<String, i64>>,
+    /// Per pair, the key id the gateway last refused while still knowing it, and when. Keyed on
+    /// the id as well as the pair, so a re-minted key is asked about afresh. Only that answer is
+    /// kept: an unchecked refusal is asked again, since the next probe may learn something.
+    still_known: Mutex<HashMap<String, (String, i64)>>,
+    /// `STILL_KNOWN_MS` in production; a separate knob from `fresh_ms`, which the spend-cap tests
+    /// set to zero to count meter reads.
+    still_known_ms: i64,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
     /// a test that counts reads sets it to zero.
     fresh_ms: i64,
@@ -637,8 +652,17 @@ impl GuardedDoor {
             limits_cache: Mutex::new(HashMap::new()),
             pool_cache: Mutex::new(HashMap::new()),
             served_cleared: Mutex::new(HashMap::new()),
+            still_known: Mutex::new(HashMap::new()),
+            still_known_ms: STILL_KNOWN_MS,
             fresh_ms: FRESH_MS,
         }
+    }
+
+    /// How long a refusal of a key the gateway still knows is reused. Zero ⇒ every 401 asks.
+    #[must_use]
+    pub fn with_still_known_ms(mut self, still_known_ms: i64) -> Self {
+        self.still_known_ms = still_known_ms;
+        self
     }
 
     /// Keyed on (coworker, PAYER), not on the coworker: the cap is the coworker's but the pool
@@ -750,8 +774,8 @@ impl GuardedDoor {
     /// next turn mints another (`None`). Anything else is recorded on the row, so the console's
     /// spend, limit and usage replies say why this coworker is not being counted instead of
     /// reading "metered" over a key that serves nothing — and the reason is handed back for the
-    /// turn's own sentence. `key_id` is the key the caller read for this call when it has one; the
-    /// uncapped path reads none, so the live row stands in.
+    /// turn's own sentence. `key_id` is the key this call was sent with. Without one (a request
+    /// built without the row's id) the live row stands in, which may be a key minted since.
     async fn key_refused(
         &self,
         coworker: &CoworkerId,
@@ -766,13 +790,26 @@ impl GuardedDoor {
                 _ => return None,
             },
         };
-        let reason = if matches!(error, ModelError::Refused { status: 401, .. }) {
+        let pair = pair_key(coworker, payer);
+        let unauthorised = matches!(error, ModelError::Refused { status: 401, .. });
+        if unauthorised
+            && let Ok(known) = self.still_known.lock()
+            && known.get(&pair).is_some_and(|(known_id, at_ms)| {
+                *known_id == key_id && now_ms() - *at_ms <= self.still_known_ms
+            })
+        {
+            // Already probed, and recorded on the row by this replica: the entry is only made
+            // after that write succeeded, so nothing new to learn or write.
+            return Some(STILL_KNOWN_REASON.to_string());
+        }
+        let mut still_known = false;
+        let reason = if unauthorised {
             match self.retire_if_forgotten(coworker, payer, &key_id).await {
                 KeyFate::Retired => return None,
-                KeyFate::StillKnown => "the gateway refuses it although it still knows it, so it \
-                     may have been revoked or disabled there; an admin re-enables it on the \
-                     gateway, or retires and re-hires the coworker"
-                    .to_string(),
+                KeyFate::StillKnown => {
+                    still_known = true;
+                    STILL_KNOWN_REASON.to_string()
+                }
                 KeyFate::Unchecked => "the gateway refuses it, and whether it was lost there or \
                      revoked could not be checked"
                     .to_string(),
@@ -792,9 +829,16 @@ impl GuardedDoor {
             .await
         {
             tracing::error!(%error, coworker = %coworker.as_str(), "points guard: the key's refusal could not be recorded for the console");
+        } else if still_known && let Ok(mut known) = self.still_known.lock() {
+            // Remembered only once the row says so: a failed write must be retried by the next
+            // 401, or the console keeps reading "metered" for the whole window. Stale entries go
+            // on the way in, so a pair whose key never serves again does not stay forever.
+            let now = now_ms();
+            known.retain(|_, (_, at_ms)| now - *at_ms <= self.still_known_ms);
+            known.insert(pair.clone(), (key_id.clone(), now));
         }
         if let Ok(mut cleared) = self.served_cleared.lock() {
-            cleared.remove(&pair_key(coworker, payer));
+            cleared.remove(&pair);
         }
         tracing::warn!(coworker = %coworker.as_str(), reason, "points guard: this coworker's own key cannot serve");
         Some(reason)
@@ -804,6 +848,9 @@ impl GuardedDoor {
     /// per pair (see `served_cleared`); a failed clear is logged and retried on the next call.
     async fn key_served(&self, coworker: &CoworkerId, payer: &AccountId) {
         let pair = pair_key(coworker, payer);
+        if let Ok(mut known) = self.still_known.lock() {
+            known.remove(&pair);
+        }
         let now = now_ms();
         if self.fresh_ms > 0
             && let Ok(cleared) = self.served_cleared.lock()
@@ -1154,7 +1201,13 @@ impl ModelDoor for GuardedDoor {
             // And the key is REPAIRED, not just stepped around: on 8 Sep a dead row stayed dead,
             // so every later turn paid two requests and none of them appeared in its usage. One
             // that cannot be repaired is at least NAMED where its usage is read.
-            self.key_refused(&coworker, &payer, None, &error).await;
+            let sent = request
+                .gateway_key
+                .as_ref()
+                .and_then(GatewayKey::key_id)
+                .map(str::to_string);
+            self.key_refused(&coworker, &payer, sent.as_deref(), &error)
+                .await;
             tracing::warn!(
                 coworker = %coworker.as_str(),
                 %error,

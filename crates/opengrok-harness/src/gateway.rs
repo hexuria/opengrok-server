@@ -652,7 +652,7 @@ impl ModelDoor for GatewayDoor {
         // around the cap the coworker's key exists to enforce.
         let key = match &request.gateway_key {
             None => self.key.as_str(),
-            Some(crate::model::GatewayKey::Own(key)) => key.as_str(),
+            Some(crate::model::GatewayKey::Own { key, .. }) => key.as_str(),
             Some(crate::model::GatewayKey::Unavailable(reason)) => {
                 // HELD, NOT CAPPED: the key could not be produced, which is a fault on this side
                 // or in the vault. The sentence says "held" and always did; the variant now

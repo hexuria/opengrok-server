@@ -48,6 +48,8 @@ fn now_ms() -> i64 {
 struct StubBox {
     gate: Option<tokio::sync::Semaphore>,
     started: tokio::sync::Notify,
+    /// Every play fails as a box that would not answer.
+    fail: bool,
 }
 
 #[async_trait]
@@ -107,6 +109,11 @@ impl Computer for StubBox {
         self.started.notify_one();
         if let Some(gate) = &self.gate {
             gate.acquire().await.expect("gate").forget();
+        }
+        if self.fail {
+            return Err(opengrok_box::BoxError::Unreachable(
+                "the stand-in box is down".to_string(),
+            ));
         }
         let artifacts = match request["artifact_dir"].as_str() {
             Some(dir) => json!([{
@@ -824,4 +831,137 @@ async fn a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_th
     run_on(&h, &colleague, &bot, &id).await;
     assert_eq!(my_runs(&h, &colleague, &id).await.len(), 5);
     assert_eq!(my_runs(&h, &owner, &id).await.len(), 1);
+}
+
+/// #227: two starts at once for one bot must not both get the lease. The insert-where-not-exists
+/// read its snapshot before either row existed, so both inserted and two recipes clicked on one
+/// screen. Many rounds, because an unlocked race only loses some of the time.
+#[tokio::test]
+async fn simultaneous_starts_for_one_bot_leave_one_run_holding_the_lease() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let owner = h.person().await;
+    let recipe = h.taught(&owner, "One screen").await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    let store = PgStore::new(pool);
+    for round in 0..20 {
+        let bot = format!("cw_race_{}", uuid::Uuid::now_v7().simple());
+        let at_ms = now_ms();
+        let starts = (0..8).map(|n| {
+            let store = store.clone();
+            let recipe = recipe.clone();
+            let bot = bot.clone();
+            async move {
+                store
+                    .start_recipe_run(
+                        &format!("rrun_{round}_{n}_{}", uuid::Uuid::now_v7().simple()),
+                        &recipe,
+                        1,
+                        &bot,
+                        at_ms + 60_000,
+                        at_ms,
+                    )
+                    .await
+                    .expect("start")
+            }
+        });
+        let started = futures::future::join_all(starts).await;
+        assert_eq!(
+            started.iter().filter(|won| **won).count(),
+            1,
+            "round {round}: {started:?}"
+        );
+    }
+}
+
+/// #227: a chat play asks for the bot's screen the way the page does. While a page run holds
+/// it the claim is refused and writes nothing; once it lands, the claim is a row, and finishing
+/// the claimed run finishes that row rather than adding a second.
+#[tokio::test]
+async fn a_chat_play_is_refused_while_a_page_run_holds_the_bot_and_finishes_its_own_row() {
+    let database_url = database_or_skip!();
+    let h = gated(&database_url).await;
+    let owner = h.person().await;
+    let bot = h.hire(&owner).await;
+    let id = h.taught(&owner, "Close the month").await;
+    let answer = h
+        .client
+        .post(format!("{}/recipes/{id}/run", h.base))
+        .header("authorization", format!("Bearer {}", owner.token))
+        .header("prefer", "respond-async")
+        .json(&json!({ "coworkerId": bot }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(answer.status().as_u16(), 202);
+
+    let source = opengrok_server::recipes::StoreRecipes {
+        store: h.store.clone(),
+    };
+    let coworker = CoworkerId::from_stored(bot.clone());
+    let refused = opengrok_tools::RecipeSource::claim_run(&source, &id, 1, &coworker).await;
+    let why = refused.as_ref().err().cloned().unwrap_or_default();
+    assert!(
+        why.contains("already playing"),
+        "a page run holds the bot: {:?}",
+        refused
+            .as_ref()
+            .map(|claim| claim.as_ref().map(|c| c.id.clone()))
+    );
+    h.let_one_play();
+    h.finished_runs(&owner, &id, 1).await;
+
+    let claim = opengrok_tools::RecipeSource::claim_run(&source, &id, 1, &coworker)
+        .await
+        .expect("the bot is free now")
+        .expect("the store keeps leases");
+    let receipt = opengrok_tools::RecipeReceipt::from_value(json!({ "ok": true, "ran": 1 }));
+    let recorded = opengrok_tools::RecipeSource::record_run(
+        &source,
+        &id,
+        1,
+        &coworker,
+        &receipt,
+        Some(&claim.id),
+    )
+    .await;
+    assert_eq!(recorded.as_deref(), Some(claim.id.as_str()));
+    let runs = h.finished_runs(&owner, &id, 2).await;
+    assert!(runs.iter().any(|run| run["id"] == claim.id.as_str()));
+}
+
+/// #227: a run the box would not play is history too, and is pruned like a run that played:
+/// a bot whose box is down otherwise grows a failed row per try, for good.
+#[tokio::test]
+async fn failed_runs_are_pruned_like_played_ones() {
+    let database_url = database_or_skip!();
+    let h = harness_with(
+        &database_url,
+        StubBox {
+            fail: true,
+            ..StubBox::default()
+        },
+    )
+    .await;
+    let owner = h.person().await;
+    let bot = h.hire(&owner).await;
+    let id = h.taught(&owner, "Nothing answers").await;
+    for _ in 0..7 {
+        let (status, why) = h
+            .call(
+                &owner,
+                "POST",
+                &format!("/recipes/{id}/run"),
+                Some(json!({ "coworkerId": bot })),
+            )
+            .await;
+        assert_eq!(status, 502, "{why}");
+    }
+    let runs = my_runs(&h, &owner, &id).await;
+    assert_eq!(runs.len(), 5, "{runs:?}");
+    assert!(runs.iter().all(|run| run["ok"] == false));
 }

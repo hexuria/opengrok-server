@@ -78,6 +78,7 @@ model that stops matching fails the gate. That mapping is the part a person has 
 | `HarnessLoop` rounds, check points, exits | `converse_raw`, `close` in `opengrok-harness/src/lib.rs` |
 | `RunLifecycle` aggregate, loops, sweep, claim | `opengrok-core/src/run.rs`, `agui/routes.rs` claim, `opengrok-server/src/recovery.rs` |
 | `JournalAppend` read/append/Conflict | `append_events` / `append_run` in `opengrok-store` |
+| `RecipeLease` lock, snapshot, insert, commit, land | `start_recipe_run` / `record_recipe_run` in `opengrok-store/src/postgres.rs` |
 | Lean `Ending`, `Answer`, `Budget`, `Close` | the same, for every constant |
 | `run_properties.rs` | `Run::decide` + `apply`, against `ExactlyOneEnding`, `ended_is_stable`, `ApprovedAtMostOnce` |
 

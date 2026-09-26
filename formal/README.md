@@ -1,6 +1,6 @@
 # Formal models of the harness
 
-Three TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
+Four TLA+ models and one Lean file, deliberately smaller than the code: they carry only the
 facts the loop and the run lifecycle branch on — no events, HTTP, SQL or serialisation. They
 were written against `4a25af6` and drove the fixes that ship with them; each fix exists because
 TLC printed a trace without it. `scripts/formal.sh` re-runs all of it, and CI's `formal` job
@@ -13,6 +13,7 @@ must touch the models, and what to do with a counterexample: [`POLICY.md`](POLIC
 | `tla/HarnessLoop.tla` | One segment of `converse_raw` (`crates/opengrok-harness/src/lib.rs`): the rounds, the two Stop check points, every exit, the budgets, a journal whose writes may fail. |
 | `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases, and a client retrying its POST with the same run id. |
 | `tla/JournalAppend.tla` | One journal write racing a Stop, as the store sees it: read the run, append at the next seq, lose the race with a `Conflict`. Which errors a write may retry. |
+| `tla/RecipeLease.tla` | Starting a recipe run on one bot (`start_recipe_run`, `opengrok-store/src/postgres.rs`): starters that each lock, take the insert's snapshot, insert where no live lease is visible, and commit; a landed run clears its lease. |
 | `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
 | `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose; its `\* VIOLATES:` line names the one invariant it must break, and breaking any other fails the check. |
 
@@ -57,6 +58,8 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | The log never holds the round a run ended on without the ending it ended with | safety | `RoundNeverWithoutEnding` |
 | A round journaled while a Stop lands is kept | safety | `JournalAppend` `RoundKept` |
 | No round is written twice | safety | `JournalAppend` `NoDuplicate` |
+| At most one run of a bot holds a live recipe lease | safety | `RecipeLease` `AtMostOneLive` |
+| Every recipe start answers, won or refused | liveness | `RecipeLease` `EveryStartAnswers` |
 
 ## TLA+ findings
 
@@ -176,6 +179,16 @@ Each trace is TLC's shortest.
     - **A failed ownership read was a `409 run-exists`.** Obeying it, the owner of a dropped
       stream started a new run id with the same words: every model call and tool twice. It is
       a 503 now, like the failed `load_run` before it.
+
+14. **Two recipe starts at once both got the lease** (`RecipeLease_nolock`, 48 states; #227).
+    `start_recipe_run` inserted where no row of the bot held a live lease, in one statement.
+    Under READ COMMITTED that statement's snapshot is taken when it begins, and a row another
+    start has inserted but not committed is not in it, so both inserted and two recipes played
+    on one screen. The integration test saw four winners of eight in its second round. The
+    start now takes `pg_advisory_xact_lock` on the bot as its own statement before the insert,
+    in the same transaction: inside the insert, the lock would be granted after the snapshot had
+    already missed the winner's row. A unique index cannot do it, since an expired lease stays
+    non-null. The lease still lapses unfenced, the limit `RunLifecycle_lapse` states.
 
 ## Lean findings
 

@@ -463,13 +463,29 @@ async fn get_policy(
         Err(refusal) => return refusal,
     };
     let policy = load_policy(&state.store, account_id.as_str(), &query.machine).await;
-    Json(serde_json::json!({
-        "machineId": query.machine,
+    Json(policy_listing(&query.machine, &policy)).into_response()
+}
+
+/// The body of `GET /local-exec/policy`. An allow row the gate can never match (stored before
+/// #203's refusal, or written straight to the store) is still listed in `allow`, and named again
+/// in `inert` with the reason the rule endpoint would give. `inert` is a sibling rather than a
+/// flag on each row because `allow` is an array of strings that NativeChat reads (#223).
+pub fn policy_listing(machine: &str, policy: &LocalExecPolicy) -> serde_json::Value {
+    let inert: Vec<serde_json::Value> = policy
+        .allow
+        .iter()
+        .filter_map(|pattern| {
+            standing_rule_refusal("allow", pattern)
+                .map(|reason| serde_json::json!({"pattern": pattern, "reason": reason}))
+        })
+        .collect();
+    serde_json::json!({
+        "machineId": machine,
         "mode": policy.mode.as_stored(),
         "allow": policy.allow,
         "deny": policy.deny,
-    }))
-    .into_response()
+        "inert": inert,
+    })
 }
 
 #[derive(serde::Deserialize)]

@@ -40,7 +40,9 @@ pub(super) struct Line {
     /// The simple commands between top-level control operators, as written. The whole line when
     /// it nests or redirects to a path: a split through `$( … )`, `{ …; }`, `>&out`, `&> out` or
     /// a heredoc's body cuts a command in half (`ls >&out` read as `ls >` and `out`), and the
-    /// machine's own approval would be shown commands that are not in the line.
+    /// machine's own approval would be shown commands that are not in the line. The whole line,
+    /// too, when the reader cannot follow it to its end (`$'…'`, an unclosed quote, a trailing
+    /// backslash): where it stopped is not where the shell will cut.
     pub simple_commands: Vec<String>,
     /// The words after quote removal, only when the line is one simple command the gate can
     /// follow. `None` means no allow rule may match it.
@@ -62,6 +64,9 @@ struct Reader {
     opaque: bool,
     nested: bool,
     redirects: bool,
+    /// The reader lost the shell's place, so its cuts after this point are guesses. Not `opaque`:
+    /// an operator sets that too, and a line with only operators splits faithfully.
+    unsplittable: bool,
 }
 
 impl Reader {
@@ -167,7 +172,10 @@ pub(super) fn read(line: &str) -> Line {
                             r.quoted = true;
                             r.push(n);
                         }
-                        None => r.opaque = true,
+                        None => {
+                            r.opaque = true;
+                            r.unsplittable = true;
+                        }
                     }
                     i += 1;
                 }
@@ -196,7 +204,10 @@ pub(super) fn read(line: &str) -> Line {
                     match next {
                         Some('(') => r.nested = true,
                         // `$'…'` lets a backslash escape the closing quote; not followed here.
-                        Some('\'') => r.opaque = true,
+                        Some('\'') => {
+                            r.opaque = true;
+                            r.unsplittable = true;
+                        }
                         _ => r.expands = true,
                     }
                     r.push(c);
@@ -207,8 +218,9 @@ pub(super) fn read(line: &str) -> Line {
                     r.push(c);
                 }
                 '<' | '>' => {
-                    // `2>&1`: one stream into another touches no path, so it is not a redirection
-                    // the gate has to judge. Anything else aimed at a path, or a heredoc, is.
+                    // `2>&1`: one standard stream into another touches no path, so it is not a
+                    // redirection the gate has to judge. Anything else aimed at a path, a heredoc,
+                    // or a descriptor past 2 (`>&5`, whatever the daemon's shell has open there) is.
                     let digits = chars
                         .get(i + 2..)
                         .unwrap_or_default()
@@ -218,7 +230,9 @@ pub(super) fn read(line: &str) -> Line {
                     let ends = chars
                         .get(i + 2 + digits)
                         .is_none_or(|&after| matches!(after, ' ' | '\t') || is_operator(after));
-                    if next == Some('&') && digits > 0 && ends {
+                    let standard =
+                        digits == 1 && chars.get(i + 2).is_some_and(|d| matches!(d, '0'..='2'));
+                    if next == Some('&') && standard && ends {
                         let is_fd = !r.quoted && r.word.chars().all(|d| d.is_ascii_digit());
                         if is_fd {
                             r.word.clear();
@@ -261,7 +275,7 @@ pub(super) fn read(line: &str) -> Line {
         || r.words
             .first()
             .is_none_or(|program| is_assignment(program) || runs_another(program));
-    let simple_commands = if r.nested || r.redirects {
+    let simple_commands = if r.nested || r.redirects || r.unsplittable || quote.is_some() {
         let whole = line.trim();
         if whole.is_empty() {
             Vec::new()

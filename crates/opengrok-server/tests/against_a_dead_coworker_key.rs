@@ -54,7 +54,7 @@ impl ModelDoor for RefusesOwnKeys {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let own = match &request.gateway_key {
-            Some(GatewayKey::Own(key)) => Some(key.clone()),
+            Some(GatewayKey::Own { key, .. }) => Some(key.clone()),
             _ => None,
         };
         if let Ok(mut saw) = self.saw.lock() {
@@ -131,7 +131,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 /// A turn as `conversation.rs` builds one: the coworker's own key attached, whatever its limits.
 fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
     ModelRequest {
-        gateway_key: Some(GatewayKey::Own("oag_live_deadbeef000000".to_string())),
+        gateway_key: Some(GatewayKey::new("oag_live_deadbeef000000")),
         spend_scope: Some(coworker.as_str().to_string()),
         spend_actor: Some(payer.as_str().to_string()),
         model: "xai/grok-4.6@sub".to_string(),
@@ -255,4 +255,62 @@ async fn a_dead_key_costs_an_uncapped_turn_nothing_and_a_capped_turn_everything(
         "and held BEFORE the door — a capped turn never reaches the model at all when its own \
          key cannot be counted on"
     );
+}
+
+/// #226: a turn that set out on a key since re-minted must not flag the new one. The uncapped
+/// path booked its refusal against whichever row was live when the 401 came back, so a slow turn
+/// on the old key marked a fresh key "cannot serve" before it had ever been tried.
+#[tokio::test]
+async fn a_refusal_on_a_re_minted_key_is_booked_against_the_key_that_was_sent() {
+    let Some(store) = connect().await else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let stamp = now_ms();
+    let payer = seed_account(&store, &format!("staleturn-{stamp}@og.local")).await;
+    let coworker = CoworkerId::new();
+    // The row as it stands after the re-mint: the turn below was built before it.
+    store
+        .insert_coworker_key(&opengrok_store::CoworkerKeyView {
+            coworker_id: coworker.as_str().to_string(),
+            account_id: payer.as_str().to_string(),
+            key_id: format!("key_new_{stamp}"),
+            key_prefix: "oag_live_new".to_string(),
+            quota_usd: None,
+            created_at_ms: stamp,
+            revoked_at_ms: None,
+            secret_scoped: true,
+        })
+        .await
+        .expect("the re-minted row");
+    let door = RefusesOwnKeys::refusing(401, "authentication failed");
+    let guard = opengrok_server::spend::GuardedDoor::new(door.clone(), store.clone(), None);
+
+    let mut stale = a_turn(&coworker, &payer);
+    stale.gateway_key = Some(GatewayKey::with_id(
+        "oag_live_old000000",
+        format!("key_old_{stamp}"),
+    ));
+    assert!(guard.stream(stale).await.is_ok(), "still falls back");
+    let refusal = store
+        .coworker_key_refusal(&coworker, &payer)
+        .await
+        .expect("read the refusal");
+    assert!(
+        refusal.is_none(),
+        "the old key's 401 was booked against the new key: {refusal:?}"
+    );
+
+    // The same refusal on the key the row names is still recorded.
+    let mut current = a_turn(&coworker, &payer);
+    current.gateway_key = Some(GatewayKey::with_id(
+        "oag_live_new000000",
+        format!("key_new_{stamp}"),
+    ));
+    assert!(guard.stream(current).await.is_ok());
+    let refusal = store
+        .coworker_key_refusal(&coworker, &payer)
+        .await
+        .expect("read the refusal");
+    assert!(refusal.is_some(), "the live key's own refusal is named");
 }
