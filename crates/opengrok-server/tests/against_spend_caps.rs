@@ -1739,3 +1739,28 @@ async fn a_key_the_gateway_refuses_but_still_knows_is_named_in_the_console_not_r
     );
     assert!(note.contains("revoked or disabled"), "{note}");
 }
+
+/// #226: a key the gateway still knows and refuses is an operator's decision that stands for a
+/// while, so asking again on every turn buys a meter read and a row write per turn and learns
+/// nothing. Within the window the second 401 reuses the first answer.
+#[tokio::test]
+async fn a_key_known_to_be_refused_is_not_asked_about_again_on_the_next_turn() {
+    let database_url = database_or_skip!();
+    let (h, access, _owner, _) = org_admin(&database_url).await;
+    let ada = hire(&h, &access, "Ada").await;
+    h.stand_in.lock().unwrap().keys[0].revoked = true;
+    let before = h.usage_reads();
+
+    for n in 1..=2 {
+        let (status, failure) = h.turn(&ada, n).await;
+        assert!(status.contains("finished"), "{status} {failure:?}");
+    }
+    assert_eq!(
+        h.usage_reads() - before,
+        1,
+        "the second refusal should reuse the first probe's answer"
+    );
+    let (_, spend) = h.spend(&access, &ada).await;
+    let note = spend["note"].as_str().unwrap_or_default();
+    assert!(note.contains("revoked or disabled"), "{note}");
+}

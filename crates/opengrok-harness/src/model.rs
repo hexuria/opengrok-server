@@ -51,15 +51,37 @@ pub enum ModelDelta {
 /// the turn on the deployment's key would step around the cap; the door refuses with the
 /// reason instead. Redacted `Debug`, no `Serialize`: a request is journaled by its messages,
 /// never by what opened the door.
+///
+/// `key_id` is the gateway's id for the key that was SENT, when the caller read one. A refusal is
+/// booked against that id, not against whatever row is live by the time the refusal arrives: a
+/// turn that set out on a key since re-minted must not flag the new one (#226).
 #[derive(Clone, PartialEq, Eq)]
 pub enum GatewayKey {
-    Own(String),
+    Own { key: String, key_id: Option<String> },
     Unavailable(String),
 }
 
 impl GatewayKey {
     pub fn new(key: impl Into<String>) -> Self {
-        Self::Own(key.into())
+        Self::Own {
+            key: key.into(),
+            key_id: None,
+        }
+    }
+
+    pub fn with_id(key: impl Into<String>, key_id: impl Into<String>) -> Self {
+        Self::Own {
+            key: key.into(),
+            key_id: Some(key_id.into()),
+        }
+    }
+
+    /// The gateway's id for the key this request carries, when it is known.
+    pub fn key_id(&self) -> Option<&str> {
+        match self {
+            Self::Own { key_id, .. } => key_id.as_deref(),
+            Self::Unavailable(_) => None,
+        }
     }
 
     pub fn unavailable(reason: impl Into<String>) -> Self {
@@ -70,7 +92,7 @@ impl GatewayKey {
 impl std::fmt::Debug for GatewayKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Own(_) => f.write_str("GatewayKey::Own(<redacted>)"),
+            Self::Own { .. } => f.write_str("GatewayKey::Own(<redacted>)"),
             Self::Unavailable(reason) => write!(f, "GatewayKey::Unavailable({reason:?})"),
         }
     }
