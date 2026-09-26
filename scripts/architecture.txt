@@ -1,0 +1,37 @@
+# The crate graph scripts/check-architecture.sh holds the workspace to.
+#
+#   crate: workspace crates it may depend on | crates it must never reach, even transitively
+#
+# Normal and build dependencies only; a test may pull in whatever it needs. Edges are a ceiling,
+# like scripts/crate-ceilings.txt: a new edge fails, and so does a listed edge the code no longer
+# has, so the removal lands here in the same change and cannot quietly come back. The bans are
+# CLAUDE.md's workspace table made checkable: opengrok-core "depends on nothing", the contract
+# and policy crates do no I/O, and nothing but the server speaks HTTP as a server.
+#
+# opengrok-harness's edges to store, tools, box and policy are what #101 wants to narrow to
+# traits; each one removed there is a line shortened here.
+
+opengrok-core:
+    | tokio axum sqlx reqwest hyper
+opengrok-wire: opengrok-core
+    | tokio axum sqlx reqwest hyper
+opengrok-policy: opengrok-core
+    | tokio axum sqlx reqwest hyper
+opengrok-plugins: opengrok-core
+    | tokio axum sqlx reqwest hyper
+opengrok-recipes:
+    | tokio axum sqlx reqwest hyper
+opengrok-box: opengrok-core
+    | axum sqlx
+opengrok-store: opengrok-core opengrok-policy opengrok-testdb opengrok-wire
+    | axum reqwest hyper
+opengrok-testdb:
+    | axum reqwest hyper
+opengrok-tools: opengrok-box opengrok-core opengrok-plugins opengrok-policy opengrok-recipes
+    | axum sqlx
+opengrok-harness: opengrok-box opengrok-core opengrok-policy opengrok-store opengrok-tools opengrok-wire
+    | axum
+opengrok-server: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
+    |
+opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-server opengrok-store
+    |

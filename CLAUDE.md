@@ -58,6 +58,10 @@ what is already decided, and your first task.
    `unwrap`/`expect`/`panic` are denied workspace-wide. Ids are newtypes. Keep it that way.
 10. **Evidence or it doesn't ship.** "200 accepted" is not "honoured". Claims about a provider's
     behaviour need a captured response; claims about the client's behaviour need a file path.
+11. **A change to the run protocol goes through the model first.** The turn loop, the run
+    aggregate, journal writes, parking, Stop, the sweep and leases are modelled in `formal/`;
+    `formal/POLICY.md` says when a change must touch the models and what to do with a
+    counterexample (fix, keep it as EXPECTED TO FAIL, add a regression test).
 
 ---
 
@@ -73,6 +77,7 @@ crates/
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
+  opengrok-testdb   test support: the `_gate` database guard, and each test binary's own database
   opengrok-server   Axum: the host-facing API, the AG-UI endpoint, the MCP door, /console
 ```
 
@@ -100,6 +105,9 @@ cargo test --workspace          # many tests need Postgres; they skip loudly wit
 scripts/serve.sh                 # build + (re)start the dev server from .env
 scripts/gate.sh --smoke          # the merge gate; CI runs the same script; docs/setup/gate.md
 scripts/crate-size.sh            # fail if any crate's src/ is over its recorded ceiling
+scripts/check-architecture.sh    # fail on a crate edge scripts/architecture.txt does not allow
+scripts/formal.sh                # TLC + Lean on formal/ (install: scripts/install-tla.sh, install-lean.sh)
+scripts/install-ci-tools.sh      # pinned cargo-deny + cargo-nextest; gate.sh uses them when present
 ```
 
 **`OG_MODEL_DOOR=mock-cards` REFUSES TO START.** It served the mock transcript catalogue, which

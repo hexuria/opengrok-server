@@ -16,6 +16,7 @@ members = [
   "crates/opengrok-recipes", # a taught tape into the box's recipe steps; the lint that keeps them runnable
   "crates/opengrok-policy",  # what a principal may make a coworker do
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
+  "crates/opengrok-testdb",  # the gate-database guard; each test binary's own database
   "crates/opengrok-server",  # Axum: the host-facing API and the event stream
 ]
 
@@ -25,6 +26,9 @@ rust-version = "1.90"
 license = "MIT"
 
 [workspace.dependencies]
+# Property tests only (dev-dependency). No default features: the fork and timeout support they
+# add pulls in crates no test here needs.
+proptest = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = { version = "0.5", features = ["util"] }

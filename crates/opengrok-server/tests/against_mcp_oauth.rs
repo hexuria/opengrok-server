@@ -780,7 +780,11 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
         "a document client's key opens the door: {init}"
     );
     // Two presentations of one refresh token at the same instant: the claim is a single
-    // statement, so exactly one mints. The loser reads a spent token — the replay case.
+    // statement, so at most one mints. The loser reads a spent token — the replay case — and
+    // revokes the whole chain, which can land before the winner has finished minting; then both
+    // are refused and the client signs in again ("a refusal costs the client a sign-in, never a
+    // second live chain", oauth_mcp.rs `refresh`). This asserted exactly one until nextest ran
+    // the suite in parallel and the loser's revoke won the race about one run in two.
     let cimd_refresh_form = |token: &str| {
         vec![
             ("grant_type", "refresh_token".to_string()),
@@ -803,10 +807,9 @@ async fn claude_code_signs_in_through_the_browser_and_gets_a_key_the_door_accept
         first.expect("first").status().as_u16(),
         second.expect("second").status().as_u16(),
     ];
-    assert_eq!(
-        statuses.iter().filter(|s| **s == 200).count(),
-        1,
-        "exactly one of two concurrent refreshes mints: {statuses:?}"
+    assert!(
+        statuses.iter().filter(|s| **s == 200).count() <= 1,
+        "two concurrent refreshes both minted: {statuses:?}"
     );
     assert!(statuses.contains(&400), "{statuses:?}");
 

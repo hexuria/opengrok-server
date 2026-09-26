@@ -11,8 +11,15 @@ fallback.)
 ## Running it
 
 ```sh
-# checks and tests only: fmt --check, cargo check, clippy -D warnings, cargo test
+# checks and tests only: fmt --check, crate sizes, the architecture guard, cargo deny,
+# the formal models, cargo check (also --no-default-features), clippy -D warnings, the tests
 scripts/gate.sh
+
+# optional, pinned by sha256: what CI installs. Without them the gate skips cargo deny and
+# formal.sh loudly and runs the tests with cargo test instead of nextest.
+scripts/install-ci-tools.sh    # cargo-deny, cargo-nextest -> ~/.local/bin
+scripts/install-tla.sh         # TLC (needs java)
+scripts/install-lean.sh        # Lean 4
 
 # everything, including the 19 smoke scripts (needs Postgres and the built binary)
 cargo build -p opengrok        # the gate does NOT rebuild — stale binaries fail mysteriously
@@ -42,3 +49,12 @@ door for two more, then hands over to the scripts that own their whole lifecycle
 SIGKILL mid-run, recovery's planted rows, autonomy's kill-mid-schedule, seam B, browser login,
 identity, account admin, web console — on `OG_PORT`+3…+6). Read the comments in
 `scripts/gate.sh` itself; each guard in there is a bug that actually happened.
+
+## Test databases
+
+`OG_DATABASE_URL` names the gate's database, and each test binary works in its own database
+beside it: `opengrok_gate` gives `opengrok_against_monitors_gate`, created on first use
+(`gate_database_or_panic` in `opengrok-store`). nextest runs the binaries at once, and a test
+that acts on the whole database (a purge, the monitor sweep's cursor) must not see another
+binary's rows. The role needs CREATEDB, which `oag` has. They are ordinary `_gate` databases:
+drop them whenever you like, and the next run recreates them.
