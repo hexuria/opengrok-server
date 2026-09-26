@@ -2823,6 +2823,9 @@ fn recipe_version_row(row: &sqlx::postgres::PgRow) -> StoreResult<RecipeVersionR
     })
 }
 
+/// The first key of `start_recipe_run`'s per-bot lock ("RECP"); the second is the bot id's hash.
+const RECIPE_LEASE_LOCK_CLASS: i32 = 0x5245_4350;
+
 const RECIPE_SELECT: &str =
     "select r.id, r.owner_id, r.org_id, r.name, r.description, r.screen_w, r.screen_h,
         r.created_at_ms, r.updated_at_ms, r.deleted_at_ms,
@@ -3361,6 +3364,15 @@ impl PgStore {
     /// Write a run down BEFORE the box is asked to play it: not ok yet, and leased until
     /// `lease_until_ms`. Writes nothing and answers false when this bot already has a run whose
     /// lease is live, because two recipes clicking on one screen at once is neither's recipe.
+    ///
+    /// THE LOCK IS WHAT MAKES THE CHECK HOLD (#227). Under READ COMMITTED the `not exists` reads
+    /// a snapshot taken before a concurrent start's row is committed, so two starts both saw no
+    /// live run and both inserted. A per-bot transaction lock serialises them, and it must be its
+    /// own statement before the insert: a statement's snapshot is taken when it begins, so a lock
+    /// taken inside the insert would be granted after the snapshot had already missed the
+    /// winner's row. A unique index cannot do it: an expired lease stays non-null. This makes the
+    /// start atomic, not the lease: a run that outlives its lapsed lease is not fenced
+    /// (`formal/tla/RecipeLease.tla`).
     pub async fn start_recipe_run(
         &self,
         id: &str,
@@ -3370,6 +3382,14 @@ impl PgStore {
         lease_until_ms: i64,
         at_ms: i64,
     ) -> StoreResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        // The two-int form, keyed by a class of its own, so it cannot collide with the single
+        // bigint keys the purge, the migrations and the test databases lock on.
+        sqlx::query("select pg_advisory_xact_lock($1, hashtext($2))")
+            .bind(RECIPE_LEASE_LOCK_CLASS)
+            .bind(coworker_id)
+            .execute(&mut *tx)
+            .await?;
         let done = sqlx::query(
             "insert into recipe_run
                  (id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms, lease_until_ms)
@@ -3383,8 +3403,9 @@ impl PgStore {
         .bind(coworker_id)
         .bind(at_ms)
         .bind(lease_until_ms)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(done.rows_affected() == 1)
     }
 

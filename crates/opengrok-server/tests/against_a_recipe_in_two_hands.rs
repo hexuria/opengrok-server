@@ -825,3 +825,48 @@ async fn a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_th
     assert_eq!(my_runs(&h, &colleague, &id).await.len(), 5);
     assert_eq!(my_runs(&h, &owner, &id).await.len(), 1);
 }
+
+/// #227: two starts at once for one bot must not both get the lease. The insert-where-not-exists
+/// read its snapshot before either row existed, so both inserted and two recipes clicked on one
+/// screen. Many rounds, because an unlocked race only loses some of the time.
+#[tokio::test]
+async fn simultaneous_starts_for_one_bot_leave_one_run_holding_the_lease() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let owner = h.person().await;
+    let recipe = h.taught(&owner, "One screen").await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .expect("connect to Postgres");
+    let store = PgStore::new(pool);
+    for round in 0..20 {
+        let bot = format!("cw_race_{}", uuid::Uuid::now_v7().simple());
+        let at_ms = now_ms();
+        let starts = (0..8).map(|n| {
+            let store = store.clone();
+            let recipe = recipe.clone();
+            let bot = bot.clone();
+            async move {
+                store
+                    .start_recipe_run(
+                        &format!("rrun_{round}_{n}_{}", uuid::Uuid::now_v7().simple()),
+                        &recipe,
+                        1,
+                        &bot,
+                        at_ms + 60_000,
+                        at_ms,
+                    )
+                    .await
+                    .expect("start")
+            }
+        });
+        let started = futures::future::join_all(starts).await;
+        assert_eq!(
+            started.iter().filter(|won| **won).count(),
+            1,
+            "round {round}: {started:?}"
+        );
+    }
+}
