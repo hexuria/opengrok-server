@@ -376,6 +376,59 @@ pub(crate) async fn for_turn(
     })
 }
 
+/// One other skill this body asks to be quoted with it.
+///
+/// The line is `Requires skill: gpui-agent` on its own. The name has to pass
+/// `opengrok_plugins::is_valid_name`, the same check a skill row's name passed,
+/// so it cannot carry a newline or a marker. One level: the required body's own
+/// `Requires skill:` line is not followed.
+pub(crate) fn required_skill_name(body: &str) -> Option<&str> {
+    body.lines().find_map(|line| {
+        let name = line.trim().strip_prefix("Requires skill:")?.trim();
+        opengrok_plugins::is_valid_name(name).then_some(name)
+    })
+}
+
+/// The skill named by [`required_skill_name`], or why it will not be quoted.
+pub(crate) enum Dependency {
+    None,
+    /// Named, and not invocable on this account for this turn.
+    Missing(String),
+    Loaded { name: String, body: String },
+}
+
+/// Load the one skill `chosen` requires. A missing dependency does not refuse
+/// `chosen`. The caller says it was not available and still quotes `chosen`.
+pub(crate) async fn dependency_for(
+    state: &AgUiState,
+    account: &AccountId,
+    chosen: &SkillForTurn,
+) -> Dependency {
+    let Some(name) = required_skill_name(&chosen.body) else {
+        return Dependency::None;
+    };
+    if name == chosen.name {
+        return Dependency::None;
+    }
+    let Some(row) = state
+        .auth
+        .store
+        .skill_named(account.as_str(), name)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return Dependency::Missing(name.to_string());
+    };
+    match for_turn(state, account, &row.id).await {
+        Ok(required) => Dependency::Loaded {
+            name: required.name,
+            body: required.body,
+        },
+        Err(_) => Dependency::Missing(name.to_string()),
+    }
+}
+
 /// What a person writes a skill down as, and what the row says it came from.
 ///
 /// `taught` is missing on purpose: it is the server's word for a body a turn wrote down, and a
@@ -1616,6 +1669,35 @@ async fn from_tape(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skill_names_one_required_skill_and_the_quote_stays_the_one_the_person_chose() {
+        assert_eq!(
+            required_skill_name("Requires skill: gpui-agent\n\nWork the return."),
+            Some("gpui-agent")
+        );
+        assert_eq!(
+            required_skill_name("Work first.\nRequires skill: gpui-agent\n"),
+            Some("gpui-agent")
+        );
+        assert_eq!(required_skill_name("Requires skill: Not A Name"), None);
+        assert_eq!(required_skill_name("no requirement here"), None);
+
+        let required =
+            crate::persona::required_skill_line("gpui-agent", "Use the sandbox first.", "m");
+        assert!(required.contains("requires the skill `gpui-agent`"));
+        assert!(crate::persona::skill_name_from_system(&required).is_none());
+        let chosen = crate::persona::chosen_skill_line(
+            "bir",
+            "Requires skill: gpui-agent\n\nWork.",
+            "m",
+            crate::persona::SkillAuthor::Chooser,
+        );
+        assert_eq!(
+            crate::persona::skill_name_from_system(&format!("{required}{chosen}")),
+            Some("bir")
+        );
+    }
 
     /// The table, stated once here so a change to `may` has to be a deliberate edit of both.
     #[test]

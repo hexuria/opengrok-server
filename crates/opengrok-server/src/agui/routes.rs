@@ -287,21 +287,34 @@ async fn skill_segment(state: &AgUiState, account: &AccountId, chosen: &ChosenSk
             return why.line().to_string();
         }
     };
-    let quoted = crate::persona::skill_marker(&skill.body)
-        .map(|marker| {
-            crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author)
-        })
-        .filter(|segment| !segment.is_empty());
-    match quoted {
-        Some(segment) => segment,
-        None => {
-            // No marker the body does not already contain, so the quote could not be closed where
-            // we say it closes. Refuse rather than quote it unbounded.
-            let why = crate::skills::NotForThisTurn::Unquotable;
-            tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
-            why.line().to_string()
+    let dependency = crate::skills::dependency_for(state, account, &skill).await;
+    // One marker has to be absent from both bodies. A fence inside either quote
+    // would close that quote early.
+    let marker_haystack = match &dependency {
+        crate::skills::Dependency::Loaded { body, .. } => format!("{body}\n{}", skill.body),
+        _ => skill.body.clone(),
+    };
+    let Some(marker) = crate::persona::skill_marker(&marker_haystack) else {
+        let why = crate::skills::NotForThisTurn::Unquotable;
+        tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+        return why.line().to_string();
+    };
+    let prefix = match &dependency {
+        crate::skills::Dependency::None => String::new(),
+        crate::skills::Dependency::Missing(name) => format!(
+            "\n\nThe skill they chose requires `{name}`, and that skill is not available for this message.\n"
+        ),
+        crate::skills::Dependency::Loaded { name, body } => {
+            crate::persona::required_skill_line(name, body, &marker)
         }
+    };
+    let quoted = crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author);
+    if quoted.is_empty() {
+        let why = crate::skills::NotForThisTurn::Unquotable;
+        tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+        return why.line().to_string();
     }
+    format!("{prefix}{quoted}")
 }
 
 /// The skill line for this turn, and the id to record on `RunEvent::Started`.

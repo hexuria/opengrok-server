@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seed the first-class `drive-bir` skill onto a live OpenGrok account.
+# Seed `gpui-agent` and `bir` onto a live OpenGrok account.
 #
 # A skill is owned by an account, not the deployment, so this cannot be a
 # migration. POST /skills with a body already creates an enabled row and
@@ -14,10 +14,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-NAME=drive-bir
+NAME=""
 BODY_CAP=8000
 DESCRIPTION_CAP=300
-FILE=docs/skills/drive-bir.md
+FILE=""
 BASE="${OG_BASE:-http://127.0.0.1:1447}"
 DRY_RUN=0
 
@@ -26,7 +26,8 @@ need() { command -v "$1" >/dev/null || fail "$1 is required"; }
 
 usage() {
   cat <<'EOF'
-Seed drive-bir onto the signed-in OpenGrok account.
+Seed gpui-agent and bir onto the signed-in OpenGrok account.
+With no --file, both are seeded. gpui-agent first, then bir.
 
   ./scripts/seed-drive-bir-skill.sh --dry-run
   OG_ACCESS_TOKEN=… ./scripts/seed-drive-bir-skill.sh
@@ -35,16 +36,15 @@ Seed drive-bir onto the signed-in OpenGrok account.
 Options:
   --dry-run     print POST /skills, POST /skills/{id}/versions, PUT enabled
   --base URL    default OG_BASE or http://127.0.0.1:1447
-  --file PATH   default docs/skills/drive-bir.md
+  --name NAME   frontmatter name, required with --file
+  --file PATH   seed this file only
   -h, --help
 
 Auth (live run only; never commit these):
   OG_ACCESS_TOKEN   Authorization Bearer
   OG_COOKIE         Cookie header. Copy og_access from the local :1447 session.
 
-The standing role is not patched here. After this skill exists, Uriah can
-PATCH /coworkers/{id} with a role that names drive-bir — only when he confirms
-the text.
+The standing role is not patched here.
 EOF
 }
 
@@ -54,6 +54,11 @@ while [[ $# -gt 0 ]]; do
     --base)
       [[ $# -ge 2 ]] || fail "--base needs a URL"
       BASE=$2
+      shift 2
+      ;;
+    --name)
+      [[ $# -ge 2 ]] || fail "--name needs a skill name"
+      NAME=$2
       shift 2
       ;;
     --file)
@@ -67,6 +72,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 BASE="${BASE%/}"
+
+if [[ -z "$FILE" ]]; then
+  extra=()
+  [[ "$DRY_RUN" -eq 1 ]] && extra+=(--dry-run)
+  extra+=(--base "$BASE")
+  "$0" --name gpui-agent --file docs/skills/gpui-agent.md "${extra[@]}"
+  "$0" --name bir --file docs/skills/bir.md "${extra[@]}"
+  exit 0
+fi
+[[ -n "$NAME" ]] || fail "--file needs --name"
 
 need python3
 need curl
@@ -155,7 +170,7 @@ version_json=$(jq -n \
   --arg body "$body" \
   --arg note "seed from $FILE" \
   '{body: $body, note: $note, kind: "authored"}')
-enable_json='{"enabled": true}'
+enable_json=$(jq -n --arg description "$description" '{enabled: true, description: $description}')
 
 echo "body characters: $body_chars (cap $BODY_CAP)"
 echo "description characters: $description_chars (cap $DESCRIPTION_CAP)"
@@ -244,8 +259,9 @@ version=$(printf '%s' "$OG_HTTP_BODY" | jq -r .version)
 echo "PUT /skills/${id} enabled=true"
 og_call PUT "/skills/${id}" "$enable_json"
 [[ "$OG_HTTP_CODE" == "200" ]] || fail "PUT /skills/${id} -> $OG_HTTP_CODE ${OG_HTTP_BODY}"
-printf '%s' "$OG_HTTP_BODY" | jq -e --arg name "$name" '
+printf '%s' "$OG_HTTP_BODY" | jq -e --arg name "$name" --arg description "$description" '
   .name == $name
+  and .description == $description
   and .enabled == true
   and .draft == false
   and (.versionCount | type == "number")
