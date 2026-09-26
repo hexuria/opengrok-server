@@ -4,7 +4,7 @@
 //! Pure: no Postgres, no daemon.
 
 use opengrok_server::local_exec::{
-    LocalExecDecision, LocalExecMode, LocalExecPolicy, decide, simple_commands,
+    LocalExecDecision, LocalExecMode, LocalExecPolicy, decide, policy_listing, simple_commands,
     standing_rule_refusal,
 };
 
@@ -100,6 +100,31 @@ fn an_fd_duplication_is_not_a_redirection_to_a_path() {
     let p = policy(&["cargo test 2"], &[]);
     assert_eq!(decide(&p, "cargo test \\\n2>&1"), LocalExecDecision::Ask);
     assert_eq!(decide(&p, "cargo test '2'>&1"), LocalExecDecision::Allow);
+}
+
+/// #223: only the three standard streams are a duplication the gate may pass. `>&5` writes to
+/// whatever descriptor 5 is in the daemon's shell, which the pattern cannot see, so it asks and
+/// the daemon is shown the whole line.
+#[test]
+fn only_the_standard_streams_are_a_harmless_duplication() {
+    let p = policy(&["cargo test"], &[]);
+    for line in [
+        "cargo test 2>&1",
+        "cargo test >&2",
+        "cargo test 1>&2",
+        "cargo test 2>&0",
+    ] {
+        assert_eq!(decide(&p, line), LocalExecDecision::Allow, "{line:?}");
+    }
+    for line in [
+        "cargo test >&5",
+        "cargo test 2>&9",
+        "cargo test >&10",
+        "cargo test 1>&12",
+    ] {
+        assert_eq!(decide(&p, line), LocalExecDecision::Ask, "{line:?}");
+        assert_eq!(simple_commands(line), [line], "{line:?}");
+    }
 }
 
 /// #203: allow only when the line is one simple command the gate can read. A construct that runs
@@ -367,9 +392,55 @@ fn the_daemon_is_sent_the_servers_split() {
         "ls &> out",
         "ls > out; rm x",
         "cat <<EOF\na; b\nEOF",
+        // #223: a line the gate cannot follow to its end is not cut where it happens to stop:
+        // `$'…'` lets `\'` escape the quote, an unbalanced quote hides every operator after it,
+        // and a trailing backslash continues into whatever the daemon's shell reads next.
+        "echo $'a\\'; rm x'; ls",
+        "echo 'a; b",
+        "ls; echo \"a && b",
+        "ls; rm x \\",
     ] {
         assert_eq!(split(line), [line], "{line:?}");
     }
+}
+
+/// #223: GET /local-exec/policy lists every allow row as stored, and names the ones the gate will
+/// never match beside them. `allow` stays an array of strings: NativeChat reads it.
+#[test]
+fn the_policy_listing_names_the_allows_that_can_never_match() {
+    let p = LocalExecPolicy {
+        mode: LocalExecMode::Ask,
+        allow: vec![
+            "cargo test".to_string(),
+            "cd src && cargo test".to_string(),
+            "sudo ls".to_string(),
+        ],
+        deny: vec!["rm".to_string()],
+        session_allow: vec!["git push".to_string()],
+    };
+    let listing = policy_listing("mac-1", &p);
+    assert_eq!(listing["machineId"], "mac-1");
+    assert_eq!(listing["mode"], "ask");
+    assert_eq!(
+        listing["allow"],
+        serde_json::json!(["cargo test", "cd src && cargo test", "sudo ls"])
+    );
+    assert_eq!(listing["deny"], serde_json::json!(["rm"]));
+    let inert = listing["inert"].as_array().cloned().unwrap_or_default();
+    let patterns: Vec<&str> = inert
+        .iter()
+        .filter_map(|row| row["pattern"].as_str())
+        .collect();
+    assert_eq!(patterns, ["cd src && cargo test", "sudo ls"]);
+    for row in &inert {
+        let pattern = row["pattern"].as_str().unwrap_or_default();
+        assert_eq!(
+            row["reason"].as_str(),
+            standing_rule_refusal("allow", pattern),
+            "{row}"
+        );
+    }
+    assert!(!listing.to_string().contains("git push"), "{listing}");
 }
 
 /// #203 asks #147's Always to store one parsed simple command, never a chain. The server holds
