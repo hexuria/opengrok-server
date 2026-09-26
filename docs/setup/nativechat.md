@@ -144,6 +144,21 @@ thread whose id is the schedule's own. `GET /schedules` lists it, and `POST
 /schedules/{id}/pause` or `/resume` and `DELETE /schedules/{id}` manage it
 (`scripts/slice10-autonomy-smoke.sh`). *Unverified:* where NativeChat shows a routine's result.
 
+Edit it in place, run it by hand, and read what it did:
+
+```sh
+curl -fsS -X PATCH "$OG/schedules/$ID" -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"prompt":"Check the disk and the backups."}'   # any of name, prompt, cron, coworkerId
+curl -fsS -X POST "$OG/schedules/$ID/run" -H "authorization: Bearer $TOKEN"    # → 202 {"accepted":true,"runId":…}
+curl -fsS "$OG/schedules/$ID/runs?limit=20" -H "authorization: Bearer $TOKEN"  # → [{"runId","cause","status",…}]
+```
+
+An edit keeps the routine's id, thread and history, and a field left out keeps what it had. A
+webhook routine keeps its URL and key through an edit, and refuses a `cron`. Run now works on a
+paused routine and leaves it paused: the clock and the hook stay off. The history lists only runs
+the routine started (`cause` is `clock`, `manual` or `webhook`), newest first, with `status`
+`running`, `waiting` (on a card), `ok` or `error`.
+
 ## When it does not connect
 
 - `/health` from the NativeChat machine first: `curl http(s)://<address>:1447/health` answers

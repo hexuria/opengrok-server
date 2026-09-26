@@ -15,16 +15,18 @@
 //! instruction that only ever logs refusals — a dead row a person has no way to see the problem
 //! with. Refusing up front puts the reason in their hands instead.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use opengrok_core::id::{AccountId, CoworkerId, MonitorId, ScheduleId};
+use opengrok_core::id::{AccountId, CoworkerId, MonitorId, RunId, ScheduleId};
 use opengrok_core::monitor::{Monitor, MonitorCommand};
-use opengrok_core::schedule::{Schedule, ScheduleCommand, Wake, WakeKind};
+use opengrok_core::schedule::{
+    FireCause, Schedule, ScheduleCommand, ScheduleError, Wake, WakeKind,
+};
 
 use crate::agui::routes::{AgUiState, account_from_bearer};
 use crate::host_state::HostState;
@@ -50,7 +52,12 @@ fn schedules_router(state: HostState) -> Router {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/rotate-key", post(rotate_schedule_key))
-        .route("/schedules/{id}", axum::routing::delete(delete_schedule))
+        .route("/schedules/{id}/run", post(run_schedule_now))
+        .route("/schedules/{id}/runs", get(schedule_runs))
+        .route(
+            "/schedules/{id}",
+            axum::routing::patch(edit_schedule).delete(delete_schedule),
+        )
         .with_state(state)
 }
 
@@ -89,21 +96,27 @@ struct CreateMonitor {
     prompt: String,
 }
 
-/// May this account point this coworker at anything? Shared by both create endpoints.
+/// Can this coworker take a routine's work at all: hired, not retired, not a group? A retired
+/// coworker's key is revoked at retirement, so its turn would run on the deployment's key outside
+/// its spend cap; a group takes no model call, so every firing would fail.
+pub(crate) async fn takes_work(state: &AgUiState, coworker_id: &CoworkerId) -> bool {
+    state
+        .auth
+        .store
+        .load_coworker(coworker_id)
+        .await
+        .map(|(coworker, _)| coworker.hired && !coworker.retired && !coworker.is_group())
+        .unwrap_or(false)
+}
+
+/// May this account point this coworker at anything? Shared by create, edit and run now.
 async fn may_use(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
 ) -> Result<(), Response> {
     // The coworker must exist — a schedule for a typo'd id would only ever log refusals.
-    let known = state
-        .auth
-        .store
-        .load_coworker(coworker_id)
-        .await
-        .map(|(coworker, _)| coworker.hired)
-        .unwrap_or(false);
-    if !known {
+    if !takes_work(state, coworker_id).await {
         return Err((StatusCode::NOT_FOUND, "no such coworker").into_response());
     }
     let policy = state
@@ -217,6 +230,19 @@ fn wake_from(body: &mut CreateSchedule) -> Result<Wake, (StatusCode, String)> {
     }
 }
 
+/// Unnamed is the pre-pane shape of this API, and the pane shows the prompt's first words — on
+/// create, and on an edit that blanks the name.
+fn name_or_first_words(name: Option<&str>, prompt: &str) -> String {
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => prompt
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
 async fn create_schedule(
     State(state): State<HostState>,
     headers: axum::http::HeaderMap,
@@ -237,20 +263,7 @@ async fn create_schedule(
     let at_ms = now_ms();
     let events = match Schedule::default().decide(ScheduleCommand::Create {
         coworker_id,
-        // Unnamed is the pre-pane shape of this API, and the pane shows the prompt's first words.
-        name: body
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                body.prompt
-                    .split_whitespace()
-                    .take(6)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            }),
+        name: name_or_first_words(body.name.as_deref(), &body.prompt),
         prompt: body.prompt,
         wake,
         at_ms,
@@ -395,6 +408,8 @@ async fn owned_schedule(
     }
 }
 
+/// Pause, resume and delete go through `mutate_schedule` too: with the pane's autosave, "Run now",
+/// the clock and a hook all writing one stream, a conflict here is ordinary and earns the retry.
 async fn change_schedule(
     state: HostState,
     headers: axum::http::HeaderMap,
@@ -402,31 +417,23 @@ async fn change_schedule(
     command: fn(i64) -> ScheduleCommand,
 ) -> Response {
     let id = ScheduleId::from_stored(id);
-    let (schedule, seq, account_id) = match owned_schedule(&state.agui, &headers, &id).await {
-        Ok(loaded) => loaded,
+    let account_id = match owned_schedule(&state.agui, &headers, &id).await {
+        Ok((_, _, account_id)) => account_id,
         Err(refusal) => return refusal,
     };
     let at_ms = now_ms();
-    let events = match schedule.decide(command(at_ms)) {
-        Ok(events) => events,
-        Err(reason) => return (StatusCode::CONFLICT, reason.to_string()).into_response(),
-    };
-    let mut after = schedule;
-    for event in &events {
-        after.apply(event);
-    }
-    match state
-        .agui
-        .auth
-        .store
-        .append_schedule(&id, &account_id, seq, &events, &after, at_ms)
-        .await
+    match mutate_schedule(&state, &account_id, &id, at_ms, |loaded| {
+        loaded.decide(command(at_ms)).map_err(|reason| {
+            (
+                StatusCode::CONFLICT.as_u16(),
+                serde_json::json!({ "error": reason.to_string() }),
+            )
+        })
+    })
+    .await
     {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => {
-            tracing::error!(%error, "could not store a schedule change");
-            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
-        }
+        Err(refusal) => json_refusal(refusal),
     }
 }
 
@@ -438,11 +445,11 @@ async fn change_schedule(
 /// the winner's state, which is what the person meant anyway.
 ///
 /// `decide` sees the fresh aggregate and returns the events to append, or a refusal already
-/// shaped for the wire. Returns the aggregate after the append and the seq it landed at.
+/// shaped for the wire. Returns the aggregate after the append.
 ///
-/// Shared with the webhook door (`hooks.rs`) — its only caller today, and the reason this lives
-/// beside `change_schedule` rather than inside it: a fired routine and an edit to the same
-/// routine a few milliseconds apart is exactly the race this retry exists for.
+/// Every write to a routine comes through here — edit, run now, pause, resume, delete, rotation,
+/// the webhook door and the clock sweep — because any two of them a few milliseconds apart is
+/// exactly the race this retry exists for.
 pub(crate) async fn mutate_schedule<F>(
     state: &HostState,
     account_id: &AccountId,
@@ -456,8 +463,15 @@ where
     ) -> Result<Vec<opengrok_core::schedule::ScheduleEvent>, (u16, serde_json::Value)>,
 {
     for attempt in 0..2 {
-        let Ok((loaded, seq)) = state.agui.auth.store.load_schedule(schedule_id).await else {
-            return Err((404, serde_json::json!({ "error": "no such routine" })));
+        // NOT A 404. Every caller checked the routine exists; a load that fails now is the store
+        // (down, or an event this binary cannot read), and "no such routine" would tell the
+        // owner it was deleted.
+        let (loaded, seq) = match state.agui.auth.store.load_schedule(schedule_id).await {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                tracing::error!(%error, schedule = %schedule_id, "could not read a routine");
+                return Err((500, serde_json::json!({ "error": "storage failed" })));
+            }
         };
         let events = decide(&loaded)?;
         let mut after = loaded;
@@ -492,6 +506,334 @@ where
         409,
         serde_json::json!({ "error": "another change to this routine landed first; reload and retry" }),
     ))
+}
+
+/// `PATCH /schedules/{id}`. Every field is optional and an absent one keeps what the routine
+/// has, so the pane can save the one field a person changed.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditSchedule {
+    name: Option<String>,
+    prompt: Option<String>,
+    cron: Option<String>,
+    coworker_id: Option<String>,
+    /// Accepted only when it names the kind the routine already is. A clock and a hook are two
+    /// different promises to whatever is wired to them; switching one into the other would move
+    /// the hook's address and key out from under it — or leave a clock nothing ever reads.
+    kind: Option<String>,
+}
+
+/// Edit a routine in place: same id, same thread, same history.
+///
+/// THE WAKE IS REBUILT FROM THE ROUTINE, NEVER FROM THE BODY. `ScheduleCommand::Update` can
+/// install either kind, and a webhook's hook id, hash and key come back from the loaded
+/// aggregate unchanged — a prompt edit must not rotate the key somebody pasted into another app.
+async fn edit_schedule(
+    State(state): State<HostState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<EditSchedule>,
+) -> Response {
+    let id = ScheduleId::from_stored(id);
+    let (loaded, _, account_id) = match owned_schedule(&state.agui, &headers, &id).await {
+        Ok(loaded) => loaded,
+        Err(refusal) => return refusal,
+    };
+    if body
+        .kind
+        .as_deref()
+        .is_some_and(|kind| kind != loaded.kind.as_str())
+    {
+        return unprocessable("a routine's kind cannot change; create a new routine instead");
+    }
+    if body.cron.is_some() && loaded.kind == WakeKind::Webhook {
+        return unprocessable("a webhook routine has no clock to set");
+    }
+    // An empty edit would still write an `Updated` event — and copy the hook's key into the log
+    // again — while answering 200: a success that changed nothing reads as a save that worked.
+    if body.name.is_none()
+        && body.prompt.is_none()
+        && body.cron.is_none()
+        && body.coworker_id.is_none()
+    {
+        return unprocessable("nothing to change: send name, prompt, cron or coworkerId");
+    }
+    if loaded.kind == WakeKind::Webhook && loaded.webhook_key.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "this webhook routine was made before its key was stored; rotate its key, then edit it"
+            })),
+        )
+            .into_response();
+    }
+    // A client echoing the whole row sends the coworker it already has; asking again would stop a
+    // routine whose grant lapsed from even being renamed. Only a real handover is checked.
+    let coworker_id = body
+        .coworker_id
+        .map(CoworkerId::from_stored)
+        .filter(|coworker_id| loaded.coworker_id.as_ref() != Some(coworker_id));
+    if let Some(coworker_id) = &coworker_id
+        && let Err(refusal) = may_use(&state.agui, &account_id, coworker_id).await
+    {
+        return refusal;
+    }
+    let at_ms = now_ms();
+    let after = match mutate_schedule(&state, &account_id, &id, at_ms, |loaded| {
+        let prompt = body.prompt.clone().unwrap_or_else(|| loaded.prompt.clone());
+        let name = match body.name.as_deref() {
+            Some(name) => name_or_first_words(Some(name), &prompt),
+            None => loaded.name.clone(),
+        };
+        let wake = match loaded.kind {
+            WakeKind::Cron => Wake::Cron {
+                cron: body.cron.clone().unwrap_or_else(|| loaded.cron.clone()),
+            },
+            WakeKind::Webhook => Wake::Webhook {
+                hook_id: loaded.hook_id.clone(),
+                secret_hash: loaded.secret_hash.clone(),
+                webhook_key: loaded.webhook_key.clone(),
+            },
+        };
+        loaded
+            .decide(ScheduleCommand::Update {
+                name,
+                prompt,
+                wake,
+                coworker_id: coworker_id.clone(),
+                at_ms,
+            })
+            .map_err(|reason| {
+                // What create refuses is the caller's input (422); anything else is the
+                // routine's state — deleted, or a hook written before its key was stored.
+                let code = match reason {
+                    ScheduleError::BadCron(_) | ScheduleError::EmptyPrompt => {
+                        StatusCode::UNPROCESSABLE_ENTITY
+                    }
+                    _ => StatusCode::CONFLICT,
+                };
+                (
+                    code.as_u16(),
+                    serde_json::json!({ "error": reason.to_string() }),
+                )
+            })
+    })
+    .await
+    {
+        Ok(after) => after,
+        Err(refusal) => return json_refusal(refusal),
+    };
+    // Read back from the projection rather than recomputed here: `nextDueMs` is whatever the
+    // sweep will claim by, which is the projection's word (it never moves earlier on an edit
+    // that keeps the clock), and the reply must agree with the next `GET /schedules`.
+    let view = match state.agui.auth.store.schedules_for(&account_id).await {
+        Ok(views) => views.into_iter().find(|view| view.id == id.as_str()),
+        Err(error) => {
+            tracing::error!(%error, routine = %id, "could not read back an edited routine");
+            None
+        }
+    };
+    let Some(view) = view else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+    };
+    // Same rule as the listing: a failed read is not "never ran".
+    let last_run =
+        match crate::autonomy::last_run(&state.agui, &account_id, id.as_str(), &view.name).await {
+            Ok(last_run) => last_run,
+            Err(error) => {
+                tracing::error!(%error, routine = %id, "could not read a routine's last run");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+            }
+        };
+    (
+        [NO_STORE],
+        Json(
+            RoutineRow {
+                id: &view.id,
+                coworker_id: Some(view.coworker_id.as_str()),
+                name: &view.name,
+                prompt: &view.prompt,
+                kind: view.kind,
+                cron: &view.cron,
+                hook_id: &view.hook_id,
+                // The aggregate's copy, not the projection's: a row projected before the key
+                // column existed carries an empty one, and the edit reply must not show it.
+                webhook_key: &after.webhook_key,
+                active: view.active,
+                next_due_ms: view.next_due_ms,
+                last_run,
+            }
+            .json(&state),
+        ),
+    )
+        .into_response()
+}
+
+fn unprocessable(message: &str) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+fn json_refusal((code, body): (u16, serde_json::Value)) -> Response {
+    (
+        StatusCode::from_u16(code).unwrap_or(StatusCode::CONFLICT),
+        Json(body),
+    )
+        .into_response()
+}
+
+/// `POST /schedules/{id}/run` — the person's "Run now".
+///
+/// A PAUSED ROUTINE RUNS, AND STAYS PAUSED. That is the core's rule (`Schedule::decide`, `Fire`):
+/// a person asking is the one wake a pause does not refuse, and pressing it is not a resume — the
+/// clock and the hook stay off. POLICY IS ASKED FIRST, like create: `fire` refuses a revoked
+/// grant silently, and a 202 with a run id that never appears is a lie the person cannot see.
+async fn run_schedule_now(
+    State(state): State<HostState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let id = ScheduleId::from_stored(id);
+    let (loaded, _, account_id) = match owned_schedule(&state.agui, &headers, &id).await {
+        Ok(loaded) => loaded,
+        Err(refusal) => return refusal,
+    };
+    // A 409, not may_use's 404: on this route a 404 reads as "the routine is gone", and the
+    // routine is right there — it is the coworker behind it that cannot work.
+    let coworker_id = match loaded.coworker_id.as_ref() {
+        Some(coworker_id) if takes_work(&state.agui, coworker_id).await => coworker_id.clone(),
+        _ => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "this routine's coworker is no longer hired; hand it to another coworker"
+                })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(refusal) = may_use(&state.agui, &account_id, &coworker_id).await {
+        return refusal;
+    }
+    if let Some(refusal) = crate::autonomy::too_busy(&state.agui, &account_id, id.as_str()).await {
+        return refusal;
+    }
+    let run_id = RunId::new();
+    let after = match mutate_schedule(&state, &account_id, &id, now_ms(), |loaded| {
+        loaded
+            .decide(ScheduleCommand::Fire {
+                run_id: run_id.clone(),
+                cause: FireCause::Manual,
+                at_ms: now_ms(),
+            })
+            .map_err(|reason| {
+                (
+                    StatusCode::CONFLICT.as_u16(),
+                    serde_json::json!({ "error": reason.to_string() }),
+                )
+            })
+    })
+    .await
+    {
+        Ok(after) => after,
+        Err(refusal) => return json_refusal(refusal),
+    };
+    let prompt = after.prompt.clone();
+    crate::autonomy::start_fired(
+        &state,
+        &after,
+        account_id,
+        id.as_str(),
+        run_id,
+        prompt,
+        format!("schedule {id} (run now)"),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct RunsQuery {
+    limit: Option<i64>,
+}
+
+/// How many runs the history reads before keeping the routine's own. The thread takes a
+/// person's replies too, so the page is filled from this many and then cut to `limit`.
+const RUNS_MAX: i64 = 100;
+
+/// `GET /schedules/{id}/runs?limit=N` — what this routine started, newest first. Always an
+/// array: a routine that never ran is `[]`, never an object a client would have to special-case.
+///
+/// The status words (`running`, `waiting`, `ok`, `error`) are the run history's own vocabulary as
+/// #82 and #235 write it, not `RunStatus::as_str` — `lastRun` on the row keeps the store's words.
+/// A run counts as the routine's only if its log recorded firing it; a person replying in the
+/// routine's thread is no firing, and the clock must not be credited with it.
+async fn schedule_runs(
+    State(state): State<HostState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<RunsQuery>,
+) -> Response {
+    use opengrok_core::run::RunStatus;
+    let id = ScheduleId::from_stored(id);
+    let account_id = match owned_schedule(&state.agui, &headers, &id).await {
+        Ok((_, _, account_id)) => account_id,
+        Err(refusal) => return refusal,
+    };
+    let limit = query.limit.unwrap_or(20).clamp(1, RUNS_MAX);
+    let runs = match state
+        .agui
+        .auth
+        .store
+        .runs_for_thread_owned_by(id.as_str(), &account_id, RUNS_MAX)
+        .await
+    {
+        Ok(runs) => runs,
+        Err(error) => {
+            tracing::error!(%error, routine = %id, "could not read a routine's runs");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+        }
+    };
+    // The aggregate is read AFTER the runs, so a run fired between the two reads is labelled
+    // rather than dropped from the page for want of its `Fired`.
+    let loaded = match state.agui.auth.store.load_schedule(&id).await {
+        Ok((loaded, _)) => loaded,
+        Err(error) => {
+            tracing::error!(%error, routine = %id, "could not read a routine");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
+        }
+    };
+    let rows: Vec<serde_json::Value> = runs
+        .iter()
+        .filter_map(|run| {
+            let key = run.id.as_str();
+            let cause = if loaded.manual_runs.contains(key) {
+                "manual"
+            } else if loaded.webhook_runs.contains(key) {
+                "webhook"
+            } else if loaded.clock_runs.contains(key) {
+                "clock"
+            } else {
+                return None;
+            };
+            let (status, ended) = match RunStatus::from_stored(&run.status) {
+                RunStatus::Running => ("running", false),
+                RunStatus::AwaitingApproval => ("waiting", false),
+                RunStatus::Finished => ("ok", true),
+                RunStatus::Failed | RunStatus::Stopped => ("error", true),
+            };
+            Some(serde_json::json!({
+                "runId": key,
+                "cause": cause,
+                "status": status,
+                "startedAtMs": run.started_at_ms,
+                "endedAtMs": ended.then_some(run.updated_at_ms),
+            }))
+        })
+        .take(usize::try_from(limit).unwrap_or(20))
+        .collect();
+    ([NO_STORE], Json(rows)).into_response()
 }
 
 async fn pause_schedule(

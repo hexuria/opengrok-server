@@ -69,39 +69,51 @@ pub async fn schedule_tick(
 
         // The aggregate gets the last word: a schedule paused or deleted between the claim and
         // now refuses here, and the projection having been momentarily stale fires nothing.
-        let (loaded, seq) = state.auth.store.load_schedule(&schedule.id).await?;
-        let events = match loaded.decide(ScheduleCommand::Fire {
-            run_id: run_id.clone(),
-            cause: opengrok_core::schedule::FireCause::Clock,
-            at_ms: now_ms(),
-        }) {
-            Ok(events) => events,
-            Err(reason) => {
-                tracing::info!(schedule = %schedule.id, %reason, "a claimed schedule declined to fire");
+        //
+        // THROUGH `mutate_schedule`, AND ONE ROUTINE'S FAILURE SKIPS ONLY THAT ROUTINE. An edit
+        // landing between the load and the append is a `Conflict`; this used to `?` out of the
+        // whole tick, and every routine claimed after it — its clock already advanced by the
+        // claim — skipped its slot. The Routines pane autosaves on blur, so that race is ordinary.
+        let after = match crate::autonomy::routes::mutate_schedule(
+            gateway,
+            &schedule.account_id,
+            &schedule.id,
+            now_ms(),
+            |loaded| {
+                loaded
+                    .decide(ScheduleCommand::Fire {
+                        run_id: run_id.clone(),
+                        cause: opengrok_core::schedule::FireCause::Clock,
+                        at_ms: now_ms(),
+                    })
+                    .map_err(|reason| (409, serde_json::json!({ "error": reason.to_string() })))
+            },
+        )
+        .await
+        {
+            Ok(after) => after,
+            // Warn, not info: the claim already advanced this routine's clock, so a slot that did
+            // not fire is gone — whether the routine was paused a moment ago or the store failed.
+            Err((code, why)) => {
+                tracing::warn!(schedule = %schedule.id, %code, %why, "a claimed schedule did not fire");
                 continue;
             }
         };
-        state
-            .auth
-            .store
-            .append_schedule(
-                &schedule.id,
-                &schedule.account_id,
-                seq,
-                &events,
-                &loaded,
-                now_ms(),
-            )
-            .await?;
+        let Some(coworker_id) = after.coworker_id.clone() else {
+            tracing::warn!(schedule = %schedule.id, "a claimed schedule names no coworker");
+            continue;
+        };
 
         // The run itself takes as long as a model takes; it must not hold up the other firings.
+        // Coworker and prompt come from the aggregate this firing was decided on, never from the
+        // claimed row: an edit can land between the claim and the load.
         tokio::spawn(crate::autonomy::fire(
             gateway.clone(),
             crate::autonomy::Firing {
                 origin: format!("schedule {}", schedule.id),
                 account_id: schedule.account_id.clone(),
-                coworker_id: schedule.coworker_id.clone(),
-                prompt: schedule.prompt.clone(),
+                coworker_id,
+                prompt: after.prompt.clone(),
                 // Every firing of one schedule shares a thread, so its history reads as one
                 // continuing conversation rather than a pile of orphans.
                 thread_id: schedule.id.as_str().to_string(),

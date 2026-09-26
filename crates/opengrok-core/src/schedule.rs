@@ -158,6 +158,10 @@ pub enum ScheduleEvent {
         secret_hash: Option<String>,
         #[serde(default)]
         webhook_key: Option<String>,
+        /// The coworker the routine was handed to. `None` keeps the one it had — which is also
+        /// what every `schedule-updated` written before the field existed replays as.
+        #[serde(default)]
+        coworker_id: Option<CoworkerId>,
     },
     Paused {
         at_ms: i64,
@@ -222,6 +226,9 @@ pub struct Schedule {
     pub manual_runs: std::collections::BTreeSet<String>,
     /// Runs an inbound POST started, by id — so a listing can label them `webhook`.
     pub webhook_runs: std::collections::BTreeSet<String>,
+    /// Runs the clock started, by id. Kept rather than inferred as "neither of the above": the
+    /// routine's thread takes a person's replies too, and those are no firing at all.
+    pub clock_runs: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -259,6 +266,8 @@ pub enum ScheduleCommand {
         name: String,
         prompt: String,
         wake: Wake,
+        /// `None` keeps the coworker it has.
+        coworker_id: Option<CoworkerId>,
         at_ms: i64,
     },
     Pause {
@@ -322,9 +331,13 @@ impl Schedule {
                 hook_id,
                 secret_hash,
                 webhook_key,
+                coworker_id,
                 ..
             } => {
                 self.name = name.clone();
+                if let Some(coworker_id) = coworker_id {
+                    self.coworker_id = Some(coworker_id.clone());
+                }
                 self.cron = cron.clone();
                 self.prompt = prompt.clone();
                 if let Some(kind) = kind {
@@ -361,6 +374,8 @@ impl Schedule {
                     self.webhook_runs.insert(run_id.as_str().to_string());
                 } else if *manual {
                     self.manual_runs.insert(run_id.as_str().to_string());
+                } else {
+                    self.clock_runs.insert(run_id.as_str().to_string());
                 }
             }
         }
@@ -437,6 +452,7 @@ impl Schedule {
         name: String,
         prompt: String,
         wake: Wake,
+        coworker_id: Option<CoworkerId>,
         at_ms: i64,
     ) -> Result<ScheduleEvent, ScheduleError> {
         if prompt.trim().is_empty() {
@@ -458,6 +474,7 @@ impl Schedule {
                     hook_id: Some(String::new()),
                     secret_hash: Some(String::new()),
                     webhook_key: Some(String::new()),
+                    coworker_id,
                 })
             }
             Wake::Webhook {
@@ -480,6 +497,7 @@ impl Schedule {
                     hook_id: Some(hook_id.trim().to_string()),
                     secret_hash: Some(secret_hash.trim().to_string()),
                     webhook_key: Some(webhook_key),
+                    coworker_id,
                 })
             }
         }
@@ -505,10 +523,17 @@ impl Schedule {
                 name,
                 prompt,
                 wake,
+                coworker_id,
                 at_ms,
             } => {
                 self.alive()?;
-                Ok(vec![Self::updated_from_wake(name, prompt, wake, at_ms)?])
+                Ok(vec![Self::updated_from_wake(
+                    name,
+                    prompt,
+                    wake,
+                    coworker_id,
+                    at_ms,
+                )?])
             }
 
             ScheduleCommand::Pause { at_ms } => {
@@ -666,6 +691,7 @@ mod tests {
                 name: "x".to_string(),
                 prompt: "y".to_string(),
                 wake: cron_wake("not cron"),
+                coworker_id: None,
                 at_ms: 2,
             }),
             Err(ScheduleError::BadCron(_))
@@ -675,6 +701,7 @@ mod tests {
                 name: "Monday report".to_string(),
                 prompt: "write the weekly report".to_string(),
                 wake: cron_wake("0 9 * * 1"),
+                coworker_id: None,
                 at_ms: 2,
             })
             .expect("update");
@@ -897,6 +924,78 @@ mod tests {
         }
         assert!(schedule.webhook_runs.contains("run_hook"));
         assert!(!schedule.manual_runs.contains("run_hook"));
+    }
+
+    /// The routine's thread is its id, and a person can reply into it; a run the routine never
+    /// fired must not be listed as one the clock did. So every firing is remembered by cause.
+    #[test]
+    fn every_firing_is_remembered_by_what_caused_it() {
+        let mut schedule = created();
+        for (run, cause) in [
+            ("run_clock", FireCause::Clock),
+            ("run_manual", FireCause::Manual),
+        ] {
+            let events = schedule
+                .decide(ScheduleCommand::Fire {
+                    run_id: RunId::from_stored(run),
+                    cause,
+                    at_ms: 2,
+                })
+                .expect("fire");
+            for event in &events {
+                schedule.apply(event);
+            }
+        }
+        assert!(schedule.clock_runs.contains("run_clock"));
+        assert!(!schedule.clock_runs.contains("run_manual"));
+        assert!(schedule.manual_runs.contains("run_manual"));
+    }
+
+    /// A ROUTINE CAN CHANGE HANDS WITHOUT LOSING ITS HISTORY. Delete-and-recreate would mint a
+    /// new id, and the id is the routine's thread — every run it ever made would fall off it.
+    #[test]
+    fn an_update_can_hand_the_routine_to_another_coworker() {
+        let mut schedule = created();
+        let events = schedule
+            .decide(ScheduleCommand::Update {
+                name: "queue check".to_string(),
+                prompt: "check the queue".to_string(),
+                wake: cron_wake("0 */5 * * * *"),
+                coworker_id: Some(CoworkerId::from_stored("cw_2")),
+                at_ms: 2,
+            })
+            .expect("update");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_2")));
+    }
+
+    /// An edit that does not name a coworker keeps the one it had — and so does every
+    /// `schedule-updated` written before the field existed.
+    #[test]
+    fn an_update_without_a_coworker_keeps_the_one_it_had() {
+        let mut schedule = created();
+        let events = schedule
+            .decide(ScheduleCommand::Update {
+                name: "renamed".to_string(),
+                prompt: "check the queue".to_string(),
+                wake: cron_wake("0 */5 * * * *"),
+                coworker_id: None,
+                at_ms: 2,
+            })
+            .expect("update");
+        for event in &events {
+            schedule.apply(event);
+        }
+        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_1")));
+
+        let old: ScheduleEvent = serde_json::from_str(
+            r#"{"type":"updated","name":"n","cron":"0 */5 * * * *","prompt":"p","at_ms":3}"#,
+        )
+        .expect("an updated event from before coworker_id");
+        schedule.apply(&old);
+        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_1")));
     }
 
     #[test]

@@ -115,29 +115,28 @@ impl PgStore {
                 .await?;
         } else {
             let active = state.created && !state.paused;
-            // Recomputed from *now* on every append. Resuming therefore skips everything missed
-            // while paused rather than backfilling it — pause means "do not act", not "act later".
-            // A webhook has no clock: next_due stays NULL so the sweep never claims it.
+            // Recomputed from *now* on every append (a resume skips what it missed while paused);
+            // a webhook has no clock and stays NULL. LOCKED BEFORE THE CLOCK IS READ: a claim holds
+            // the row until it commits, and a writer computing from a time read before the claim
+            // wrote the claimed slot back and it fired twice. Clock and `active` unchanged, the
+            // upsert only moves it later, and a claimed-empty one-shot stays empty.
+            sqlx::query("select 1 from schedule_view where id = $1 for update")
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await?;
+            let clock_ms = at_ms.max(chrono::Utc::now().timestamp_millis());
             let next_due_ms = if active && state.kind == WakeKind::Cron {
-                next_fire_ms(&state.cron, at_ms)
+                next_fire_ms(&state.cron, clock_ms)
             } else {
                 None
             };
-            let coworker = state
-                .coworker_id
-                .as_ref()
-                .map(|c| c.as_str().to_string())
-                .unwrap_or_default();
+            let coworker = state.coworker_id.as_ref().map_or("", |c| c.as_str());
             // A firing in this batch stamps last_fired_ms; anything else leaves it alone.
             let fired_at = events.iter().find_map(|event| match event {
                 ScheduleEvent::Fired { at_ms, .. } => Some(*at_ms),
                 _ => None,
             });
-            let hook_id = if state.hook_id.is_empty() {
-                None
-            } else {
-                Some(state.hook_id.as_str())
-            };
+            let hook_id = (!state.hook_id.is_empty()).then_some(state.hook_id.as_str());
             sqlx::query(
                 "insert into schedule_view
                    (id, account_id, coworker_id, cron, prompt, name, active, next_due_ms,
@@ -145,11 +144,16 @@ impl PgStore {
                     webhook_key)
                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13, $14)
                  on conflict (id) do update set
+                   coworker_id = excluded.coworker_id,
                    cron = excluded.cron,
                    prompt = excluded.prompt,
                    name = excluded.name,
                    active = excluded.active,
-                   next_due_ms = excluded.next_due_ms,
+                   next_due_ms = case when schedule_view.cron = excluded.cron
+                     and schedule_view.active = excluded.active
+                     then case when schedule_view.next_due_ms is null then null
+                       else greatest(schedule_view.next_due_ms, excluded.next_due_ms) end
+                     else excluded.next_due_ms end,
                    updated_at_ms = excluded.updated_at_ms,
                    created_at_ms = coalesce(schedule_view.created_at_ms, excluded.created_at_ms),
                    last_fired_ms = coalesce(excluded.last_fired_ms, schedule_view.last_fired_ms),
@@ -160,7 +164,7 @@ impl PgStore {
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
-            .bind(&coworker)
+            .bind(coworker)
             .bind(&state.cron)
             .bind(&state.prompt)
             .bind(&state.name)
@@ -385,11 +389,7 @@ impl PgStore {
                 .await?;
         } else {
             let active = state.created && !state.paused;
-            let coworker = state
-                .coworker_id
-                .as_ref()
-                .map(|c| c.as_str().to_string())
-                .unwrap_or_default();
+            let coworker = state.coworker_id.as_ref().map_or("", |c| c.as_str());
             sqlx::query(
                 "insert into monitor_view
                    (id, account_id, coworker_id, watches, prompt, active, updated_at_ms)
@@ -402,7 +402,7 @@ impl PgStore {
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
-            .bind(&coworker)
+            .bind(coworker)
             .bind(&state.watches)
             .bind(&state.prompt)
             .bind(active)
