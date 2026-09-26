@@ -11,6 +11,7 @@
 
 mod budget;
 pub mod cloaked_door;
+mod context;
 pub mod gateway;
 mod intent;
 pub mod journal;
@@ -1090,6 +1091,7 @@ async fn converse_raw(
     timing.budget(&budget);
     let verbose_timing = timing::verbose_from_env();
     let run_clock = std::time::Instant::now();
+    let mut window = context::Window::at_entry(&request);
 
     // EVERY EXIT OF THIS LOOP IS `close`. Returning any other way is how one exit ended a run with
     // no terminal event and others wrote their ending in two halves; this keeps the one way out
@@ -1125,16 +1127,22 @@ async fn converse_raw(
             if journal.stopped(run_id).await {
                 end_run!(Vec::new(), Ending::Stop);
             }
-            let (round, ending) = wrap_up(
-                door,
-                &request,
-                &budget,
-                &mut projection,
-                sink,
-                &mut timing,
-                why,
-            )
-            .await;
+            let mut ask = last_call(&request, &why);
+            // The wall clock calls this at the top of a round, before that round's fit, so the
+            // last round's results are unmeasured. The run's own window, not a new one: a boundary
+            // searched for now would land on the "[harness]" line just pushed.
+            match window.clone().fit(&mut ask) {
+                Ok(estimate) => timing.context(ask.context_tokens, estimate, window.left_out()),
+                Err(too_long) => {
+                    tracing::warn!(
+                        too_long,
+                        "the wrap-up call does not fit; the run ends on its budget"
+                    );
+                    end_run!(Vec::new(), Ending::Fail(why));
+                }
+            }
+            let (round, ending) =
+                wrap_up(door, ask, &budget, &mut projection, sink, &mut timing, why).await;
             end_run!(round, ending);
         }};
     }
@@ -1170,6 +1178,13 @@ async fn converse_raw(
         }
 
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
+        // BEFORE THE CALL, NOT AFTER THE 400 (#90). A request the model cannot read is not sent:
+        // the provider would refuse it after a round trip, and mid-run after tools had acted.
+        // This run's own results are never left out, so a run that outgrows the model ends here.
+        match window.fit(&mut request) {
+            Ok(estimate) => timing.context(request.context_tokens, estimate, window.left_out()),
+            Err(why) => end_run!(round_events, Ending::Fail(why)),
+        }
         let model_started = std::time::Instant::now();
         let stream = match budget.open(door, request.clone()).await {
             Ok(stream) => Some(stream),
@@ -1812,18 +1827,9 @@ async fn converse_raw(
     );
 }
 
-/// The wrap-up call itself: the conversation so far, a harness line saying why this is the last
-/// call, and no tools. Only words and reasoning are painted — a model that asks for a tool
-/// anyway is not given one. Returns the round and how it ends.
-async fn wrap_up(
-    door: &dyn ModelDoor,
-    request: &ModelRequest,
-    budget: &RunBudget,
-    projection: &mut Projection,
-    sink: Option<&dyn EventSink>,
-    timing: &mut timing::TurnTiming,
-    why: String,
-) -> (Vec<Event>, Ending) {
+/// The wrap-up's request: the conversation so far, a harness line saying why this is the last
+/// call, and no tools.
+fn last_call(request: &ModelRequest, why: &str) -> ModelRequest {
     let mut ask = request.clone();
     ask.tools.clear();
     ask.messages.push(ChatMessage::text(
@@ -1834,6 +1840,20 @@ async fn wrap_up(
         ),
     ));
     keep_recent_images(&mut ask.messages, RECENT_IMAGES);
+    ask
+}
+
+/// The wrap-up call itself, on `last_call`'s request. Only words and reasoning are painted — a
+/// model that asks for a tool anyway is not given one. Returns the round and how it ends.
+async fn wrap_up(
+    door: &dyn ModelDoor,
+    ask: ModelRequest,
+    budget: &RunBudget,
+    projection: &mut Projection,
+    sink: Option<&dyn EventSink>,
+    timing: &mut timing::TurnTiming,
+    why: String,
+) -> (Vec<Event>, Ending) {
     let started = std::time::Instant::now();
     let mut round = Vec::new();
     let streamed: Result<(), ModelError> = async {

@@ -135,6 +135,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         spend_scope: Some(coworker_id.as_str().to_string()),
         // Nobody is talking: a coworker acting on its own schedule acts for whoever hired it.
         spend_actor: Some(account_id.as_str().to_string()),
+        context_tokens: state.context_for(&coworker.model).await,
         // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
         model: coworker.model.clone(),
         // A routine's turn is still this coworker's turn: same identity, same standing role.

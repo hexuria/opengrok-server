@@ -125,6 +125,10 @@ pub struct ModelRequest {
     /// On a coworker only its owner can reach they name the same person; on a shared one they
     /// do not, and the difference is the whole point of the field.
     pub spend_actor: Option<String>,
+    /// How many tokens the model can read, prompt and answer together, as the server learned it
+    /// from the gateway's catalogue or `OG_CONTEXT_TOKENS`. `None` ⇒ unknown, and the harness
+    /// only counts. Never sent: the door builds its body field by field (#90).
+    pub context_tokens: Option<u64>,
 }
 
 /// One message of a conversation, in the OpenAI chat dialect the gateway speaks.

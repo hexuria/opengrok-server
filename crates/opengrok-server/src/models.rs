@@ -63,6 +63,73 @@ fn redact_secrets(detail: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Model {
     pub id: String,
+    /// `oag.context_window`: how many tokens the route reads. Null on virtual entries
+    /// (`oag/auto`), whose model is chosen per request.
+    pub context_window: Option<u64>,
+    /// `oag.alias_of`: the canonical id an `@sub`/`@api` entry is a channel of.
+    pub alias_of: Option<String>,
+}
+
+/// The context a turn is held to when the catalogue cannot say: `OG_CONTEXT_TOKENS`.
+///
+/// A DEFAULT, NOT "UNKNOWN MEANS UNGUARDED" (#90). The shipping pin `xai/grok-4.6` is served but
+/// never advertised (docs/setup/environment.md), so with no default the one route every hire
+/// starts on would be the one never guarded. 128k is the smallest window among the routes we
+/// ship; a larger model only trims later than it could.
+pub const DEFAULT_CONTEXT_TOKENS: u64 = 128_000;
+
+/// How long a turn waits for the catalogue before it falls back. A turn is not a picker: it
+/// must not pay the listing's ten seconds for a gateway that is down.
+const CONTEXT_LOOKUP: Duration = Duration::from_secs(3);
+
+/// `OG_CONTEXT_TOKENS`: unset ⇒ the default; `0` ⇒ no guard at all; a number ⇒ that fallback.
+pub fn context_setting_from_env() -> Option<u64> {
+    match std::env::var("OG_CONTEXT_TOKENS")
+        .ok()
+        .map(|raw| raw.trim().parse::<u64>())
+    {
+        Some(Ok(0)) => None,
+        Some(Ok(tokens)) => Some(tokens),
+        Some(Err(_)) => {
+            tracing::warn!("OG_CONTEXT_TOKENS is not a number; using {DEFAULT_CONTEXT_TOKENS}");
+            Some(DEFAULT_CONTEXT_TOKENS)
+        }
+        None => Some(DEFAULT_CONTEXT_TOKENS),
+    }
+}
+
+/// How many tokens a turn on `pin` may send: the gateway's word for it when it has one, else
+/// `setting`. `setting` of `None` turns the guard off, whatever the catalogue says.
+pub async fn context_for(
+    catalogue: Option<&ModelCatalogue>,
+    setting: Option<u64>,
+    pin: &str,
+) -> Option<u64> {
+    let fallback = setting?;
+    match catalogue {
+        Some(catalogue) => Some(catalogue.context_window(pin).await.unwrap_or(fallback)),
+        None => Some(fallback),
+    }
+}
+
+/// The advertised window for `pin`: its own entry, else the entry it is a channel of, else the
+/// same model on another channel. An exact entry with no window (a virtual route) is final: its
+/// model is picked per request, and borrowing another's window would be a guess.
+fn context_of(models: &[Model], pin: &str) -> Option<u64> {
+    if let Some(exact) = models.iter().find(|model| model.id == pin) {
+        return exact.context_window;
+    }
+    let base = crate::points::base_model(pin);
+    models
+        .iter()
+        .find(|model| model.alias_of.as_deref() == Some(pin))
+        .or_else(|| {
+            models.iter().find(|model| {
+                crate::points::base_model(&model.id) == base
+                    || model.alias_of.as_deref() == Some(base)
+            })
+        })
+        .and_then(|model| model.context_window)
 }
 
 /// What the catalogue answered, and why it is empty when it is.
@@ -77,6 +144,9 @@ pub struct ModelCatalogue {
     key: String,
     http: reqwest::Client,
     cached: Mutex<Option<(Instant, Vec<Model>)>>,
+    /// When a turn last asked the gateway for its listing. A failed listing is not cached, so
+    /// without this a gateway that is down would cost every turn a lookup.
+    looked_up: Mutex<Option<Instant>>,
     /// When each account last spent the deployment's money on a probe.
     probed: Mutex<HashMap<String, Instant>>,
 }
@@ -100,6 +170,7 @@ impl ModelCatalogue {
             key: key.into(),
             http: reqwest::Client::new(),
             cached: Mutex::new(None),
+            looked_up: Mutex::new(None),
             probed: Mutex::new(HashMap::new()),
         }
     }
@@ -141,6 +212,30 @@ impl ModelCatalogue {
             .map(|(_, models)| models.clone())
     }
 
+    /// What a turn reads: the last listing of any age, and one lookup a minute at most.
+    async fn context_window(&self, pin: &str) -> Option<u64> {
+        let due = {
+            let mut looked_up = match self.looked_up.lock() {
+                Ok(looked_up) => looked_up,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let due =
+                self.fresh().is_none() && looked_up.is_none_or(|at| at.elapsed() >= FRESH_FOR);
+            if due {
+                *looked_up = Some(Instant::now());
+            }
+            due
+        };
+        if due {
+            self.list_within(CONTEXT_LOOKUP).await;
+        }
+        let cached = match self.cached.lock() {
+            Ok(cached) => cached,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        context_of(&cached.as_ref()?.1, pin)
+    }
+
     fn remember(&self, models: &[Model]) {
         let mut cached = match self.cached.lock() {
             Ok(cached) => cached,
@@ -153,6 +248,10 @@ impl ModelCatalogue {
     /// an empty catalogue and the reason, because a picker that cannot offer a list must still let
     /// somebody type a route by hand.
     pub async fn list(&self) -> Catalogue {
+        self.list_within(Duration::from_secs(10)).await
+    }
+
+    async fn list_within(&self, timeout: Duration) -> Catalogue {
         if let Some(models) = self.fresh() {
             return Catalogue { models, note: None };
         }
@@ -160,7 +259,7 @@ impl ModelCatalogue {
             .http
             .get(format!("{}/v1/models", self.base_url))
             .bearer_auth(&self.key)
-            .timeout(Duration::from_secs(10))
+            .timeout(timeout)
             .send()
             .await;
         let response = match response {
@@ -265,8 +364,9 @@ pub struct Probed {
     pub tool_calls: bool,
 }
 
-/// Ids out of an OpenAI-shaped `/v1/models` body. Unknown fields are ignored, and a body that is
-/// not what we expected yields nothing rather than a guess.
+/// Ids out of an OpenAI-shaped `/v1/models` body, with the gateway's `oag` window where it gives
+/// one. Unknown fields are ignored, and a body that is not what we expected yields nothing rather
+/// than a guess.
 fn parse_models(body: &str) -> Vec<Model> {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
         return Vec::new();
@@ -276,8 +376,19 @@ fn parse_models(body: &str) -> Vec<Model> {
         .and_then(|data| data.as_array())
         .map(|rows| {
             rows.iter()
-                .filter_map(|row| row.get("id").and_then(|id| id.as_str()))
-                .map(|id| Model { id: id.to_string() })
+                .filter_map(|row| {
+                    let id = row.get("id").and_then(|id| id.as_str())?;
+                    Some(Model {
+                        id: id.to_string(),
+                        context_window: row
+                            .pointer("/oag/context_window")
+                            .and_then(|tokens| tokens.as_u64()),
+                        alias_of: row
+                            .pointer("/oag/alias_of")
+                            .and_then(|alias| alias.as_str())
+                            .map(str::to_string),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -285,82 +396,5 @@ fn parse_models(body: &str) -> Vec<Model> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ids_are_read_from_an_openai_shaped_listing() {
-        let body = r#"{"object":"list","data":[{"id":"oag/auto"},{"id":"openai/gpt-5.5"}]}"#;
-        let models = parse_models(body);
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].id, "oag/auto");
-        assert_eq!(models[1].id, "openai/gpt-5.5");
-    }
-
-    /// A body we did not expect yields nothing — never a guessed id a person could pin to.
-    #[test]
-    fn an_unexpected_body_yields_no_models_rather_than_a_guess() {
-        assert!(parse_models("not json").is_empty());
-        assert!(parse_models(r#"{"error":"nope"}"#).is_empty());
-        assert!(parse_models(r#"{"data":"not an array"}"#).is_empty());
-    }
-
-    /// The reason `probe` may pass a gateway sentence on at all: anything key-shaped in it does
-    /// not travel. A gateway that echoes the failed request would otherwise leak our credential
-    /// through us — the one thing this module exists to prevent.
-    #[test]
-    fn a_gateway_sentence_travels_but_a_credential_in_it_does_not() {
-        let leaked = redact_secrets(
-            "invalid Authorization header: Bearer oag_live_deadbeefdeadbeefdeadbeef",
-        );
-        assert!(
-            !leaked.contains("oag_live_deadbeefdeadbeefdeadbeef"),
-            "{leaked}"
-        );
-        assert!(leaked.contains("«redacted»"), "{leaked}");
-        assert!(leaked.contains("invalid Authorization header"), "{leaked}");
-
-        // Built rather than written: a key-shaped literal in source trips secret scanners, and a
-        // test about redaction should not be the thing that looks like a leak.
-        let openai_shaped = format!("sk-{}", "abcdefghijklmnopqrstuv");
-        let scrubbed = redact_secrets(&format!("key {openai_shaped}"));
-        assert!(!scrubbed.contains(&openai_shaped), "{scrubbed}");
-
-        // The useful case is untouched — this is the sentence the whole feature turns on.
-        let real = "no credential available for provider anthropic on this route";
-        assert_eq!(redact_secrets(real), real);
-    }
-
-    /// A gateway that dumps a whole request cannot dump it into a browser.
-    #[test]
-    fn an_enormous_detail_is_clipped() {
-        let flood = "word ".repeat(400);
-        let scrubbed = redact_secrets(&flood);
-        assert!(
-            scrubbed.chars().count() <= DETAIL_CLIP + 16,
-            "{}",
-            scrubbed.len()
-        );
-        assert!(scrubbed.ends_with("(clipped)"));
-    }
-
-    /// One person clicking Test is fine; a loop spending the deployment's money is not.
-    #[test]
-    fn an_account_cannot_probe_in_a_loop() {
-        let catalogue = ModelCatalogue::new("http://gateway.local", "oag_live_x");
-        assert!(catalogue.may_probe("acct_1"), "the first probe is allowed");
-        assert!(!catalogue.may_probe("acct_1"), "an immediate second is not");
-        assert!(
-            catalogue.may_probe("acct_2"),
-            "one account's limit is not another's"
-        );
-    }
-
-    #[test]
-    fn debug_never_prints_the_key() {
-        let catalogue = ModelCatalogue::new("http://gateway.local:29080", "oag_live_supersecret");
-        let rendered = format!("{catalogue:?}");
-        assert!(!rendered.contains("supersecret"), "{rendered}");
-        assert!(rendered.contains("«redacted»"), "{rendered}");
-    }
-}
+#[path = "../tests/unit/models.rs"]
+mod tests;

@@ -27,6 +27,8 @@ missing binary; its calls are screen actions, other work, or a chart/form. The p
 Stop at any step. With `WrapUp` (#93) a spent budget, or the wall clock at the top of any
 round after the first, goes to `wrap`: a Stop recorded by then wins, and otherwise one more
 call with no tools finishes the run with its words or fails it with the budget's reason.
+Before a round's call, or the wrap-up's, the context guard (#90) may find the request too long
+for the model and fail the run with no call at all (`TooLong`).
 
 **Lifecycle** (`RunLifecycle`). The aggregate is `running | awaiting | finished | failed |
 stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
@@ -260,6 +262,9 @@ The state graph was the object being minimised. The results:
   - `resume_conversation` asks `stopped` before running (or refusing) the approved call, goes
     through `close`, and checks its durable write.
   - Falling out of the `for` fails the run with a sentence.
+  - `TooLong` is `window.fit` (`context.rs`) before each round's call and in `wrap_up!`, after its Stop check:
+    what cannot fit fails the run with a sentence and asks the door nothing. It is not
+    switched, because the door-error branch of `Call` already ends the same way one call later.
 - `crates/opengrok-harness/src/projection.rs`: `unrecorded` swaps a refused ending for the one
   `RUN_ERROR` that is true, keeping its brackets and its `run-timing`.
 - `crates/opengrok-server/src/agui/routes.rs`

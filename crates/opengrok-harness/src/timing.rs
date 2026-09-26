@@ -47,6 +47,9 @@ pub struct TurnTiming {
     budget: Option<Value>,
     /// Why the run ended on its wrap-up call, when it did: which limit it reached.
     wrapped_up: Option<String>,
+    /// The model's context limit, each call's estimated prompt, and how many earlier messages
+    /// were left out to fit (#90). Absent on a run that never reached a model call.
+    context: Option<(Option<u64>, Vec<u64>, usize)>,
 }
 
 impl TurnTiming {
@@ -60,6 +63,7 @@ impl TurnTiming {
             tool_rounds: 0,
             budget: None,
             wrapped_up: None,
+            context: None,
         }
     }
 
@@ -69,6 +73,15 @@ impl TurnTiming {
 
     pub fn wrapped_up(&mut self, why: &str) {
         self.wrapped_up = Some(why.to_string());
+    }
+
+    pub fn context(&mut self, limit: Option<u64>, estimate: u64, left_out: usize) {
+        let (_, estimates, _) = self.context.get_or_insert((limit, Vec::new(), 0));
+        estimates.push(estimate);
+        if let Some(context) = &mut self.context {
+            context.0 = limit;
+            context.2 = left_out;
+        }
     }
 
     pub fn record_model(&mut self, ms: u64) {
@@ -107,6 +120,12 @@ impl TurnTiming {
             }
             if let Some(why) = &self.wrapped_up {
                 object.insert("wrapped_up".to_string(), json!(why));
+            }
+            if let Some((limit, estimated, left_out)) = &self.context {
+                object.insert(
+                    "context".to_string(),
+                    json!({ "limit": limit, "estimated": estimated, "left_out": left_out }),
+                );
             }
         }
         value

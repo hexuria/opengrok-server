@@ -428,6 +428,7 @@ fn pinned(scope: Option<&str>, actor: Option<&str>) -> Option<String> {
         gateway_key: None,
         spend_scope: scope.map(str::to_string),
         spend_actor: actor.map(str::to_string),
+        context_tokens: None,
     })
 }
 
