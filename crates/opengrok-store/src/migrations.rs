@@ -1131,6 +1131,27 @@ create unique index if not exists pending_user_message_client_idx
     on pending_user_message (account_id, thread_id, client_message_id)
     where client_message_id is not null;
 
+-- A follow-up aimed at a run that is already going. Not a stop, and not a new
+-- run: the harness reads the open rows at its next step boundary, appends them
+-- to that run's model request, and acks them. `consumed_at_ms` null means the
+-- model has not been shown the line yet. The partial unique index is what makes
+-- a client retry of the same bubble a no-op.
+create table if not exists run_steer (
+    id                 text        primary key,
+    run_id             text        not null,
+    account_id         text        not null,
+    content            text        not null,
+    client_message_id  text,
+    created_at_ms      bigint      not null,
+    consumed_at_ms     bigint
+);
+create index if not exists run_steer_open_idx
+    on run_steer (run_id, created_at_ms)
+    where consumed_at_ms is null;
+create unique index if not exists run_steer_client_idx
+    on run_steer (run_id, client_message_id)
+    where client_message_id is not null;
+
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.
 create table if not exists credential_hint (

@@ -1,6 +1,6 @@
 use super::*;
 use opengrok_tools::Executor;
-use opengrok_wire::agui::EventType;
+use opengrok_wire::agui::{Event, EventType};
 use std::sync::{Arc, Mutex};
 
 fn tool_runner() -> ToolRunner {
@@ -752,33 +752,63 @@ async fn a_call_refused_the_same_way_twice_ends_the_run() {
     );
 }
 
-/// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
-/// as text, and never started a call. Crossing the character bound ends the run with a
-/// reason, instead of streaming the rest of the flood — including a tool call that
-/// arrives only after it.
+/// Tools are offered and the model is writing, with no tool call yet. Each
+/// delta is its own frame. One flush when the model stops is what made a
+/// joke list appear all at once.
 #[tokio::test]
-async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
+async fn a_chat_reply_with_tools_offered_streams_each_delta() {
+    struct Door;
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            Ok(Box::pin(futures::stream::iter(
+                vec![
+                    Ok(ModelDelta::Text("1. One.\n".to_string())),
+                    Ok(ModelDelta::Text("2. Two.\n".to_string())),
+                ]
+                .into_iter(),
+            )))
+        }
+    }
+    let runner = tool_runner();
+    assert!(
+        work_tools_offered(&runner.tool_schemas()),
+        "this test is the tools-offered case: {:?}",
+        runner.tool_schemas()
+    );
+    let events = run_conversation(
+        &Door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("two jokes"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter(|event| event.event_type == EventType::TextMessageContent)
+        .filter_map(|event| event.extra.get("delta").and_then(|d| d.as_str()))
+        .collect();
+    assert_eq!(deltas, vec!["1. One.\n", "2. Two.\n"]);
+}
+
+/// A long reply with tools offered and no tool call is still the answer.
+/// Length is not a reason to fail the run.
+#[tokio::test]
+async fn a_long_reply_with_tools_offered_is_shown() {
     struct PlanDoor;
     #[async_trait::async_trait]
     impl ModelDoor for PlanDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-            let script = vec![
-                ModelDelta::Text(flood),
-                ModelDelta::Text(" and then I will call the tool.".to_string()),
-                ModelDelta::ToolCallStart {
-                    id: "late".to_string(),
-                    name: "shell".to_string(),
-                },
-                ModelDelta::ToolCallEnd {
-                    id: "late".to_string(),
-                },
-            ];
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+            let flood = "A real answer. ".repeat(120);
+            Ok(Box::pin(futures::stream::iter(vec![Ok(ModelDelta::Text(
+                flood,
+            ))])))
         }
     }
 
-    let journal = MemoryJournal::new();
     let runner = tool_runner();
     assert!(
         !runner.tool_schemas().is_empty(),
@@ -787,7 +817,7 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
     let events = run_conversation(
         &PlanDoor,
         Some(&runner),
-        &journal,
+        &MemoryJournal::new(),
         request("list the forms"),
         "t1",
         "r1",
@@ -795,20 +825,27 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
     )
     .await;
 
+    let text = assistant_text(&events);
     assert!(
-        !events
-            .iter()
-            .any(|event| event.event_type == EventType::ToolCallStart),
-        "must stop before a tool call that arrives only after the flood: {events:?}"
+        text.contains("A real answer."),
+        "the long reply is shown: {text:?}"
     );
-    let last = events.last().unwrap();
-    assert_eq!(last.event_type, EventType::RunError);
-    let message = last
-        .extra
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or_default();
-    assert!(message.contains("plan-only text"), "{message}");
+    assert_eq!(
+        events.last().unwrap().event_type,
+        EventType::RunFinished,
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| {
+            event.event_type == EventType::RunError
+                && event
+                    .extra
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("plan-only"))
+        }),
+        "{events:?}"
+    );
 }
 
 /// The bound is "tools offered and unused", not "the model wrote a lot". A coworker
@@ -819,7 +856,7 @@ async fn plan_only_text_does_not_stop_when_no_tools_are_offered() {
     #[async_trait::async_trait]
     impl ModelDoor for PlanDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+            let flood = "A real answer. ".repeat(120);
             Ok(Box::pin(futures::stream::iter(
                 vec![Ok(ModelDelta::Text(flood))].into_iter(),
             )))
@@ -849,7 +886,7 @@ async fn plan_only_text_does_not_stop_when_only_paint_tools_are_offered() {
     #[async_trait::async_trait]
     impl ModelDoor for PlanDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+            let flood = "A real answer. ".repeat(120);
             Ok(Box::pin(futures::stream::iter(
                 vec![Ok(ModelDelta::Text(flood))].into_iter(),
             )))
@@ -893,6 +930,223 @@ async fn plan_only_text_does_not_stop_when_only_paint_tools_are_offered() {
     assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
 }
 
+/// A line aimed at the run shows up on the next model request. The run finishes.
+/// It is not stopped, and it is not a second run.
+#[tokio::test]
+async fn a_steered_line_is_in_the_next_request_and_the_run_is_not_stopped() {
+    struct CountingDoor {
+        round: Mutex<usize>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for CountingDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            self.requests.lock().unwrap().push(request);
+            let script = if round == 1 {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"ls"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]
+            } else {
+                vec![ModelDelta::Text("saw the steer".to_string())]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    struct Once {
+        inner: MemoryJournal,
+        hits: Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for Once {
+        async fn record(&self, run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            self.inner.record(run_id, events).await
+        }
+        async fn steered(&self, _run_id: &str) -> Vec<SteerLine> {
+            let mut hits = self.hits.lock().unwrap();
+            *hits += 1;
+            // The first ask is the opening of round 1, before any tool. The
+            // line arrives for the request after that tool, which is the
+            // second ask.
+            if *hits == 2 {
+                vec![SteerLine {
+                    id: "s1".to_string(),
+                    content: "look in /tmp instead".to_string(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    let door = CountingDoor {
+        round: Mutex::new(0),
+        requests: Mutex::new(Vec::new()),
+    };
+    let journal = Once {
+        inner: MemoryJournal::new(),
+        hits: Mutex::new(0),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &journal,
+        request("list files"),
+        "t1",
+        "r-steer",
+        1,
+    )
+    .await;
+
+    let requests = door.requests.lock().unwrap().clone();
+    assert!(requests.len() >= 2, "the same run asked the model again");
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content == "look in /tmp instead"),
+        "the steer is in the next request of this run: {:?}",
+        requests[1].messages
+    );
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+    assert!(
+        !events.iter().any(|event| {
+            event.event_type == EventType::RunError
+                && event
+                    .extra
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or_default()
+                    .contains("stopped")
+        }),
+        "steer must not stop the run: {events:?}"
+    );
+}
+
+/// A prose round would otherwise finish. A steer that arrived during it keeps
+/// the same run open for one more model call.
+#[tokio::test]
+async fn a_steer_during_a_prose_round_does_not_finish_the_run() {
+    struct CountingDoor {
+        round: Mutex<usize>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for CountingDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            self.requests.lock().unwrap().push(request);
+            let text = if round == 1 {
+                "short answer".to_string()
+            } else {
+                "after the steer".to_string()
+            };
+            Ok(Box::pin(futures::stream::iter(vec![Ok(ModelDelta::Text(
+                text,
+            ))])))
+        }
+    }
+
+    struct Late {
+        inner: MemoryJournal,
+        hits: Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl RunJournal for Late {
+        async fn record(&self, run_id: &str, events: &[Event]) -> Result<(), JournalError> {
+            self.inner.record(run_id, events).await
+        }
+        async fn steered(&self, _run_id: &str) -> Vec<SteerLine> {
+            let mut hits = self.hits.lock().unwrap();
+            *hits += 1;
+            // Opening of the prose round, then the check that would have
+            // finished it. The line is there for that second check.
+            if *hits == 2 {
+                vec![SteerLine {
+                    id: "s2".to_string(),
+                    content: "also say the hostname".to_string(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    let door = CountingDoor {
+        round: Mutex::new(0),
+        requests: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &Late {
+            inner: MemoryJournal::new(),
+            hits: Mutex::new(0),
+        },
+        request("say hi"),
+        "t1",
+        "r-steer-prose",
+        1,
+    )
+    .await;
+
+    let requests = door.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "the prose round did not end the run");
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == "short answer" }),
+        "the next call is shown the reply already on screen: {:?}",
+        requests[1].messages
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.content == "also say the hostname"),
+        "{:?}",
+        requests[1].messages
+    );
+    let end_at = events
+        .iter()
+        .position(|event| event.event_type == EventType::TextMessageEnd)
+        .expect("the first reply closes before the next one");
+    let second = events.iter().skip(end_at).find(|event| {
+        event.event_type == EventType::TextMessageContent
+            && event.extra.get("delta").and_then(|d| d.as_str()) == Some("after the steer")
+    });
+    assert!(
+        second.is_some(),
+        "the steered reply is its own message: {events:?}"
+    );
+    assert_eq!(
+        events.last().unwrap().event_type,
+        EventType::RunFinished,
+        "{events:?}"
+    );
+}
+
 /// A tool call, then a long answer, is work. The character bound must not fire on
 /// the summary just because this round had no second ToolCallStart.
 #[tokio::test]
@@ -921,7 +1175,7 @@ async fn a_tool_call_then_text_is_not_plan_only() {
                     },
                 ]
             } else {
-                vec![ModelDelta::Text("x".repeat(PLAN_ONLY_TEXT_LIMIT + 1))]
+                vec![ModelDelta::Text("A real answer. ".repeat(120))]
             };
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
@@ -956,7 +1210,7 @@ async fn a_resumed_run_does_not_treat_a_long_summary_as_plan_only() {
     #[async_trait::async_trait]
     impl ModelDoor for SummaryDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
+            let flood = "A real answer. ".repeat(120);
             Ok(Box::pin(futures::stream::iter(
                 vec![Ok(ModelDelta::Text(flood))].into_iter(),
             )))

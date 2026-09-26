@@ -111,6 +111,11 @@ fn sentence_is_intent(sentence: &str) -> bool {
 }
 
 /// Pre-tool / between-tool CoT: “I'll pull…”, “First I'll…”, “The X isn't answering…”.
+///
+/// `strip_intent_keep_facts` does not apply this to a finished answer. One
+/// marker inside a long reply is not a reason to drop the reply. The tests
+/// still pin the whole-text check.
+#[allow(dead_code)]
 pub fn is_intent_or_status_prose(text: &str) -> bool {
     let n = normalize(text);
     if n.is_empty() {
@@ -123,7 +128,11 @@ pub fn is_intent_or_status_prose(text: &str) -> bool {
         || STATUS_MARKERS.iter().any(|marker| n.contains(marker))
 }
 
-/// Multi-paragraph or multi-sentence retry narration. One short failure fact is not this.
+/// Multi-paragraph retry narration, or three or more intent sentences.
+///
+/// One "I'll …" inside a long answer is not this. A numbered list is allowed
+/// to contain a sentence that starts that way, and length is not a diary:
+/// the old 400-character rule flattened those lists into one paragraph.
 pub fn is_retry_diary(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -137,9 +146,7 @@ pub fn is_retry_diary(text: &str) -> bool {
         .into_iter()
         .filter(|s| sentence_is_intent(s))
         .count();
-    (paragraphs >= 2 && intent_sentences >= 1)
-        || intent_sentences >= 3
-        || (trimmed.chars().count() > 400 && intent_sentences >= 1 && !has_fact_signal(trimmed))
+    (paragraphs >= 2 && intent_sentences >= 2) || intent_sentences >= 3
 }
 
 fn is_sentence_end(ch: char, next: Option<char>) -> bool {
@@ -173,9 +180,29 @@ fn split_sentences(text: &str) -> Vec<String> {
     out
 }
 
-/// Drop leading (and leftover) intent sentences. `None` if nothing factual remains.
-/// A reply with no intent sentences is returned unchanged — version pins and
-/// decimals must not be rewritten.
+/// The original tail after a leading run of "I'll probe…" sentences.
+///
+/// The tail is a slice of `text`, not a re-join. Joining the kept sentences
+/// with spaces is what turned a numbered list into one paragraph whenever a
+/// single line looked like intent.
+fn drop_leading_intent(text: &str) -> &str {
+    let sentences = split_sentences(text);
+    let mut rest = text;
+    for sentence in &sentences {
+        if !sentence_is_intent(sentence) {
+            break;
+        }
+        let Some(rel) = rest.find(sentence.as_str()) else {
+            break;
+        };
+        rest = &rest[rel + sentence.len()..];
+    }
+    rest.trim()
+}
+
+/// Drop a leading "I'll probe…" run. `None` if nothing factual remains.
+/// A reply whose first sentence is not intent is returned unchanged — version
+/// pins, decimals, and line breaks must not be rewritten.
 pub fn strip_intent_keep_facts(text: &str) -> Option<String> {
     if text.trim().is_empty() {
         return None;
@@ -194,17 +221,11 @@ pub fn strip_intent_keep_facts(text: &str) -> Option<String> {
             Some(text.to_string())
         };
     }
-    let kept: Vec<&str> = sentences
-        .iter()
-        .map(String::as_str)
-        .skip_while(|sentence| sentence_is_intent(sentence))
-        .filter(|sentence| !sentence_is_intent(sentence) || has_fact_signal(sentence))
-        .collect();
-    let joined = kept.join(" ").trim().to_string();
-    if joined.is_empty() || is_intent_or_status_prose(&joined) || is_retry_diary(&joined) {
+    let kept = drop_leading_intent(text);
+    if kept.is_empty() || is_retry_diary(kept) {
         None
     } else {
-        Some(joined)
+        Some(kept.to_string())
     }
 }
 
@@ -400,6 +421,41 @@ mod tests {
         assert!(
             !visible_chat(reply, None).unwrap().contains("grok-4. 6"),
             "sentence-split must not break a model pin"
+        );
+    }
+
+    #[test]
+    fn a_long_list_with_one_intent_sentence_keeps_its_line_breaks() {
+        let mut lines = vec!["Here are the jokes.".to_string(), String::new()];
+        for n in 1..30 {
+            lines.push(format!("{n}. The clock struck {n}."));
+        }
+        lines.push("I'll meet you at the corner.".to_string());
+        let reply = lines.join("\n");
+        assert!(reply.chars().count() > 400, "{}", reply.chars().count());
+        assert!(reply.contains("\n\n"));
+        assert!(
+            !is_retry_diary(&reply),
+            "one I'll sentence does not make a long answer a diary"
+        );
+        assert_eq!(
+            strip_intent_keep_facts(&reply).as_deref(),
+            Some(reply.as_str())
+        );
+        assert!(
+            !strip_intent_keep_facts(&reply)
+                .unwrap()
+                .contains("29. The clock struck 29. I'll"),
+            "line breaks must not be joined into spaces"
+        );
+    }
+
+    #[test]
+    fn a_leading_probe_is_dropped_and_the_list_keeps_its_breaks() {
+        let reply = "I'll probe the host.\n\n1. One.\n2. Two.";
+        assert_eq!(
+            strip_intent_keep_facts(reply).as_deref(),
+            Some("1. One.\n2. Two.")
         );
     }
 

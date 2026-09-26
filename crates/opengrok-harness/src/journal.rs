@@ -42,6 +42,25 @@ pub trait RunJournal: Send + Sync {
     async fn stopped(&self, _run_id: &str) -> bool {
         false
     }
+
+    /// User lines waiting to be appended to this run. Empty when there are none,
+    /// and empty when the journal cannot answer: a database blink must not invent
+    /// a message and must not stop the run.
+    ///
+    /// This is not a stop. The run id stays, and the loop keeps going.
+    async fn steered(&self, _run_id: &str) -> Vec<SteerLine> {
+        Vec::new()
+    }
+
+    /// Those lines are now in the model request. A later round must not append them again.
+    async fn ack_steered(&self, _run_id: &str, _ids: &[String]) {}
+}
+
+/// One user line to fold into a run that is already going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerLine {
+    pub id: String,
+    pub content: String,
 }
 
 /// Keeps events in memory. For tests, and for a caller that has chosen not to persist.

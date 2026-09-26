@@ -32,6 +32,7 @@ pub mod purge;
 pub mod replica;
 pub mod skills;
 pub mod spend;
+pub mod steer;
 pub mod templates;
 pub mod vault;
 
@@ -54,6 +55,7 @@ pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};
 pub use spend::{SpendLimit, SpendScope};
+pub use steer::RunSteerRow;
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
 

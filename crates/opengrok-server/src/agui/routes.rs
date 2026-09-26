@@ -810,6 +810,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
+        .route("/ag-ui/runs/{run_id}/steer", post(steer_run))
         .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
@@ -2719,6 +2720,34 @@ impl opengrok_harness::RunJournal for StoreJournal {
             }
         }
     }
+
+    async fn steered(&self, run_id: &str) -> Vec<opengrok_harness::SteerLine> {
+        match self.state.auth.store.open_run_steer(run_id).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| opengrok_harness::SteerLine {
+                    id: row.id,
+                    content: row.content,
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, run = %run_id, "could not read steered lines");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn ack_steered(&self, run_id: &str, ids: &[String]) {
+        if let Err(error) = self
+            .state
+            .auth
+            .store
+            .ack_run_steer(run_id, ids, now_ms())
+            .await
+        {
+            tracing::warn!(%error, run = %run_id, "could not ack steered lines");
+        }
+    }
 }
 
 /// Append a batch of a run's events to the log, starting the run if this is its first batch.
@@ -3466,6 +3495,75 @@ fn resume_outcome(
 /// ordinary; reporting a failure because of it would leave a run going after its owner was told it
 /// was not.
 const STOP_ATTEMPTS: usize = 5;
+
+/// A steer may land only while the run is still `Running`. Anything else,
+/// including a stop, is a different send: the client posts a new turn.
+pub(crate) fn steer_lands(status: Option<RunStatus>) -> bool {
+    matches!(status, Some(RunStatus::Running))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SteerBody {
+    content: String,
+    #[serde(default, rename = "clientMessageId")]
+    client_message_id: Option<String>,
+}
+
+/// Append a user line to a run that is already going — `POST /ag-ui/runs/{run_id}/steer`.
+///
+/// THIS IS NOT A STOP. `RunCommand::Stop` is not called, and the status is not
+/// changed. The line waits in `run_steer` until the harness's next step
+/// boundary, which is after the current tool returns and before the next model
+/// call. A run that is not `Running` answers 409 so the client can send a new
+/// turn instead of losing the words.
+pub(crate) async fn steer_run(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Path(run_id): Path<String>,
+    Json(body): Json<SteerBody>,
+) -> Response {
+    let content = body.content.trim();
+    if content.is_empty() {
+        return (StatusCode::BAD_REQUEST, "a steer needs words").into_response();
+    }
+    let run_id = RunId::from_stored(run_id);
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::NOT_FOUND, "no such run").into_response();
+    };
+    match state.auth.store.run_owned_by(&run_id, &account_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    }
+    let status = match state.auth.store.run_status(&run_id).await {
+        Ok(status) => status,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+    if !steer_lands(status) {
+        return (StatusCode::CONFLICT, "run-not-running").into_response();
+    }
+    let id = uuid::Uuid::now_v7().to_string();
+    if let Err(error) = state
+        .auth
+        .store
+        .enqueue_run_steer(
+            &id,
+            run_id.as_str(),
+            account_id.as_str(),
+            content,
+            body.client_message_id.as_deref(),
+            now_ms(),
+        )
+        .await
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
 
 /// Stop a run — `POST /ag-ui/runs/{run_id}/stop`.
 ///
@@ -4293,6 +4391,16 @@ mod tests {
             forwarded_props: json!(null),
             extra: Default::default(),
         }
+    }
+
+    #[test]
+    fn steer_lands_only_while_the_run_is_running() {
+        assert!(steer_lands(Some(RunStatus::Running)));
+        assert!(!steer_lands(Some(RunStatus::Stopped)));
+        assert!(!steer_lands(Some(RunStatus::Finished)));
+        assert!(!steer_lands(Some(RunStatus::Failed)));
+        assert!(!steer_lands(Some(RunStatus::AwaitingApproval)));
+        assert!(!steer_lands(None));
     }
 
     #[test]

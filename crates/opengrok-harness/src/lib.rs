@@ -21,7 +21,7 @@ mod timing;
 pub mod tools;
 
 pub use gateway::GatewayDoor;
-pub use journal::{JournalError, MemoryJournal, RunJournal};
+pub use journal::{JournalError, MemoryJournal, RunJournal, SteerLine};
 pub use mock::MockDoor;
 pub use model::{
     ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
@@ -66,21 +66,6 @@ pub const MAX_COMPUTER_ROUNDS: usize = 24;
 /// Identical screenshots in a row before the run stops: the model is waiting for something
 /// that is not happening, and the honest thing is to say so rather than to keep looking.
 pub const SAME_SCREEN_LIMIT: usize = 4;
-
-/// Assistant text a tool-capable round may emit before a `ToolCallStart`.
-///
-/// Seen live (NativeChat Shot A): a model offered tools wrote a plan of the work as
-/// `TEXT_MESSAGE` and never started a call. Words without a call are a reply; a flood of
-/// them is the model stalling. The bound is a couple of short paragraphs — enough for
-/// "I'll look that up" plus a real answer, not enough for a repeated plan of unused tools.
-/// The same lesson is a sentence in `computer_system_prompt`; this is the stop that
-/// prompt text alone did not provide.
-///
-/// Short intent *before* a tool (`I'll probe…`) is a different bug: NativeChat paints
-/// every `TEXT_MESSAGE` as chat. Work-tool rounds drop that prose; a text-only round
-/// still drops it when it is intent/status/diary, and only flushes leftover facts.
-/// This bound still fires on the withheld bytes — a flood with no call is still a flood.
-pub const PLAN_ONLY_TEXT_LIMIT: usize = 1500;
 
 /// Tools NativeChat paints itself. Offered to the model; TOOL_CALL frames are
 /// streamed; after one chart/form this HTTP run ends so the model cannot call
@@ -358,10 +343,7 @@ pub async fn run_conversation(
     at_ms: i64,
 ) -> Vec<Event> {
     let projection = Projection::new(thread_id, run_id, at_ms);
-    converse(
-        door, tools, journal, request, projection, run_id, None, false,
-    )
-    .await
+    converse(door, tools, journal, request, projection, run_id, None).await
 }
 
 /// `run_conversation`, with a sink that sees each event as it is produced.
@@ -388,7 +370,6 @@ pub async fn run_conversation_streaming(
         projection,
         run_id,
         Some(sink),
-        false,
     )
     .await
 }
@@ -532,9 +513,6 @@ pub async fn resume_conversation(
         return all;
     }
 
-    // The first half already recorded ToolCallStart (that is why this run is
-    // resuming). converse_raw would otherwise start with started_a_tool = false
-    // and treat a long post-HITL summary as a plan-only flood.
     let mut rest = converse(
         door,
         Some(tools),
@@ -543,7 +521,6 @@ pub async fn resume_conversation(
         projection,
         &run_id,
         None,
-        true,
     )
     .await;
     all.append(&mut rest);
@@ -589,19 +566,65 @@ async fn stop_here(
     .await
 }
 
-async fn flush_withheld_text(
+/// Fold waiting user lines into the request this run will send next.
+///
+/// Returns whether any line was appended. The lines are acked only after they
+/// are on the request, so a later round does not say them twice.
+async fn append_steered(
+    journal: &dyn RunJournal,
+    request: &mut ModelRequest,
+    run_id: &str,
+) -> bool {
+    let lines = journal.steered(run_id).await;
+    if lines.is_empty() {
+        return false;
+    }
+    let ids: Vec<String> = lines.iter().map(|line| line.id.clone()).collect();
+    for line in lines {
+        request.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: line.content,
+            images: Vec::new(),
+        });
+    }
+    journal.ack_steered(run_id, &ids).await;
+    true
+}
+
+fn strip_text_messages(round_events: &mut Vec<Event>) {
+    round_events.retain(|event| {
+        !matches!(
+            event.event_type,
+            opengrok_wire::agui::EventType::TextMessageStart
+                | opengrok_wire::agui::EventType::TextMessageContent
+                | opengrok_wire::agui::EventType::TextMessageEnd
+        )
+    });
+}
+
+/// The text of a tools-offered round was already sent live, one delta at a
+/// time. Keep it when it is the answer. When it was only a preamble or a
+/// retry diary, take the paint back and emit whatever may still be shown.
+async fn settle_streamed_chat(
     projection: &mut Projection,
     sink: Option<&dyn EventSink>,
     withheld: &mut String,
     round_events: &mut Vec<Event>,
     last_failure: Option<&str>,
-) {
-    let Some(visible) = intent::visible_chat(&std::mem::take(withheld), last_failure) else {
-        return;
-    };
-    let produced = projection.push(ModelDelta::Text(visible));
-    emit_live(sink, &produced).await;
-    round_events.extend(produced);
+) -> String {
+    let raw = std::mem::take(withheld);
+    let visible = intent::visible_chat(&raw, last_failure);
+    if visible.as_deref() == Some(raw.as_str()) {
+        return raw;
+    }
+    strip_text_messages(round_events);
+    let drop = projection.retract_streamed_preamble(&raw);
+    emit_live(sink, &drop).await;
+    if let Some(visible) = visible {
+        emit_visible_text(projection, sink, round_events, visible.clone()).await;
+        return visible;
+    }
+    String::new()
 }
 
 async fn emit_visible_text(
@@ -707,20 +730,9 @@ async fn converse(
     projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
 ) -> Vec<Event> {
     scrub_streamed_tool_args(
-        converse_raw(
-            door,
-            tools,
-            journal,
-            request,
-            projection,
-            run_id,
-            sink,
-            already_started_a_tool,
-        )
-        .await,
+        converse_raw(door, tools, journal, request, projection, run_id, sink).await,
     )
 }
 
@@ -733,7 +745,6 @@ async fn converse_raw(
     mut projection: Projection,
     run_id: &str,
     sink: Option<&dyn EventSink>,
-    already_started_a_tool: bool,
 ) -> Vec<Event> {
     let mut all = Vec::new();
 
@@ -744,13 +755,9 @@ async fn converse_raw(
         request.tools = runner.tool_schemas();
     }
     // Not `!request.tools.is_empty()`. Production AG-UI always runs
-    // `chat_ui::attach` (opengrok-server `agui/chat_ui.rs`, offered from
-    // `agui/routes.rs` on every turn, including coworkers with no computer),
-    // which adds `bar_chart` and `form`. Those are paint widgets NativeChat
-    // draws from TOOL_CALL frames. A long prose answer that never calls them
-    // is normal chat, not Shot A — Shot A is unused shell / user_machine_shell
-    // / computer. Count the plan-only flood only when a non-paint tool is on
-    // the schema list.
+    // `chat_ui::attach`, which adds `bar_chart` and `form` on every turn.
+    // Those are paint widgets. Withholding "I'll probe…" applies when a work
+    // tool is actually offered. A finished reply, however long, is the answer.
     let tools_offered = work_tools_offered(&request.tools);
 
     let mut opening = projection.start();
@@ -771,11 +778,6 @@ async fn converse_raw(
     // for exactly the same thing again is not going to get a different answer, and
     // burning the remaining rounds on it only delays telling the person.
     let mut last_refused: Option<Vec<(String, serde_json::Value)>> = None;
-    // Across the whole run, not the round: a tool call then a long summary is work,
-    // not a plan. Resetting this each round — or on resume, which is a new
-    // converse_raw — would fail that summary as plan-only text.
-    let mut started_a_tool = already_started_a_tool;
-    let mut plan_only_chars = 0usize;
     // Rounds that ended in words or box tools, and rounds spent on the screen: two budgets.
     let mut spoken_rounds = 0usize;
     let mut computer_rounds = 0usize;
@@ -817,6 +819,11 @@ async fn converse_raw(
             return all;
         }
 
+        // A follow-up aimed at this run, not a new one. In-flight work is left
+        // alone: this runs at the step boundary, after a tool has returned and
+        // before the next model call. It does not stop the run.
+        append_steered(journal, &mut request, run_id).await;
+
         keep_recent_images(&mut request.messages, RECENT_IMAGES);
         let model_started = std::time::Instant::now();
         let stream = match door.stream(request.clone()).await {
@@ -850,6 +857,7 @@ async fn converse_raw(
 
         let mut said = String::new();
         let mut withheld = String::new();
+        let mut shown = String::new();
         let mut round_work_tool = false;
         if let Some(mut stream) = stream {
             while let Some(delta) = stream.next().await {
@@ -857,78 +865,48 @@ async fn converse_raw(
                     Ok(delta) => {
                         any_delta = true;
                         if let ModelDelta::Text(text) = &delta {
-                            // F8: discarded intent must not land on `said`. The next
-                            // hop would append it as an assistant message and re-bill
-                            // the diary. Count plan-only from the bytes; keep them off
-                            // the next request.
-                            if !tools_offered {
-                                said.push_str(text);
-                            }
-                            if tools_offered && !started_a_tool {
-                                plan_only_chars =
-                                    plan_only_chars.saturating_add(text.chars().count());
-                            }
+                            // F8: a preamble a tool call then takes back must not land on
+                            // `said`. The next hop would send it as an assistant message.
+                            // A text-only round keeps the words in `withheld` and, if the
+                            // run continues, that visible reply is what the next call sees.
                             if tools_offered {
                                 withheld.push_str(text);
+                            } else {
+                                said.push_str(text);
                             }
                         }
-                        if let ModelDelta::ToolCallStart { name, .. } = &delta {
-                            started_a_tool = true;
-                            if !is_client_render_tool(name) {
-                                round_work_tool = true;
-                            }
-                        }
-                        // Work-tool rounds withhold TEXT until ToolCallStart / finalization
-                        // so NativeChat does not paint "I'll probe…" as chat. Reasoning and
-                        // tool frames still stream. A text-only round flushes below.
-                        let withhold_text = tools_offered && matches!(delta, ModelDelta::Text(_));
-                        if !withhold_text {
-                            let produced = projection.push(delta);
-                            // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
-                            // adds a second reader that does not have to wait for the run to end.
-                            // Through `emit_live`, never `sink.emit` directly, so the live
-                            // delta path meets `scrub_event_secrets` like every other path.
-                            // Without it a model that smuggled a `values.password` into its
-                            // own tool args reached NativeChat verbatim.
-                            emit_live(sink, &produced).await;
-                            round_events.extend(produced);
-                        }
-                        if tools_offered
-                            && !started_a_tool
-                            && plan_only_chars > PLAN_ONLY_TEXT_LIMIT
+                        // A work tool in this same round means the text so far was
+                        // "I'll probe…", not the answer. It was already painted, so a
+                        // real reply can be read while the model is still writing.
+                        // Take that paint back. The journal copy goes too, so a replay
+                        // does not show a sentence the live turn retracted.
+                        // bar_chart / form are not this: the sentence before a chart
+                        // is part of the answer, and that run still ends after the widget.
+                        if let ModelDelta::ToolCallStart { name, .. } = &delta
+                            && !is_client_render_tool(name)
                         {
-                            timing.record_model(timing::elapsed_ms(model_started));
-                            let ending = projection.fail(format!(
-                                "plan-only text: {plan_only_chars} characters with tools offered and no tool call started; stopping instead of waiting"
-                            ));
-                            pin_last_agent_shot(
-                                sink,
-                                &mut last_agent_shot,
-                                opengrok_tools::ImageVisibility::Failure,
-                                &mut round_events,
-                            )
-                            .await;
-                            let _ = record_round(journal, run_id, &round_events).await;
-                            all.append(&mut round_events);
-                            all.extend(
-                                finish_ending(
-                                    journal,
-                                    sink,
-                                    run_id,
-                                    &projection,
-                                    &timing,
-                                    verbose_timing,
-                                    ending,
-                                )
-                                .await,
-                            );
-                            return all;
+                            round_work_tool = true;
+                            if !withheld.is_empty() {
+                                let preamble = std::mem::take(&mut withheld);
+                                strip_text_messages(&mut round_events);
+                                let drop = projection.retract_streamed_preamble(&preamble);
+                                emit_live(sink, &drop).await;
+                            }
                         }
+                        let produced = projection.push(delta);
+                        // AS THEY ARE PRODUCED. The `Vec` still collects everything; this only
+                        // adds a second reader that does not have to wait for the run to end.
+                        // Through `emit_live`, never `sink.emit` directly, so the live
+                        // delta path meets `scrub_event_secrets` like every other path.
+                        // Without it a model that smuggled a `values.password` into its
+                        // own tool args reached NativeChat verbatim.
+                        emit_live(sink, &produced).await;
+                        round_events.extend(produced);
                     }
                     Err(error) => {
                         timing.record_model(timing::elapsed_ms(model_started));
-                        if !round_work_tool {
-                            flush_withheld_text(
+                        if !round_work_tool && !withheld.is_empty() {
+                            settle_streamed_chat(
                                 &mut projection,
                                 sink,
                                 &mut withheld,
@@ -963,18 +941,23 @@ async fn converse_raw(
                 }
             }
             timing.record_model(timing::elapsed_ms(model_started));
-            if round_work_tool {
+            shown = if round_work_tool {
+                // The preamble was "I'll probe…". The tool is the round. The
+                // next call sees the tool result, not that sentence.
                 withheld.clear();
+                String::new()
+            } else if withheld.is_empty() {
+                String::new()
             } else {
-                flush_withheld_text(
+                settle_streamed_chat(
                     &mut projection,
                     sink,
                     &mut withheld,
                     &mut round_events,
                     last_failure.as_deref(),
                 )
-                .await;
-            }
+                .await
+            };
             // Tools for this round, run on the coworker's own computer.
             let mut calls = collect_tool_calls(&round_events);
             // One chart/form per round. Extra bar_chart calls in the same
@@ -1443,6 +1426,59 @@ async fn converse_raw(
                 }
                 continue;
             }
+        }
+
+        // A steer that landed during this prose round belongs to the same run.
+        // The reply already on screen is one message. The next call is shown
+        // that reply, then the steered line, and its text starts a new message
+        // so the two answers are not pasted into one sentence.
+        // One read: the row stays until it is acked, and a second read here
+        // would look like a later round to a journal that answers once.
+        let pending_steer = journal.steered(run_id).await;
+        if !pending_steer.is_empty() {
+            let reply = if !said.is_empty() {
+                std::mem::take(&mut said)
+            } else {
+                shown
+            };
+            if !reply.is_empty() {
+                request.messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: reply,
+                    images: Vec::new(),
+                });
+            }
+            let ended = projection.end_text();
+            emit_live(sink, &ended).await;
+            round_events.extend(ended);
+            let ids: Vec<String> = pending_steer.iter().map(|line| line.id.clone()).collect();
+            for line in pending_steer {
+                request.messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: line.content,
+                    images: Vec::new(),
+                });
+            }
+            journal.ack_steered(run_id, &ids).await;
+            if let Err(error) = record_round(journal, run_id, &round_events).await {
+                let failed = projection.fail(format!("the run could not be recorded: {error}"));
+                all.extend(
+                    finish_round(
+                        journal,
+                        sink,
+                        run_id,
+                        &projection,
+                        &timing,
+                        verbose_timing,
+                        round_events,
+                        failed,
+                    )
+                    .await,
+                );
+                return all;
+            }
+            all.append(&mut round_events);
+            continue;
         }
 
         // No tools were asked for, or the run failed: this is the last round either way.

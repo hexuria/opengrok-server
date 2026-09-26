@@ -92,6 +92,37 @@ impl Projection {
         ]
     }
 
+    /// Take back text this round already painted, because a work tool just
+    /// started and that text was the preamble ("I'll probe…"), not the answer.
+    ///
+    /// The frame is live-only. The caller also drops the text events from the
+    /// journal, so a replay never paints the sentence and then removes it.
+    /// Closing the open text here, without a `TEXT_MESSAGE_END`, is what lets
+    /// the tool call that follows open cleanly.
+    pub fn retract_streamed_preamble(&mut self, text: &str) -> Vec<Event> {
+        if matches!(self.open, Open::Text { .. }) {
+            self.open = Open::Nothing;
+        }
+        vec![
+            self.event(EventType::Custom)
+                .with("name", "drop-streamed-preamble")
+                .with("text", text),
+        ]
+    }
+
+    /// End the assistant text message, if one is open.
+    ///
+    /// A later model round in the same run — a steered follow-up — must not
+    /// keep writing into the message the person is already reading. The next
+    /// text delta opens a new one.
+    pub fn end_text(&mut self) -> Vec<Event> {
+        if matches!(self.open, Open::Text { .. }) {
+            self.close_open()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Close whatever is open, emitting the events that end it.
     fn close_open(&mut self) -> Vec<Event> {
         let events = match &self.open {

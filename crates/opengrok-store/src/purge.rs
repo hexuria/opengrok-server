@@ -282,6 +282,11 @@ impl PgStore {
             &schedules,
             &mcp_threads
         );
+        delete!(
+            "run_steer",
+            "delete from run_steer where account_id = any($1)",
+            &accounts
+        );
         delete!("run_view", "delete from run_view where id = any($1)", &runs);
         delete!(
             "schedule_view",

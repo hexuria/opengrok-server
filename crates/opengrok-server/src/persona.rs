@@ -460,8 +460,9 @@ pub fn computer_system_prompt(
          asked for one, do the same with passkeyMode \"register\", then click the site's create \
          button once the holder is ready. You never see a key. Captcha or a page outside this box \
          is not another password form: the person finishes on the computer (Open the screen). If they \
-         dismiss or decline, continue without those credentials and do not loop. When tools are \
-         offered, call one; do not narrate a plan of the work instead of starting a tool. \
+         dismiss or decline, continue without those credentials and do not loop. Call a tool when \
+         the work needs one. A direct answer needs no tool; do not narrate a plan of the work \
+         instead of starting the tool it needs. \
          Never chat I'll / First I'll / The X isn't answering. After a listing, answer with facts. \
          After a failed tool, retry once silently or say one short failure fact — never a diary. \
          Never claim create or save until the call that writes has returned ok."
