@@ -10,10 +10,22 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The full set, nightly: a push to main runs only the checks suite, so this is where two merges
+  # that are each fine and broken together are caught.
+  schedule:
+    - cron: "41 2 * * *"
+  # One suite on demand, on any branch: the Actions tab's "Run workflow" button.
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: which suite to run
+        type: choice
+        options: [all, server, checks, formal, web, docs]
+        default: all
 
 # A new push to a pull request cancels the run it replaces; each push to main keeps its own run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -23,12 +35,18 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  # code=false when a pull request changes only prose no test reads (scripts/ci-scope.sh says how
-  # that is decided). The jobs below skip then; a failed scope runs them.
+  # Which suites this run needs: the event, a pull request's branch prefix (doc-*, formal-*,
+  # web-*) and what it changed decide (scripts/ci-scope.sh; the table is in docs/setup/gate.md,
+  # "CI suites"). server, formal and web run unless scope says `false`, so a scope that dies
+  # before answering runs them all; checks and docs run only when asked for.
   scope:
     runs-on: ubuntu-latest
     outputs:
-      code: ${{ steps.scope.outputs.code }}
+      server: ${{ steps.scope.outputs.server }}
+      checks: ${{ steps.scope.outputs.checks }}
+      formal: ${{ steps.scope.outputs.formal }}
+      web: ${{ steps.scope.outputs.web }}
+      docs: ${{ steps.scope.outputs.docs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,11 +55,55 @@ jobs:
       - id: scope
         env:
           EVENT: ${{ github.event_name }}
+          BRANCH: ${{ github.head_ref }}
+          SUITE: ${{ inputs.suite }}
         run: scripts/ci-scope.sh >> "$GITHUB_OUTPUT"
+      # A prefixed branch that changes files outside its suite: red, with the reason, and the
+      # suites stay skipped. A name may narrow what runs; it may never skip tests for code.
+      - name: branch prefix matches the diff
+        if: ${{ steps.scope.outputs.guard != '' }}
+        env:
+          GUARD: ${{ steps.scope.outputs.guard }}
+        run: |
+          echo "::error::$GUARD"
+          exit 1
+
+  # Docs a test reads: run those tests, not the whole gate. They are plain std, so rustc builds
+  # them without the server (about two seconds, against the gate's seven minutes). If
+  # setup_docs.rs ever needs a crate, this compile fails and says so.
+  docs:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.docs == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - name: crates/opengrok/tests/setup_docs.rs
+        run: |
+          CARGO_MANIFEST_DIR="$PWD/crates/opengrok" rustc --edition 2024 --test \
+            crates/opengrok/tests/setup_docs.rs -o "$RUNNER_TEMP/setup_docs"
+          "$RUNNER_TEMP/setup_docs"
+
+  # What a push to main runs: the gate's checks without its tests (`gate.sh --checks`). The pull
+  # request already ran the tests on this merge result; the nightly run repeats them.
+  checks:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.checks == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: install the pinned CI tools
+        run: scripts/install-ci-tools.sh | tail -1 >> "$GITHUB_PATH"
+      - name: scripts/gate.sh --checks
+        run: scripts/gate.sh --checks
 
   server:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.scope.outputs.server != 'false' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -88,11 +150,12 @@ jobs:
         run: scripts/gate.sh --smoke
 
   # The TLA+ models and Lean proofs in formal/: every configuration must give its expected result
-  # (formal/README.md). Under a minute, so it runs on every change that is not prose only; a
-  # model is only worth having if a change that breaks what it proved cannot merge green.
+  # (formal/README.md). Under a minute, so it runs on every code change and every push to main; a
+  # model is only worth having if a change that breaks what it proved cannot merge green. A
+  # formal-* branch runs it alone.
   formal:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.scope.outputs.formal != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +172,7 @@ jobs:
 
   web:
     needs: scope
-    if: ${{ !cancelled() && needs.scope.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.scope.outputs.web != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:

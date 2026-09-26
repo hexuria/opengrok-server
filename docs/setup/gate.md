@@ -2,8 +2,8 @@
 
 `scripts/gate.sh` runs everything CI runs — literally: since 1 Sep 2026 the workflow calls
 this script instead of re-listing its steps, so the two cannot drift. The local run is the
-pre-push ritual; CI is the public record. Nothing merges on a red `scripts/gate.sh --smoke`,
-local or CI. (Two portability lessons are baked in: CI pins the same toolchain as
+pre-push ritual; CI is the public record. Nothing that changes code merges on a red
+`scripts/gate.sh --smoke`, local or CI; which suites a run needs is below ("CI suites"). (Two portability lessons are baked in: CI pins the same toolchain as
 `rust-toolchain.toml` — a floating @stable failed lints nobody could reproduce at a desk — and
 the smokes reach Postgres via a local `psql` when there is one, the dev container only as a
 fallback.)
@@ -41,6 +41,38 @@ OG_PORT=1449 OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate \
 - **A port of its own** (`OG_PORT=1449` when a live server holds 1447): the gate frees its port
   by killing whatever is listening there. The default is 1447 — pointing it at your live
   server kills the live server.
+
+## CI suites
+
+`.github/workflows/ci.yml` runs only the suites a change needs; `scripts/ci-scope.sh` decides.
+
+| Suite | What it runs | Time |
+|---|---|---|
+| `server` | `scripts/gate.sh --smoke`: every check, every test, the smokes | ~7 min |
+| `checks` | `scripts/gate.sh --checks`: fmt, crate sizes, architecture, cargo deny, check, clippy | ~2 min |
+| `formal` | `scripts/formal.sh --require`: TLC and Lean on `formal/` | ~1 min |
+| `web` | the console: typecheck, test, build | seconds |
+| `docs` | `crates/opengrok/tests/setup_docs.rs`, compiled with `rustc` alone | seconds |
+
+| When | Suites |
+|---|---|
+| Pull request from `doc-*` / `docs-*` | `docs` |
+| Pull request from `formal-*` / `tla-*` | `formal` |
+| Pull request from `web-*` | `web` |
+| Pull request from any other branch that changes code | `server`, `formal`, `web` |
+| Pull request from any other branch that changes only docs | `docs` if a test reads one of them, else nothing |
+| Push to `main` | `checks`, `formal` |
+| Nightly | `server`, `formal`, `web` |
+| Actions tab → ci → "Run workflow" | the suite you pick, or `all` |
+
+**A prefix may narrow what runs, never skip tests for code.** A prefixed branch may change only
+its own area (`formal/**` and the formal scripts; `web/**`) plus docs. Anything else fails the
+`scope` job with the list of files; rename the branch (no prefix runs everything) or move them.
+"Docs" means Markdown anywhere or anything under `docs/`.
+
+A push to `main` runs the light set because its pull request already ran the tests on that same
+merge result; two merges that each pass and break together are caught by the nightly run. A
+skipped job reports success, so a required check stays green when its suite is not needed.
 
 ## Shape
 
