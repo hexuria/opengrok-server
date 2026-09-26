@@ -91,6 +91,12 @@ pub enum BoxError {
     /// The host could not mint a secret for the box (no OS randomness).
     #[error("could not mint a box secret: {0}")]
     Secret(String),
+    /// The request reached the box and its answer never came back whole: the connection dropped
+    /// mid-call, or the reply could not be read. What the box did meanwhile is unknown, so a
+    /// caller that must not repeat a side effect treats it as done. A recipe counted as "not
+    /// played" here could be played again on top of the one that had been typing (#120).
+    #[error("the connection to the box was lost mid-request: {0}")]
+    Interrupted(String),
 }
 
 impl BoxError {
@@ -98,7 +104,7 @@ impl BoxError {
     /// server/client contract: invalid_key | quota_exceeded | provider_unreachable | provider_error.
     pub fn code(&self) -> &'static str {
         match self {
-            BoxError::Unreachable(_) => "provider_unreachable",
+            BoxError::Unreachable(_) | BoxError::Interrupted(_) => "provider_unreachable",
             BoxError::Refused { status, .. } if *status == 401 || *status == 403 => "invalid_key",
             BoxError::Refused { status, .. } if *status == 402 || *status == 429 => {
                 "quota_exceeded"

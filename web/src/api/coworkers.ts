@@ -13,6 +13,12 @@ export interface Coworker {
   boxId?: string | null;
   /** A sentence when something the template promised did not land at hire (a limit, say). */
   templateNote?: string | null;
+  /**
+   * False on a roster row an org-mate shared: the roster lists what you may talk to, and every
+   * management route (repin, spend, door calls) answers such a row 403 or 404. True on a hire
+   * reply, which is always yours and is the same row the roster lists.
+   */
+  mine?: boolean;
 }
 
 export function listCoworkers(): Promise<Coworker[]> {
@@ -172,6 +178,11 @@ export interface ProbeResult {
   served?: string;
   /** The gateway's own words when it would not. */
   detail?: string;
+  /**
+   * Whether the route called the one tool the probe offered. `false` beside `ok: true` is a
+   * route that talks but cannot act — a coworker on it cannot use its computer.
+   */
+  toolCalls?: boolean;
 }
 
 export function probeModel(model: string): Promise<ProbeResult> {

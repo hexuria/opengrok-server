@@ -170,6 +170,8 @@ fn failure_of(error: &ModelError) -> JudgeFailure {
         ModelError::Refused { status, .. } => JudgeFailure::Refused(*status),
         ModelError::Unreachable(_) => JudgeFailure::Unreachable,
         ModelError::Stream(_) => JudgeFailure::StreamBroke,
+        // The door's own clock (`RunBudget`) ran out before the judge's did: the same silence.
+        ModelError::TimedOut(_) => JudgeFailure::TimedOut,
     }
 }
 
@@ -366,6 +368,7 @@ mod tests {
                 || ModelError::Refused {
                     status: 404,
                     body: "unknown model route".to_string(),
+                    retry_after_s: None,
                 },
                 JudgeFailure::Refused(404),
             ),

@@ -23,7 +23,9 @@ CONSTANTS MaxRounds,       \* MAX_ROUNDS
           StopAtClose,     \* FIX: a clean finish asks `stopped` once more and yields to a Stop
           OneWriteClose,   \* FIX: every exit writes the round it ends on and its ending in ONE write
           WriteBeforeEmit, \* FIX: an ending reaches the client only once the log holds it
-          EndedRefusesPark \* FIX: a park whose write finds the run ended writes nothing and ends stopped
+          EndedRefusesPark,\* FIX: a park whose write finds the run ended writes nothing and ends stopped
+          WrapUp           \* FIX (#93): a spent budget or wall clock makes one last call, no tools, and
+                           \* finishes with its words; the cap's RUN_ERROR only if that call fails
 
 ForBound == MaxRounds + MaxComputer   \* lib.rs:813 `for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS)`
 
@@ -120,7 +122,10 @@ Top ==
               ELSE pc' = "done" /\ ending' = "fellOut"
                    /\ UNCHANGED <<told, terminals, journaledEnd, orphan, unjournaled>>
          ELSE IF stop THEN EndWith("stopped")
-                      ELSE pc' = "call" /\ UNCHANGED endVars
+                      \* With WrapUp, past the wall clock (time is not modelled, so any round after
+                      \* the first) no new work starts: the last call instead.
+                      ELSE (pc' = "call" \/ (WrapUp /\ round > 0 /\ pc' = "wrap"))
+                           /\ UNCHANGED endVars
     /\ UNCHANGED <<loopVars, anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
 
 \* lib.rs:835-992 — one model call and its stream.
@@ -132,6 +137,9 @@ Call ==
            [] r = "streamError" -> EndWith("failed") /\ anyDelta' \in {anyDelta, TRUE}
                                    /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:911-941 — prose past PLAN_ONLY_TEXT_LIMIT with work tools offered and none started.
+           \* Since #178 only text still withheld counts, i.e. text that keeps opening with intent;
+           \* an answer goes live first and is a "words" reply. The exit still fails; it paints the
+           \* withheld words first, which no property here reads.
            [] r = "planFlood"   -> Close("split", "failed") /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:1573-1604 — no tools asked for: last round either way.
            [] r = "words"       -> Finish /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
@@ -142,8 +150,8 @@ Call ==
                                       /\ UNCHANGED endVars
     /\ UNCHANGED <<loopVars, stop, toolRuns, toolRunsAfterStop>>
 
-\* lib.rs:1018-1103 — stop check #2, then the two early finishes that run no tool
-\* (a repeated listing, the same open action again).
+\* lib.rs:1018-1103 — stop check #2, then the early finishes that run no tool
+\* (a repeated listing, the same open action again, a recipe replay asked for twice — #120).
 Check2 ==
     /\ pc = "check2"
     /\ IF stop THEN EndWith("stopped")
@@ -166,6 +174,10 @@ Refused(o) == o \in {"refusedA", "refusedB"}
 \* lib.rs:1222-1569 — what the results mean, in the code's order.
 Judge ==
     /\ pc = "judge"
+    \* Since #183 "unrecoverable" is the host catalog's binary missing, and a non-zero exit
+    \* restarts the streak at 1 unless it repeats the last failing command with no other call in
+    \* the round making progress. Modelling every workFail as +1 over-approximates the early
+    \* finish; no property here depends on it.
     /\ LET wf == CASE outcome = "unrecoverable" -> MaxFailedWork        \* lib.rs:1243-1247
                    [] outcome = "workFail"      -> workFails + 1        \* lib.rs:1248-1249
                    [] outcome = "ok"            -> 0                    \* lib.rs:1251-1255
@@ -202,7 +214,16 @@ Judge ==
                          \* so the round they end on goes down with their ending, once.
                          IF batch = "render" THEN Finish /\ UNCHANGED <<round, spoken, computer>>
                          ELSE /\ spoken' = sp /\ computer' = co
-                              /\ IF over THEN (EndWith("failed") \/ Finish) /\ UNCHANGED round
+                              /\ IF over /\ ~WrapUp THEN (EndWith("failed") \/ Finish) /\ UNCHANGED round
+                                 \* With WrapUp the opened sentence still finishes at once; otherwise
+                                 \* the round goes down first, then the wrap-up call is its own round.
+                                 ELSE IF over THEN
+                                      \/ Finish /\ UNCHANGED round
+                                      \/ \E ok \in JournalWrite :
+                                           IF ~ok THEN EndUnrecorded /\ UNCHANGED round
+                                           ELSE /\ pc' = "wrap" /\ unjournaled' = FALSE
+                                                /\ UNCHANGED <<round, ending, told, terminals,
+                                                               journaledEnd, orphan>>
                                  ELSE \E ok \in JournalWrite :      \* DURABLE BEFORE THE NEXT CALL
                                       IF ~ok THEN EndUnrecorded /\ UNCHANGED round ELSE Next_
                     ELSE \E ok \in JournalWrite :                   \* 1443-1459 DURABLE BEFORE NEXT CALL
@@ -214,6 +235,15 @@ Judge ==
                                    THEN (Close("after", "failed") \/ FinishBy("after")) /\ UNCHANGED round
                                    ELSE Next_
     /\ UNCHANGED <<anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
+
+\* lib.rs `wrap_up!` — a Stop recorded by now wins and nothing more is asked. Otherwise one model
+\* call with no tools: words finish the run, a failure or silence ends it with the budget's reason.
+WrapUpCall ==
+    /\ pc = "wrap"
+    /\ IF stop THEN EndWith("stopped") /\ UNCHANGED modelCalls
+               ELSE /\ modelCalls' = modelCalls + 1
+                    /\ (Finish \/ EndWith("failed"))
+    /\ UNCHANGED <<loopVars, anyDelta, stop, toolRuns, toolRunsAfterStop, batch, outcome>>
 
 \* The park's write, after `close` asked `stopped` and heard no. A Stop recorded in the gap makes
 \* the log refuse the `Suspended`; at 3eb8304 the refusal was dropped and the rest written, so the
@@ -231,7 +261,7 @@ PressStop ==
 
 Done == pc = "done" /\ UNCHANGED vars
 
-Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge \/ ParkWrite
+Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge \/ ParkWrite \/ WrapUpCall
 Next == Step \/ PressStop \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 
@@ -239,15 +269,17 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 (* PROPERTIES *)
 
 TypeOK ==
-    /\ pc \in {"open", "top", "call", "check2", "run", "judge", "park", "done"}
+    /\ pc \in {"open", "top", "call", "check2", "run", "judge", "park", "wrap", "done"}
     /\ ending \in {"none", "finished", "failed", "stopped", "parked", "fellOut"}
     /\ told \in {"none", "finished", "failed", "stopped", "parked", "unrecorded"}
     /\ terminals \in 0..1
 
 ExactlyOneEnding      == (pc = "done") => (terminals = 1)
 NeverFallsOut         == ending /= "fellOut"
-DurableBeforeNextCall == (pc = "call") => ~unjournaled
+DurableBeforeNextCall == (pc \in {"call", "wrap"}) => ~unjournaled
 BudgetsHold           == spoken <= MaxRounds /\ computer <= MaxComputer
+\* The wrap-up is one call past the loop's R + C - 1 (Lean `Budget.calls_bounded`), so the bound
+\* is unchanged by it.
 CallsBounded          == modelCalls <= MaxRounds + MaxComputer
 \* One batch may slip through the gap between stop check #2 and `run_all` — never two.
 AtMostOneToolRunAfterStop == toolRunsAfterStop <= 1

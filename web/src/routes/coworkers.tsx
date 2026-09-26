@@ -83,13 +83,27 @@ function TestButton({ model }: { model: string }) {
       >
         {probe.isPending ? "Testing…" : "Test"}
       </button>
-      {result ? (
-        <span className={result.ok ? "ok" : "error"}>
-          {result.ok ? `answered as ${result.served}` : result.detail}
-        </span>
-      ) : null}
+      {result ? <ProbeVerdict result={result} /> : null}
     </>
   );
+}
+
+/**
+ * A route that answers but never calls the offered tool is NOT a green result: `gpt-5.6-luna`
+ * passed the old text-only probe while a coworker on it could not use its computer, so no consent
+ * card ever fired. `toolCalls` absent (an older server) stays the plain answer.
+ */
+function ProbeVerdict({ result }: { result: ProbeResult }) {
+  if (!result.ok) return <span className="error">{result.detail}</span>;
+  if (result.toolCalls === false) {
+    return (
+      <span className="error">
+        answered as {result.served}, but did not call the offered tool — a coworker on this route
+        may not be able to use its computer
+      </span>
+    );
+  }
+  return <span className="ok">answered as {result.served}</span>;
 }
 
 /**
@@ -340,6 +354,9 @@ function CoworkerCard({ coworker, models }: { coworker: Coworker; models: string
 export function CoworkersPage() {
   const queryClient = useQueryClient();
   const coworkers = useQuery({ queryKey: ["coworkers"], queryFn: listCoworkers, retry: false });
+  // This page manages what you hired. A coworker an org-mate shared is on your roster too, but
+  // every control on its card would be refused, so it is not listed here.
+  const hired = coworkers.data?.filter((coworker) => coworker.mine !== false);
   const catalogue = useQuery({ queryKey: ["models"], queryFn: listModels, retry: false });
   const templates = useQuery({ queryKey: ["templates"], queryFn: listTemplates, retry: false });
   const [name, setName] = useState("");
@@ -421,13 +438,13 @@ export function CoworkersPage() {
             <section className="card">
               <h2>
                 Your roster
-                {coworkers.data ? <span className="count">{coworkers.data.length}</span> : null}
+                {hired ? <span className="count">{hired.length}</span> : null}
               </h2>
               {coworkers.isLoading ? (
                 <p className="empty">Loading…</p>
-              ) : coworkers.data && coworkers.data.length > 0 ? (
+              ) : hired && hired.length > 0 ? (
                 <div className="list">
-                  {coworkers.data.map((coworker) => (
+                  {hired.map((coworker) => (
                     <CoworkerCard key={coworker.id} coworker={coworker} models={ids} />
                   ))}
                 </div>

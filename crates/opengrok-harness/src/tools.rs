@@ -223,6 +223,7 @@ impl ToolRunner {
                 content: "this coworker has no computer, so it has no tools to run".to_string(),
                 awaiting_approval: false,
                 awaiting_reason: None,
+                stopped_part_way: false,
             },
         }
     }

@@ -525,14 +525,20 @@ pub(crate) async fn tools_for_coworker(
         });
     });
 
+    // The policy a turn runs under, so a member of the org talking to a shared coworker gets the
+    // tools its owner's grant allows — the same answer the run door's gate just gave. Callers
+    // that must be the owner (routines, the tool listing) gate on that before they get here.
     let policy = state
         .auth
         .store
-        .policy_for(account_id, &coworker_id)
+        .policy_to_use(account_id, &coworker_id)
         .await
         .ok()?;
 
-    // The plugins this coworker may use, connected with its own credentials.
+    // The plugins this coworker may use, connected with its own credentials. On a shared
+    // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
+    // turn acts through them, while the owner's `user`-scoped ones stay the owner's (ROADMAP
+    // 19.4). Narrowing that is a decision about what sharing lends, not a filter to add here.
     let plugins = connect_plugins(state, account_id, &coworker_id, &policy).await;
 
     // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
@@ -1041,7 +1047,10 @@ pub async fn probe_model(
             .into_response();
     }
     match catalogue.probe(model).await {
-        Ok(served) => Json(serde_json::json!({ "ok": true, "served": served })).into_response(),
+        Ok(probed) => Json(serde_json::json!({
+            "ok": true, "served": probed.served, "toolCalls": probed.tool_calls,
+        }))
+        .into_response(),
         // The gateway's own words. A paraphrase would lose the part that says what to do.
         Err(detail) => Json(serde_json::json!({ "ok": false, "detail": detail })).into_response(),
     }
@@ -1068,9 +1077,12 @@ pub struct RepinRequest {
 /// visibility are the aggregate's, and the title, avatar shape and colour are the client's
 /// decoration in the seam-B profile blob. `notifyOnUpdates` has no home at all — see below.
 ///
-/// Ownership answers 404, like every other per-coworker route here: an id that is not yours must
-/// not be distinguishable from one that does not exist. A body naming no field is a 400 rather
-/// than a silent no-op, because a caller who sent one meant something.
+/// A coworker not on your roster answers 404, like every other per-coworker route here: an id
+/// you cannot use must not be distinguishable from one that does not exist. One an org-mate
+/// shared with you is on your roster, so you already know it exists; what you may change on it is
+/// your own sidebar, and anything else is a 403 that says so — management stays with the owner.
+/// A body naming no field is a 400 rather than a silent no-op, because a caller who sent one
+/// meant something.
 pub async fn repin_coworker(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -1088,16 +1100,15 @@ pub async fn repin_coworker(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     let coworker_id = CoworkerId::from_stored(coworker_id);
-    let owns = state
-        .auth
-        .store
-        .coworkers_for(&account_id)
-        .await
-        .map(|roster| roster.iter().any(|view| view.id == coworker_id))
-        .unwrap_or(false);
-    if !owns {
-        return (StatusCode::NOT_FOUND, "no such coworker").into_response();
-    }
+    // The caller's own roster row, so the reply below can be exactly what the roster will list.
+    let (listed, owner) = match state.auth.store.roster_for(&account_id).await {
+        Ok(roster) => match roster.into_iter().find(|(view, _)| view.id == coworker_id) {
+            Some(seat) => seat,
+            None => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        },
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    let mine = owner.id == account_id;
 
     // A name is trimmed and must survive it. Null is a wrong type here rather than "clear it":
     // the role is nullable and a name is not, because `persona::system_message` has no identity
@@ -1128,9 +1139,10 @@ pub async fn repin_coworker(
     };
     // "private" | "org". An unrecognised word is refused rather than defaulted: a caller who
     // wrote "public" meant something we do not offer, and quietly storing "private" would tell
-    // them they had shared a coworker they had not. `org` is accepted now that a shared
-    // coworker has a transcript per member; before that it was refused, because storing it
-    // would have reported a sharing that did nothing.
+    // them they had shared a coworker they had not. `org` is honoured by the roster
+    // (`roster_for`) and the run door (`policy_to_use`). Until #175 nothing on this door read
+    // it, and a 200 here reported a sharing that did nothing; an owner in no org, for whom that
+    // is still true, is refused below.
     let visibility = match body.get("visibility") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(text)) => {
@@ -1166,29 +1178,62 @@ pub async fn repin_coworker(
         }
     }
     // `notifyOnUpdates` arrives from the app and is READ NOWHERE, deliberately. Nothing on this
-    // server stores it: the seam-B roster answers a constant `true` (`gateway/summaries.rs`) and
-    // the desktop client keeps the real answer in its own settings file
-    // (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
+    // server stores it, `coworker_row` never answers it, and the desktop client keeps the real
+    // answer in its own settings file (`docs/research/client-grok-bot.md` §8.1). Accepting it here would need a table, and
     // inventing one to make a toggle look persistent is worse than the toggle not persisting.
     //
     // So a body naming nothing this route can change — including one carrying only that toggle —
     // is a 400 rather than a silent no-op, and the sentence lists what it could have named.
-    if name.is_none()
-        && model.is_none()
-        && role.is_none()
-        && visibility.is_none()
-        && hidden.is_none()
-        && decoration.is_empty()
-    {
+    let manages = name.is_some()
+        || model.is_some()
+        || role.is_some()
+        || visibility.is_some()
+        || !decoration.is_empty();
+    if !manages && hidden.is_none() {
         return refuse(
             "nothing to change: send a name, a model, a role, a title, an avatar shape or \
              colour, a visibility, hiddenFromSidebar, or several"
                 .to_string(),
         );
     }
+    if !mine {
+        return match (manages, hidden) {
+            (false, Some(hidden)) => {
+                hide_shared(&state, &account_id, &listed, &owner, hidden).await
+            }
+            _ => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "only the person who hired this coworker can change it; you can \
+                              hide it from your own sidebar"
+                })),
+            )
+                .into_response(),
+        };
+    }
 
     let Ok((loaded, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
+    };
+    // Read before anything is written, and a failure refuses the whole PATCH: the blob is merged
+    // into and written back whole, so an unreadable one taken as `{}` would overwrite the stored
+    // title and avatar with nothing — and even a PATCH that touches no decoration answers it.
+    let mut profile = match state.auth.store.seamb_profile(&coworker_id).await {
+        Ok(profile) => profile.unwrap_or_else(|| serde_json::json!({})),
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    // The stored hide flag, read here for the same reason and with the same refusal: the reply
+    // is the roster row the app overwrites its own from, so a failed read answered as `false`
+    // would un-hide the coworker on the sidebar of the person who hid it. `GET /coworkers`
+    // answers the same failure 503.
+    let hidden_from_sidebar = match hidden {
+        Some(hidden) => hidden,
+        None => match state.auth.store.hidden_coworker_ids(&account_id).await {
+            Ok(ids) => ids.contains(coworker_id.as_str()),
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        },
     };
     let at_ms = now_ms();
     let mut events = Vec::new();
@@ -1212,6 +1257,20 @@ pub async fn repin_coworker(
             Err(error) => return refuse(error.to_string()),
         }
     }
+    // Sharing with the org when there is no org would store a word that reaches nobody — the
+    // 200 would tell the person their coworker was shared when it was not. Refused only on the
+    // way IN, so a coworker already marked `org` (its owner has since left the org) can still be
+    // saved from a card that sends its visibility back unchanged.
+    if visibility == Some(opengrok_core::coworker::Visibility::Org)
+        && loaded.visibility != opengrok_core::coworker::Visibility::Org
+        && owner.org_id.is_none()
+    {
+        return refuse(
+            "visibility: this account is in no org, so there is nobody to share this coworker \
+             with; it stays private"
+                .to_string(),
+        );
+    }
     if let Some(visibility) = visibility {
         match loaded.decide(CoworkerCommand::SetVisibility { visibility, at_ms }) {
             Ok(more) => events.extend(more),
@@ -1229,7 +1288,14 @@ pub async fn repin_coworker(
         box_id: after.box_id.clone(),
         retired: after.retired,
         members: after.members.clone(),
-        updated_at_ms: at_ms,
+        // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
+        // projection is only rewritten with events, and a reply stamped `now` over an unchanged
+        // row would move the coworker in the sidebar until the next roster read moved it back.
+        updated_at_ms: if events.is_empty() {
+            listed.updated_at_ms
+        } else {
+            at_ms
+        },
         role: after.role.clone(),
         visibility: after.visibility,
     };
@@ -1243,37 +1309,16 @@ pub async fn repin_coworker(
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
     }
-    let hidden_from_sidebar = if let Some(hidden) = hidden {
-        if state
+    if let Some(hidden) = hidden
+        && state
             .auth
             .store
             .set_coworker_hidden(&account_id, &coworker_id, hidden, at_ms)
             .await
             .is_err()
-        {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
-        }
-        hidden
-    } else {
-        state
-            .auth
-            .store
-            .hidden_coworker_ids(&account_id)
-            .await
-            .ok()
-            .is_some_and(|ids| ids.contains(coworker_id.as_str()))
-    };
-    // The blob is read even when nothing in it changed, because the reply below has to be the
-    // whole post-patch truth: the app overwrites its row from what comes back, and a title left
-    // out of the answer is a title the next roster read has to go and fetch again.
-    let mut profile = state
-        .auth
-        .store
-        .seamb_profile(&coworker_id)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| serde_json::json!({}));
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+    }
     if !decoration.is_empty() {
         crate::persona::merge_profile_text(&mut profile, &serde_json::Value::Object(decoration));
         // A 500 rather than the seam-B path's silent `let _`: this door exists because an edit
@@ -1289,34 +1334,133 @@ pub async fn repin_coworker(
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
         }
     }
+    // The same row the roster lists, by construction: the app overwrites its row from this reply
+    // and relaunches onto `GET /coworkers`, so two spellings of one coworker is a coworker that
+    // changes shape on restart.
+    Json(coworker_row(
+        &view,
+        Some(&profile),
+        hidden_from_sidebar,
+        &owner,
+        &account_id,
+    ))
+    .into_response()
+}
+
+/// A member hiding a coworker an org-mate shared: the one change that is theirs to make, because
+/// the sidebar it changes is their own (`coworker_hidden` is keyed by the viewer). Without it a
+/// shared coworker is a row somebody can never put away.
+async fn hide_shared(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    listed: &opengrok_core::coworker::CoworkerView,
+    owner: &opengrok_store::RosterOwner,
+    hidden: bool,
+) -> Response {
+    let profile = match state.auth.store.seamb_profile(&listed.id).await {
+        Ok(profile) => profile,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    if state
+        .auth
+        .store
+        .set_coworker_hidden(account_id, &listed.id, hidden, now_ms())
+        .await
+        .is_err()
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "could not save").into_response();
+    }
+    Json(coworker_row(
+        listed,
+        profile.as_ref(),
+        hidden,
+        owner,
+        account_id,
+    ))
+    .into_response()
+}
+
+/// One coworker, as every route that answers with one spells it — the roster, the hire reply
+/// (which adds `computerError` and `templateNote`) and the PATCH reply.
+///
+/// camelCase throughout, because that is what the app's `Coworker` deserialises: a snake_case
+/// key is a field it silently reads as absent, which is how #27 lost a whole reply, and how the
+/// roster (which serialized the core `CoworkerView` as-is) lost the sort key, the title and the
+/// avatar on every relaunch.
+///
+/// Provenance, key by key. The decoder of this row is NativeChat's `Coworker`, hexuria/nativechat
+/// `src/opengrok/types.rs:54-79` (at 2af9e60), `#[serde(rename_all = "camelCase")]`; the roster is
+/// its `Vec<Coworker>` and the hire and PATCH replies one `Coworker` (`src/opengrok/client.rs`
+/// `list_coworkers`, `hire`, `patch_coworker`). `id` is its one required key. `name`, `model`
+/// (`String`), `updatedAtMs` (`i64`, aliases `updated_at_ms` and `updatedAt`) and
+/// `hiddenFromSidebar` (`bool`) are `#[serde(default)]`, which covers a missing key and not a null
+/// one: a null in any of them fails the decode (on the roster, one row's null fails the whole
+/// array), so the row never sends one. `hiddenFromSidebar`'s only alias is its own spelling, so
+/// `hidden_from_sidebar` or §8.1's `isHiddenFromSidebar` would be skipped and read as false — every
+/// hidden coworker back in the sidebar. `role`, `title`, `avatarShape`, `avatarColor` and `boxId`
+/// (aliases `boxId` and `box_id`) are `Option<String>`, null reading as unset. The struct has no
+/// `deny_unknown_fields`, so `visibility`, `isGroup`, `memberIds`, `mine`, `canManage` and `owner`
+/// (and the hire reply's extras) are ignored by it, not refused. `title`, `avatarShape`,
+/// `avatarColor`, `isGroup` and `memberIds` are also the Electron host's roster names
+/// (`docs/research/client-grok-bot.md` §8.1, transcribed from
+/// `source/host/extensions/session/session-summaries.ts:13-16`). §8.1 spells the sort key
+/// `updatedAt` and the hide flag `isHiddenFromSidebar`; this row keeps NativeChat's primary
+/// spellings, because the second of those is not an alias its decoder accepts. The permission keys
+/// are server precedent (below).
+///
+/// Every key is always present, null when unset: a key that is sometimes missing is a shape the
+/// app has to guess about. `retired` is not a key because a retired coworker is never a row.
+/// `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant would
+/// overwrite the toggle the person just moved.
+///
+/// The permission fields are decided here, per viewer, on every row (ROADMAP 19.2; the shape the
+/// pre-deletion roster answered, `git show 0cc3487^:crates/opengrok-server/src/gateway/live.rs`).
+/// `mine` is ownership; `canManage` follows it exactly, because management stays with the owner
+/// when a coworker is shared — without it a member's client offers edit controls that answer
+/// 403; `owner` names the hirer so a shared row can say whose it is.
+pub(crate) fn coworker_row(
+    view: &opengrok_core::coworker::CoworkerView,
+    profile: Option<&serde_json::Value>,
+    hidden_from_sidebar: bool,
+    owner: &opengrok_store::RosterOwner,
+    viewer: &opengrok_core::id::AccountId,
+) -> serde_json::Value {
+    let mine = owner.id == *viewer;
     // Blank reads as absent, the way `Persona::compose` reads the same blob: a cleared title is
     // a coworker with no title, not one called "".
     let decorated = |key: &str| {
         profile
-            .get(key)
+            .and_then(|profile| profile.get(key))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|text| !text.is_empty())
             .map(str::to_string)
     };
-    // camelCase throughout, because that is what the app's `Coworker` deserialises — a
-    // snake_case key here is a field it silently reads as absent, which is how #27 lost a whole
-    // reply. `notifyOnUpdates` is absent on purpose: nothing stores it, and echoing a constant
-    // would overwrite the toggle the person just moved.
-    Json(serde_json::json!({
-        "id": coworker_id.as_str(),
-        "name": after.name,
-        "model": after.model,
-        "role": after.role,
+    serde_json::json!({
+        "id": view.id.as_str(),
+        "name": view.name,
+        "model": view.model,
+        "role": view.role,
         "title": decorated("title"),
         "avatarShape": decorated("avatarShape"),
         "avatarColor": decorated("avatarColor"),
-        "visibility": after.visibility.as_str(),
+        "visibility": view.visibility.as_str(),
         "hiddenFromSidebar": hidden_from_sidebar,
-        "updatedAtMs": at_ms,
-        "boxId": after.box_id.as_ref().map(|id| id.as_str()),
-    }))
-    .into_response()
+        "updatedAtMs": view.updated_at_ms,
+        // The hirer's computer, so null on a shared row: a member's turns resolve a box from
+        // the member's own scope, and every computer route answers them 404, so the owner's id
+        // here would name a machine the row's reader can neither open nor work on. Null is
+        // already the row's word for "no computer" (a hire with none answers it).
+        "boxId": view.box_id.as_ref().filter(|_| mine).map(|id| id.as_str()),
+        "isGroup": !view.members.is_empty(),
+        "memberIds": view.members.iter().map(CoworkerId::as_str).collect::<Vec<_>>(),
+        "mine": mine,
+        "canManage": mine,
+        "owner": {
+            "id": owner.id.as_str(),
+            "name": format!("{} {}", owner.first_name, owner.last_name).trim(),
+        },
+    })
 }
 
 /// `DELETE /coworkers/{id}` — retire this coworker. Same ownership 404 as every other
@@ -1405,6 +1549,14 @@ pub async fn hire(
 ) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+
+    // The hirer as the roster will name them, read BEFORE anything is written: the reply is a
+    // roster row, and a read failing after the hire committed could only answer 503 over a
+    // coworker that exists — which a client retries into a second hire.
+    let owner = match state.auth.store.roster_owner(&account_id).await {
+        Ok(owner) => owner,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
 
     let coworker_id = CoworkerId::new();
@@ -1557,19 +1709,20 @@ pub async fn hire(
             .into_response();
     }
 
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": coworker_id.as_str(),
-            "name": view.name,
-            "model": view.model,
-            "boxId": view.box_id.as_ref().map(|id| id.as_str()),
-            "computerError": provision::error_json_at(&computer_error),
-            // A sentence when something the template promised did not land; null otherwise.
-            "templateNote": template_note,
-        })),
-    )
-        .into_response()
+    // The roster's row, so a hired coworker does not change shape the first time the app
+    // relaunches onto `GET /coworkers`; the two keys only a hire can answer ride on top of it.
+    // Not hidden: nobody can have hidden an id minted a moment ago.
+    let profile = template.as_ref().and_then(crate::templates::hire_profile);
+    let mut row = coworker_row(&view, profile.as_ref(), false, &owner, &account_id);
+    if let Some(row) = row.as_object_mut() {
+        row.insert(
+            "computerError".to_string(),
+            provision::error_json_at(&computer_error),
+        );
+        // A sentence when something the template promised did not land; null otherwise.
+        row.insert("templateNote".to_string(), serde_json::json!(template_note));
+    }
+    (StatusCode::CREATED, Json(row)).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1607,7 +1760,7 @@ pub async fn set_approvals(
         &policy,
     );
     if let Some(reason) = decision.reason() {
-        return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+        return refuse_use(&state, &account_id, &coworker_id, reason).await;
     }
 
     let (Some(grant), Some(ceiling)) = (policy.grant, policy.ceiling) else {
@@ -1643,6 +1796,32 @@ pub async fn set_approvals(
     .into_response()
 }
 
+/// A refused use of a coworker, answered the way every per-coworker route answers: 404 when it
+/// is not on the caller's roster, so an outsider's probe reads the same for a coworker that
+/// exists and one that does not (#175) — and 403 with the rule's reason when it is on their
+/// roster, because somebody who can see it already knows it exists, and a refusal they can read
+/// is one they can act on (CLAUDE.md #8).
+///
+/// Asked only after the policy has refused, so it can never turn a refusal into an allow. A
+/// store error keeps the 403: its reason is the no-grant sentence an unknown id gets too, so it
+/// confirms nothing either.
+pub(crate) async fn refuse_use(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    reason: &str,
+) -> Response {
+    match state
+        .auth
+        .store
+        .may_use_coworker(account_id, coworker_id)
+        .await
+    {
+        Ok(false) => (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Ok(true) | Err(_) => (StatusCode::FORBIDDEN, reason.to_string()).into_response(),
+    }
+}
+
 /// The roster, newest first — the order the client sorts by.
 pub async fn list_coworkers(
     State(state): State<AgUiState>,
@@ -1651,7 +1830,9 @@ pub async fn list_coworkers(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
-    let coworkers = match state.auth.store.coworkers_for(&account_id).await {
+    // `roster_for`, not `coworkers_for`: the roster is what this person may TALK to, including
+    // what an org-mate shared; `coworkers_for` is what they may manage, and stays owner-only.
+    let coworkers = match state.auth.store.roster_for(&account_id).await {
         Ok(coworkers) => coworkers,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
@@ -1659,19 +1840,25 @@ pub async fn list_coworkers(
         Ok(ids) => ids,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    // A 503 rather than rows without their decoration: a roster that answers 200 with every
+    // title and avatar quietly gone is the app repainting a correct sidebar as a wrong one.
+    let ids: Vec<CoworkerId> = coworkers.iter().map(|(view, _)| view.id.clone()).collect();
+    let profiles = match state.auth.store.seamb_profiles(&ids).await {
+        Ok(profiles) => profiles,
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
     // An ARRAY, always. An empty roster is a valid answer and must not become null or an
     // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
     let rows: Vec<serde_json::Value> = coworkers
-        .into_iter()
-        .map(|coworker| {
-            let mut row = serde_json::to_value(&coworker).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(object) = row.as_object_mut() {
-                object.insert(
-                    "hiddenFromSidebar".to_string(),
-                    serde_json::json!(hidden.contains(coworker.id.as_str())),
-                );
-            }
-            row
+        .iter()
+        .map(|(view, owner)| {
+            coworker_row(
+                view,
+                profiles.get(view.id.as_str()),
+                hidden.contains(view.id.as_str()),
+                owner,
+                &account_id,
+            )
         })
         .collect();
     Json(rows).into_response()
@@ -2261,6 +2448,10 @@ async fn set_limit(
     }
 }
 
+/// `GET /coworkers/{id}/keys` — the owner's bot keys for this coworker. Anyone else's id, a
+/// shared coworker's included, is a 404 like every other coworker route: the query alone
+/// answered `[]` to a stranger and an unknown id alike, which is the empty success that reads
+/// as "no keys" rather than "not yours".
 async fn list_bot_keys(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2270,6 +2461,11 @@ async fn list_bot_keys(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
     let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(&state, &account_id, &coworker_id).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+        Err(refusal) => return refusal,
+    }
     match state
         .auth
         .store
@@ -2327,6 +2523,11 @@ async fn list_mcp_calls(
     }
 }
 
+/// `DELETE /coworkers/{id}/keys/{jti}` — keyed by the caller's own key, not by the path's
+/// coworker, and deliberately not gated on `owned_coworker`: retiring a coworker does not revoke
+/// its bot keys, so a gate on the retired (off-roster) row would leave a key the owner still holds
+/// live with no door to revoke it through. Somebody else's key, or an id that is no key, is the
+/// same 404, so nothing about the path's coworker is confirmed.
 async fn revoke_bot_key(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2506,12 +2707,27 @@ pub async fn run(
     let mut coworker_role: Option<String> = None;
 
     if let (Some(account_id), Some(coworker_id)) = (&account_id, run_coworker.clone()) {
-        let policy = state
+        // `policy_to_use`, not `policy_for`: a coworker an org-mate shared is one this person may
+        // talk to under the owner's grant, read now. A store error refuses too, but as a 503
+        // that says so: an empty context would deny with "no grant lets …", which sends the
+        // person off to repair a grant that is fine.
+        let policy = match state
             .auth
             .store
-            .policy_for(account_id, &coworker_id)
+            .policy_to_use(account_id, &coworker_id)
             .await
-            .unwrap_or_default();
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::error!(%error, coworker = %coworker_id.as_str(), "the run door could not read the policy; the turn is refused");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the permission check could not be read right now, so nothing ran; send it \
+                     again in a moment",
+                )
+                    .into_response();
+            }
+        };
         let decision = opengrok_policy::decide(
             account_id,
             &coworker_id,
@@ -2519,8 +2735,7 @@ pub async fn run(
             &policy,
         );
         if let Some(reason) = decision.reason() {
-            // A refusal the client can read, not a dead socket.
-            return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+            return refuse_use(&state, account_id, &coworker_id, reason).await;
         }
 
         // WHICH MODEL A COWORKER THINKS WITH IS THE COWORKER'S, NOT THE DEPLOYMENT'S. Hiring takes

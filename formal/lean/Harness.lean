@@ -5,7 +5,8 @@ Four facts the TLA+ models check for small constants, proved here for every cons
 
 1. `Budget`: the loop's budgets alone end it. Every round that continues spends one unit of
    one of two budgets, so a run makes at most `R + C - 1` model calls, which is strictly
-   inside the `for` bound `R + C`. The loop never falls out of its `for`.
+   inside the `for` bound `R + C`. The loop never falls out of its `for`, and the wrap-up
+   call a spent budget makes is the `R + C`-th at most.
 2. `Ending`: the projection's terminal operations are guarded by one flag, so any sequence of
    operations emits at most one terminal event, and once ended nothing changes it.
 3. `Close`: a clean finish yields to a recorded Stop; a park, a failure and a Stop are kept.
@@ -76,6 +77,13 @@ theorem never_falls_out (R C : Nat) (rounds : Nat → Bool) (i : Nat)
 /-- Model calls in one segment: one per round reached. -/
 theorem calls_bounded (R C : Nat) (rounds : Nat → Bool) (i : Nat)
     (h : within R C (after rounds i)) : i + 1 ≤ R + C - 1 := by
+  have := continues_bounded R C rounds i h; omega
+
+/-- WITH THE WRAP-UP (#93). A spent budget, or the wall clock, makes one more call with no
+    tools after the last round reached. The segment's calls stay within `R + C`, the bound
+    the `for` was always sized to, so the wrap-up costs no budget nobody granted. -/
+theorem calls_with_wrap_up_bounded (R C : Nat) (rounds : Nat → Bool) (i : Nat)
+    (h : within R C (after rounds i)) : (i + 1) + 1 ≤ R + C := by
   have := continues_bounded R C rounds i h; omega
 
 end Budget

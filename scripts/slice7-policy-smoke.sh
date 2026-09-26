@@ -32,26 +32,30 @@ status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui" \
 [ "$status" = "200" ] || fail "the owner was refused with $status"
 ok "the owner's run is accepted"
 
-echo "3. somebody else naming that coworker is refused by a rule"
-# The whole point. A well-formed request about another account's coworker.
+echo "3. somebody else naming that coworker is refused"
+# The whole point. A well-formed request about another account's coworker. It is not on their
+# roster, so the run door answers 404 like every per-coworker route (#175): the refusal is the
+# policy's, and the status only declines to confirm the coworker exists.
 body=$(curl -s -w '\n%{http_code}' -X POST "$BASE/ag-ui" \
   -H "authorization: Bearer $theirs" -H 'content-type: application/json' \
   -d "{\"threadId\":\"t\",\"runId\":\"r-theft-$(date +%s)\",\"forwardedProps\":{\"coworkerId\":\"$coworker\"},\"messages\":[{\"id\":\"m\",\"role\":\"user\",\"content\":\"use their coworker\"}]}" \
   --max-time 30)
 status=$(echo "$body" | tail -1)
-reason=$(echo "$body" | sed '$d')
-[ "$status" = "403" ] || fail "expected 403, got $status"
-echo "$reason" | grep -qi "grant" || fail "the refusal should name the missing grant: $reason"
-ok "403, and the reason names the rule: $(echo "$reason" | head -c 60)…"
+theft=$(echo "$body" | sed '$d')
+[ "$status" = "404" ] || fail "expected 404, got $status: $theft"
+ok "404: $theft"
 
 echo "4. the refusal is a rule, not an accident of the id being unknown"
-# An id that does not exist at all must also be refused — same answer, so a probe learns nothing
-# about which coworkers exist.
-status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/ag-ui" \
+# An id that does not exist at all must be answered identically — status AND body — so a probe
+# learns nothing about which coworkers exist.
+body=$(curl -s -w '\n%{http_code}' -X POST "$BASE/ag-ui" \
   -H "authorization: Bearer $theirs" -H 'content-type: application/json' \
   -d "{\"threadId\":\"t\",\"runId\":\"r-ghost-$(date +%s)\",\"forwardedProps\":{\"coworkerId\":\"cw_does_not_exist\"},\"messages\":[{\"id\":\"m\",\"role\":\"user\",\"content\":\"x\"}]}" \
   --max-time 30)
-[ "$status" = "403" ] || fail "an unknown coworker returned $status, expected 403"
+status=$(echo "$body" | tail -1)
+ghost=$(echo "$body" | sed '$d')
+[ "$status" = "404" ] || fail "an unknown coworker returned $status, expected 404"
+[ "$ghost" = "$theft" ] || fail "an unknown coworker was answered differently: '$ghost' vs '$theft'"
 ok "an unknown coworker is refused identically — a probe learns nothing"
 
 echo

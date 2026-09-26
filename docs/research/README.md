@@ -5,7 +5,8 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 
 | Document | Covers | Read it before |
 |---|---|---|
-| [`client-grok-bot.md`](client-grok-bot.md) | The Grok Bot desktop client: architecture, the 123 `SAND_GATEWAY_COMMANDS`, transcript entry kinds and card types, the live activity stream, the box seam, and the first-boot call order | touching `opengrok-wire` or `opengrok-server` |
+| [`client-nativechat.md`](client-nativechat.md) | **The client served today.** Every route the server mounts, grouped roster / conversation / approvals / attachments / MCP and skills / automations / computer, with where it is mounted, what it answers, and who is on record calling it. Written from the server's source; NativeChat's own source is **not yet read**, so its column says *unverified* until it is | touching any route, or connecting NativeChat |
+| [`client-grok-bot.md`](client-grok-bot.md) | **Removed 20 Sep 2026 — the record.** The Grok Bot desktop client: architecture, the 123 `SAND_GATEWAY_COMMANDS`, transcript entry kinds and card types, the live activity stream, the box seam, and the first-boot call order | touching `opengrok-wire` or `opengrok-server` |
 | [`gateway-open-ai-gateway.md`](gateway-open-ai-gateway.md) | open-ai-gateway: crate layout, the two listeners, auth, the model-pin dialect, endpoints, the `/v1/models` diagnostics envelope, and whether it can be embedded | touching `opengrok-harness` or planning the single-binary release |
 | [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `opengrok-store` or `opengrok-harness` |
 | [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, pinned shapes (`box.id`, `X-Ascii-Confirm-Delete`), the typed `ascii::Client`, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
@@ -17,9 +18,10 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 
 Each doc is long because the detail is the point. These four are the ones that change what you build:
 
-- **The client refuses a loopback gateway host** — serve on a non-loopback hostname or it fails with
-  no useful error (`client-grok-bot.md`).
-- **The Sand gateway is 123 commands** (90 reachable from the renderer, 33 host-only) **plus an
+- **The removed Grok Bot client refused a loopback gateway host** — serve on a non-loopback
+  hostname or it failed with no useful error (`client-grok-bot.md`). Whether NativeChat has the
+  same rule is unverified (`../setup/nativechat.md`).
+- **The removed client's Sand gateway was 123 commands** (90 reachable from the renderer, 33 host-only) **plus an
   18-channel SSE stream, `/health` and `/avatars`** — and `api2.cursor.sh` is a *second* seam that is
   explicitly not ours (`client-grok-bot.md`).
 - **The gateway embeds cleanly** — `oag_server::public_router()` gives a wired Axum router; the

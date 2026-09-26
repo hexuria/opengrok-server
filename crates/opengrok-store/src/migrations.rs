@@ -1,9 +1,10 @@
 //! Schema, applied in-process under an advisory lock.
 //!
 //! The lock is why several replicas can boot at once without racing each other into a half-applied
-//! schema: whoever gets it migrates, the rest wait and then find the work already done. Matches
-//! open-ai-gateway's pattern deliberately (`RUNBOOK.md` §2) — one database server for a developer,
-//! and one habit to learn across the two services.
+//! schema: whoever gets it migrates, the rest wait and find the work done. Matches open-ai-gateway
+//! (`RUNBOOK.md` §2). `SCHEMA` replays in full whenever it changes, so every statement in it runs
+//! again on a database that already went through it; `EVERY_BOOT` runs on every boot. Read
+//! docs/setup/postgres.md, "Data-transforming migrations", before writing either.
 
 use sqlx::PgPool;
 
@@ -947,51 +948,6 @@ create index if not exists artifact_run_idx
 create index if not exists artifact_thread_idx
     on artifact (account_id, thread_id) where deleted_at_ms is null;
 
--- Data follows schema: everything above has created its tables by here.
--- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
--- EXACTLY the previous built-in set was "everything this server implements" when it was written,
--- so it follows the built-ins; a narrower or wider list was chosen on purpose and is left alone.
--- Idempotent: once widened, the row no longer matches.
-update grant_view
-   set profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
- where profile = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
-update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
--- `run_recipe` joined the built-ins the same way: a row that is exactly the five-tool set
--- follows; the two statements chain, so a three-tool row widens twice in one boot.
-update grant_view
-   set profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
- where profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
-update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
--- `request_user_form` joined the built-ins the same way: a row that is exactly today's
--- previous set follows; a narrower list was chosen on purpose and is left alone.
-update grant_view
-   set profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
-update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
--- `credential.request` joined the built-ins the same way. Site passwords are NOT stored;
--- this tool only asks the client to fill a saved login.
-update grant_view
-   set profile = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
-update ceiling_view
-   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
--- `credential.request` left with the broker (Sep 2026): the saved login is offered on the
--- ordinary form card. The widening just above still matches today's default grant, so it
--- would put the dead name on every fresh bot at every boot; this takes it out again.
-update grant_view
-   set profile = jsonb_set(profile, '{only}', (profile->'only') - 'credential.request')
- where profile->'only' ? 'credential.request';
-update ceiling_view
-   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request')
- where tools->'only' ? 'credential.request';
-
 -- A person's saved site logins, so the same rows follow them to every Mac. The password
 -- is sealed in secret_store under `site-login:<account>:<id>` (the account id in the key is
 -- what the purge finds it by); only the owner's own app ever opens it, over the bearer door.
@@ -1221,6 +1177,59 @@ do $do$ begin
 end $do$;
 "#;
 
+/// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.
+///
+/// A grant or ceiling written as exactly an older built-in set follows the built-ins. During a
+/// deploy an older replica can still write the older set after a newer one has migrated, and the
+/// next boot is what brings that row along (`old_grants_follow_the_builtins.rs`). These are
+/// UPDATEs over rows that match, so they take row locks only, never the table locks that made
+/// replaying `SCHEMA` on every boot deadlock against live reads.
+const EVERY_BOOT: &str = r#"
+-- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
+-- EXACTLY the previous built-in set was "everything this server implements" when it was written,
+-- so it follows the built-ins; a narrower or wider list was chosen on purpose and is left alone.
+-- Idempotent: once widened, the row no longer matches.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+-- `run_recipe` joined the built-ins the same way: a row that is exactly the five-tool set
+-- follows; the two statements chain, so a three-tool row widens twice in one boot.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
+-- `request_user_form` joined the built-ins the same way: a row that is exactly today's
+-- previous set follows; a narrower list was chosen on purpose and is left alone.
+update grant_view
+   set profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` joined the built-ins the same way. Site passwords are NOT stored;
+-- this tool only asks the client to fill a saved login.
+update grant_view
+   set profile = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+update ceiling_view
+   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
+ where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+-- `credential.request` left with the broker (Sep 2026): the saved login is offered on the
+-- ordinary form card. The widening just above still matches today's default grant, so it
+-- would put the dead name on every fresh bot at every boot; this takes it out again.
+update grant_view
+   set profile = jsonb_set(profile, '{only}', (profile->'only') - 'credential.request')
+ where profile->'only' ? 'credential.request';
+update ceiling_view
+   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request')
+ where tools->'only' ? 'credential.request';
+"#;
+
 /// Apply the schema. Safe to call on every boot and from every replica.
 pub async fn run(pool: &PgPool) -> StoreResult<()> {
     let mut conn = pool.acquire().await?;
@@ -1229,7 +1238,7 @@ pub async fn run(pool: &PgPool) -> StoreResult<()> {
         .execute(&mut *conn)
         .await?;
 
-    let applied = sqlx::raw_sql(SCHEMA).execute(&mut *conn).await;
+    let applied = apply_unless_current(&mut conn).await;
 
     // Release even when the migration failed, or the next boot deadlocks against our own lock.
     let released = sqlx::query("select pg_advisory_unlock($1)")
@@ -1239,5 +1248,58 @@ pub async fn run(pool: &PgPool) -> StoreResult<()> {
 
     applied?;
     released?;
+    Ok(())
+}
+
+/// Replay the schema only when THIS schema has not been applied here before.
+///
+/// A REPLAY IS NOT FREE, even when every statement is `if not exists`. The schema is one
+/// transaction, and a bare `alter table … add column if not exists` takes ACCESS EXCLUSIVE before
+/// it decides there is nothing to do, then holds it to the end. Every server and every test
+/// harness boots through here, so any read that locked those tables in the other order
+/// deadlocked against a boot: `policy_to_use` refused a turn over a grant that was fine, the
+/// site-login saves died (#239), and a recipe's history prune was killed, leaving six runs where
+/// five belong. Guarding each statement one at a time left the next one to be found in CI.
+///
+/// Keyed by the schema's digest, so any edit to `SCHEMA` replays it once, exactly as before;
+/// only an unchanged schema is skipped. The check runs under the advisory lock, so two replicas
+/// booting a new schema still apply it once and the second finds the digest. What must run on
+/// every boot regardless lives in `EVERY_BOOT`, which never takes a table lock.
+async fn apply_unless_current(conn: &mut sqlx::PgConnection) -> StoreResult<()> {
+    use sha2::Digest as _;
+    let digest: String = sha2::Sha256::digest(SCHEMA.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // Created on its own, before the schema: it is the one table the skip decision reads.
+    sqlx::query(
+        "create table if not exists schema_applied (
+             digest     text primary key,
+             applied_at bigint not null
+         )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    let current: Option<(i32,)> = sqlx::query_as("select 1 from schema_applied where digest = $1")
+        .bind(&digest)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if current.is_none() {
+        sqlx::raw_sql(SCHEMA).execute(&mut *conn).await?;
+        record_applied(conn, &digest).await?;
+    }
+    sqlx::raw_sql(EVERY_BOOT).execute(&mut *conn).await?;
+    Ok(())
+}
+
+async fn record_applied(conn: &mut sqlx::PgConnection, digest: &str) -> StoreResult<()> {
+    sqlx::query(
+        "insert into schema_applied (digest, applied_at)
+         values ($1, (extract(epoch from now()) * 1000)::bigint)
+         on conflict (digest) do nothing",
+    )
+    .bind(digest)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }

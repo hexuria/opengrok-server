@@ -68,7 +68,10 @@ from the proto inventory.** And because `SAND_HOST_GATEWAY_URL` repoints the cli
 gateway with no auth work, the build order inverts the ship order: gateway first, identity
 after — the real, unmodified client is the strongest smoke test we can have.
 
-## Slice 7 — The gateway boots the real client (P2 + P3)
+## Slice 7 — The gateway boots the real client (P2 + P3) — removed in P0-E
+
+*Done, then deleted with seam A on 20 Sep 2026 (Phase 0, P0-E): the ticks below record what was
+built and verified for the discontinued Grok Bot client, not what the server serves today.*
 
 - [x] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
   at ≤15 s (a 35 s watchdog aborts otherwise), channel filter parsed, one shared bearer
@@ -85,7 +88,10 @@ after — the real, unmodified client is the strongest smoke test we can have.
   dead path now (B1 re-checked 1 Sep). Evidence: `docs/verification/real-client/README.md`
   and the 31 Aug acceptance run it cites. (`0ae194e`)
 
-## Slice 8 — A conversation from the real app (P4)
+## Slice 8 — A conversation from the real app (P4) — removed in P0-E
+
+*Done, then deleted with seam A on 20 Sep 2026. A conversation today is `POST /ag-ui`
+(`research/client-nativechat.md`).*
 
 The milestone that proves the port; everything after it is breadth, not risk.
 
@@ -111,7 +117,11 @@ The milestone that proves the port; everything after it is breadth, not risk.
   `docs/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
   (streams `run_01a057f0-…`, `run_01a057f5-…`). (`0ae194e`)
 
-## Slice 9 — Seam B: identity and the mint (P0 + P1)
+## Slice 9 — Seam B: identity and the mint (P0 + P1) — removed in P0-E
+
+*Seam B (ConnectRPC, the tonic mirror, `opengrok-proto`) was deleted on 20 Sep 2026. What
+survives from this slice is 9.1/9.1b's auth routes (`/auth/poll`, `/oauth/token`,
+`/loginDeepControl`), which are not seam B.*
 
 Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two services,
 18 methods, transcribed from `source/mock/`** with provenance comments (the transcription
@@ -363,8 +373,9 @@ the proof, not construction.
   use with the old key revoked; a spent refresh presented again revokes the whole family;
   revoking the key from the coworker's list revokes its refresh tokens. `against_mcp_oauth.rs`
   covers rotation, replay, and a stand-in document server. *(this commit)*
-- [ ] **16.later** The org-key mint console surface shipped as slice 17; nothing else pending on
-  the door.
+- [x] **16.later** The org-key mint console surface shipped as slice 17 (`/admin/gateway/keys`,
+  "Slice 17" below); nothing else pending on the door. Ticked 25 Sep 2026 (#202): the box said
+  it was done and was never ticked.
 
 ## Slice 17 — one identity across both doors
 
@@ -483,14 +494,14 @@ REST ignored a requested model and stored the deployment default. Investigation:
   at the model's list API price — a subscription seat's usage against the bill it displaced) and
   the spend reply a `seat` hint ("subscription" | "api"), from open-ai-gateway #51's per-window
   fields; absent on an older gateway. The desktop's Usage block reads them. #48.
-- [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
+- [x] P5 *(removed in P0-E, 20 Sep 2026)* agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
-- [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its
+- [x] P6 *(removed in P0-E, 20 Sep 2026)* entry mutation — reactions, widget answers/dismissal, deletion, each with its
   `updated`/`removed` SSE frame. (`c8ee938`)
-- [x] P7 — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
+- [x] P7 *(removed in P0-E, 20 Sep 2026)* — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
   commands refuse readably until the artifacts slice lands (they are its client surface).
   *(this commit)*
-- [x] P8 — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
+- [x] P8 *(removed in P0-E, 20 Sep 2026)* — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
   publishing and routed-MCP execution refuse readably (a coworker's connections drive MCP on
   this server, from runs). *(this commit)*
 - [x] P9 automations — slice 6's schedules wearing the client's names; one scheduler, two
@@ -599,6 +610,42 @@ every record that sharing would otherwise break carry whose it is.
   learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
   are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
 
+  **Re-landed on the AG-UI door, 25 Sep 2026 (#175).** P0-E deleted `roster_for` and
+  `tests/against_visibility.rs` with the seam-A door that called them, and the AG-UI door had
+  never honoured sharing: `GET /coworkers` listed `coworkers_for`, and the run gate asked
+  `policy_for`, which only the hirer ever has a row in — so `PATCH visibility=org` answered 200
+  and shared nothing. `roster_for` is back and feeds `GET /coworkers`, whose rows carry `mine`,
+  `canManage` and `owner` again (built by `coworker_row`, the same row the PATCH reply is). A turn
+  runs under `policy_to_use`: the caller's own grant, else the OWNER's grant addressed to them
+  when the coworker is org-visible and they share its owner's non-empty org — derived on every
+  read, never copied into a grant row, so unsharing, leaving the org and the owner's own
+  revocation all bite on the next turn. `policy_for` stays strict, because `set_approvals`,
+  connections and routines ask it and a member must not mint a grant through them. A member may
+  PATCH `hiddenFromSidebar` on a shared coworker (their own sidebar) and gets a 403 with a
+  sentence for anything else; an owner in no org is refused `org` with a sentence. In the default
+  per-account box mode a member's tools run on the member's OWN computer, not the owner's — the
+  scope is resolved from whoever is asking, and a member with no computer yet talks without
+  tools. `tests/against_visibility.rs`.
+
+  What a member reaches, and what answers them, stated so nobody has to rediscover it. A coworker
+  that is not on the caller's roster answers **404 on every coworker route**, the run door
+  (`POST /ag-ui`) and `POST /coworkers/{id}/approvals` included. Those two used to say 403 "no
+  grant lets …": identical for an unknown id, so it confirmed nothing, but unlike every other
+  route; `refuse_use` now decides both. So it does for `POST /schedules` and `POST /monitors`,
+  which name the coworker in the body and used to answer an unknown id 404 but a real one 403,
+  which told a stranger which ids exist. One that is on their roster and still refused (the owner
+  revoked their own grant) is a 403 with the rule's sentence. The member's turn is billed to the member
+  (`spend_actor`, and the per-person key for coworker × member), and `GET
+  /ag-ui/threads/gateway-{id}` shows each person only their own runs of the one shared thread id.
+  **Sharing lends the coworker's `bot`-scoped connections:** `connections_for(member, coworker)`
+  includes the rows owned by the coworker, and those were OAuth'd by the owner, so a member's turn
+  can act through an account the owner connected *as the coworker*. The owner's `user`-scoped and
+  lent connections are not included. Connect a personal account as `user`, never as `bot`, on a
+  coworker you will share. The owner-only routes (`/computer`, `/screen`, `/usage`, `/tools`, keys,
+  limits) answer a member 404, because `owned_coworker` gates them — the client's Open button on a
+  shared row therefore has nothing to open, and the row says so: a member's `boxId` is null, not
+  the owner's computer.
+
 ## Phase 0
 
 - [x] **jev cargo feature.** `typesafe-sdk` is optional so `--no-default-features` carries one reqwest and one hyper. *(this commit)* 18 Sep 2026.
@@ -642,8 +689,13 @@ every record that sharing would otherwise break carry whose it is.
 - [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
-- [ ] Artifacts/uploads — parked on purpose; lands with or after the harness produces files worth
-  storing (design notes in GOAL.md).
+- [x] **Artifacts.** One store for what a run produces and what a person attaches: `POST
+  /artifacts` (a 25 MiB cap on that one route), `GET`/`DELETE /artifacts/{id}`, `GET
+  /artifacts/{id}/bytes`; bytes stored plainly beside plaintext payloads; a missing, deleted or
+  somebody else's artifact answers the same 404. Recipe runs store their screenshots there
+  (#118). (`cf0a512`, #117) What is still open is on the client side: which NativeChat surface
+  attaches or shows them has not been read from NativeChat's source
+  (`research/client-nativechat.md`, "Attachments").
 - [ ] stdio MCP servers inside a coworker's own container (the follow-up to HTTP-only).
 - [ ] Graph harness (the loop is linear today, `MAX_ROUNDS = 8`).
 - [ ] Redis — only after a measured hot query, per the standing decision.
@@ -669,3 +721,7 @@ every record that sharing would otherwise break carry whose it is.
   answered from text with made-up output). A coworker pinned to it cannot use its computer, and
   no policy or auto-review gate ever fires for it. xai/grok-4.6 emits real tool calls; pin a
   coworker there (slice 18) until this is resolved upstream.
+  *25 Sep 2026 (#197):* the shipped default (`DEFAULT_MODEL`, `.env.example`) is now
+  `xai/grok-4.6`, and `POST /models/probe` offers one tool and answers `toolCalls`, so the
+  console's Test tells a route that talks from one that can act. This box stays open until luna
+  itself is re-verified with a captured `tool_calls` response.

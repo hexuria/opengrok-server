@@ -42,6 +42,12 @@ roster_one=$(curl -fsS "$BASE/coworkers" -H "authorization: Bearer $token_one")
 echo "$roster_one" | jq -e 'type == "array"' >/dev/null || fail "the roster is not an array"
 echo "$roster_one" | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null \
   || fail "the new coworker is not on its own roster"
+# camelCase, like the hire and PATCH replies: the app reads a snake_case key as absent, and the
+# roster used to lose its sort key that way on every relaunch (#176).
+echo "$roster_one" | jq -e --arg id "$id" \
+  'any(.[]; .id == $id and has("updatedAtMs") and has("boxId") and .mine == true
+            and (has("updated_at_ms") | not) and (has("box_id") | not))' >/dev/null \
+  || fail "the roster row is not the camelCase row the PATCH reply is: $roster_one"
 ok "one coworker on the hirer's roster"
 
 echo "5. somebody else's roster does not show it"
