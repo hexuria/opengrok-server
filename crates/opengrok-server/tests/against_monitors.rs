@@ -12,7 +12,9 @@
 //!
 //! ONE GLOBAL CURSOR, SO ONE TEST AT A TIME. Tests in one binary run in parallel, and a tick in one
 //! test reads — and moves the cursor past — the events another test just seeded. `SERIAL` keeps
-//! them from draining each other's log.
+//! them from draining each other's log under `cargo test`; nextest runs each test in its own
+//! process, where that lock is useless, so `.config/nextest.toml` puts this binary in a group of
+//! one.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
