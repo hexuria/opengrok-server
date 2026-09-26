@@ -11,10 +11,9 @@
 //! nature, `auth/budget.rs`), and the per-coworker MCP lock, which serialises a retry against
 //! an approve on ONE replica; across replicas the take below is the whole race.
 //!
-//! What stays in the process and is NOT yet right for a second replica: the SSE broadcast
-//! channel and its ordered sequence counters (`gateway/live.rs`), the host-settings mutex and
-//! the reverse-exec broker. Behind a balancer a second replica still breaks the event stream
-//! and lets sequences go backwards. This module makes the three one-shot handoffs correct; it
+//! What stays in the process and is NOT yet right for a second replica: the host-settings mutex
+//! and the reverse-exec broker. (Seam A's SSE broadcast channel, whose sequences could go
+//! backwards behind a balancer, went with that door in P0-E.) This module makes the three one-shot handoffs correct; it
 //! does not make the server multi-replica. That is the roadmap's next line, not this one.
 
 use opengrok_core::id::CoworkerId;

@@ -1,6 +1,6 @@
 //! The account's ONE shared computer, and its teardown.
 //!
-//! 1 account = 1 computer (`docs/plan-bots-computers-channels.md`). The account's first agent
+//! 1 account = 1 computer (`docs/archive/plan-bots-computers-channels.md`). The account's first agent
 //! creates the box; every later agent of that account SHARES it — provisioning is automatic, with
 //! no per-agent choice and no "connect" step. Deleting an agent does not destroy the box (others
 //! may share it); when the account's LAST agent is deleted, the box is destroyed and the mapping

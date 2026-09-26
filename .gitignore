@@ -5,14 +5,10 @@
 !.env.example
 .DS_Store
 
-# Next.js client
-web/node_modules
-web/.next
-web/out
-web/.env*.local
+# web/ (Vite) keeps its own ignores in web/.gitignore.
 
 # Browser-automation scratch: console logs, page snapshots and screenshots dropped by the
-# Playwright/Chrome MCP servers while driving the desktop client. Evidence worth keeping is
+# Playwright/Chrome MCP servers while driving a client or the console. Evidence worth keeping is
 # copied into docs/verification/ deliberately; this directory is the raw spill.
 .playwright-mcp/
 

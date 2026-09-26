@@ -2800,8 +2800,8 @@ pub async fn run(
 }
 
 /// The 401 every refusal of an unnamed or unrecognised caller answers with: `{"error": …}`, the
-/// shape the `/api/{method}` seam already guarantees and the desktop's error helper reads first
-/// (`docs/known-gaps.md` §4), so the sentence reaches the person rather than "failed (401)".
+/// shape the removed `/api/{method}` seam guaranteed and a client's error helper reads first
+/// (`docs/known-gaps.md` §2), so the sentence reaches the person rather than "failed (401)".
 fn unauthorized(sentence: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -3770,8 +3770,8 @@ async fn events_for_client(
 
 /// How many runs a thread answers with when the caller does not ask for a number.
 ///
-/// Twenty, which is what `gateway/lifecycle.rs` already asks `runs_for_thread` for when it builds
-/// a routine's run list. Two readers of the same history disagreeing about how much of it is
+/// Twenty, which is what seam A's routine run list (removed in P0-E) asked `runs_for_thread` for,
+/// and what the server-side history window uses. Two readers of the same history disagreeing about how much of it is
 /// "recent" gets reported as "the app shows fewer turns than the pane does", and the cheapest way
 /// not to have that conversation is to pick the number once. Twenty turns is also more than a
 /// screenful, which is what a client reopening a conversation actually has to draw.

@@ -16,7 +16,8 @@
 //!
 //! Provenance: shapes derived from the client's own recovered surface in
 //! `opengrok/source/host/gateway-protocol.ts`, `source/shared/transcript.ts` and
-//! `docs/grok-0.27-disparity-proto.md`. Interop only: none of Cursor's server code is used.
+//! `opengrok/docs/grok-0.27-disparity-proto.md` (all in the client repo, not this one). Interop
+//! only: none of Cursor's server code is used.
 
 pub mod activity;
 pub mod agui;
