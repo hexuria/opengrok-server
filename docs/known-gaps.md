@@ -4,46 +4,13 @@ Real defects that are understood, reproduced, and not yet fixed. Each says what 
 and why it was left — so the next person inherits the reasoning and not just the symptom.
 
 Written 8 Sep 2026, from a night where four of these were found by hitting them in sequence.
-Nothing here is speculative; every one has an observation behind it.
+Nothing here is speculative; every one has an observation behind it. Entries are removed when
+they are fixed: the revoked-key filter (fixed 9 Sep) and telling a live gateway key from a dead
+one (fixed 9 and 25 Sep) are in `git show 99ec5c3:docs/known-gaps.md`.
 
 ---
 
-## 1. A revoked coworker key is still treated as usable — FIXED 9 Sep 2026
-
-**Where it was:** five call sites, not the three this entry originally claimed. `ensure_key_for`'s
-early return, **both** of `key_for`'s lookups (the one dispatch authenticates with),
-`GuardedDoor::stream`'s meter lookup, and `set_limit`'s feasibility check — which was introduced
-by #76 *without* the filter, so the guard written to refuse an uncountable cap was itself accepting
-one from a revoked row. Miscounting this entry is how that happened; the count is now checked
-rather than remembered.
-
-**Coverage, stated rather than assumed** (`against_a_revoked_key.rs`): `set_limit`, the mint check
-and dispatch are each independently revert-checked and go red alone. The meter lookup is NOT
-discriminated by a test — with no vault it holds the turn either way and only the sentence differs
-— so that one site is verified by reading, not by behaviour.
-
-The original entry follows, kept because the constraint in it still governs any future change.
-
-`PgStore::coworker_key` returns a row without checking `revoked_at_ms`, deliberately: the row
-must survive revocation so a member's month still counts toward their pool, and
-`tests/against_member_keys.rs` asserts exactly that. The convention is therefore to filter at the
-CALL SITE, and three places already do — `points.rs:262`, `points.rs:573`, `spend.rs:469`. The
-three named above do not.
-
-**What breaks:** retiring a coworker revokes its keys, after which `ensure_key_for` still reports
-`Minted` with the revoked prefix and the meter still tries to read against a credential the
-gateway has been told to reject.
-
-**The fix:** add `.filter(|row| row.revoked_at_ms.is_none())` at those three sites. Do NOT push
-the filter into the SQL — `coworker_key` returning revoked rows is load-bearing for pool
-accounting and is under test.
-
-**Why it is still open:** it needs a review pass rather than a hurried edit, and the outage that
-surfaced its neighbourhood was fixed a different way (see §2).
-
----
-
-## 2. `mint_late` will mint a key that cannot be used
+## 1. `mint_late` will mint a key that cannot be used
 
 **Where:** `crates/opengrok-server/src/spend.rs`, `mint_late` → `ensure_key_for`.
 
@@ -112,77 +79,30 @@ pass on one rung and fail on another.
 
 ---
 
-## 3. Nothing can tell a live gateway key from a dead one
+## 2. The account API answers refusals as plain text, not JSON
 
-**Where:** conceptual — `coworker_gateway_key` rows versus the gateway's `api_key` table.
+**Where:** `crates/opengrok-server/src/agui/routes.rs` and `account_api.rs` — about 99 refusals
+of the form `(StatusCode::X, "some sentence")` (counted 26 Sep 2026), against a minority that use
+`json!({"error": …})`.
 
-Our Postgres is on a named volume and survives; the gateway's dev Postgres was tmpfs and did not.
-So our key rows outlived the gateway keys they name, and nothing on either side noticed:
-`coworker_key` returns the row, the vault opens the sealed secret happily, and the door presents
-a syntactically perfect credential the gateway has never heard of — `401 authentication failed`,
-with no way to see why from our logs.
+The removed `/api/{method}` door guaranteed `{"error": …}` for every refusal, transcribed from the
+Grok Bot client's contract. The account API never adopted the same rule, so most of what it
+refuses reaches a client as a bare sentence. `POST /ag-ui`'s refusals of an unnamed caller (no
+bearer, a bearer that names nobody, an unsigned queued send) answer `{"error": …}` since 25 Sep
+2026.
 
-**Two cheap improvements, either of which would have collapsed an hour into a minute:**
-
-- ~~**Log the presented key prefix on a 401.**~~ **DONE 9 Sep 2026** (`gateway.rs`,
-  `logged_prefix`). The gateway records *nothing* for a rejected key — it proved this by sending
-  junk and watching its log stay flat — so ours is the only place that can say which credential
-  was sent. Sixteen characters, which is exactly `api_key.key_prefix` on the gateway and so
-  exactly what names the row; never the value. It also logs `owned`, because a coworker's own key
-  and the deployment's fail with the same status and the same sentence, and which one it was
-  decides where to look next.
-
-  Coverage, stated rather than assumed: the PREFIX RULE is behaviour-tested and revert-checked
-  three ways (logging the whole key, a longer prefix, and a byte slice — the last passes the
-  prefix test and fails the panic test, which is why both exist). That the line is *emitted on a
-  401* is not covered by a test: the harness crate keeps its tests socket-free on purpose, and a
-  subscriber-capture test would have cost a dev-dependency for one assertion.
-- ~~**Validate a stored prefix against the gateway**~~ **DONE 25 Sep 2026, on first refusal
-  rather than first use.** When a coworker's own key draws a 401 — or the capped path's meter
-  read says the gateway has no such key — `GuardedDoor::retire_if_forgotten` asks the gateway
-  (`GET /admin/api/keys/{id}/usage`) whether it still knows the key. Only a definite "no key"
-  retires the row (pair- and key-scoped, so a concurrent re-mint survives), drops the sealed
-  secret and clears the mint back-off; the next turn mints a fresh key and is metered again. A
-  key the gateway still knows (revoked or disabled there) is an operator's decision and is left
-  alone. The uncapped turn that found it still falls back once; a capped one is held once with
-  "a fresh key is minted on its next turn; send it again". `insert_coworker_key` now clears
-  `revoked_at_ms`, without which a re-mint over a retired row stayed invisible and was re-minted
-  every retry interval. Probing on first use after a restart was not done: the reactive probe
-  costs nothing on the happy path and also catches a wipe while the server is running.
-
-  **The gateway's "no key" does not say why.** A key lost in a wipe and one an operator deleted on
-  purpose answer the same, so a key DELETED on the gateway is re-minted on the coworker's next
-  turn. To cut a coworker off, disable its org's principal on the gateway or retire the coworker
-  here; a key merely REVOKED or disabled on the gateway is left alone, and the console names it.
-  (`against_spend_caps.rs::a_key_the_gateway_forgot_is_re_minted_rather_than_retried_forever`,
-  `…a_capped_coworker_whose_key_was_forgotten_is_held_once_and_then_runs_on_a_fresh_key`.)
+**Status:** it is an inconsistency between our own routes, and the next person to add a refusal
+has two conventions to choose from. Whether NativeChat reads a JSON body, a plain one, or both is
+not known from this repo ([`setup/nativechat.md`](setup/nativechat.md)).
 
 ---
 
-## 4. The account API answers refusals as plain text, not JSON
-
-**Where:** `crates/opengrok-server/src/agui/routes.rs` and `account_api.rs` — **62** refusals of
-the form `(StatusCode::X, "some sentence")` against 11 that use `json!({"error": …})`.
-
-The `/api/{method}` gateway seam already guarantees `{"error": …}` — `reply()` and `refusal()`
-enforce it, transcribed from the client contract in that file's header. The account API never
-adopted the same rule, so the majority of what it refuses arrives at the desktop as
-`failed (NNN).` rather than the sentence we wrote. Among the casualties: "the current password is
-wrong", "you are not in an organization", "no such account".
-
-**Status:** the desktop shipped a helper that falls back to raw text on a non-JSON body, so this
-is invisible to users today. `POST /ag-ui`'s refusals of an unnamed caller (no bearer, a bearer
-that names nobody, an unsigned queued send) answer `{"error": …}` since 25 Sep 2026. It remains an inconsistency between two of our own surfaces, and the
-next person to add a refusal has two conventions to choose from.
-
----
-
-## 5. A failed probe returns 200, so probe spend cannot be audited
+## 3. A failed probe returns 200, so probe spend cannot be audited
 
 **Where:** `crates/opengrok-server/src/agui/routes.rs`, `probe_model`.
 
 ```rust
-Ok(served) => Json({"ok": true,  "served": served})    // 200, a real billed completion
+Ok(probed) => Json({"ok": true, "served": …, "toolCalls": …})  // 200, a real billed completion
 Err(detail) => Json({"ok": false, "detail": detail})   // ALSO 200, nothing spent
 ```
 

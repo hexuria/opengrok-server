@@ -17,9 +17,10 @@ A coworker keeps working when you close the tab, because the work was never in t
 
 ## Status
 
-Slices 1–14 are done and the server is real: auth, the AG-UI endpoint, the durable harness,
-computers, connectors, the scheduler/monitor autonomy pair, the MCP door, orgs and invites, the
-web console, and the consent model with model-judged auto-review.
+The server is real and serving NativeChat: auth, the AG-UI endpoint, the durable harness,
+computers, connectors, the scheduler/monitor autonomy pair, the MCP door with OAuth, orgs and
+invites, the web console, the consent model with model-judged auto-review, org gateway keys and
+per-coworker model pins (slices 1–19; 17 and 18 each keep one open box).
 **[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is ticked only in the commit that
 makes it true, and its unticked boxes are the remaining work.
 
@@ -64,7 +65,7 @@ gate → TLS → NativeChat. The routes NativeChat and the console call are mapp
 | **What's done, what's left** | [`docs/ROADMAP.md`](docs/ROADMAP.md) — the single tracker |
 | **Standing it up** | [`docs/setup/`](docs/setup/README.md) |
 | **The consent model** | [`docs/AUTO-REVIEW.md`](docs/AUTO-REVIEW.md) — policy tiers, the judge, the cards |
-| **The invariants** | [`CLAUDE.md`](CLAUDE.md) — ten rules that are not up for negotiation |
+| **The invariants** | [`CLAUDE.md`](CLAUDE.md) — eleven rules that are not up for negotiation |
 | **Reference docs** | [`docs/research/`](docs/research/README.md) — the client, the gateway, the sandbox, connectors, the prior product |
 
 ## Layout
@@ -76,14 +77,20 @@ crates/
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
   opengrok-harness  the agent loop: turns, tool calls, streaming, durability; the auto-review judge
   opengrok-box      the coworker's computer — a trait; local Docker and box.ascii.dev (typed v1 client) today
+  opengrok-plugins  Agent Plugins: the bundle of skills + MCP servers a coworker is given
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins
+  opengrok-recipes  a taught tape into the box's recipe steps; the lint that keeps them runnable
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
+  opengrok-testdb   test support: the `_gate` database guard, and each test binary's own database
   opengrok-server   Axum: the host-facing API, the AG-UI endpoint, the MCP door, /console
 docs/
   setup/ · research/ · box/ (vendor API pages) · verification/ · archive/ · the documents in the table above
+formal/
+  TLA+ and Lean models of the run protocol (README.md: what they found; POLICY.md: when a change must touch them)
 scripts/
-  serve.sh (run the dev server) · gate.sh (the merge gate) · crate-size.sh (the crate-size ceiling) · slice*-smoke.sh (the evidence)
+  serve.sh (run the dev server) · gate.sh (the merge gate) · crate-size.sh (the crate-size ceiling) ·
+  check-architecture.sh (the crate graph) · formal.sh (TLC + Lean) · slice*-smoke.sh (the evidence)
 web/
   the web console (Bun/Vite/React SPA served at /console)
 ```

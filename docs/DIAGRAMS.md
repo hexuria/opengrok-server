@@ -1,8 +1,8 @@
 # Diagrams and picture-explainers
 
 Visual explanations of why OpenGrok exists and what it is. Each is a published Claude artifact
-(private to the owner's account unless shared from the page's share menu). **Sources for the three
-authored here are vendored in `docs/artifacts/`**, so they survive independently of the hosting.
+(private to the owner's account unless shared from the page's share menu). **Sources for the ones
+authored here are vendored in `docs/artifacts/`** (№2's, retired, in `docs/archive/artifacts/`), so they survive independently of the hosting.
 
 Read them in this order for the fastest possible orientation.
 
@@ -258,6 +258,9 @@ this last, with the cost of a screenshot versus a connector call stated plainly.
 
 **https://claude.ai/code/artifact/fc9688dc-c7b5-4a41-8adc-196b623f374a**
 Source: [`artifacts/many-voices-one-room.html`](artifacts/many-voices-one-room.html)
+
+> **Groups were built and then removed on 20 Sep 2026** with seam A's orchestrator (P0-E);
+> shared rooms stay parked (ROADMAP "Later"). The picture is the design record for both.
 
 The two features called "rooms" separated on the first page: a group (one person's coworkers, one
 tenancy) versus a shared room (several accounts, crossing the tenancy wall). A group as a coworker

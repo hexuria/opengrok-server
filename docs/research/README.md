@@ -11,7 +11,7 @@ reading the source, not from memory; each anchors its claims to file paths or pr
 | [`lessons-opensesame.md`](lessons-opensesame.md) | The previous product: what was tried, what broke, and the rules that came out — thread binding, the woven timeline, the fan-out collapse, the refresh bug, model pins, and the hosted-dependency trap | designing `opengrok-store` or `opengrok-harness` |
 | [`sandbox-box-ascii-dev.md`](sandbox-box-ascii-dev.md) | box.ascii.dev: verdict, full endpoint table, pinned shapes (`box.id`, `X-Ascii-Confirm-Delete`), the typed `ascii::Client`, and the gaps (no streaming exec, no dir listing, VNC-only computer-use, hosted-only) | touching `opengrok-box` |
 | [`../box/README.md`](../box/README.md) | Local copy of the Box Public API v1 pages + OpenAPI spec (vendor markdown, not ours) | fixing or extending `opengrok-box` against the live contract |
-| [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | touching `opengrok-tools` or planning P6 |
+| [`connectors-open-connector.md`](connectors-open-connector.md) | open-connector: what is genuinely open vs hosted (an earlier audit was wrong here), the action schema, the executor problem, tenancy and security defaults | revisiting connectors; not adopted, slice 5 shipped them natively |
 
 ## Headline findings, so they are not buried
 

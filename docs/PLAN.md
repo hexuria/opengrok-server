@@ -5,6 +5,11 @@
 > the open questions (§7) are historical — progress is tracked in [`ROADMAP.md`](ROADMAP.md),
 > and the phases were superseded first by `GOAL.md`'s slices, then by `PORT-PRIORITY.md`'s
 > port ladder.
+>
+> **Since 20 Sep 2026** the Grok Bot desktop client below is discontinued and its two doors (seam
+> A and seam B) were deleted in P0-E. The client served today is NativeChat, over AG-UI and the
+> REST routes beside it ([`setup/nativechat.md`](setup/nativechat.md)); read "the desktop app"
+> in this plan as the client it was written for.
 
 **The one-line idea.** The coworkers move out of the browser tab and into a server of their own: one
 Rust service that owns the harness, the tools, the computers and the policy, shipped together with

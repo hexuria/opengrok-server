@@ -7,10 +7,9 @@ is reference. Rewritten 25 Sep 2026 for the client served today. Previous versio
 `git show 99ec5c3:docs/archive/handover-2026-08-29.md` (P0 era).
 
 **Read [`../CLAUDE.md`](../CLAUDE.md) first** (it loads automatically), then this, then act.
-CLAUDE.md's client line and its "Three facts" #1 and #3 still describe the Grok Bot desktop
-client. Its non-negotiables stand as written, but for **which client, and how it connects**,
-this page and [`setup/nativechat.md`](setup/nativechat.md) are current. The pre-removal facts are
-kept in [`archive/seam-a-client-facts.md`](archive/seam-a-client-facts.md).
+For **which client, and how it connects**, this page and
+[`setup/nativechat.md`](setup/nativechat.md) are the detail. The Grok Bot client's facts that
+CLAUDE.md used to carry are kept in [`archive/seam-a-client-facts.md`](archive/seam-a-client-facts.md).
 
 ## Where this stands, in one paragraph
 

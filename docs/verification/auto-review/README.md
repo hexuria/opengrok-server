@@ -1,5 +1,9 @@
 # Auto-review — end-to-end verification (server half)
 
+> Captured 31 Aug 2026 on the Grok Bot desktop client, removed 20 Sep 2026 (P0-E). The judge, the
+> tiers and the card still work as recorded; a card is now answered at
+> `POST /ag-ui/runs/{run_id}/answer`, not seam A's `resolveAutoReviewApproval`.
+
 Driven against the shipped path: the packaged desktop client (the peer's CDP session, screenshots
 in the client repo's `docs/consent-model-B5-acceptance.md`) talking to this server on `:1447`,
 the real gateway door and the real judge route (`OG_AUTO_REVIEW_MODEL` = the deployment's
@@ -90,6 +94,7 @@ to off/empty and the coworker row deleted.
 - The real judge answering `ask` (item 2 used the canned verdict). The parsing and fail-closed
   ladder are unit-tested (`opengrok-harness/src/review.rs`, `opengrok-tools/src/review.rs`); a
   real "ask" is the same code path with a different one-word input.
-- A card pressed after a server restart. Covered by `tests/against_auto_review_gate.rs`'s
-  "answered exactly once" test, which resolves a run that exists only in Postgres, never in
+- A card pressed after a server restart. Covered at capture time by
+  `tests/against_auto_review_gate.rs`'s "answered exactly once" test (removed with seam A in
+  P0-E; exactly-once answering is now `run.rs`'s `a_call_can_only_be_answered_once`), which resolves a run that exists only in Postgres, never in
   process memory — the same situation a restart leaves.

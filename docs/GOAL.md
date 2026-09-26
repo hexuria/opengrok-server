@@ -8,6 +8,10 @@ the client's own manifest at `/Volumes/goldcoders/OSS/opengrok` — so that each
 remote computer and keeps working when the person's laptop is off. Clients are windows; the server
 is the product.
 
+*Since then (20 Sep 2026):* the Grok Bot desktop client was discontinued and the doors built for it
+were deleted in P0-E. The goal stands with a different first window: NativeChat, over AG-UI
+([`setup/nativechat.md`](setup/nativechat.md)). The server's side of the goal is unchanged.
+
 The rights line still applies in full: message shapes are **transcribed with provenance, never
 vendored**. The operator published the repo on 1 Sep 2026 with the rights review still
 outstanding.

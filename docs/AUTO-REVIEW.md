@@ -3,9 +3,15 @@
 Status (2026-08-31): **implemented end to end.** Storage/resolution/API (§2, §3, §6) in
 `crates/opengrok-store/src/auto_review.rs` + `crates/opengrok-server/src/auto_review.rs`; the
 judge at the tool seam (§4) in `crates/opengrok-tools/src/review.rs` (`combine`, the ladder) and
-`crates/opengrok-harness/src/review.rs` (`ModelJudge`, `parse_verdict`); the card and the real
-`resolveAutoReviewApproval` (§5) in `crates/opengrok-server/src/cards.rs` and
-`crates/opengrok-server/src/agui/resume.rs`.
+`crates/opengrok-harness/src/review.rs` (`ModelJudge`, `parse_verdict`); the card (§5) in
+`crates/opengrok-server/src/cards.rs` and its resume in `crates/opengrok-server/src/agui/resume.rs`.
+
+> **Since 20 Sep 2026 (P0-E):** the answer verb `resolveAutoReviewApproval` lived on seam A, the
+> Grok Bot client's `POST /api/{method}` door, and was deleted with it. A card is now answered at
+> `POST /ag-ui/runs/{run_id}/answer` with `{callId, approved}` (`answer_run`,
+> `crates/opengrok-server/src/agui/routes.rs`): the same exactly-once aggregate, the same flip of
+> the card on its entry id. §1 and §5's verb are the record of how it was built; the card's
+> shape, the tiers, the gate and the management API stand.
 Tests: unit (ladder, redaction, judge parsing, cards) and Postgres-backed (tiers, resolve verb).
 `OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask`
 cans the judge under a mock door. The audit of what existed before is §1; the consent model this
@@ -37,7 +43,7 @@ Rules that follow from it:
 - **At most one card per tool call.** When the remote-control gate already suspended for consent,
   auto-review does not raise a second ask for the same call.
 
-## 1. What existed before (audited, with evidence)
+## 1. What existed before (audited, with evidence; the `gateway/` files named here were deleted in P0-E)
 
 - `gateway/mod.rs:141` — `"autoReviewInstructions": null` in the `getHostSettings` default
   record; present only because the client's resync chain reads the record whole.
@@ -145,7 +151,7 @@ effective instruction texts, it returns one word of `allow | block | ask`. Fail-
 An ask suspends the run through the proven machinery: `RunCommand::Suspend` →
 `AwaitingApproval`, no expiry ever — the card answers whenever the user returns.
 
-## 5. The ask card and `resolveAutoReviewApproval`
+## 5. The ask card and its answer (`resolveAutoReviewApproval` until P0-E)
 
 The suspension emits a transcript entry using the renderer's **auto-review approval card**.
 Shape transcribed by the desktop peer from the shipped renderer (non-negotiable #1 — nothing
