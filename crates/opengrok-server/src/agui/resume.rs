@@ -674,12 +674,14 @@ async fn resume_suspended_run(
         skill_id: run.skill_id.clone(),
         prompt: None,
     };
+    let pin = run.pin_for_resume(&coworker.model);
     let request = ModelRequest {
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,
         spend_scope: Some(coworker_id.as_str().to_string()),
         // The person who answered the card is the person this continuation is for.
         spend_actor: Some(account_id.as_str().to_string()),
-        model: run.pin_for_resume(&coworker.model),
+        context_tokens: state.agui.context_for(&pin).await,
+        model: pin,
         // A resumed run carries the SAME system message as the turn it continues. It used to
         // carry none at all, so a coworker lost both its identity and the whose-computer
         // discipline at the moment a person had just intervened — the worst possible moment to

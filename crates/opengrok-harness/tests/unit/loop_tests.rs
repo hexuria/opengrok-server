@@ -71,6 +71,7 @@ fn request(text: &str) -> ModelRequest {
         gateway_key: None,
         spend_scope: None,
         spend_actor: None,
+        context_tokens: None,
         model: "mock".to_string(),
         system: None,
         tools: Vec::new(),
@@ -5028,4 +5029,166 @@ async fn two_parallel_calls_come_back_as_a_call_message_and_one_tool_message_eac
         assert_eq!(answer["role"], "tool", "{second:?}");
         assert_eq!(answer["tool_call_id"], *id, "{second:?}");
     }
+}
+
+/// Answers every call with a word and keeps what it was asked.
+#[derive(Default)]
+struct RecordingDoor(Mutex<Vec<ModelRequest>>);
+
+#[async_trait::async_trait]
+impl ModelDoor for RecordingDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        self.0.lock().unwrap().push(request);
+        let script = vec![ModelDelta::Text("Done.".to_string())];
+        Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+    }
+}
+
+/// A shell whose every answer is `bytes` long: a log dump, a large file read.
+fn loud_shell(bytes: usize, pause_ms: u64) -> ToolRunner {
+    ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(move |call| {
+            std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+            opengrok_tools::ToolResult::ok(&call.id, "o".repeat(bytes))
+        }),
+    )
+}
+
+fn run_error(events: &[Event]) -> String {
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError, "{events:?}");
+    last.extra["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A LONG THREAD USED TO REACH THE PROVIDER WHOLE (#90), and came back a 400 after a round trip.
+/// Now the oldest turns are left out before the call, this turn is kept, and the model is told.
+#[tokio::test]
+async fn an_over_limit_history_is_trimmed_before_the_call_and_keeps_this_turn() {
+    let mut asked = request("now");
+    let mut messages = Vec::new();
+    for turn in 0..10 {
+        messages.push(ChatMessage::text(
+            "user",
+            format!("question {turn} {}", "q".repeat(3_000)),
+        ));
+        messages.push(ChatMessage::text(
+            "assistant",
+            format!("answer {turn} {}", "a".repeat(3_000)),
+        ));
+    }
+    messages.append(&mut asked.messages);
+    asked.messages = messages;
+    asked.context_tokens = Some(20_000);
+    let door = RecordingDoor::default();
+
+    let events = run_conversation(&door, None, &MemoryJournal::new(), asked, "t1", "r1", 1).await;
+
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let calls = door.0.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let sent = &calls[0];
+    assert!(sent.messages.len() < 21, "{}", sent.messages.len());
+    assert_eq!(sent.messages.last().unwrap().content, "now");
+    assert!(sent.messages[0].content.starts_with("question "));
+    assert!(sent.system.as_deref().unwrap().contains("oldest messages"));
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert_eq!(timing["context"]["limit"], 20_000, "{timing}");
+    assert_eq!(timing["context"]["estimated"].as_array().unwrap().len(), 1);
+    assert!(
+        timing["context"]["left_out"].as_u64().unwrap() > 0,
+        "{timing}"
+    );
+}
+
+/// Every call's estimate is on the run's record, known limit or not.
+#[tokio::test]
+async fn run_timing_carries_each_calls_estimate() {
+    let door = RecordingDoor::default();
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert!(timing["context"]["limit"].is_null(), "{timing}");
+    assert!(
+        timing["context"]["estimated"][0].as_u64().unwrap() > 0,
+        "{timing}"
+    );
+}
+
+/// This turn alone does not fit: nothing is sent, and the person is told why in a sentence
+/// instead of reading the provider's 400.
+#[tokio::test]
+async fn a_conversation_that_cannot_fit_ends_with_a_sentence_and_asks_no_model() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let door = CountingToolDoor(calls.clone());
+    let mut asked = request(&"x".repeat(60_000));
+    asked.context_tokens = Some(8_000);
+    let events = run_conversation(&door, None, &MemoryJournal::new(), asked, "t1", "r1", 1).await;
+    assert_eq!(*calls.lock().unwrap(), 0);
+    let message = run_error(&events);
+    assert!(message.contains("too long for mock"), "{message}");
+}
+
+/// A run's own tool results are never left out, so a run whose results outgrow the model ends
+/// before the call that would have been refused — not after it.
+#[tokio::test]
+async fn a_round_that_outgrows_the_limit_ends_before_its_call() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let door = CountingToolDoor(calls.clone());
+    let runner = loud_shell(60_000, 0);
+    let mut asked = request("dump the log");
+    asked.context_tokens = Some(16_000);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        asked,
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "the call that would not fit is never made"
+    );
+    assert!(run_error(&events).contains("too long"));
+}
+
+/// The wall clock's wrap-up is measured too: it carries the round the fit has not seen yet.
+/// One that cannot fit is not sent, and the run ends on the limit it reached.
+#[tokio::test]
+async fn a_wrap_up_that_cannot_fit_ends_on_its_limit_uncalled() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let door = CountingToolDoor(calls.clone());
+    let runner = loud_shell(60_000, 30);
+    let mut asked = request("dump the log");
+    asked.context_tokens = Some(16_000);
+    let events = run_conversation_within(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        asked,
+        RunContext::new("t1", "r1", 1),
+        RunBudget {
+            max_wall_ms: 10,
+            ..RunBudget::default()
+        },
+        None,
+    )
+    .await;
+    assert_eq!(*calls.lock().unwrap(), 1, "no wrap-up call was sent");
+    assert!(run_error(&events).contains("time limit"));
 }

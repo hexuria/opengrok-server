@@ -245,6 +245,17 @@ WrapUpCall ==
                     /\ (Finish \/ EndWith("failed"))
     /\ UNCHANGED <<loopVars, anyDelta, stop, toolRuns, toolRunsAfterStop, batch, outcome>>
 
+\* lib.rs `window.fit` (#90) — the context guard, before a round's call or the wrap-up's. A request
+\* the model cannot read is not sent: the run fails with a sentence and spends no model call. Not
+\* switched: the door-error branch of Call already ends the same way one call later, so this adds
+\* no ending the invariants did not already admit, only one that costs less. At "wrap" a recorded
+\* Stop wins first, as WrapUpCall has it. At "call" a Stop pressed since Top asked can still end
+\* the run failed, the same gap a door error has; StopIsHonoured allows it, as it allows that.
+TooLong ==
+    /\ (pc = "call" \/ (pc = "wrap" /\ ~stop))
+    /\ EndWith("failed")
+    /\ UNCHANGED <<loopVars, anyDelta, stop, modelCalls, toolRuns, toolRunsAfterStop, batch, outcome>>
+
 \* The park's write, after `close` asked `stopped` and heard no. A Stop recorded in the gap makes
 \* the log refuse the `Suspended`; at 3eb8304 the refusal was dropped and the rest written, so the
 \* run ended on a card the log could not answer (the peer review's trace). With EndedRefusesPark
@@ -261,7 +272,7 @@ PressStop ==
 
 Done == pc = "done" /\ UNCHANGED vars
 
-Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge \/ ParkWrite \/ WrapUpCall
+Step == Open \/ Top \/ Call \/ Check2 \/ RunTools \/ Judge \/ ParkWrite \/ WrapUpCall \/ TooLong
 Next == Step \/ PressStop \/ Done
 Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 

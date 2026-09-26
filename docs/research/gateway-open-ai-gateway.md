@@ -416,6 +416,10 @@ would fail SDK validation on element 0).
 }
 ```
 
+OpenGrok reads `oag.context_window` and `oag.alias_of` (`crates/opengrok-server/src/models.rs`,
+`context_for`) to hold a turn's prompt to the pin's window (#90). A virtual entry's null and an
+unlisted pin fall back to `OG_CONTEXT_TOKENS`.
+
 **No pricing is emitted anywhere in `data`** — asserted by `no_entry_carries_pricing`. Cost data
 stays on the admin listener.
 

@@ -67,6 +67,9 @@ pub struct AuthState {
     /// a picker can never advertise a gateway the runs do not use. `None` on a mock door, where
     /// there is no gateway to ask and the picker says so.
     pub model_catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
+    /// The context a turn is held to when the catalogue cannot say; `None` turns the guard off.
+    /// `OG_CONTEXT_TOKENS`, read once here so a test sets it without touching the environment.
+    pub context_tokens: Option<u64>,
     /// Jev, the classifier (`crate::jev`). Resolved ONCE at boot beside the two doors above, for
     /// the reason they are: the environment is not a per-request input, and a client rebuilt per
     /// request would rebuild a connection pool per request. `None` ⇒ this deployment has no
@@ -126,6 +129,7 @@ impl AuthState {
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
+            context_tokens: crate::models::context_setting_from_env(),
             jev: crate::jev::from_env(),
             dns: Arc::new(crate::domain_proof::NoResolver),
             budgets: Arc::new(super::budget::Budgets::default()),
@@ -199,6 +203,13 @@ impl AuthState {
         catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
     ) -> Self {
         self.model_catalogue = catalogue;
+        self
+    }
+
+    /// Hold turns to `tokens` when the catalogue cannot say; `None` turns the guard off.
+    #[must_use]
+    pub fn with_context_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.context_tokens = tokens;
         self
     }
 

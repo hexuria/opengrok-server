@@ -69,6 +69,16 @@ pub struct AgUiState {
 }
 
 impl AgUiState {
+    /// How many tokens a turn on `pin` may send (#90): `models::context_for` on this deployment.
+    pub(crate) async fn context_for(&self, pin: &str) -> Option<u64> {
+        crate::models::context_for(
+            self.auth.model_catalogue.as_deref(),
+            self.auth.context_tokens,
+            pin,
+        )
+        .await
+    }
+
     /// Env `OG_EGRESS_TUNNEL_ENABLED=1` / `SAND_EGRESS_TUNNEL_ENABLED=1` (Grok host parity),
     /// or host setting `egressTunnelEnabled`. This is host *intent*. The gateway verb
     /// and Review-an-action gate also need `/v1/info` `egress_tunnel.ready`.
@@ -3030,6 +3040,7 @@ async fn start_claimed_turn(
         // No coworker ⇒ no scope, and the guard lets it through on the deployment's key; `run`
         // has already bounded that per account (`budget::AGUI_UNSCOPED`).
         spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
+        context_tokens: state.context_for(&model).await,
         model,
         system: system.clone(),
         messages,
@@ -4838,16 +4849,18 @@ async fn continue_run(
         prompt: None,
     };
 
+    // The pin the turn started on, not the coworker's current one. A coworker that was
+    // repinned while this run waited on a card must not change what the continuation thinks
+    // with. Logs written before the pin was stored fall back to the current pin.
+    let pin = run.pin_for_resume(&coworker.model);
     let request = ModelRequest {
         gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref(), Some(&account_id))
             .await,
         spend_scope: run.coworker_id.as_ref().map(|c| c.as_str().to_string()),
         // The person who answered the card is the person this continuation is for.
         spend_actor: Some(account_id.as_str().to_string()),
-        // The pin the turn started on, not the coworker's current one. A coworker that was
-        // repinned while this run waited on a card must not change what the continuation thinks
-        // with. Logs written before the pin was stored fall back to the current pin.
-        model: run.pin_for_resume(&coworker.model),
+        context_tokens: state.context_for(&pin).await,
+        model: pin,
         system: Some(system),
         messages: super::history::for_resume(&state, &account_id, &run_id, &run, &answered).await,
         tools: Vec::new(),

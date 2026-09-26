@@ -134,6 +134,7 @@ fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
         gateway_key: Some(GatewayKey::new("oag_live_deadbeef000000")),
         spend_scope: Some(coworker.as_str().to_string()),
         spend_actor: Some(payer.as_str().to_string()),
+        context_tokens: None,
         model: "xai/grok-4.6@sub".to_string(),
         system: None,
         messages: vec![ChatMessage::text("user", "ok")],

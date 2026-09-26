@@ -249,6 +249,7 @@ impl ReviewJudge for ModelJudge {
             gateway_key: self.key.clone(),
             spend_scope: self.scope.clone(),
             spend_actor: self.actor.clone(),
+            context_tokens: None,
             model: self.model.clone(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage::text("user", Self::prompt_for(&ask))],
