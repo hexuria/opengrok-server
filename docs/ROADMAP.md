@@ -695,6 +695,10 @@ every record that sharing would otherwise break carry whose it is.
   pauses where the round stood (`room_pause`), and the answer — given naming the group, as the
   desktop does — resumes that member inside the room and then the members still to speak.
   `tests/against_group_card.rs`.
+- [ ] Group chat on AG-UI (#162) — parked until NativeChat's half (hexuria/nativechat#79) is
+  scheduled. The aggregate (`HireGroup`/`SetMembers`), the group-scoped computer and the tools'
+  `machine: "group"` exist with no route issuing them; building the routes and the group turn
+  first would be a server shape no client sends yet.
 - [ ] Cross-account shared rooms — parked (`archive/plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
