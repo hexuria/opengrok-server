@@ -4,12 +4,12 @@ The server the AI coworkers live on.
 
 One Rust service that owns the agent harness, the tools, the computers and the policy — shipped
 together with [open-ai-gateway](https://github.com/hexuria/open-ai-gateway) as a single AI
-infrastructure. Clients are windows onto it: the reconstructed Grok Bot desktop app connects
-through its OpenGrok server mode, any AG-UI client (openbot among them) through `POST /ag-ui`,
-and a browser through the web console at `/console`.
+infrastructure. Clients are windows onto it: NativeChat (`hexuria/nativechat`, a native desktop
+app in Rust + GPUI) and any other AG-UI client (openbot among them) through `POST /ag-ui` and the
+REST routes beside it, and a browser through the web console at `/console`.
 
 ```
-desktop app / AG-UI / console  ──▶  OpenGrok  ──▶  open-ai-gateway  ──▶  models
+NativeChat / AG-UI / console  ──▶  OpenGrok  ──▶  open-ai-gateway  ──▶  models
                                       └──▶  a computer per coworker (Docker / box.ascii.dev)
 ```
 
@@ -49,7 +49,9 @@ cargo build -p opengrok && OG_PORT=1449 \
 ```
 
 The full chain, one file per topic: **[`docs/setup/`](docs/setup/README.md)** —
-postgres → environment → running → gate.
+postgres → environment → running → first run (the first admin, a gateway key, a real turn) →
+gate → TLS → NativeChat. The routes NativeChat and the console call are mapped in
+[`docs/research/client-nativechat.md`](docs/research/client-nativechat.md).
 
 ## Start here
 

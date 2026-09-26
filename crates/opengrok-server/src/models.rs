@@ -204,7 +204,12 @@ impl ModelCatalogue {
     /// Ask the gateway to answer one tiny prompt on `model`. This is how a pin is proven BEFORE it
     /// is saved — the alternative is discovering it at the first real turn, which the person who
     /// typed it is no longer watching.
-    pub async fn probe(&self, model: &str) -> Result<String, String> {
+    ///
+    /// It offers one trivial tool exactly as a coworker's turn offers its computer (`tool_choice`
+    /// "auto", as `GatewayDoor` sends), so it asks what a real turn asks. "Say ok" proved a route
+    /// answers, never that it can act: `gpt-5.6-luna` passed it while making zero tool calls
+    /// (ROADMAP, "Blocked on the operator").
+    pub async fn probe(&self, model: &str) -> Result<Probed, String> {
         let response = self
             .http
             .post(format!("{}/v1/chat/completions", self.base_url))
@@ -212,8 +217,13 @@ impl ModelCatalogue {
             .timeout(Duration::from_secs(30))
             .json(&serde_json::json!({
                 "model": model,
-                "messages": [{"role": "user", "content": "say ok"}],
-                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "Call the ping tool."}],
+                "tools": [{"type": "function", "function": {"name": "ping", "description":
+                    "Answers pong.", "parameters": {"type": "object", "properties": {}}}}],
+                "tool_choice": "auto",
+                // Room for the call and for any reasoning a route counts against this: a clipped
+                // call reads as no call — a false "cannot act" on a working route.
+                "max_tokens": 512,
             }))
             .send()
             .await
@@ -236,12 +246,23 @@ impl ModelCatalogue {
                 .map_or_else(|| format!("the gateway answered {status}"), redact_secrets);
             return Err(detail);
         }
-        let served = parsed
-            .get("model")
-            .and_then(|model| model.as_str())
-            .unwrap_or(model);
-        Ok(served.to_string())
+        let served = parsed.get("model").and_then(|model| model.as_str());
+        Ok(Probed {
+            served: served.unwrap_or(model).to_string(),
+            // Anything unrecognised is `false`: the probe may understate a route, never overstate.
+            tool_calls: parsed
+                .pointer("/choices/0/message/tool_calls")
+                .and_then(|calls| calls.as_array())
+                .is_some_and(|calls| !calls.is_empty()),
+        })
     }
+}
+
+/// What a probe proved. `tool_calls: false` is not a failure: a route that only talks is a working
+/// pin for a coworker with no computer, and a useless one for a coworker with one.
+pub struct Probed {
+    pub served: String,
+    pub tool_calls: bool,
 }
 
 /// Ids out of an OpenAI-shaped `/v1/models` body. Unknown fields are ignored, and a body that is

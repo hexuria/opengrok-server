@@ -1,5 +1,12 @@
 # What to port, in what order
 
+> **The door this describes was removed on 20 Sep 2026.** Every tier below is a command of seam A
+> (`POST /api/{method}`, `GET /events`) or a method of seam B (ConnectRPC), built for the Grok Bot
+> desktop client, which is discontinued; P0-E deleted both doors ([`ROADMAP.md`](ROADMAP.md),
+> Phase 0). Kept as the record of how the port was ordered and measured, not as a plan: the
+> client served today is NativeChat, over AG-UI and the REST routes beside it
+> ([`research/client-nativechat.md`](research/client-nativechat.md)).
+
 > **Status (1 Sep 2026): executed.** The ladder below drove slices 7–10 and the P5–P10 breadth
 > pass; per-tier statuses live in [`ROADMAP.md`](ROADMAP.md). Kept as the reference for what
 > each tier contains and for the measured corrections in §6.

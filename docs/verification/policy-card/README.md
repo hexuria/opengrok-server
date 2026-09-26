@@ -31,7 +31,8 @@ from a card.
 
 ## Model note
 
-The coworker used for this capture was pinned to `xai/grok-4.6`. The default
+The coworker used for this capture was pinned to `xai/grok-4.6` — which is why
+that route became the shipped default on 25 Sep 2026 (#197). The then-default
 `gpt-5.6-luna` route does not emit tool calls through the gateway (it answers a
 shell request from a text message with fabricated output; zero `TOOL_*` events
 across its runs), so the policy gate — which is only reached on a real
