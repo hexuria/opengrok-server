@@ -184,6 +184,32 @@ struct Harness {
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
+    harness_with_door(database_url, email, Arc::new(MockDoor::asking_for_a_tool())).await
+}
+
+/// The tool-asking mock, keeping every request it was asked so a test can read what a
+/// continuation was grounded in.
+struct RecordingToolDoor {
+    inner: MockDoor,
+    asked: Mutex<Vec<opengrok_harness::ModelRequest>>,
+}
+
+#[async_trait]
+impl opengrok_harness::ModelDoor for RecordingToolDoor {
+    async fn stream(
+        &self,
+        request: opengrok_harness::ModelRequest,
+    ) -> Result<opengrok_harness::DeltaStream, opengrok_harness::ModelError> {
+        self.asked.lock().expect("asked").push(request.clone());
+        self.inner.stream(request).await
+    }
+}
+
+async fn harness_with_door(
+    database_url: &str,
+    email: &str,
+    door: Arc<dyn opengrok_harness::ModelDoor>,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -202,7 +228,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
     );
     let agui = AgUiState {
         auth,
-        door: Arc::new(MockDoor::asking_for_a_tool()),
+        door,
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
         computer: Some(stub.clone()),
@@ -590,5 +616,108 @@ async fn a_conversation_on_a_look_alike_thread_is_not_an_mcp_run() {
             .expect("the run never ended, so nothing resumed it")
             .status,
         RunStatus::Finished
+    );
+}
+
+/// AN ALLOWED CARD CONTINUES WITH THE REQUEST IT WAS ASKED (#187). "Allow once" used to hand the
+/// model the system message and a bare tool result: the person's request was never journaled and
+/// the rebuild dropped the call, so the answer after the yes was not grounded in anything.
+#[tokio::test]
+async fn an_allowed_card_continues_with_the_request_it_was_asked() {
+    let database_url = database_or_skip!();
+    let email = format!("grounded-yes-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(RecordingToolDoor {
+        inner: MockDoor::asking_for_a_tool(),
+        asked: Mutex::new(Vec::new()),
+    });
+    let h = harness_with_door(&database_url, &email, door.clone()).await;
+    let token = h.access_token(&email);
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+
+    h.turn(
+        &token,
+        &agent,
+        "install jq then count the keys in data.json",
+    )
+    .await;
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let answered = h
+        .client
+        .post(format!("{}/ag-ui/runs/{}/answer", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "call_id": call_id, "approved": true }))
+        .send()
+        .await
+        .expect("answer");
+    assert_eq!(answered.status().as_u16(), 200);
+    for _ in 0..100 {
+        let (run, _) = h.store.load_run(&run_id).await.expect("run");
+        if run.status.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let asked = door.asked.lock().expect("asked").clone();
+    assert!(
+        asked.len() >= 2,
+        "the yes was carried on: {} calls",
+        asked.len()
+    );
+    let resumed = &asked[1];
+    let words: Vec<String> = resumed
+        .messages
+        .iter()
+        .map(|message| serde_json::to_string(message).expect("message"))
+        .collect();
+    let first = resumed
+        .messages
+        .iter()
+        .find(|message| message.role != "system")
+        .expect("a message");
+    assert_eq!(first.role, "user", "{words:?}");
+    assert!(
+        first.content.contains("install jq then count"),
+        "the continuation opens with what the person asked: {words:?}"
+    );
+    let call = words
+        .iter()
+        .position(|message| message.contains("\"shell\"") && message.contains("opengrok-tool-ran"));
+    let result = words
+        .iter()
+        .position(|message| message.contains(&call_id) && message.contains("\"tool\""));
+    assert!(
+        call.is_some() && result.is_some() && call < result,
+        "the approved call, with its arguments, comes before its result: {words:?}"
+    );
+    assert_eq!(
+        resumed.system, asked[0].system,
+        "a resume speaks with the system message the turn opened with"
+    );
+    assert!(
+        asked[0]
+            .system
+            .as_deref()
+            .is_some_and(|system| system.contains("You are talking with Host. Today is")),
+        "the speaker line is in it, so the resume repeats it byte for byte (#193): {:?}",
+        asked[0].system
     );
 }

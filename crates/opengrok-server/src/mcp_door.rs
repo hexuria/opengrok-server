@@ -842,6 +842,8 @@ async fn persist_mcp_ask(
             // none to restore, which is the pre-existing behaviour.
             system: None,
             skill_id: None,
+            // Journaled, and nobody spoke: an MCP ask is a call, not a message.
+            prompt: Some(Vec::new()),
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;

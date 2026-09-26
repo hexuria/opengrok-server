@@ -71,20 +71,30 @@ start_server
 replay=$(curl -fsS --max-time 10 "$BASE/ag-ui/runs/$RUN" -H "authorization: Bearer $TOKEN") \
   || fail "the run could not be replayed"
 status=$(echo "$replay" | jq -r '.status')
-count=$(echo "$replay" | jq -r '.events | length')
 thread=$(echo "$replay" | jq -r '.threadId')
+# THE REPLAY ALSO CARRIES THE PERSON'S WORDS, which the live stream never did: their message comes
+# back as role:user TEXT_MESSAGE_* frames right after RUN_STARTED (#195). Those are set aside
+# here, so the count below still holds the log to exactly what was streamed, and the reply check
+# cannot be passed by the person's own "remember this".
+said=$(echo "$replay" | jq -c '[.events[] | select(.type == "TEXT_MESSAGE_START" and .role == "user") | .messageId]')
+theirs=$(echo "$replay" | jq -c --argjson said "$said" \
+  '[.events[] | select((.messageId // null) as $id | $said | any(. == $id) | not)]')
+count=$(echo "$theirs" | jq -r 'length')
 
 [ "$thread" = "$THREAD" ] || fail "threadId came back as $thread"
 [ "$status" = "finished" ] || fail "status is $status, expected finished"
 [ "$count" = "$sent" ] || fail "replayed $count events, streamed $sent"
-ok "$count events replayed, status=$status, thread preserved"
+echo "$replay" | jq -r --argjson said "$said" \
+  '.events[] | select(.type == "TEXT_MESSAGE_CONTENT" and (.messageId as $id | $said | any(. == $id))) | .delta' \
+  | grep -q "remember this" || fail "the person's words were not replayed"
+ok "$count events replayed, status=$status, thread preserved, and the person's words with them"
 
 echo "4. the replayed events are the ones that were sent, in order"
-first=$(echo "$replay" | jq -r '.events[0].type')
-last=$(echo "$replay" | jq -r '.events[-1].type')
+first=$(echo "$theirs" | jq -r '.[0].type')
+last=$(echo "$theirs" | jq -r '.[-1].type')
 [ "$first" = "RUN_STARTED" ]  || fail "first replayed event is $first"
 [ "$last"  = "RUN_FINISHED" ] || fail "last replayed event is $last"
-text=$(echo "$replay" | jq -r '.events[] | select(.type == "TEXT_MESSAGE_CONTENT") | .delta' | tr -d '\n')
+text=$(echo "$theirs" | jq -r '.[] | select(.type == "TEXT_MESSAGE_CONTENT") | .delta' | tr -d '\n')
 echo "$text" | grep -q "remember this" || fail "the reply did not survive: $text"
 ok "RUN_STARTED … RUN_FINISHED, and the reply is intact"
 

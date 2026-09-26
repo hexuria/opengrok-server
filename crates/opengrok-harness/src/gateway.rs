@@ -500,6 +500,112 @@ fn message_content(message: &ChatMessage) -> serde_json::Value {
     serde_json::Value::Array(parts)
 }
 
+/// What an unanswered call is told: the call happened and nothing came back.
+const NO_RESULT: &str = "(no result was recorded for this call)";
+
+/// A message with its pictures as a user message: the only role the dialect lets carry them.
+fn as_words(message: &ChatMessage) -> serde_json::Value {
+    let words = ChatMessage {
+        images: message.images.clone(),
+        ..ChatMessage::text("user", message.as_text())
+    };
+    serde_json::json!({"role": "user", "content": message_content(&words)})
+}
+
+/// The request's conversation in the OpenAI chat dialect.
+///
+/// AN ASSISTANT'S CALLS AND THEIR RESULTS TRAVEL AS ONE BLOCK, and a provider refuses the turn
+/// with a 400 when the block is broken: a `tool` message whose call is not in the assistant
+/// message right before it, or a call no `tool` message answers. Both happen honestly — a result a
+/// client sent for a call made in an earlier request, a call a stopped run never ran — so the
+/// block is mended here rather than trusted: an orphan result goes as the words the loop always
+/// wrote, an unanswered call is told it has none. Nothing is dropped.
+///
+/// A PICTURE CANNOT RIDE A TOOL RESULT in this dialect, so a round's screenshots follow its last
+/// result as one user message — never between a call and its answer, which would break the block.
+fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
+    let mut out = Vec::with_capacity(request.messages.len() + 1);
+    if let Some(system) = &request.system {
+        out.push(serde_json::json!({"role": "system", "content": system}));
+    }
+    let mut messages = request.messages.iter().peekable();
+    while let Some(message) = messages.next() {
+        if message.role == "tool" {
+            out.push(as_words(message));
+            continue;
+        }
+        if message.tool_calls.is_empty() {
+            out.push(serde_json::json!({
+                "role": message.role,
+                "content": message_content(message),
+            }));
+            continue;
+        }
+        let content = if message.content.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(message.content.clone())
+        };
+        let calls: Vec<serde_json::Value> = message
+            .tool_calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                })
+            })
+            .collect();
+        out.push(serde_json::json!({"role": "assistant", "content": content, "tool_calls": calls}));
+        let mut open: Vec<&str> = message
+            .tool_calls
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect();
+        let mut pictures = Vec::new();
+        let mut orphans = Vec::new();
+        while let Some(result) = messages.next_if(|next| next.role == "tool") {
+            let answered = result
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| open.iter().position(|call| *call == id));
+            match answered {
+                Some(at) => {
+                    out.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": open.remove(at),
+                        "content": result.content,
+                    }));
+                    pictures.extend(result.images.iter().cloned());
+                }
+                None => orphans.push(result),
+            }
+        }
+        for id in open {
+            out.push(serde_json::json!({"role": "tool", "tool_call_id": id, "content": NO_RESULT}));
+        }
+        if !pictures.is_empty() {
+            let screen = ChatMessage {
+                images: pictures,
+                ..ChatMessage::text("user", "The screen after the tool calls above.")
+            };
+            out.push(serde_json::json!({"role": "user", "content": message_content(&screen)}));
+        }
+        out.extend(orphans.into_iter().map(as_words));
+    }
+    out
+}
+
+/// The body of one chat completion request.
+fn chat_body(request: &ModelRequest) -> serde_json::Value {
+    serde_json::json!({
+        "model": request.model,
+        "stream": true,
+        "messages": chat_messages(request),
+    })
+}
+
 #[async_trait::async_trait]
 impl ModelDoor for GatewayDoor {
     /// `probe`, answered from the last one while it is younger than `READY_FOR`. Boot calls
@@ -521,22 +627,7 @@ impl ModelDoor for GatewayDoor {
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        if let Some(system) = &request.system {
-            messages.push(serde_json::json!({"role": "system", "content": system}));
-        }
-        for message in &request.messages {
-            messages.push(serde_json::json!({
-                "role": message.role,
-                "content": message_content(message),
-            }));
-        }
-
-        let mut payload = serde_json::json!({
-            "model": request.model,
-            "stream": true,
-            "messages": messages,
-        });
+        let mut payload = chat_body(&request);
         // WHICH CONVERSATION THIS IS, so the gateway can pin it to one credential and the
         // provider's prompt cache can actually hit. Omitted when the request carries no
         // scope/actor pair (a judge call, say), which simply leaves the gateway on its

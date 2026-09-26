@@ -260,15 +260,14 @@ pub(crate) async fn lesson_from_tape(
         // completion that cannot reach a coworker's computer, its shell or anything else while
         // it reads a recording made on a page that may have asked it to.
         tools: Vec::new(),
-        messages: vec![ChatMessage {
-            images: Vec::new(),
-            role: "user".to_string(),
-            content: format!(
+        messages: vec![ChatMessage::text(
+            "user",
+            format!(
                 "The recording follows.\n{}\n{tape}{}",
                 begin_tape(&tape_marker),
                 end_tape(&tape_marker)
             ),
-        }],
+        )],
     };
     let end = end_lesson(&lesson_marker);
     let text = match tokio::time::timeout(LESSON_TIMEOUT, collect_text(state, request, &end)).await

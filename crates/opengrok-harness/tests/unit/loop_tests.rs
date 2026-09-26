@@ -74,11 +74,7 @@ fn request(text: &str) -> ModelRequest {
         model: "mock".to_string(),
         system: None,
         tools: Vec::new(),
-        messages: vec![ChatMessage {
-            images: Vec::new(),
-            role: "user".to_string(),
-            content: text.to_string(),
-        }],
+        messages: vec![ChatMessage::text("user", text.to_string())],
     }
 }
 
@@ -3562,8 +3558,9 @@ fn shot(call_id: &str) -> opengrok_tools::ToolResult {
 #[test]
 fn a_tool_result_with_a_picture_becomes_a_message_with_an_image() {
     let message = tool_result_message(&shot("c1"));
-    assert_eq!(message.role, "user");
-    assert!(message.content.starts_with("[tool c1 result] screenshot"));
+    assert_eq!(message.role, "tool");
+    assert_eq!(message.tool_call_id.as_deref(), Some("c1"));
+    assert!(message.content.starts_with("screenshot"));
     assert_eq!(message.images.len(), 1);
     assert_eq!(message.images[0].mime, "image/png");
 
@@ -3592,7 +3589,7 @@ fn an_empty_result_array_carries_the_dead_end_sentence() {
         full.content
     );
     let garbage = tool_result_message(&opengrok_tools::ToolResult::ok("c1", "not-json"));
-    assert_eq!(garbage.content, "[tool c1 result] not-json");
+    assert_eq!(garbage.content, "not-json");
 }
 
 /// Screenshots are the widest thing in a request; only the last two say where the screen is.
@@ -3601,21 +3598,15 @@ fn only_the_two_most_recent_screenshots_travel() {
     let mut messages: Vec<ChatMessage> = (1..=4)
         .map(|n| tool_result_message(&shot(&format!("c{n}"))))
         .collect();
-    messages.insert(
-        2,
-        ChatMessage {
-            role: "assistant".into(),
-            content: "clicking".into(),
-            images: Vec::new(),
-        },
-    );
+    messages.insert(2, ChatMessage::text("assistant", "clicking"));
 
     keep_recent_images(&mut messages, RECENT_IMAGES);
 
     let carried: Vec<bool> = messages.iter().map(|m| !m.images.is_empty()).collect();
     assert_eq!(carried, vec![false, false, false, true, true]);
     // The words stay even where the picture went.
-    assert!(messages[0].content.contains("[tool c1 result]"));
+    assert!(messages[0].content.starts_with("screenshot"));
+    assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
 }
 
 /// A person's no is about their machine, not about one spelling of the command. Seen live:
@@ -4938,4 +4929,103 @@ async fn a_park_whose_write_finds_the_run_stopped_ends_stopped_with_no_card() {
             .any(|event| event.event_type == EventType::ToolCallStart),
         "the round that asked is still in the log: {written:?}"
     );
+}
+
+/// THE MODEL SEES WHAT IT CALLED. After a round of two parallel calls the next request carries
+/// the assistant's own `tool_calls` message and then one `tool` message per call, keyed by the id
+/// it gave each one — not two user lines naming ids it was never shown (#189).
+#[tokio::test]
+async fn two_parallel_calls_come_back_as_a_call_message_and_one_tool_message_each() {
+    struct SpyDoor {
+        round: Mutex<usize>,
+        second: Mutex<Vec<serde_json::Value>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for SpyDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            if round == 2 {
+                *self.second.lock().unwrap() = request
+                    .messages
+                    .iter()
+                    .map(|message| serde_json::to_value(message).unwrap())
+                    .collect();
+            }
+            let call = |id: &str, command: &str| {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: id.to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: id.to_string(),
+                        delta: format!(r#"{{"command":"{command}"}}"#),
+                    },
+                    ModelDelta::ToolCallEnd { id: id.to_string() },
+                ]
+            };
+            let script = if round == 1 {
+                [call("c1", "echo a"), call("c2", "echo b")].concat()
+            } else {
+                vec![ModelDelta::Text("both ran".to_string())]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    let door = SpyDoor {
+        round: Mutex::new(0),
+        second: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let second = door.second.lock().unwrap().clone();
+    let at = second
+        .iter()
+        .position(|message| message["role"] == "assistant");
+    assert!(
+        at.is_some(),
+        "no assistant message after the tool round: {second:?}"
+    );
+    let at = at.unwrap();
+    let calls = second[at]["tool_calls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let named: Vec<(&str, &str, &str)> = calls
+        .iter()
+        .map(|call| {
+            (
+                call["id"].as_str().unwrap_or(""),
+                call["name"].as_str().unwrap_or(""),
+                call["arguments"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("c1", "shell", r#"{"command":"echo a"}"#),
+            ("c2", "shell", r#"{"command":"echo b"}"#)
+        ],
+        "{second:?}"
+    );
+    for (offset, id) in ["c1", "c2"].iter().enumerate() {
+        let answer = &second[at + 1 + offset];
+        assert_eq!(answer["role"], "tool", "{second:?}");
+        assert_eq!(answer["tool_call_id"], *id, "{second:?}");
+    }
 }
