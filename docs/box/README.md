@@ -25,7 +25,6 @@ is the `Computer` adapter on top.
 ### Account
 
 - [Get current Box user](api/reference/account/get-current-box-user.md) — `GET /me`
-- [List organizations](api/reference/account/list-organizations.md)
 - [Get Box limits](api/reference/account/get-box-limits.md) — `GET /limits`
 - [Get account data-retention policy](api/reference/account/get-account-data-retention-policy.md) — `GET /account/data-retention`
 - [Update account data-retention policy](api/reference/account/update-account-data-retention-policy.md) — `PATCH /account/data-retention`
