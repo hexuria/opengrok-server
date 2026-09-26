@@ -1078,15 +1078,19 @@ fn over_points(name: &str, limits: &crate::points::Effective, counted: &Counted)
 fn is_credential_refusal(error: &ModelError) -> bool {
     match error {
         ModelError::Refused { status: 401, .. } => true,
-        ModelError::Refused { status: 503, body } => {
-            body.to_ascii_lowercase().contains("credential")
-        }
+        ModelError::Refused {
+            status: 503, body, ..
+        } => body.to_ascii_lowercase().contains("credential"),
         _ => false,
     }
 }
 
 #[async_trait::async_trait]
 impl ModelDoor for GuardedDoor {
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        self.inner.ready().await
+    }
+
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         let Some(scope) = request.spend_scope.clone() else {
             return self.inner.stream(request).await;

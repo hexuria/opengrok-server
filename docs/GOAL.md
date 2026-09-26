@@ -17,7 +17,7 @@ outstanding.
 | Piece | Decision |
 |---|---|
 | Language / web | Rust, Axum 0.8 |
-| RPC | **tonic + prost** for service/message definitions (operator reaffirmed with the Connect finding known). The desktop client speaks ConnectRPC over HTTP/1.1 (`cursor-inference.ts:157`), which a bare tonic server cannot answer — so Connect-compatible routes are served at the Axum edge, reusing the same prost types. tonic is the internal/service backbone. |
+| RPC | **AG-UI + REST over Axum; no RPC framework.** The client doors are `POST /ag-ui` (an AG-UI event stream), the REST routes beside it, `/mcp` and `/health` ([`research/client-nativechat.md`](research/client-nativechat.md) maps them). *Was:* tonic + prost, reaffirmed by the operator for seam B, the Grok Bot desktop client's ConnectRPC door — removed with that door in P0-E on 20 Sep 2026, together with the `opengrok-proto` crate and protoc in CI (`ROADMAP.md`, Phase 0). A generated stub is still never vendored (CLAUDE.md #3). |
 | Approvals | A tool may need a human yes (PLAN §4.5 layer 5). The run suspends; it does not fail. |
 | Design | DDD + CQRS + ES: append-only event store in Postgres, projections for reads. No ES framework — a transcript is already an event log. |
 | DB / cache | PostgreSQL; Redis added **when a measured hot query needs it**, not before |
@@ -75,6 +75,13 @@ repo cannot be published. Treat it as a second, optional client.
 > strongest smoke test we can have — and slices 7–14 were built and verified against it, through
 > its own OpenGrok server mode. openbot remains a supported AG-UI client (`POST /ag-ui` is live);
 > the paragraph above stands as the record of the 29 Aug framing.
+>
+> **And superseded again, 20 Sep 2026.** The Grok Bot desktop client is discontinued, and P0-E
+> deleted the two doors built for it (seam A and seam B). The client served today is
+> **NativeChat** (`hexuria/nativechat`, Rust + GPUI), over AG-UI and the REST routes beside it:
+> [`setup/nativechat.md`](setup/nativechat.md) connects it, and
+> [`research/client-nativechat.md`](research/client-nativechat.md) maps the routes.
+> `opengrok-wire` keeps the transcribed desktop shapes as a record.
 
 ### `web/` is ours, and stays
 

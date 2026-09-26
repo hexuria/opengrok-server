@@ -114,6 +114,12 @@ impl ModelDoor for CloakedDoor {
                 .scrub(&message.content)
                 .map_err(as_model_error)?
                 .text;
+            // A call's arguments are the model's own words from an earlier round, restored to the
+            // real values on the way in (3. below) — so they leave again with the real host in
+            // them unless they are scrubbed like any other message.
+            for call in &mut message.tool_calls {
+                call.arguments = session.scrub(&call.arguments).map_err(as_model_error)?.text;
+            }
         }
 
         // `tools` is the schema the model is offered, not conversation
@@ -122,6 +128,10 @@ impl ModelDoor for CloakedDoor {
 
         let inner = self.inner.stream(request).await?;
         Ok(Box::pin(restoring(inner, session)))
+    }
+
+    async fn ready(&self) -> Option<Result<(), ModelError>> {
+        self.inner.ready().await
     }
 }
 
@@ -404,11 +414,7 @@ mod tests {
     fn request(text: &str) -> ModelRequest {
         ModelRequest {
             model: "oag/cheap".to_string(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: text.to_string(),
-                images: Vec::new(),
-            }],
+            messages: vec![ChatMessage::text("user", text.to_string())],
             spend_scope: Some("cw_test".to_string()),
             spend_actor: Some("acct_test".to_string()),
             ..ModelRequest::default()
@@ -600,20 +606,48 @@ mod tests {
 
         // The shape the harness builds in `tool_result_message`.
         let mut request = request("check the logs");
-        request.messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: "[tool call_1 result] url=postgresql://appuser:s3cr3t@db.prod.internal/orders"
-                .to_string(),
-            images: Vec::new(),
-        });
+        request.messages.push(ChatMessage::tool_result(
+            "call_1",
+            "url=postgresql://appuser:s3cr3t@db.prod.internal/orders",
+        ));
 
         drop(door.stream(request).await.unwrap());
 
         let sent = seen.lock().unwrap();
-        let result = &sent[0].messages[1].content;
-        assert!(!result.contains("s3cr3t"), "{result}");
-        assert!(!result.contains("db.prod.internal"), "{result}");
-        assert!(result.starts_with("[tool call_1 result]"), "{result}");
+        let result = &sent[0].messages[1];
+        assert!(!result.content.contains("s3cr3t"), "{result:?}");
+        assert!(!result.content.contains("db.prod.internal"), "{result:?}");
+        assert!(result.content.starts_with("url="), "{result:?}");
+        assert_eq!(result.tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    /// The model's own call from an earlier round comes back in the next request with the real
+    /// values restored into it; it leaves scrubbed like every other message, or the cloak has a
+    /// hole the size of every command the coworker ever ran.
+    #[tokio::test]
+    async fn a_call_the_model_made_leaves_scrubbed_too() {
+        let (inner, seen) = ScriptedDoor::wired(Vec::new());
+        let door = CloakedDoor::new(inner, store());
+
+        let mut request = request("check the logs");
+        request.messages.push(ChatMessage::calls(
+            "",
+            vec![crate::model::ToolCallRef {
+                id: "call_1".to_string(),
+                name: "shell".to_string(),
+                arguments:
+                    r#"{"command":"psql postgresql://appuser:s3cr3t@db.prod.internal/orders"}"#
+                        .to_string(),
+            }],
+        ));
+
+        drop(door.stream(request).await.unwrap());
+
+        let sent = seen.lock().unwrap();
+        let call = &sent[0].messages[1].tool_calls[0];
+        assert!(!call.arguments.contains("s3cr3t"), "{call:?}");
+        assert!(!call.arguments.contains("db.prod.internal"), "{call:?}");
+        assert_eq!((call.id.as_str(), call.name.as_str()), ("call_1", "shell"));
     }
 
     #[tokio::test]
@@ -718,11 +752,9 @@ mod tests {
         assert_ne!(mine, default_key(&other));
 
         // And it is stable as the conversation grows.
-        request.messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: "sure".to_string(),
-            images: Vec::new(),
-        });
+        request
+            .messages
+            .push(ChatMessage::text("assistant", "sure"));
         assert_eq!(mine, default_key(&request));
     }
 }

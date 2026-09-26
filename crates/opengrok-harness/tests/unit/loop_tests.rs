@@ -1,4 +1,5 @@
 use super::*;
+use futures::StreamExt;
 use opengrok_tools::Executor;
 use opengrok_wire::agui::EventType;
 use std::sync::{Arc, Mutex};
@@ -73,11 +74,7 @@ fn request(text: &str) -> ModelRequest {
         model: "mock".to_string(),
         system: None,
         tools: Vec::new(),
-        messages: vec![ChatMessage {
-            images: Vec::new(),
-            role: "user".to_string(),
-            content: text.to_string(),
-        }],
+        messages: vec![ChatMessage::text("user", text.to_string())],
     }
 }
 
@@ -92,6 +89,34 @@ async fn a_mock_run_is_a_well_formed_agui_run() {
         .filter_map(|event| event.extra.get("delta").and_then(|d| d.as_str()))
         .collect();
     assert!(text.contains("hello"), "{text}");
+}
+
+/// A reply of nothing but whitespace is not a reply. With or without a computer, it used to end
+/// RUN_FINISHED with an empty bubble: the empty success (CLAUDE.md, three facts №3).
+#[tokio::test]
+async fn a_reply_of_only_whitespace_ends_as_an_error_that_says_so() {
+    for tools in [None, Some(tool_runner())] {
+        let door = MockDoor::with_script(vec![
+            ModelDelta::Text("\n\n".to_string()),
+            ModelDelta::Text("  ".to_string()),
+        ]);
+        let events = run_conversation(
+            &door,
+            tools.as_ref(),
+            &MemoryJournal::new(),
+            request("hello"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let ending = events.last().unwrap();
+        assert_eq!(ending.event_type, EventType::RunError, "{events:?}");
+        assert_eq!(
+            ending.extra.get("message").unwrap(),
+            "the model returned no text"
+        );
+    }
 }
 
 /// The failure that matters: the client still gets an ending, so its spinner stops.
@@ -772,14 +797,83 @@ async fn a_refused_card_is_read_by_the_model_and_never_runs() {
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
-/// A model that never stops asking would otherwise run until the money ran out. The bound ends
-/// the run as a result the client can see, not a silent stop.
+/// A model that never stops asking would otherwise run until the money ran out. At the cap the
+/// run used to end in RUN_ERROR with the person told nothing about the work. Now it makes one
+/// last call with no tools, asks for a summary, and finishes with it (#93).
 #[tokio::test]
 async fn a_model_that_never_stops_is_bounded_and_told_why() {
-    struct AlwaysToolDoor;
+    #[derive(Default)]
+    struct AlwaysToolDoor {
+        calls: Mutex<Vec<ModelRequest>>,
+    }
     #[async_trait::async_trait]
     impl ModelDoor for AlwaysToolDoor {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let script = if request.tools.is_empty() {
+                vec![ModelDelta::Text(
+                    "I ran `again` eight times and it never settled.".to_string(),
+                )]
+            } else {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"again"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]
+            };
+            self.calls.lock().unwrap().push(request);
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    let door = AlwaysToolDoor::default();
+    let journal = MemoryJournal::new();
+    let runner = tool_runner();
+    let events =
+        run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+    assert!(
+        assistant_text(&events).contains("eight times"),
+        "the wrap-up is the answer: {events:?}"
+    );
+    let calls = door.calls.lock().unwrap();
+    assert_eq!(calls.len(), MAX_ROUNDS + 1, "the cap, then one wrap-up");
+    let wrap_ups: Vec<_> = calls.iter().filter(|call| call.tools.is_empty()).collect();
+    assert_eq!(wrap_ups.len(), 1, "exactly one call without tools");
+    let nudge = &wrap_ups[0].messages.last().unwrap().content;
+    assert!(
+        nudge.starts_with("[harness]") && nudge.contains("limit"),
+        "{nudge}"
+    );
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert!(
+        timing["wrapped_up"]
+            .as_str()
+            .is_some_and(|why| why.contains("limit")),
+        "the reason is on the run's own record: {timing}"
+    );
+    assert_eq!(timing["budget"]["max_rounds"], MAX_ROUNDS);
+}
+
+/// A wrap-up that cannot be had still ends the run, with the cap's own reason.
+#[tokio::test]
+async fn a_wrap_up_that_fails_still_ends_with_the_cap() {
+    struct Door;
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            if request.tools.is_empty() {
+                return Err(ModelError::Stream("the gateway went away".to_string()));
+            }
             let script = vec![
                 ModelDelta::ToolCallStart {
                     id: "c1".to_string(),
@@ -796,12 +890,183 @@ async fn a_model_that_never_stops_is_bounded_and_told_why() {
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
-
-    let journal = MemoryJournal::new();
-    let runner = tool_runner();
     let events = run_conversation(
-        &AlwaysToolDoor,
-        Some(&runner),
+        &Door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError);
+    let message = last.extra["message"].as_str().unwrap_or_default();
+    assert!(message.contains("limit of 8 model calls"), "{message}");
+}
+
+/// A provider that sends a word and then goes quiet used to hold the run open for as long as
+/// the process lived, renewing its lease the whole time.
+#[tokio::test]
+async fn a_stalled_model_stream_ends_with_a_reason() {
+    struct Stalls;
+    #[async_trait::async_trait]
+    impl ModelDoor for Stalls {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            Ok(Box::pin(
+                futures::stream::iter([Ok(ModelDelta::Text("hi".to_string()))])
+                    .chain(futures::stream::pending()),
+            ))
+        }
+    }
+    let budget = RunBudget {
+        idle_ms: 100,
+        ..RunBudget::default()
+    };
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_conversation_within(
+            &Stalls,
+            None,
+            &MemoryJournal::new(),
+            request("hello"),
+            RunContext::new("t1", "r1", 1),
+            budget,
+            None,
+        ),
+    )
+    .await
+    .expect("the run ends on its own");
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError);
+    let message = last.extra["message"].as_str().unwrap_or_default();
+    assert!(message.contains("stopped answering"), "{message}");
+}
+
+/// A door that never opens is bounded too.
+#[tokio::test]
+async fn a_model_call_that_never_starts_ends_with_a_reason() {
+    struct NeverOpens;
+    #[async_trait::async_trait]
+    impl ModelDoor for NeverOpens {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            futures::future::pending().await
+        }
+    }
+    let budget = RunBudget {
+        call_timeout_ms: 100,
+        ..RunBudget::default()
+    };
+    let events = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_conversation_within(
+            &NeverOpens,
+            None,
+            &MemoryJournal::new(),
+            request("hello"),
+            RunContext::new("t1", "r1", 1),
+            budget,
+            None,
+        ),
+    )
+    .await
+    .expect("the run ends on its own");
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError);
+    let message = last.extra["message"].as_str().unwrap_or_default();
+    assert!(message.contains("did not start answering"), "{message}");
+}
+
+/// Past its wall clock, a run stops starting work and wraps up.
+#[tokio::test]
+async fn a_run_past_its_wall_clock_wraps_up() {
+    /// Works for as long as it is offered tools, and answers in words when it is not.
+    struct Tireless;
+    #[async_trait::async_trait]
+    impl ModelDoor for Tireless {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let script = if request.tools.is_empty() {
+                vec![ModelDelta::Text(
+                    "Out of time after one command.".to_string(),
+                )]
+            } else {
+                shell_deltas("c1", "sleep 1")
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let door = Tireless;
+    let (_, ran) = shell_runner(&[]);
+    let slow_ran = ran.clone();
+    let slow = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(move |call| {
+            slow_ran.lock().unwrap().push("sleep 1".to_string());
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            opengrok_tools::ToolResult::ok(&call.id, "[exit code 0]")
+        }),
+    );
+    let budget = RunBudget {
+        max_wall_ms: 10,
+        ..RunBudget::default()
+    };
+    let events = run_conversation_within(
+        &door,
+        Some(&slow),
+        &MemoryJournal::new(),
+        request("sleep twice"),
+        RunContext::new("t1", "r1", 1),
+        budget,
+        None,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap().len(),
+        1,
+        "the second command never starts"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(assistant_text(&events).contains("Out of time"));
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert!(
+        timing["wrapped_up"]
+            .as_str()
+            .is_some_and(|why| why.contains("time limit")),
+        "{timing}"
+    );
+}
+
+/// A Stop that lands at the cap wins over the wrap-up: the person asked for nothing more.
+#[tokio::test]
+async fn a_stop_at_the_cap_is_not_wrapped_up() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            *self.0.lock().unwrap() += 1;
+            assert!(!request.tools.is_empty(), "no wrap-up after a stop");
+            let script = vec![
+                ModelDelta::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: "c1".to_string(),
+                    delta: r#"{"command":"again"}"#.to_string(),
+                },
+                ModelDelta::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+            ];
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    // Two questions per round (the top of the round, before the tools), for MAX_ROUNDS rounds.
+    let journal = StoppingJournal::saying_stop_after(2 * MAX_ROUNDS);
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&tool_runner()),
         &journal,
         request("go"),
         "t1",
@@ -809,17 +1074,8 @@ async fn a_model_that_never_stops_is_bounded_and_told_why() {
         1,
     )
     .await;
-
-    let last = events.last().unwrap();
-    assert_eq!(last.event_type, opengrok_wire::agui::EventType::RunError);
-    assert!(
-        last.extra
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or_default()
-            .contains("limit"),
-        "{last:?}"
-    );
+    assert!(events.iter().any(is_run_stopped), "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
 /// Seen live: a cheap model asked for `user_machine_shell` with no arguments, was refused,
@@ -877,18 +1133,21 @@ async fn a_call_refused_the_same_way_twice_ends_the_run() {
 
 /// Seen live (NativeChat Shot A): tools were offered, the model wrote a plan of the work
 /// as text, and never started a call. Crossing the character bound ends the run with a
-/// reason, instead of streaming the rest of the flood — including a tool call that
-/// arrives only after it.
+/// reason a person can read, instead of streaming the rest of the flood — including a tool
+/// call that arrives only after it. What the model wrote up to the bound is shown as written
+/// first: every exit flushes the withheld text (#178).
 #[tokio::test]
 async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
     struct PlanDoor;
     #[async_trait::async_trait]
     impl ModelDoor for PlanDoor {
         async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let flood = "x".repeat(PLAN_ONLY_TEXT_LIMIT + 1);
-            let script = vec![
-                ModelDelta::Text(flood),
-                ModelDelta::Text(" and then I will call the tool.".to_string()),
+            let mut script: Vec<ModelDelta> = "I'll check the host and then list the profiles. "
+                .repeat(PLAN_ONLY_TEXT_LIMIT / 40)
+                .split_inclusive(' ')
+                .map(|word| ModelDelta::Text(word.to_string()))
+                .collect();
+            script.extend([
                 ModelDelta::ToolCallStart {
                     id: "late".to_string(),
                     name: "shell".to_string(),
@@ -896,7 +1155,7 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
                 ModelDelta::ToolCallEnd {
                     id: "late".to_string(),
                 },
-            ];
+            ]);
             Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
@@ -931,7 +1190,330 @@ async fn plan_only_text_with_tools_offered_and_no_call_ends_the_run() {
         .get("message")
         .and_then(|m| m.as_str())
         .unwrap_or_default();
-    assert!(message.contains("plan-only text"), "{message}");
+    assert!(
+        message.contains("without starting any of it"),
+        "the reason is a sentence, not engine-speak: {message}"
+    );
+    assert!(
+        assistant_text(&events).starts_with("I'll check the host and then list the profiles."),
+        "the words are flushed before the run closes: {events:?}"
+    );
+}
+
+/// A stream that breaks after words that opened with intent shows those words before the
+/// RUN_ERROR (#178, "any remaining exit flushes withheld text"). Filtered for intent they came
+/// to nothing, and the person saw the error alone.
+#[tokio::test]
+async fn a_broken_stream_shows_the_words_it_withheld() {
+    struct BreaksAfterWords;
+    #[async_trait::async_trait]
+    impl ModelDoor for BreaksAfterWords {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(ModelDelta::Text(
+                    "I'll keep the old config and only change the port.".to_string(),
+                )),
+                Err(ModelError::Stream("upstream hung up".to_string())),
+            ])))
+        }
+    }
+    let events = run_conversation(
+        &BreaksAfterWords,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("what would you change?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunError);
+    assert_eq!(
+        assistant_text(&events),
+        "I'll keep the old config and only change the port."
+    );
+}
+
+/// The verifier's probe for #178: asked "what would you do? just tell me", a coworker with a
+/// shell answers in sentences that each open with intent. Filtered for intent, that answer came
+/// to nothing and the person saw only the RUN_ERROR.
+#[tokio::test]
+async fn an_answer_that_is_all_intent_is_shown_before_the_plan_bound_stops_it() {
+    let answer = [
+        "I'll install nginx from the distribution's packages. ",
+        "I'll then request a certificate with certbot for your domain. ",
+        "I'll point the server block at the app on port 8080. ",
+        "I'll finish by reloading nginx and checking the site answers over https. ",
+    ]
+    .concat()
+    .repeat(PLAN_ONLY_TEXT_LIMIT / 200);
+    let door = MockDoor::with_script(
+        answer
+            .split_inclusive(' ')
+            .map(|word| ModelDelta::Text(word.to_string()))
+            .collect(),
+    );
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("what would you do to put my app online? just tell me"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let text = assistant_text(&events);
+    assert!(text.starts_with("I'll install nginx"), "{events:?}");
+    assert!(text.contains("request a certificate"), "{text:?}");
+    assert!(text.chars().count() > PLAN_ONLY_TEXT_LIMIT, "{text:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunError);
+}
+
+/// A LONG ANSWER IS NOT A STALL. Any coworker with a computer answering "explain X" or a
+/// routine's daily briefing past ~250 words used to end in RUN_ERROR "plan-only text", and
+/// the withheld answer was never shown. Five thousand characters, #178's size.
+#[tokio::test]
+async fn a_long_answer_with_tools_offered_is_delivered_not_failed() {
+    let answer = format!("{0} {0} {0}", long_answer());
+    assert!(answer.chars().count() >= 5_000, "{}", answer.len());
+    let events = run_conversation(
+        &MockDoor::with_script(words(&answer)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain the borrow checker"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), answer);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::RunError),
+        "{events:?}"
+    );
+}
+
+/// Prose, longer than the plan-only bound, with no intent opener anywhere.
+fn long_answer() -> String {
+    "The borrow checker tracks who owns each value and for how long. "
+        .repeat(PLAN_ONLY_TEXT_LIMIT / 60 + 2)
+        .trim_end()
+        .to_string()
+}
+
+/// Word by word, the way a provider streams.
+fn words(text: &str) -> Vec<ModelDelta> {
+    text.split_inclusive(' ')
+        .map(|word| ModelDelta::Text(word.to_string()))
+        .collect()
+}
+
+/// #61, back for every coworker with a computer since 83f09fe: with a work tool offered every
+/// text delta was withheld for the whole round, so the answer arrived as one burst.
+#[tokio::test]
+async fn a_coworker_with_a_computer_streams_its_answer() {
+    let answer = long_answer();
+    let events = run_conversation(
+        &MockDoor::with_script(words(&answer)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain the borrow checker"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    let pieces = events
+        .iter()
+        .filter(|event| event.event_type == EventType::TextMessageContent)
+        .count();
+    assert!(pieces > 1, "one burst is not streaming: {pieces} piece(s)");
+    assert_eq!(assistant_text(&events), answer);
+}
+
+/// A streamed answer after a failed tool is the answer. The failure fact is for a round that
+/// said nothing of its own; painted after a real answer it reads as the conclusion.
+#[tokio::test]
+async fn a_streamed_answer_after_a_failed_tool_is_not_followed_by_the_failure() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = if round == 1 {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"cat notes.txt"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]
+            } else {
+                words(&long_answer())
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(|call| opengrok_tools::ToolResult::refused(&call.id, "no such file: notes.txt")),
+    );
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("summarise my notes"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), long_answer());
+}
+
+/// And the pieces reach a live watcher while the model is still talking.
+#[tokio::test]
+async fn a_paced_answer_with_a_computer_reaches_the_sink_before_the_run_ends() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    struct FirstText(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>);
+    #[async_trait::async_trait]
+    impl EventSink for FirstText {
+        async fn emit(&self, events: &[Event]) {
+            if events
+                .iter()
+                .any(|event| event.event_type == EventType::TextMessageContent)
+                && let Some(tx) = self.0.lock().ok().and_then(|mut slot| slot.take())
+            {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    let sink = FirstText(std::sync::Mutex::new(Some(tx)));
+    let handle = tokio::spawn(async move {
+        run_conversation_streaming(
+            &MockDoor::with_script(words(&long_answer())).paced_by_ms(10),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("explain the borrow checker"),
+            "t1",
+            "r1",
+            1,
+            &sink,
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .expect("first text should arrive before the run ends")
+        .unwrap();
+    assert!(
+        !handle.is_finished(),
+        "text arrived only after the turn finished — the answer came as one burst"
+    );
+    let events = handle.await.unwrap();
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// A file list with a closing offer, answered by a coworker with a computer, arrives as the
+/// model wrote it — not as `README. md` on one flattened line.
+#[tokio::test]
+async fn a_markdown_answer_with_a_computer_arrives_as_written() {
+    let reply = "Here are the files in your project:\n\n- README.md\n- src/main.rs\n\nLet me know if you want more.";
+    let events = run_conversation(
+        &MockDoor::with_script(words(reply)),
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("list my files"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), reply);
+}
+
+/// Words the person saw before a tool ran are part of the conversation: the next call must
+/// not be asked as if they were never said.
+#[tokio::test]
+async fn text_the_person_saw_reaches_the_next_request() {
+    struct SpyDoor {
+        round: Mutex<usize>,
+        assistant: Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for SpyDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = if round == 1 {
+                let mut script = words(&long_answer());
+                script.extend([
+                    ModelDelta::ToolCallStart {
+                        id: "c1".to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: "c1".to_string(),
+                        delta: r#"{"command":"cargo check"}"#.to_string(),
+                    },
+                    ModelDelta::ToolCallEnd {
+                        id: "c1".to_string(),
+                    },
+                ]);
+                script
+            } else {
+                self.assistant.lock().unwrap().extend(
+                    request
+                        .messages
+                        .iter()
+                        .filter(|message| message.role == "assistant")
+                        .map(|message| message.content.clone()),
+                );
+                vec![ModelDelta::Text("It builds.".to_string())]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    let door = SpyDoor {
+        round: Mutex::new(0),
+        assistant: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("explain, then check it builds"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let assistant = door.assistant.lock().unwrap();
+    assert_eq!(assistant.as_slice(), [long_answer()], "{assistant:?}");
 }
 
 /// The bound is "tools offered and unused", not "the model wrote a lot". A coworker
@@ -1360,7 +1942,7 @@ async fn between_tool_intent_text_is_not_chat() {
     assert_eq!(run_timing_value(&events).expect("timing")["tool_rounds"], 2);
 }
 
-/// After a successful listing shell, the next model request carries the harness
+/// After a successful catalog listing, the next model request carries the harness
 /// nudge so the hop answers instead of announcing another probe.
 #[tokio::test]
 async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
@@ -1393,7 +1975,7 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
                     },
                     ModelDelta::ToolCallArgs {
                         id: "c1".to_string(),
-                        delta: r#"{"command":"ls"}"#.to_string(),
+                        delta: r#"{"command":"gpui-agent invoke profile.list"}"#.to_string(),
                     },
                     ModelDelta::ToolCallEnd {
                         id: "c1".to_string(),
@@ -1410,9 +1992,13 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
         round: Mutex::new(0),
         seen: Mutex::new(Vec::new()),
     };
+    let (runner, _) = shell_runner(&[(
+        "gpui-agent invoke profile.list",
+        "Juan Dela Cruz\n[exit code 0]",
+    )]);
     let events = run_conversation(
         &door,
-        Some(&tool_runner()),
+        Some(&runner),
         &MemoryJournal::new(),
         request("list files"),
         "t1",
@@ -1429,8 +2015,11 @@ async fn a_successful_listing_shell_nudges_the_next_hop_to_answer() {
     assert!(assistant_text(&events).contains("here are the files"));
 }
 
+/// A turn whose whole reply is intent — it said what it would do and called nothing — shows
+/// that reply. Dropping it finished the run with no text at all: the empty success (CLAUDE.md,
+/// three facts №3), which the person blames on the app.
 #[tokio::test]
-async fn intent_only_text_with_tools_offered_is_not_chat() {
+async fn an_intent_only_reply_is_shown_rather_than_an_empty_success() {
     struct IntentDoor;
     #[async_trait::async_trait]
     impl ModelDoor for IntentDoor {
@@ -1454,41 +2043,75 @@ async fn intent_only_text_with_tools_offered_is_not_chat() {
     )
     .await;
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
-    let text = assistant_text(&events);
-    assert!(
-        !text.to_ascii_lowercase().contains("i'll pull"),
-        "intent-only rounds must not become bubbles: {text:?}"
+    assert_eq!(
+        assistant_text(&events),
+        "I'll pull the BIR profile and then look up dues."
     );
-    assert!(!text.contains("look up"), "{text:?}");
 }
 
+/// A round that calls no tool is the answer, and the answer is shown as the model wrote it
+/// (#180). The intent filter is for words before a tool call; on a final answer it cut
+/// "Let me explain." off an explanation and "I'll look up the TIN." off a BIR answer.
 #[tokio::test]
-async fn mixed_intent_then_facts_flushes_only_the_facts() {
-    struct MixedDoor;
-    #[async_trait::async_trait]
-    impl ModelDoor for MixedDoor {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            Ok(Box::pin(futures::stream::iter(
-                vec![Ok(ModelDelta::Text(
-                    "I'll look up the TIN.\n\nTIN 123-456-789. Forms: 1701.".to_string(),
-                ))]
-                .into_iter(),
-            )))
-        }
+async fn a_final_answer_that_opens_with_intent_is_shown_as_written() {
+    for reply in [
+        "Let me explain. Ownership moves a value; borrowing lends it.",
+        "I'll look up the TIN.\n\nTIN 123-456-789. Forms: 1701.",
+        "    let x = 1; // an indented code line keeps its indent",
+    ] {
+        let events = run_conversation(
+            &MockDoor::with_script(words(reply)),
+            Some(&tool_runner()),
+            &MemoryJournal::new(),
+            request("explain"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+        assert_eq!(assistant_text(&events), reply);
     }
+}
+
+/// A long answer goes live part way through; its opening sentence is part of it (#178).
+#[tokio::test]
+async fn a_long_answer_that_opens_with_intent_keeps_its_opening() {
+    let answer = format!("Let me explain. {}", long_answer());
     let events = run_conversation(
-        &MixedDoor,
+        &MockDoor::with_script(words(&answer)),
         Some(&tool_runner()),
         &MemoryJournal::new(),
-        request("tin"),
+        request("explain the borrow checker"),
         "t1",
         "r1",
         1,
     )
     .await;
-    let text = assistant_text(&events);
-    assert!(!text.to_ascii_lowercase().contains("i'll look"), "{text:?}");
-    assert!(text.contains("TIN 123-456-789"), "{text:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), answer);
+}
+
+/// A non-empty answer is never swapped for the last failure fact. After a grep with no match,
+/// "I'll need a different pattern: nothing in src mentions foo." reached the person as
+/// "grep: no match" (verifier's probe).
+#[tokio::test]
+async fn a_final_answer_after_a_failed_command_is_not_swapped_for_the_failure() {
+    let reply = "I'll need a different pattern: nothing in src mentions foo.";
+    let door = Rounds::new(vec![shell_deltas("c1", "grep -rn foo src")], reply);
+    let (runner, _) = shell_runner(&[("grep -rn foo src", "grep: no match\n[exit code 1]")]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("where is foo used"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), reply);
 }
 
 /// Live NativeChat: wrong port, then missing profiles, with a diary of "isn't answering"
@@ -1740,7 +2363,17 @@ fn listing_and_show_commands_are_readonly_shell_fast_path() {
         opengrok_tools::USER_MACHINE_SHELL,
         "gpui-agent invoke profile.search --q buwiz"
     )));
-    assert!(is_readonly_listing_shell(&call("shell", "ls -la")));
+    assert!(is_readonly_listing_shell(&call(
+        "shell",
+        "gpui-agent invoke profile.forms_set.get --arg year=2025"
+    )));
+    // Ordinary reads on a computer are work, not the turn's one catalog listing (#183).
+    assert!(!is_readonly_listing_shell(&call("shell", "ls -la")));
+    assert!(!is_readonly_listing_shell(&call("shell", "cat README.md")));
+    assert!(!is_readonly_listing_shell(&call(
+        "shell",
+        "grep deb /etc/apt/sources.list"
+    )));
     assert!(!is_readonly_listing_shell(&call(
         "shell",
         "echo opengrok-tool-ran > /tmp/opengrok-tool-ran"
@@ -1809,6 +2442,846 @@ fn ums_runner(tool: LocalTool) -> ToolRunner {
         }),
         tool,
     )
+}
+
+fn shell_deltas(id: &str, command: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: "shell".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "command": command }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A box `shell` whose answer to each command is looked up in `answers`, and which records
+/// every command it was asked to run.
+fn shell_runner(answers: &[(&str, &str)]) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+    let ran_tool = ran.clone();
+    let answers: Vec<(String, String)> = answers
+        .iter()
+        .map(|(command, body)| (command.to_string(), body.to_string()))
+        .collect();
+    let tool: LocalTool = Arc::new(move |call| {
+        let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+        ran_tool.lock().unwrap().push(command.clone());
+        let body = answers
+            .iter()
+            .find(|(asked, _)| *asked == command)
+            .map(|(_, body)| body.clone())
+            .unwrap_or_else(|| "[exit code 0]".to_string());
+        opengrok_tools::ToolResult::ok(&call.id, body)
+    });
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        tool,
+    );
+    (runner, ran)
+}
+
+/// A door that plays one script per round, then answers `last` in words.
+struct Rounds {
+    scripts: Vec<Vec<ModelDelta>>,
+    last: String,
+    calls: Mutex<usize>,
+}
+
+impl Rounds {
+    fn new(scripts: Vec<Vec<ModelDelta>>, last: &str) -> Self {
+        Self {
+            scripts,
+            last: last.to_string(),
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelDoor for Rounds {
+    async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let round = {
+            let mut count = self.calls.lock().unwrap();
+            *count += 1;
+            *count
+        };
+        let script = self
+            .scripts
+            .get(round - 1)
+            .cloned()
+            .unwrap_or_else(|| vec![ModelDelta::Text(self.last.clone())]);
+        Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+    }
+}
+
+/// `ls` then `cat README.md` on the box. Both used to be "the one listing": the `cat` got a
+/// synthetic "A listing already succeeded" and the file was never read (#183).
+#[tokio::test]
+async fn ls_then_cat_reads_the_file() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "ls"),
+            shell_deltas("c2", "cat README.md"),
+        ],
+        "The README says hello.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("ls", "README.md\n[exit code 0]"),
+        ("cat README.md", "# hello\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("what does my README say?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(ran.lock().unwrap().as_slice(), ["ls", "cat README.md"]);
+    assert!(
+        !events.iter().any(|event| {
+            event.event_type == EventType::ToolCallResult
+                && event
+                    .extra
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains("A listing already succeeded"))
+        }),
+        "{events:?}"
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(assistant_text(&events).contains("README says hello"));
+}
+
+/// Another program's `invoke x.list` is not the BIR catalog: its second read runs. The
+/// one-listing rule matched any `invoke <name>.list` on the box shell before it was scoped to
+/// the binary it was measured on.
+#[tokio::test]
+async fn another_programs_invoke_list_is_not_the_one_catalog_listing() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "todo invoke items.list"),
+            shell_deltas("c2", "todo invoke items.get --id 3"),
+        ],
+        "Item 3 is due Friday.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("todo invoke items.list", "1 2 3\n[exit code 0]"),
+        ("todo invoke items.get --id 3", "due friday\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("when is item 3 due?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap().as_slice(),
+        ["todo invoke items.list", "todo invoke items.get --id 3"]
+    );
+    assert!(assistant_text(&events).contains("due Friday"), "{events:?}");
+}
+
+/// A grep with no match (exit 1) and a failing test run (exit 101) are two different
+/// outcomes of ordinary work, not two failed retries. The turn used to end on the second
+/// with the first line of the test output as the answer.
+#[tokio::test]
+async fn non_zero_exits_from_normal_commands_do_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "grep -rn TODO src"),
+            shell_deltas("c2", "cargo test"),
+            shell_deltas("c3", "cat src/lib.rs"),
+        ],
+        "One test fails: parse rejects an empty line.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("grep -rn TODO src", "[exit code 1]"),
+        (
+            "cargo test",
+            "test result: FAILED. 1 failed\n[exit code 101]",
+        ),
+        ("cat src/lib.rs", "pub fn parse() {}\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("why do my tests fail?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 4);
+    assert_eq!(ran.lock().unwrap().len(), 3);
+    let text = assistant_text(&events);
+    assert!(text.contains("parse rejects an empty line"), "{text:?}");
+    assert!(!text.contains("test result: FAILED"), "{text:?}");
+}
+
+/// #183's own case: a grep with no match, then the same search case-insensitive, is a new
+/// command and not the retry diary. The second grep runs, and so does the read after it.
+#[tokio::test]
+async fn a_grep_with_no_match_then_grep_i_does_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "grep -rn todo src"),
+            shell_deltas("c2", "grep -rni todo src"),
+            shell_deltas("c3", "cat src/lib.rs"),
+        ],
+        "src/lib.rs:3 has the TODO.",
+    );
+    let (runner, ran) = shell_runner(&[
+        ("grep -rn todo src", "[exit code 1]"),
+        ("grep -rni todo src", "[exit code 1]"),
+        ("cat src/lib.rs", "// TODO: parse\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("where is the todo?"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = ran.lock().unwrap().clone();
+    assert_eq!(ran.len(), 3, "{ran:?}");
+    assert_eq!(assistant_text(&events), "src/lib.rs:3 has the TODO.");
+}
+
+/// `python` missing on the box is fixed by `python3`. Exit 127 used to set the failure streak
+/// straight to its ceiling, so the retry was never asked for.
+#[tokio::test]
+async fn a_missing_python_gets_a_python3_retry() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "python x.py"),
+            shell_deltas("c2", "python3 x.py"),
+        ],
+        "Done.",
+    );
+    let (runner, ran) = shell_runner(&[
+        (
+            "python x.py",
+            "bash: python: command not found\n[exit code 127]",
+        ),
+        ("python3 x.py", "ok\n[exit code 0]"),
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("run x.py"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap().as_slice(),
+        ["python x.py", "python3 x.py"]
+    );
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(assistant_text(&events).contains("Done."));
+}
+
+/// Two different files that are not there are two outcomes, not a retry of one: a tool with no
+/// `command` argument is told apart by its arguments. The fake answers a missing file the way
+/// the executor does: `cat` fails in the box, the box says `Refused`, and `read_file` returns a
+/// refusal. An earlier fake returned ok with "[exit code 1]", which the executor never produces,
+/// and so hid that every refusal still counted (#183, verifier's probe).
+#[tokio::test]
+async fn two_different_missing_files_do_not_end_the_turn() {
+    fn read(id: &str, path: &str) -> Vec<ModelDelta> {
+        vec![
+            ModelDelta::ToolCallStart {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+            },
+            ModelDelta::ToolCallArgs {
+                id: id.to_string(),
+                delta: serde_json::json!({ "path": path }).to_string(),
+            },
+            ModelDelta::ToolCallEnd { id: id.to_string() },
+        ]
+    }
+    let door = Rounds::new(
+        vec![
+            read("c1", "notes.md"),
+            read("c2", "NOTES.md"),
+            read("c3", "docs/notes.md"),
+        ],
+        "Found it in docs/notes.md.",
+    );
+    let reads = Arc::new(Mutex::new(0usize));
+    let counted = reads.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "read_file" } }),
+        Arc::new(move |call| {
+            let n = {
+                let mut reads = counted.lock().unwrap();
+                *reads += 1;
+                *reads
+            };
+            if n < 3 {
+                let path = call.arguments["path"].as_str().unwrap_or_default();
+                opengrok_tools::ToolResult::refused(
+                    &call.id,
+                    format!(
+                        "the computer refused the request (1): cat: {path}: No such file or directory"
+                    ),
+                )
+            } else {
+                opengrok_tools::ToolResult::ok(&call.id, "the notes")
+            }
+        }),
+    );
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("read my notes"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*reads.lock().unwrap(), 3);
+    assert!(
+        assistant_text(&events).contains("docs/notes.md"),
+        "{events:?}"
+    );
+}
+
+/// The streak still does its job for the same command failing the same way: the second
+/// identical failure ends the turn with one short fact, not a diary of retries.
+#[tokio::test]
+async fn the_same_command_failing_twice_still_ends_the_turn() {
+    let door = Rounds::new(
+        vec![
+            shell_deltas("c1", "make build"),
+            shell_deltas("c2", "make build"),
+        ],
+        "unreachable",
+    );
+    let (runner, _) = shell_runner(&[(
+        "make build",
+        "make: *** No rule to make target 'build'.  Stop.\n[exit code 2]",
+    )]);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("build it"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        assistant_text(&events).contains("No rule to make target"),
+        "{events:?}"
+    );
+}
+
+fn write_deltas(id: &str, path: &str, content: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: "write_file".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "path": path, "content": content }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A box with `write_file` and a `shell` whose `cargo test` fails until its `passes_on`-th run.
+fn fix_then_test_runner(passes_on: usize) -> (ToolRunner, Arc<Mutex<Vec<String>>>) {
+    let ran = Arc::new(Mutex::new(Vec::<String>::new()));
+    let shell_ran = ran.clone();
+    let write_ran = ran.clone();
+    let runner = ToolRunner::local_only()
+        .with_local(
+            serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+            Arc::new(move |call| {
+                let command = call.arguments["command"].as_str().unwrap_or("").to_string();
+                let runs = {
+                    let mut ran = shell_ran.lock().unwrap();
+                    ran.push(command.clone());
+                    ran.iter().filter(|asked| **asked == command).count()
+                };
+                let body = match command.as_str() {
+                    "cargo test" if runs < passes_on => {
+                        "test parse_empty ... FAILED\ntest result: FAILED. 1 failed\n[exit code 101]"
+                    }
+                    "cargo test" => "test result: ok. 3 passed",
+                    _ => "pub fn parse() {}",
+                };
+                opengrok_tools::ToolResult::ok(&call.id, body)
+            }),
+        )
+        .with_local(
+            serde_json::json!({ "type": "function", "function": { "name": "write_file" } }),
+            Arc::new(move |call| {
+                let path = call.arguments["path"].as_str().unwrap_or("").to_string();
+                write_ran.lock().unwrap().push(format!("write {path}"));
+                opengrok_tools::ToolResult::ok(&call.id, format!("wrote {path}"))
+            }),
+        );
+    (runner, ran)
+}
+
+/// The verifier's probe for #183: each round edits the file and runs the test again. The same
+/// failing `cargo test` after an edit is the fix-then-test loop, not a retry, so the turn
+/// reaches the third run (the one that passes) and ends in the model's words.
+#[tokio::test]
+async fn an_edit_between_two_failing_test_runs_does_not_end_the_turn() {
+    let door = Rounds::new(
+        vec![
+            [
+                write_deltas("w1", "src/lib.rs", "fn parse() { todo!() }"),
+                shell_deltas("c1", "cargo test"),
+            ]
+            .concat(),
+            [
+                write_deltas("w2", "src/lib.rs", "fn parse() { if line.is_empty() {} }"),
+                shell_deltas("c2", "cargo test"),
+            ]
+            .concat(),
+            shell_deltas("c3", "cargo test"),
+        ],
+        "Fixed: parse now accepts an empty line, and all three tests pass.",
+    );
+    let (runner, ran) = fix_then_test_runner(3);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("make the tests pass"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let ran = ran.lock().unwrap().clone();
+    assert_eq!(
+        ran.iter()
+            .filter(|command| *command == "cargo test")
+            .count(),
+        3,
+        "{ran:?}"
+    );
+    assert_eq!(door.calls(), 4);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let text = assistant_text(&events);
+    assert!(text.contains("all three tests pass"), "{text:?}");
+    assert!(!text.contains("test result: FAILED"), "{text:?}");
+}
+
+/// Progress is new work, not the same success again: reading the same file beside the same
+/// failing test changes nothing the test sees, so the second identical round still ends the
+/// turn on the failure.
+#[tokio::test]
+async fn the_same_read_beside_the_same_failing_test_still_ends_the_turn() {
+    let round = |n: u8| {
+        [
+            shell_deltas(&format!("r{n}"), "cat src/lib.rs"),
+            shell_deltas(&format!("c{n}"), "cargo test"),
+        ]
+        .concat()
+    };
+    let door = Rounds::new(vec![round(1), round(2), round(3)], "unreachable");
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("make the tests pass"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "test parse_empty ... FAILED");
+}
+
+fn recipe_deltas(id: &str, recipe: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: opengrok_tools::RUN_RECIPE.to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "recipe": recipe }).to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+/// A `run_recipe` that counts its plays.
+fn recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(&call.id, "played 4 steps; the results page is open")
+        }),
+    );
+    (runner, plays)
+}
+
+/// #120, the kabisado run: asked to search YouTube, the coworker played its recipe again and
+/// again — typing the same words into a field that already held them. "Run a recipe at most
+/// once per request" was a line in the prompt; the loop now keeps it. A replay is answered
+/// without touching the box, and asking a second time ends the turn.
+#[tokio::test]
+async fn a_recipe_is_played_at_most_once_per_request() {
+    struct AlwaysRecipe(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for AlwaysRecipe {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = recipe_deltas(&format!("c{round}"), "search-youtube");
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let door = AlwaysRecipe(Mutex::new(0));
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "the box played it once");
+    assert!(*door.0.lock().unwrap() <= 3, "a replay ends the turn");
+    let second = events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallResult)
+        .nth(1)
+        .and_then(|event| event.extra.get("content"))
+        .and_then(|content| content.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(second.starts_with("Not played again"), "{second:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        assistant_text(&events).contains("search-youtube"),
+        "the turn says which recipe it did not replay: {events:?}"
+    );
+}
+
+/// Two plays of one recipe in ONE completion both reached `run_all`: `played` learns a round's
+/// recipes only after the round ran, so neither looked like a replay and the box typed the
+/// search twice, the kabisado failure inside a single reply (#120, verifier's probe).
+#[tokio::test]
+async fn a_recipe_asked_twice_in_one_completion_plays_once() {
+    let door = Rounds::new(
+        vec![
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_deltas("c2", "search-youtube"),
+            ]
+            .concat(),
+        ],
+        "The results page is open.",
+    );
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let results = tool_results(&events);
+    assert_eq!(*plays.lock().unwrap(), 1, "{results:?}");
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results[0].starts_with("played"), "{results:?}");
+    assert!(results[1].starts_with("Not played twice"), "{results:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "The results page is open.");
+}
+
+/// A different recipe is a different task and still runs.
+#[tokio::test]
+async fn a_second_recipe_in_the_same_request_still_plays() {
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_deltas("c2", "open-inbox"),
+        ],
+        "Searched, then opened the inbox.",
+    );
+    let (runner, plays) = recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube, then open my inbox"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// The approved recipe ran in the resumed half's first step; the model asking for it again
+/// in that same request is a replay too, although it is a new `converse_raw`.
+#[tokio::test]
+async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
+    let door = Rounds::new(
+        vec![recipe_deltas("c2", "search-youtube")],
+        "The results page is open.",
+    );
+    let (runner, plays) = recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "search-youtube" }),
+    };
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{events:?}");
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// A `run_recipe` that refuses a call with no `values` before anything plays, the way the
+/// executor refuses a missing parameter, and plays (and counts) one that has them.
+fn binding_recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            if call.arguments.get("values").is_none() {
+                return opengrok_tools::ToolResult::refused(&call.id, "missing value for `query`");
+            }
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::ok(&call.id, "played 4 steps; the results page is open")
+        }),
+    );
+    (runner, plays)
+}
+
+fn recipe_with_values(id: &str, recipe: &str) -> Vec<ModelDelta> {
+    vec![
+        ModelDelta::ToolCallStart {
+            id: id.to_string(),
+            name: opengrok_tools::RUN_RECIPE.to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: id.to_string(),
+            delta: serde_json::json!({ "recipe": recipe, "values": { "query": "kabisado" } })
+                .to_string(),
+        },
+        ModelDelta::ToolCallEnd { id: id.to_string() },
+    ]
+}
+
+fn tool_results(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallResult)
+        .filter_map(|event| event.extra.get("content").and_then(|c| c.as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A recipe refused before the box (here a missing parameter, worded so the model can fix it)
+/// played nothing. It was counted as played, so the corrected call was answered "Not played
+/// again" and the search the person asked for never ran (#120, verifier's probe).
+#[tokio::test]
+async fn a_recipe_refused_before_the_box_still_plays_when_corrected() {
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_with_values("c2", "search-youtube"),
+        ],
+        "The results page is open.",
+    );
+    let (runner, plays) = binding_recipe_runner();
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert!(
+        tool_results(&events)
+            .iter()
+            .all(|content| !content.starts_with("Not played again")),
+        "{:?}",
+        tool_results(&events)
+    );
+    assert_eq!(assistant_text(&events), "The results page is open.");
+}
+
+/// One completion names a recipe twice and the first call is refused before the box. The second
+/// was answered by the loop with an `ok` result, and `played` took it, so the recipe counted as
+/// played although nothing ran: next round's corrected call was a "replay", the turn ended
+/// saying the recipe "already ran", and the search never happened (#120 again, verifier's
+/// probes A and B on 9e4b6d1).
+#[tokio::test]
+async fn a_refused_recipe_named_twice_in_one_completion_still_plays_when_corrected() {
+    for (probe, first_round) in [
+        (
+            "both calls lack values",
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_deltas("c2", "search-youtube"),
+            ]
+            .concat(),
+        ),
+        (
+            "only the first lacks values",
+            [
+                recipe_deltas("c1", "search-youtube"),
+                recipe_with_values("c2", "search-youtube"),
+            ]
+            .concat(),
+        ),
+    ] {
+        let door = Rounds::new(
+            vec![first_round, recipe_with_values("c3", "search-youtube")],
+            "The results page is open.",
+        );
+        let (runner, plays) = binding_recipe_runner();
+        let events = run_conversation(
+            &door,
+            Some(&runner),
+            &MemoryJournal::new(),
+            request("search youtube for kabisado"),
+            "t1",
+            "r1",
+            1,
+        )
+        .await;
+        let results = tool_results(&events);
+        assert_eq!(*plays.lock().unwrap(), 1, "{probe}: {results:?}");
+        assert_eq!(results.len(), 3, "{probe}: {results:?}");
+        assert!(
+            results[1].starts_with("Not played twice"),
+            "{probe}: the answer must not claim a refused call ran: {results:?}"
+        );
+        assert!(results[2].starts_with("played"), "{probe}: {results:?}");
+        assert_eq!(
+            assistant_text(&events),
+            "The results page is open.",
+            "{probe}"
+        );
+    }
+}
+
+/// A recipe the box played until a step failed did play: asking for it again is a replay.
+#[tokio::test]
+async fn a_recipe_that_stopped_part_way_is_not_played_again() {
+    let plays = Arc::new(Mutex::new(0usize));
+    let counted = plays.clone();
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": opengrok_tools::RUN_RECIPE } }),
+        Arc::new(move |call| {
+            *counted.lock().unwrap() += 1;
+            opengrok_tools::ToolResult::refused(&call.id, "recipe stopped at step 2").part_way()
+        }),
+    );
+    let door = Rounds::new(
+        vec![
+            recipe_deltas("c1", "search-youtube"),
+            recipe_deltas("c2", "search-youtube"),
+        ],
+        "It stopped at step 2.",
+    );
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert!(tool_results(&events)[1].starts_with("Not played again"));
+}
+
+/// The approved call of a resume that was refused before the box is not carried as played.
+#[tokio::test]
+async fn a_resumed_recipe_refused_before_the_box_may_be_asked_again() {
+    let door = Rounds::new(
+        vec![recipe_with_values("c2", "search-youtube")],
+        "The results page is open.",
+    );
+    let (runner, plays) = binding_recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "search-youtube" }),
+    };
+    let events = resume_conversation(
+        &door,
+        &runner,
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "{:?}", tool_results(&events));
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
 /// profile.list then profile.search: one real read, then a facts hop — not a second invoke.
@@ -2085,8 +3558,9 @@ fn shot(call_id: &str) -> opengrok_tools::ToolResult {
 #[test]
 fn a_tool_result_with_a_picture_becomes_a_message_with_an_image() {
     let message = tool_result_message(&shot("c1"));
-    assert_eq!(message.role, "user");
-    assert!(message.content.starts_with("[tool c1 result] screenshot"));
+    assert_eq!(message.role, "tool");
+    assert_eq!(message.tool_call_id.as_deref(), Some("c1"));
+    assert!(message.content.starts_with("screenshot"));
     assert_eq!(message.images.len(), 1);
     assert_eq!(message.images[0].mime, "image/png");
 
@@ -2115,7 +3589,7 @@ fn an_empty_result_array_carries_the_dead_end_sentence() {
         full.content
     );
     let garbage = tool_result_message(&opengrok_tools::ToolResult::ok("c1", "not-json"));
-    assert_eq!(garbage.content, "[tool c1 result] not-json");
+    assert_eq!(garbage.content, "not-json");
 }
 
 /// Screenshots are the widest thing in a request; only the last two say where the screen is.
@@ -2124,21 +3598,15 @@ fn only_the_two_most_recent_screenshots_travel() {
     let mut messages: Vec<ChatMessage> = (1..=4)
         .map(|n| tool_result_message(&shot(&format!("c{n}"))))
         .collect();
-    messages.insert(
-        2,
-        ChatMessage {
-            role: "assistant".into(),
-            content: "clicking".into(),
-            images: Vec::new(),
-        },
-    );
+    messages.insert(2, ChatMessage::text("assistant", "clicking"));
 
     keep_recent_images(&mut messages, RECENT_IMAGES);
 
     let carried: Vec<bool> = messages.iter().map(|m| !m.images.is_empty()).collect();
     assert_eq!(carried, vec![false, false, false, true, true]);
     // The words stay even where the picture went.
-    assert!(messages[0].content.contains("[tool c1 result]"));
+    assert!(messages[0].content.starts_with("screenshot"));
+    assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
 }
 
 /// A person's no is about their machine, not about one spelling of the command. Seen live:
@@ -2679,6 +4147,43 @@ async fn a_second_home_directory_find_ends_the_turn() {
     assert_eq!(timing["model_ms"].as_array().map(Vec::len), Some(2));
 }
 
+/// The Hog Rider turn walked `find ~`, then `find /Users/uriah`: two spellings of one walk. A
+/// refusal on an ordinary tool now counts only when it repeats the last failure (#183), and a
+/// home-directory walk is kept out of that rule, or a respelled second walk was one more round.
+#[tokio::test]
+async fn a_second_home_directory_find_spelled_differently_ends_the_turn() {
+    let door = Rounds::new(
+        vec![
+            ums_deltas("c1", "find ~ -name AGENT.md", "I'll look up AGENT.md"),
+            ums_deltas("c2", "find /Users/uriah -name AGENT.md", "I'll look again"),
+            ums_deltas("c3", "gpui-agent invoke profile.list", "I'll list them"),
+        ],
+        "unreachable",
+    );
+    let ran = Arc::new(Mutex::new(0usize));
+    let ran_tool = ran.clone();
+    let tool: LocalTool = Arc::new(move |call| {
+        *ran_tool.lock().unwrap() += 1;
+        opengrok_tools::ToolResult::ok(&call.id, "should not run")
+    });
+    let events = run_conversation(
+        &door,
+        Some(&ums_runner(tool)),
+        &MemoryJournal::new(),
+        request("open the profile"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(*ran.lock().unwrap(), 0, "neither find is dispatched");
+    assert_eq!(door.calls(), 2, "the second walk ends the turn");
+    assert!(
+        assistant_text(&events).contains("home directory"),
+        "{events:?}"
+    );
+}
+
 /// Grey run 01a0c9ed: hello exited 0, then profile.search was skipped as a
 /// second listing and the chat stayed empty. Hello is a probe. The search runs.
 #[tokio::test]
@@ -3118,6 +4623,45 @@ async fn a_chart_round_and_its_ending_are_journaled_together() {
     );
 }
 
+/// A chart round's preamble is not painted: the chart is what the round showed. The blank-turn
+/// fallback painted "I'll draw a chart" as a bubble above it, because the run had no
+/// TEXT_MESSAGE yet and the chart's TOOL_CALL frames did not count as saying something.
+#[tokio::test]
+async fn a_chart_rounds_preamble_is_not_painted() {
+    let door = MockDoor::with_script(vec![
+        ModelDelta::Text("I'll draw a chart of your spending.".to_string()),
+        ModelDelta::ToolCallStart {
+            id: "c1".to_string(),
+            name: "bar_chart".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: "c1".to_string(),
+            delta: r#"{"title":"spend"}"#.to_string(),
+        },
+        ModelDelta::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+    ]);
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("chart my spending"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallStart),
+        "{events:?}"
+    );
+    assert_eq!(assistant_text(&events), "", "{events:?}");
+}
+
 /// A DOOR THAT WILL NOT OPEN ENDS THE RUN ONCE, SAYING WHY, and asks nothing further.
 #[tokio::test]
 async fn a_door_that_will_not_open_ends_the_run_once() {
@@ -3155,6 +4699,109 @@ async fn a_door_that_will_not_open_ends_the_run_once() {
             .any(|event| event.event_type == EventType::RunError),
         "and the log holds it"
     );
+}
+
+/// A door that fails with `first` on its first call and answers "back" after.
+struct FailsOnce {
+    first: Mutex<Option<ModelError>>,
+    calls: Mutex<usize>,
+}
+
+impl FailsOnce {
+    fn with(error: ModelError) -> Self {
+        Self {
+            first: Mutex::new(Some(error)),
+            calls: Mutex::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelDoor for FailsOnce {
+    async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        *self.calls.lock().unwrap() += 1;
+        if let Some(error) = self.first.lock().unwrap().take() {
+            return Err(error);
+        }
+        Ok(Box::pin(futures::stream::iter([Ok(ModelDelta::Text(
+            "back".to_string(),
+        ))])))
+    }
+}
+
+/// A gateway restarting refuses connections for a moment. Nothing was sent, so nothing can be
+/// billed twice, and the turn used to fail on the spot (#185).
+#[tokio::test]
+async fn a_refused_connection_is_retried() {
+    let door = FailsOnce::with(ModelError::Unreachable("connection refused".to_string()));
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    assert_eq!(assistant_text(&events), "back");
+}
+
+/// A short Retry-After is honoured once.
+#[tokio::test]
+async fn a_rate_limit_with_a_short_retry_after_is_asked_again() {
+    let door = FailsOnce::with(ModelError::Refused {
+        status: 429,
+        body: r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#
+            .to_string(),
+        retry_after_s: Some(0),
+    });
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 2);
+    assert_eq!(assistant_text(&events), "back");
+}
+
+/// A request the gateway could not take is not asked twice, and the person reads the reason,
+/// not the gateway's JSON.
+#[tokio::test]
+async fn a_rejected_request_ends_with_a_sentence_not_json() {
+    let door = FailsOnce::with(ModelError::Refused {
+        status: 400,
+        body: r#"{"type":"error","error":{"type":"upstream_error","message":"This model's maximum context length is 128000 tokens."}}"#
+            .to_string(),
+        retry_after_s: None,
+    });
+    let events = run_conversation(
+        &door,
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(door.calls(), 1);
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunError);
+    let message = last.extra["message"].as_str().unwrap_or_default();
+    assert!(!message.contains('{'), "{message}");
+    assert!(message.contains("maximum context length"), "{message}");
 }
 
 /// A PARK ASKS `stopped` TOO (`formal/tla/HarnessLoop.tla` StopIsHonoured, the verifier's trace).
@@ -3282,4 +4929,103 @@ async fn a_park_whose_write_finds_the_run_stopped_ends_stopped_with_no_card() {
             .any(|event| event.event_type == EventType::ToolCallStart),
         "the round that asked is still in the log: {written:?}"
     );
+}
+
+/// THE MODEL SEES WHAT IT CALLED. After a round of two parallel calls the next request carries
+/// the assistant's own `tool_calls` message and then one `tool` message per call, keyed by the id
+/// it gave each one — not two user lines naming ids it was never shown (#189).
+#[tokio::test]
+async fn two_parallel_calls_come_back_as_a_call_message_and_one_tool_message_each() {
+    struct SpyDoor {
+        round: Mutex<usize>,
+        second: Mutex<Vec<serde_json::Value>>,
+    }
+    #[async_trait::async_trait]
+    impl ModelDoor for SpyDoor {
+        async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.round.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            if round == 2 {
+                *self.second.lock().unwrap() = request
+                    .messages
+                    .iter()
+                    .map(|message| serde_json::to_value(message).unwrap())
+                    .collect();
+            }
+            let call = |id: &str, command: &str| {
+                vec![
+                    ModelDelta::ToolCallStart {
+                        id: id.to_string(),
+                        name: "shell".to_string(),
+                    },
+                    ModelDelta::ToolCallArgs {
+                        id: id.to_string(),
+                        delta: format!(r#"{{"command":"{command}"}}"#),
+                    },
+                    ModelDelta::ToolCallEnd { id: id.to_string() },
+                ]
+            };
+            let script = if round == 1 {
+                [call("c1", "echo a"), call("c2", "echo b")].concat()
+            } else {
+                vec![ModelDelta::Text("both ran".to_string())]
+            };
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    let door = SpyDoor {
+        round: Mutex::new(0),
+        second: Mutex::new(Vec::new()),
+    };
+    let events = run_conversation(
+        &door,
+        Some(&tool_runner()),
+        &MemoryJournal::new(),
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let second = door.second.lock().unwrap().clone();
+    let at = second
+        .iter()
+        .position(|message| message["role"] == "assistant");
+    assert!(
+        at.is_some(),
+        "no assistant message after the tool round: {second:?}"
+    );
+    let at = at.unwrap();
+    let calls = second[at]["tool_calls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let named: Vec<(&str, &str, &str)> = calls
+        .iter()
+        .map(|call| {
+            (
+                call["id"].as_str().unwrap_or(""),
+                call["name"].as_str().unwrap_or(""),
+                call["arguments"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("c1", "shell", r#"{"command":"echo a"}"#),
+            ("c2", "shell", r#"{"command":"echo b"}"#)
+        ],
+        "{second:?}"
+    );
+    for (offset, id) in ["c1", "c2"].iter().enumerate() {
+        let answer = &second[at + 1 + offset];
+        assert_eq!(answer["role"], "tool", "{second:?}");
+        assert_eq!(answer["tool_call_id"], *id, "{second:?}");
+    }
 }

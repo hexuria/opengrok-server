@@ -64,6 +64,7 @@ impl ModelDoor for RefusesOwnKeys {
             return Err(ModelError::Refused {
                 status: self.status,
                 body: self.body.clone(),
+                retry_after_s: None,
             });
         }
         Ok(Box::pin(futures::stream::iter(vec![Ok(ModelDelta::Text(
@@ -135,11 +136,7 @@ fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
         spend_actor: Some(payer.as_str().to_string()),
         model: "xai/grok-4.6@sub".to_string(),
         system: None,
-        messages: vec![ChatMessage {
-            images: Vec::new(),
-            role: "user".to_string(),
-            content: "ok".to_string(),
-        }],
+        messages: vec![ChatMessage::text("user", "ok")],
         tools: Vec::new(),
     }
 }

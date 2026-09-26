@@ -380,6 +380,7 @@ async fn a_runs_owner_is_set_once() {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms,
         })
         .expect("start");

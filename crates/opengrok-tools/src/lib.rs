@@ -128,6 +128,13 @@ pub struct ToolResult {
     /// [`ToolImage::visibility`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
+    /// A refusal that came after the call had already done part of its work: a recipe the box
+    /// played until a step failed. Every other refusal came before anything ran, so a corrected
+    /// call is new work and not a replay; the loop's once-per-request rule for recipes counted
+    /// a missing parameter as a play and then refused the fixed call (#120). The loop's, not
+    /// the wire's: never serialized.
+    #[serde(skip)]
+    pub stopped_part_way: bool,
 }
 
 /// Where a tool-result image may be shown. Rides `TOOL_CALL_RESULT.image.visibility`.
@@ -210,6 +217,7 @@ impl ToolResult {
             awaiting_approval: false,
             awaiting_reason: None,
             image: None,
+            stopped_part_way: false,
         }
     }
 
@@ -229,6 +237,7 @@ impl ToolResult {
             awaiting_approval: true,
             awaiting_reason: Some(reason),
             image: None,
+            stopped_part_way: false,
         }
     }
 
@@ -241,7 +250,15 @@ impl ToolResult {
             awaiting_approval: false,
             awaiting_reason: None,
             image: None,
+            stopped_part_way: false,
         }
+    }
+
+    /// This refusal came after the box had already acted.
+    #[must_use]
+    pub fn part_way(mut self) -> Self {
+        self.stopped_part_way = true;
+        self
     }
 }
 
@@ -1901,6 +1918,19 @@ impl Executor {
         crate::observe::ask(&mut request, self.observe);
         let receipt = match self.computer.run_recipe(box_id.as_str(), &request).await {
             Ok(raw) => RecipeReceipt::from_value(raw),
+            // The box may have played some of it before the connection went: a replay would
+            // type on top of it. Counted as played, and the model is told to look first.
+            Err(error @ BoxError::Interrupted(_)) => {
+                return ToolResult::refused(
+                    call_id,
+                    format!(
+                        "{}. The recipe may have played part way: look at the screen before \
+                         doing anything else, and do not run it again",
+                        describe(error)
+                    ),
+                )
+                .part_way();
+            }
             Err(error) => return ToolResult::refused(call_id, describe(error)),
         };
         let _ = source
@@ -1930,7 +1960,7 @@ impl Executor {
         let mut result = if receipt.ok {
             ToolResult::ok(call_id, said)
         } else {
-            ToolResult::refused(call_id, said)
+            ToolResult::refused(call_id, said).part_way()
         };
         if let Some(image) = receipt.image.clone() {
             result = result.with_image(image);
@@ -2317,6 +2347,9 @@ fn describe(error: BoxError) -> String {
         BoxError::NoSuchBox => "that computer no longer exists".to_string(),
         BoxError::Secret(reason) => reason.clone(),
         BoxError::Unreachable(detail) => format!("the computer is unreachable: {detail}"),
+        BoxError::Interrupted(detail) => {
+            format!("the connection to the computer was lost before it answered: {detail}")
+        }
         BoxError::Refused { status, body } => {
             format!("the computer refused the request ({status}): {body}")
         }
@@ -2367,6 +2400,19 @@ mod tests {
         tunnel_ready: bool,
     }
 
+    fn copy_error(error: &BoxError) -> BoxError {
+        match error {
+            BoxError::NoSuchBox => BoxError::NoSuchBox,
+            BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
+            BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
+            BoxError::Interrupted(detail) => BoxError::Interrupted(detail.clone()),
+            BoxError::Refused { status, body } => BoxError::Refused {
+                status: *status,
+                body: body.clone(),
+            },
+        }
+    }
+
     impl SpyComputer {
         fn last_box(&self) -> Option<String> {
             self.ran_on
@@ -2392,15 +2438,7 @@ mod tests {
                 calls.push((box_id.to_string(), command.to_string()));
             }
             if let Some(error) = &self.fail_with {
-                return Err(match error {
-                    BoxError::NoSuchBox => BoxError::NoSuchBox,
-                    BoxError::Secret(reason) => BoxError::Secret(reason.clone()),
-                    BoxError::Unreachable(detail) => BoxError::Unreachable(detail.clone()),
-                    BoxError::Refused { status, body } => BoxError::Refused {
-                        status: *status,
-                        body: body.clone(),
-                    },
-                });
+                return Err(copy_error(error));
             }
             Ok(CommandOutput {
                 exit_code: 0,
@@ -2414,6 +2452,9 @@ mod tests {
         async fn run_recipe(&self, box_id: &str, request: &Value) -> BoxResult<Value> {
             if let Ok(mut calls) = self.ran_on.lock() {
                 calls.push((box_id.to_string(), format!("recipe:{request}")));
+            }
+            if let Some(error) = &self.fail_with {
+                return Err(copy_error(error));
             }
             let name = request.get("name").and_then(Value::as_str).unwrap_or("");
             // The box answers the level it was asked for, and answers nothing about observation
@@ -4863,6 +4904,44 @@ mod tests {
         );
     }
 
+    /// A recipe whose connection dropped after the POST may have played: it is a part-way
+    /// refusal, so the loop's once-per-request rule holds (#120). One that never reached the
+    /// box played nothing, and a corrected retry is new work.
+    #[tokio::test]
+    async fn a_recipe_cut_off_mid_play_counts_as_played() {
+        for (error, played) in [
+            (
+                BoxError::Interrupted("box-exec: client error (SendRequest)".to_string()),
+                true,
+            ),
+            (
+                BoxError::Unreachable("box-exec: client error (Connect)".to_string()),
+                false,
+            ),
+        ] {
+            let spy = Arc::new(SpyComputer {
+                fail_with: Some(error),
+                ..SpyComputer::default()
+            });
+            let executor = allowing(spy)
+                .with_screen(true)
+                .with_recipes(offers(), Arc::new(SpyRecipes::default()));
+            let result = executor
+                .execute(
+                    &context_with_box("box_mine"),
+                    &call(RUN_RECIPE, json!({"recipe": "rcp_gmail"})),
+                )
+                .await;
+            assert!(!result.ok, "{result:?}");
+            assert_eq!(result.stopped_part_way, played, "{result:?}");
+            assert_eq!(
+                result.content.contains("may have played part way"),
+                played,
+                "{result:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_recipe_that_stops_is_a_refusal_in_words() {
         let spy = Arc::new(SpyComputer::default());
@@ -4898,12 +4977,14 @@ mod tests {
             recipes.runs.lock().unwrap().last().map(|r| r.2),
             Some(false)
         );
+        assert!(result.stopped_part_way, "the box played it: {result:?}");
 
         // A recipe that was never granted is refused before anything runs.
         let result = executor
             .execute(&context, &call(RUN_RECIPE, json!({"recipe": "rcp_other"})))
             .await;
         assert!(!result.ok, "{result:?}");
+        assert!(!result.stopped_part_way, "nothing played: {result:?}");
         assert!(
             result.content.contains("not granted") || result.content.contains("no recipe"),
             "{result:?}"

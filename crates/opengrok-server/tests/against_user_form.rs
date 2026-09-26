@@ -193,6 +193,39 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
     id
 }
 
+/// `visibility = org` through the aggregate, as the PATCH route would have stored it.
+async fn mark_org_visible(store: &PgStore, owner: &AccountId, id: &str) {
+    use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Visibility};
+    let coworker_id = opengrok_core::id::CoworkerId::from_stored(id.to_string());
+    let (loaded, seq) = store.load_coworker(&coworker_id).await.expect("load");
+    let at_ms = now_ms();
+    let events = loaded
+        .decide(CoworkerCommand::SetVisibility {
+            visibility: Visibility::Org,
+            at_ms,
+        })
+        .expect("set visibility");
+    let mut after = loaded.clone();
+    for event in &events {
+        after.apply(event);
+    }
+    let view = CoworkerView {
+        id: coworker_id.clone(),
+        name: after.name.clone(),
+        model: after.model.clone(),
+        box_id: after.box_id.clone(),
+        retired: after.retired,
+        members: after.members.clone(),
+        updated_at_ms: at_ms,
+        role: after.role.clone(),
+        visibility: after.visibility,
+    };
+    store
+        .append_coworker(&coworker_id, owner, seq, &events, &view)
+        .await
+        .expect("append");
+}
+
 struct Harness {
     base: String,
     agui: AgUiState,
@@ -2011,17 +2044,12 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
     assert!(!offered, "no save offer after a vault fill: {replayed}");
 
     // A bot the person shares with their org is driven by everyone in it: its box never gets
-    // a saved login, even though the box is the bot's own.
+    // a saved login, even though the box is the bot's own. Marked `org` in the store rather
+    // than through PATCH, because this person is in no org and the route now refuses to share
+    // with nobody; the rule keys on the word, and must hold for a bot that still carries it
+    // after its owner left their org.
     let shown = h.hire(&token, "Dee").await;
-    let patched = h
-        .client
-        .patch(format!("{}/coworkers/{shown}", h.base))
-        .header("authorization", format!("Bearer {token}"))
-        .json(&json!({ "visibility": "org" }))
-        .send()
-        .await
-        .expect("patch visibility");
-    assert!(patched.status().is_success(), "{}", patched.status());
+    mark_org_visible(&h.store, &h.account, &shown).await;
     h.turn(&token, &shown, "sign in").await;
     let card = h.wait_for_form(&shown).await;
     let acts_before = h.stub.acts.lock().expect("acts").len();
@@ -2528,6 +2556,50 @@ async fn collect_network_off_still_waits_and_submits_without_computer_effects() 
     assert_eq!(*h.stub.resumes.lock().expect("resumes"), resumes);
 }
 
+/// A SUBMITTED FORM RESUMES KNOWING WHAT IT WAS FOR (#187). The continuation used to be rebuilt
+/// from the run's emitted frames alone, so the model was handed a form result with neither the
+/// request that led to it nor the call that asked for it.
+#[tokio::test]
+async fn a_submitted_form_resumes_with_the_request_it_was_asked() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "collect-grounded-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let door = Arc::new(CollectDoor::new());
+    let h = harness_with_door(&database_url, &email, door.clone()).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Collect").await;
+    h.turn(&token, &agent, "collect answers").await;
+    let card = h.wait_for_form(&agent).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"], "agentId": agent,
+                "values": {"email": EMAIL, "password": SECRET}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    let resumed = door.first_resume().await;
+    let at = |needle: &str| {
+        resumed
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is missing from the resume: {resumed}"))
+    };
+    assert!(
+        at("collect answers") < at("request_user_form"),
+        "the request comes first: {resumed}"
+    );
+    assert!(
+        at("request_user_form") < at(EMAIL),
+        "the call comes before what it returned: {resumed}"
+    );
+    assert!(!resumed.contains(SECRET), "{resumed}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // A card and the run that raised it are one thing (#186, #188). Park, stop, interrupt, submit,
 // time out and replay each used to find "the" card or "the" run by the coworker alone.
@@ -2545,7 +2617,7 @@ impl ModelDoor for HoldDoor {
         let last = request
             .messages
             .last()
-            .map(|message| message.content.to_ascii_lowercase())
+            .map(|message| message.as_text().to_ascii_lowercase())
             .unwrap_or_default();
         let fresh = uuid::Uuid::now_v7().simple().to_string();
         let call = |id: String, name: &str, args: Value| {
@@ -2742,6 +2814,7 @@ async fn submit_resumes_the_run_parked_on_its_own_call_not_the_oldest() {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms,
         })
         .expect("start");

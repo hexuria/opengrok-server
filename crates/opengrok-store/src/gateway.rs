@@ -129,6 +129,25 @@ impl PgStore {
         row.map(|row| Ok(row.try_get("profile")?)).transpose()
     }
 
+    /// The same blobs for a whole roster in one read, keyed by coworker id. A coworker with no
+    /// profile row is simply absent from the map. One query rather than one per row: the roster
+    /// is listed on every sign-in, and its length is the org's, not a constant.
+    pub async fn seamb_profiles(
+        &self,
+        coworkers: &[CoworkerId],
+    ) -> StoreResult<std::collections::HashMap<String, Value>> {
+        let ids: Vec<&str> = coworkers.iter().map(CoworkerId::as_str).collect();
+        let rows = sqlx::query(
+            "select coworker_id, profile from seamb_profile where coworker_id = any($1)",
+        )
+        .bind(&ids)
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter()
+            .map(|row| Ok((row.try_get("coworker_id")?, row.try_get("profile")?)))
+            .collect()
+    }
+
     pub async fn put_seamb_profile(
         &self,
         coworker: &CoworkerId,

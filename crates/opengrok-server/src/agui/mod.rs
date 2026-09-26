@@ -5,6 +5,7 @@
 
 pub mod chat_ui;
 pub mod credential;
+pub(crate) mod history;
 pub mod passkeys;
 pub mod pending;
 pub mod provision;

@@ -107,10 +107,14 @@ if lsof -ti:"$PORT" >/dev/null 2>&1; then
 fi
 
 step "starting a server on $PORT with the mock door"
+# The gate names its own deployment route rather than inheriting the code's. slice5, slice14 and
+# slice22 hire on xai/grok-4.6 and prove a run with no coworker did NOT borrow that pin — which
+# nothing can observe once the deployment default is the same route, as the code's now is.
 OG_BIND="127.0.0.1:$PORT" \
 OG_DATABASE_URL="$OG_DATABASE_URL" \
 OG_TOKEN_SECRET="${OG_TOKEN_SECRET:-$(openssl rand -hex 32)}" \
 OG_MODEL_DOOR=mock \
+OG_MODEL=gate/deployment-default \
 OG_DEV_SIGN_IN=1 \
 RUST_LOG=warn \
 ./target/debug/opengrok >/dev/null 2>&1 &

@@ -350,6 +350,7 @@ fn a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer() {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms: 1,
         },
     );

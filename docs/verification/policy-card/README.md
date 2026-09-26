@@ -31,9 +31,23 @@ from a card.
 
 ## Model note
 
-The coworker used for this capture was pinned to `xai/grok-4.6`. The default
+The coworker used for this capture was pinned to `xai/grok-4.6` — which is why
+that route became the shipped default on 25 Sep 2026 (#197). The then-default
 `gpt-5.6-luna` route does not emit tool calls through the gateway (it answers a
 shell request from a text message with fabricated output; zero `TOOL_*` events
 across its runs), so the policy gate — which is only reached on a real
 `RunTool` call — is never exercised with it. The card path is otherwise proven
 by `tests/against_the_mcp_door.rs` and the `cards` unit tests.
+
+## What this evidence does not show (25 Sep 2026)
+
+It stops at "the command executes". Until #187 the continuation after
+**Allow once** was rebuilt from the run's emitted frames alone: the model was
+handed the system message and a bare tool output, with neither the person's
+request nor the call it had allowed, so the answer after the yes was not
+grounded in anything. The rebuild now opens with the journaled request and
+names the allowed call before its result (`agui/history.rs`
+`conversation_from`); `tests/against_a_no_on_the_desktop_card.rs`
+`an_allowed_card_continues_with_the_request_it_was_asked` asserts it on the
+mock door's captured request. **Still owed:** a re-capture on a live door
+showing the grounded answer after Allow once (CLAUDE.md #10).

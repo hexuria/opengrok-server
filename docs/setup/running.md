@@ -11,6 +11,10 @@ curl -fsS http://127.0.0.1:1447/health   # {"ok":true,…}
 server, and starts the new binary. It refuses to run when `OG_DATABASE_URL` points at the
 gate's database (`…/opengrok_gate`) — a dev server there would race the smoke suite's sweeps.
 
+A server that answers `/health` still has **nobody who can sign in to it** and no proven model
+route. [`first-run.md`](first-run.md) is the next step: the gateway key, the first admin, a hire
+and a real turn.
+
 ## Restarting by hand — the four gotchas, learned the hard way
 
 If you manage the process yourself instead of using `serve.sh`:

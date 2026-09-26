@@ -529,3 +529,102 @@ async fn probing_in_a_loop_is_refused() {
         "the refused probe never reached the gateway, so it cost nothing"
     );
 }
+
+/// A stand-in that answers the way two real kinds of route do: `tools/yes` calls the tool it was
+/// offered, anything else answers in prose. It records the whole body, because what the probe
+/// OFFERS is half of what is under test.
+async fn spawn_tool_aware_gateway(bodies: Arc<Mutex<Vec<Value>>>) -> String {
+    let app = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(
+                |State(bodies): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                    bodies.lock().unwrap().push(body.clone());
+                    let model = body["model"].as_str().unwrap_or_default().to_string();
+                    let offered = body["tools"][0]["function"]["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let message = if model == "tools/yes" && !offered.is_empty() {
+                        json!({"role": "assistant", "content": null, "tool_calls": [{
+                            "id": "call_1", "type": "function",
+                            "function": {"name": offered, "arguments": "{}"},
+                        }]})
+                    } else {
+                        json!({"role": "assistant", "content": "I would ping, if I could."})
+                    };
+                    Json(json!({"model": model, "choices": [{"message": message}]}))
+                },
+            ),
+        )
+        .with_state(bodies);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    format!("http://127.0.0.1:{}", addr.port())
+}
+
+/// "Say ok" proved a route answers, never that it can DO anything: `gpt-5.6-luna` passed that
+/// probe while answering every shell request with invented output and zero tool calls, so a
+/// coworker hired on it could not use its computer and no policy gate ever fired. The probe now
+/// offers one tool and says whether it was called — and a route that only talks is still `ok`,
+/// because it is a working pin for a coworker with no computer.
+#[tokio::test]
+async fn a_probe_offers_one_tool_and_reports_whether_it_was_called() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let email = format!("tools-{}@og.local", uuid::Uuid::now_v7().simple());
+    let account = seed_account(&store, &email).await;
+    let bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let gateway = spawn_tool_aware_gateway(bodies.clone()).await;
+    let (app, state) = app_with(store.clone(), &email, &gateway);
+    let base = spawn(app).await;
+    let token = token_for(&state, &account, &email);
+
+    let (status, calls) = call(
+        &base,
+        reqwest::Method::POST,
+        "/models/probe",
+        &token,
+        Some(json!({ "model": "tools/yes" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{calls}");
+    assert_eq!(calls["ok"], json!(true), "{calls}");
+    assert_eq!(calls["served"], json!("tools/yes"), "{calls}");
+    assert_eq!(calls["toolCalls"], json!(true), "{calls}");
+
+    // A second account: one account may not probe twice in a moment.
+    let other_email = format!("tools2-{}@og.local", uuid::Uuid::now_v7().simple());
+    let other_account = seed_account(&store, &other_email).await;
+    let other_token = token_for(&state, &other_account, &other_email);
+    let (status, talks) = call(
+        &base,
+        reqwest::Method::POST,
+        "/models/probe",
+        &other_token,
+        Some(json!({ "model": "text/only" })),
+    )
+    .await;
+    assert_eq!(status, 200, "{talks}");
+    assert_eq!(
+        talks["ok"],
+        json!(true),
+        "a route that only talks still answers: {talks}"
+    );
+    assert_eq!(talks["toolCalls"], json!(false), "{talks}");
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    for body in bodies.iter() {
+        let tools = body["tools"].as_array().expect("the probe offers tools");
+        assert_eq!(tools.len(), 1, "exactly one trivial tool: {body}");
+        assert_eq!(tools[0]["type"], json!("function"), "{body}");
+        // "auto" is what a real coworker turn sends (`GatewayDoor`): the probe asks what it asks.
+        assert_eq!(body["tool_choice"], json!("auto"), "{body}");
+    }
+}

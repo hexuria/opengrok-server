@@ -453,12 +453,13 @@ impl ModelDoor for MockDoor {
             let word = word.clone();
             return Ok(self.emit(&request, vec![ModelDelta::Text(word)]));
         }
-        // Has this conversation already seen its tool result? The harness appends one as a user
-        // message, so the conversation itself is the state.
+        // Has this conversation already seen its tool result? The harness appends one after each
+        // round, so the conversation itself is the state. Read in the words a tool result has
+        // always been written in, so a result a client sent as text counts the same.
         let already_ran = request
             .messages
             .iter()
-            .any(|message| message.content.contains("[tool "));
+            .any(|message| message.as_text().contains("[tool "));
 
         if self.echo_system {
             let said = request.system.clone().unwrap_or_default();
@@ -498,11 +499,7 @@ mod tests {
             model: "mock".to_string(),
             system: None,
             tools: Vec::new(),
-            messages: vec![crate::model::ChatMessage {
-                images: Vec::new(),
-                role: "user".to_string(),
-                content: text.to_string(),
-            }],
+            messages: vec![crate::model::ChatMessage::text("user", text.to_string())],
         }
     }
 

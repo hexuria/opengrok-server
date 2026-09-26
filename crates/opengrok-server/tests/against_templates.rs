@@ -589,6 +589,28 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         hired["templateNote"].is_null(),
         "nothing failed to land: {hired}"
     );
+    // The reply is the roster row the member will list, built from the profile the template
+    // wrote: its blank title reads as none, not as "".
+    let roster: Value = h
+        .client
+        .get(format!("{}/coworkers", h.base))
+        .header("Authorization", format!("Bearer {member}"))
+        .send()
+        .await
+        .expect("roster")
+        .json()
+        .await
+        .expect("roster body");
+    let row = roster
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == hired["id"]))
+        .cloned()
+        .expect("the hire is on the member's roster");
+    let mut reply = hired.as_object().expect("an object").clone();
+    reply.remove("computerError");
+    reply.remove("templateNote");
+    assert_eq!(Value::Object(reply), row, "{hired} vs {row}");
+    assert!(hired["title"].is_null(), "{hired}");
     let coworker = CoworkerId::from_stored(hired["id"].as_str().expect("id").to_string());
     let policy = store
         .policy_for(&member_id, &coworker)
