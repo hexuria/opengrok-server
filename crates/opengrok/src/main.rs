@@ -13,9 +13,13 @@ use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_store::PgStore;
 use sqlx::postgres::PgPoolOptions;
 
-/// The route a deployment hires on when it names none. Provider-qualified so it matches an
-/// advertised catalogue id rather than only resolving upstream.
-const DEFAULT_MODEL: &str = "openai/gpt-5.6-luna";
+/// The route a deployment hires on when it names none: one ON THE RECORD making real tool calls
+/// (docs/verification/policy-card). It was `openai/gpt-5.6-luna`, which answers every shell
+/// request with invented text and zero tool calls — a default coworker could not use its
+/// computer, and no policy gate or consent card ever fired for it. xAI's model listing carries
+/// no ids, so the picker never shows this one; servable and advertised are independent
+/// (docs/setup/environment.md), and a default is chosen for the first.
+const DEFAULT_MODEL: &str = "xai/grok-4.6";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -274,17 +278,15 @@ async fn main() -> anyhow::Result<()> {
     let connectors = load_connectors()?;
     let plugins = load_plugins();
 
+    let (model, auto_review_model) = chosen_models(
+        std::env::var("OG_MODEL").ok(),
+        std::env::var("OG_AUTO_REVIEW_MODEL").ok(),
+    );
     let state = AgUiState {
         auth,
         door,
-        // PROVIDER-QUALIFIED, always. A bare upstream name resolves at the gateway through its
-        // unambiguous-name path, so it works — but it can never match an advertised catalogue id,
-        // which means a template pinned to it is refused and the picker shows no multiplier for
-        // it. A default that half-works is worse than one that does not.
-        model: std::env::var("OG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
-        auto_review_model: std::env::var("OG_AUTO_REVIEW_MODEL").unwrap_or_else(|_| {
-            std::env::var("OG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
-        }),
+        model,
+        auto_review_model,
         computer,
         vault,
         connectors,
@@ -529,6 +531,26 @@ fn with_mock_verdict(door: MockDoor) -> MockDoor {
     }
 }
 
+/// The hire route and the auto-review judge's, from `OG_MODEL` and `OG_AUTO_REVIEW_MODEL`.
+///
+/// PROVIDER-QUALIFIED, always. A bare upstream name resolves at the gateway through its
+/// unambiguous-name path, so it works — but it can never match an advertised catalogue id, which
+/// means a template pinned to it is refused and the picker shows no multiplier for it.
+///
+/// BLANK IS UNSET. `.env.example` ships `OG_AUTO_REVIEW_MODEL=` and `scripts/serve.sh` sources it
+/// under `set -a`, so the variable arrives present and empty; read as a value, the judge was
+/// handed a route named "" instead of falling back.
+fn chosen_models(hire: Option<String>, review: Option<String>) -> (String, String) {
+    let set = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let hire = set(hire).unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let review = set(review).unwrap_or_else(|| hire.clone());
+    (hire, review)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -553,5 +575,37 @@ mod tests {
             door_choice(Some("mock-tools")).unwrap(),
             DoorChoice::MockTools
         );
+    }
+
+    #[test]
+    fn the_default_route_is_one_verified_to_call_tools() {
+        assert!(!DEFAULT_MODEL.contains("luna"), "{DEFAULT_MODEL}");
+        assert!(
+            DEFAULT_MODEL.contains('/'),
+            "provider-qualified: {DEFAULT_MODEL}"
+        );
+        assert_eq!(DEFAULT_MODEL, "xai/grok-4.6");
+    }
+
+    #[test]
+    fn the_judge_falls_back_to_the_hire_route_then_the_default() {
+        let default = DEFAULT_MODEL.to_string();
+        assert_eq!(chosen_models(None, None), (default.clone(), default));
+        assert_eq!(chosen_models(Some("a/b".into()), None).1, "a/b");
+        assert_eq!(chosen_models(None, Some("c/d".into())).1, "c/d");
+    }
+
+    #[test]
+    fn a_blank_variable_is_unset_rather_than_a_model_named_nothing() {
+        let default = DEFAULT_MODEL.to_string();
+        assert_eq!(
+            chosen_models(Some("  ".into()), Some(String::new())),
+            (default.clone(), default)
+        );
+        assert_eq!(
+            chosen_models(Some("a/b".into()), Some(" ".into())),
+            ("a/b".to_string(), "a/b".to_string())
+        );
+        assert_eq!(chosen_models(Some(" a/b ".into()), None).0, "a/b");
     }
 }

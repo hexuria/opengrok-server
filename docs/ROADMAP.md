@@ -64,7 +64,10 @@ from the proto inventory.** And because `SAND_HOST_GATEWAY_URL` repoints the cli
 gateway with no auth work, the build order inverts the ship order: gateway first, identity
 after — the real, unmodified client is the strongest smoke test we can have.
 
-## Slice 7 — The gateway boots the real client (P2 + P3)
+## Slice 7 — The gateway boots the real client (P2 + P3) — removed in P0-E
+
+*Done, then deleted with seam A on 20 Sep 2026 (Phase 0, P0-E): the ticks below record what was
+built and verified for the discontinued Grok Bot client, not what the server serves today.*
 
 - [x] **7.1** `GET /health` on a 1500 ms deadline, and `GET /events`: `retry: 1000`, `:ping`
   at ≤15 s (a 35 s watchdog aborts otherwise), channel filter parsed, one shared bearer
@@ -81,7 +84,10 @@ after — the real, unmodified client is the strongest smoke test we can have.
   dead path now (B1 re-checked 1 Sep). Evidence: `docs/verification/real-client/README.md`
   and the 31 Aug acceptance run it cites. (`0ae194e`)
 
-## Slice 8 — A conversation from the real app (P4)
+## Slice 8 — A conversation from the real app (P4) — removed in P0-E
+
+*Done, then deleted with seam A on 20 Sep 2026. A conversation today is `POST /ag-ui`
+(`research/client-nativechat.md`).*
 
 The milestone that proves the port; everything after it is breadth, not risk.
 
@@ -107,7 +113,11 @@ The milestone that proves the port; everything after it is breadth, not risk.
   `docs/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
   (streams `run_01a057f0-…`, `run_01a057f5-…`). (`0ae194e`)
 
-## Slice 9 — Seam B: identity and the mint (P0 + P1)
+## Slice 9 — Seam B: identity and the mint (P0 + P1) — removed in P0-E
+
+*Seam B (ConnectRPC, the tonic mirror, `opengrok-proto`) was deleted on 20 Sep 2026. What
+survives from this slice is 9.1/9.1b's auth routes (`/auth/poll`, `/oauth/token`,
+`/loginDeepControl`), which are not seam B.*
 
 Re-scoped by the port plan from "hundreds of messages" to a bounded job: **two services,
 18 methods, transcribed from `source/mock/`** with provenance comments (the transcription
@@ -359,8 +369,9 @@ the proof, not construction.
   use with the old key revoked; a spent refresh presented again revokes the whole family;
   revoking the key from the coworker's list revokes its refresh tokens. `against_mcp_oauth.rs`
   covers rotation, replay, and a stand-in document server. *(this commit)*
-- [ ] **16.later** The org-key mint console surface shipped as slice 17; nothing else pending on
-  the door.
+- [x] **16.later** The org-key mint console surface shipped as slice 17 (`/admin/gateway/keys`,
+  "Slice 17" below); nothing else pending on the door. Ticked 25 Sep 2026 (#202): the box said
+  it was done and was never ticked.
 
 ## Slice 17 — one identity across both doors
 
@@ -479,14 +490,14 @@ REST ignored a requested model and stored the deployment default. Investigation:
   at the model's list API price — a subscription seat's usage against the bill it displaced) and
   the spend reply a `seat` hint ("subscription" | "api"), from open-ai-gateway #51's per-window
   fields; absent on an older gateway. The desktop's Usage block reads them. #48.
-- [x] P5 agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
+- [x] P5 *(removed in P0-E, 20 Sep 2026)* agent lifecycle — create (nonce-deduped), update, delete(s), duplicate, search,
   avatars, the shipped host's no-ops kept as no-ops; groups refused readably. (`c8ee938`)
-- [x] P6 entry mutation — reactions, widget answers/dismissal, deletion, each with its
+- [x] P6 *(removed in P0-E, 20 Sep 2026)* entry mutation — reactions, widget answers/dismissal, deletion, each with its
   `updated`/`removed` SSE frame. (`c8ee938`)
-- [x] P7 — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
+- [x] P7 *(removed in P0-E, 20 Sep 2026)* — `GET /avatars/<id>` serves the stored bytes behind slim rosters; attachment
   commands refuse readably until the artifacts slice lands (they are its client surface).
   *(this commit)*
-- [x] P8 — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
+- [x] P8 *(removed in P0-E, 20 Sep 2026)* — `skillsCatalog` lists the curated plugins' own skills; sync status is real;
   publishing and routed-MCP execution refuse readably (a coworker's connections drive MCP on
   this server, from runs). *(this commit)*
 - [x] P9 automations — slice 6's schedules wearing the client's names; one scheduler, two
@@ -669,8 +680,13 @@ every record that sharing would otherwise break carry whose it is.
 - [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
-- [ ] Artifacts/uploads — parked on purpose; lands with or after the harness produces files worth
-  storing (design notes in GOAL.md).
+- [x] **Artifacts.** One store for what a run produces and what a person attaches: `POST
+  /artifacts` (a 25 MiB cap on that one route), `GET`/`DELETE /artifacts/{id}`, `GET
+  /artifacts/{id}/bytes`; bytes stored plainly beside plaintext payloads; a missing, deleted or
+  somebody else's artifact answers the same 404. Recipe runs store their screenshots there
+  (#118). (`cf0a512`, #117) What is still open is on the client side: which NativeChat surface
+  attaches or shows them has not been read from NativeChat's source
+  (`research/client-nativechat.md`, "Attachments").
 - [ ] stdio MCP servers inside a coworker's own container (the follow-up to HTTP-only).
 - [ ] Graph harness (the loop is linear today, `MAX_ROUNDS = 8`).
 - [ ] Redis — only after a measured hot query, per the standing decision.
@@ -696,3 +712,7 @@ every record that sharing would otherwise break carry whose it is.
   answered from text with made-up output). A coworker pinned to it cannot use its computer, and
   no policy or auto-review gate ever fires for it. xai/grok-4.6 emits real tool calls; pin a
   coworker there (slice 18) until this is resolved upstream.
+  *25 Sep 2026 (#197):* the shipped default (`DEFAULT_MODEL`, `.env.example`) is now
+  `xai/grok-4.6`, and `POST /models/probe` offers one tool and answers `toolCalls`, so the
+  console's Test tells a route that talks from one that can act. This box stays open until luna
+  itself is re-verified with a captured `tool_calls` response.

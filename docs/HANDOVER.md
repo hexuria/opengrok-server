@@ -1,156 +1,102 @@
 # Handover
 
 You are picking up OpenGrok in a fresh session. This page is the state of play; everything else
-is reference. Rewritten 2 Sep 2026 — previous versions:
-[`HANDOVER-9v-10.3.md`](HANDOVER-9v-10.3.md) (1 Sep, after 9.v / 10.3) and
-[`archive/handover-2026-08-29.md`](archive/handover-2026-08-29.md) (P0-era).
+is reference. Rewritten 25 Sep 2026 for the client served today. Previous versions:
+`git show d73042b:docs/HANDOVER.md` (last updated 6 Sep, the Grok Bot era),
+[`HANDOVER-9v-10.3.md`](HANDOVER-9v-10.3.md) (1 Sep) and
+[`archive/handover-2026-08-29.md`](archive/handover-2026-08-29.md) (P0 era).
 
 **Read [`../CLAUDE.md`](../CLAUDE.md) first** (it loads automatically), then this, then act.
+CLAUDE.md's client line and its "Three facts" #1 and #3 still describe the Grok Bot desktop
+client. Its non-negotiables stand as written, but for **which client, and how it connects**,
+this page and [`setup/nativechat.md`](setup/nativechat.md) are current. The pre-removal facts are
+kept in [`archive/seam-a-client-facts.md`](archive/seam-a-client-facts.md).
 
 ## Where this stands, in one paragraph
 
-The server is **real and serving**. Slices 1–18 are done (12.later included): auth and our own OAuth, the AG-UI
-endpoint, the durable harness, computers (local Docker + box.ascii.dev), connectors with a
-credential vault, the scheduler/monitor autonomy pair, the gateway port that boots the packaged
-desktop client (P2–P10 breadth), seam B transcribed, bot-keys, orgs/invites/credential accounts,
-the web console at `/console`, the consent model (per-machine policy, never-expiring cards,
-two-tier auto-review with a model judge), Claude Code through both doors (model + MCP, with
-card-driven AutoReview Ask), org gateway keys from the console, and per-coworker model pins
-that survive a resume. A typed Box Public API v1 client (`opengrok_box::ascii::Client`, shapes
-from [`box/`](box/README.md)) replaced the old single-file ASCII driver; `AsciiBoxes` is still
-the `Computer` adapter. Domain ownership is proven, not assumed: a console admin's claim admits
-nobody until its `_opengrok-verify` TXT record resolves, while the operator's shell still vouches
-directly; password reset rides Resend with a one-shot signed link (12.later). Hexuria's right-sidebar screen paints a live noVNC desktop from
-`getForeverBoxStatus.vncUrl`. **Slice 19 is done and merged (4 Sep 2026): a coworker can be shared.** A standing role reaches
-the model every turn; an owner marks a coworker `org`; two people hold one coworker without
-sharing a conversation, a gateway key, a pool or a permission card. Building it uncovered that
-**seam A authorised nothing per coworker** — every verb checked that the caller was somebody and
-none checked the coworker was theirs — which is now one gate before the dispatch. A dev instance
-runs on `:1447` when `scripts/serve.sh` was the last thing to touch the port — `gate.sh --smoke` kills
-whatever is there and leaves nothing behind, so after a local gate, `serve.sh` again before trusting the desktop.
-[`ROADMAP.md`](ROADMAP.md) is the tracker — a box is ticked only in the commit that makes it
-true. Unticked work is the `*.later` boxes and the Later bucket, not a missing slice.
+The server is **real and serving**, and its client is **NativeChat** (`hexuria/nativechat`, a
+native desktop app in Rust + GPUI). NativeChat talks to `POST /ag-ui` and the REST routes beside
+it; [`research/client-nativechat.md`](research/client-nativechat.md) maps every route the server
+mounts. The Grok Bot desktop client is discontinued. On **20 Sep 2026** P0-E deleted the two doors
+built for it: seam A (`POST /api/{method}`, `GET /events`) and seam B (ConnectRPC, its tonic
+mirror, `opengrok-proto`), about 20,500 lines (`ROADMAP.md`, Phase 0). Its host-settings verbs
+were re-homed first, at `GET/PUT /ag-ui/host-settings`. What exists: our own auth and OAuth, the
+AG-UI endpoint with streamed text and widgets, the durable harness (journal, suspension, stop,
+resume, crash recovery), computers (local Docker by default, box.ascii.dev with a key), connectors
+with a credential vault, schedules, monitors and webhook routines, the MCP door for Claude Code,
+orgs, invites and credential accounts, the web console at `/console`, the consent model (policy
+tiers, never-expiring cards, a model judge), per-coworker model pins and points limits, recipes,
+skills and workflows, site logins, reverse-exec to the person's own Mac, and one artifact store.
+[`ROADMAP.md`](ROADMAP.md) is the tracker. A box is ticked only in the commit that makes it true.
 
 ## How to stand it up
 
-[`setup/`](setup/README.md), in order: prerequisites → postgres → environment → running → gate
-→ desktop-client. `scripts/serve.sh` builds and (re)starts the dev server from `.env`;
-`scripts/gate.sh --smoke` is the merge gate, and CI runs the same script since the repo went public (1 Sep 2026).
+[`setup/`](setup/README.md), in order: postgres → environment → running → **first run** (the first
+admin, the gateway key, a real tool-calling turn) → gate → TLS → **NativeChat** (connect it, then
+the demo runbook: a chat, a card, the computer, a routine). `scripts/serve.sh` builds and
+(re)starts the dev server from `.env`. `scripts/gate.sh --smoke` is the merge gate, and CI runs the
+same script.
 
 ## Decisions already made — do not relitigate
 
-Recorded with their reasoning where they belong; overturn deliberately with the operator, never
+Recorded with their reasoning where they belong. Overturn deliberately with the operator, never
 by drift.
 
 | Decision | Where |
 |---|---|
 | Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
-| Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2 |
-| The client contract is transcribed, never invented; no vendored protobuf stubs | `CLAUDE.md` #1, #3 |
-| Every model call exits through open-ai-gateway; a pin is a route, not a key | `CLAUDE.md` #4 |
-| Port from the client's own mock (2 services, 18 methods), never the proto inventory | `PORT-PRIORITY.md` §3 |
+| Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2, `GOAL.md` stack |
+| The client contract is transcribed, never invented; no vendored generated stubs. For NativeChat that means a route's place in the contract is proven by the NativeChat file that calls it — the route map says which rows are still unread | `CLAUDE.md` #1, #3; `research/client-nativechat.md` |
+| Every model call exits through open-ai-gateway; a pin is a route, not a key. The shipped default route is `xai/grok-4.6`, chosen because it is on the record making tool calls | `CLAUDE.md` #4; `setup/environment.md` |
 | One consent model: the server decides, cards never expire, judge failure = ask | `AUTO-REVIEW.md` §0 |
-| Repo went public 1 Sep 2026 with the rights review still outstanding — transcription rule is harder, not softer | this page |
-| Redis only after a measured hot query; artifacts land with the harness's first real files | `ROADMAP.md` Later |
+| Repo went public 1 Sep 2026 with the rights review still outstanding — the transcription rule is harder, not softer | this page |
+| Redis only after a measured hot query | `ROADMAP.md` Later |
 | A coworker's computer is a seam (`Computer`), not a vendor. ASCII is one adapter over a typed v1 client; do not invent vendor shapes | `PLAN.md` §4.3, `research/sandbox-box-ascii-dev.md` |
 | Live site wins if `docs/box/` drifts; vendor pages are ASCII's, not ours | `box/README.md` |
-| The shell vouches, the console proves: a domain from `opengrok admin` admits signups at once; a console claim admits nothing until DNS says so. Verify is a live lookup on click, no poller | `opengrok-core/src/org.rs` module doc, `opengrok-server/src/domain_proof.rs` |
-| A coworker's spend is metered on a gateway key of its own, and its limits are three windows — rolling 5 hours, rolling 7 days, calendar month — evaluated by the server before each model call from the gateway's ledger; at a limit the turn is refused with a sentence that names the window and when it resets; a key that cannot be opened holds the turn rather than falling back to the deployment's key | [`plan-spend-policy.md`](plan-spend-policy.md), `opengrok-server/src/spend.rs` |
+| The shell vouches, the console proves: a domain from `opengrok admin` admits signups at once; a console claim admits nothing until DNS says so | `opengrok-core/src/org.rs` module doc, `opengrok-server/src/domain_proof.rs` |
+| The first org and admin are made from the operator's shell, never over HTTP: a fresh server has nobody to authorize an admin call | `crates/opengrok/src/admin.rs`, `setup/first-run.md` |
+| A coworker's spend is metered on a gateway key of its own, limited in **points** (one token at the gateway's reference price); a member's pool is the PAYER's; the server refuses at a limit with a sentence naming it; a key that cannot be opened holds the turn | [`plan-spend-policy.md`](plan-spend-policy.md), `opengrok-server/src/spend.rs`, `points.rs` |
+| Every model call the server makes is metered, including the auto-review judge — which needs a scope AND a key AND an actor | `opengrok-harness/src/review.rs` |
 | What a second replica must see is a row taken once with `delete … returning`; budgets and caches stay per replica | `opengrok-store/src/replica.rs`, `auth/budget.rs` |
+| Every surviving door takes a signed per-account token (or a coworker's bot key) and has no identity fallback to fail open into. The 5 Sep 2026 bug it closed — both ends of seam A failing open, each citing the other's fallback — is recorded in `git show d73042b:docs/HANDOVER.md` | `agui/routes.rs::principal_from_bearer` |
+| A refusal of somebody else's thing is a 404, never a 403: a person who may not use a coworker must not learn it exists | per route; the ownership checks in `agui/routes.rs` |
+| The schema is idempotent statements run on every boot under one advisory lock; a data-transforming migration follows the rules in `setup/postgres.md` | `opengrok-store/src/migrations.rs` |
 | A PR is based on `main`, never stacked on a branch about to merge — GitHub closes a PR whose base branch is deleted and it cannot be reopened | this page, 2 Sep 2026 |
-| Sharing lets somebody TALK to a coworker; it is never a write grant. The gate asks two questions — `may_use` (owner or org-shared) and `owns` (owner only) — and the two lists fail in opposite directions on purpose, so only the ownership one has a drift test | `gateway/routes.rs`, `tests/against_constant_verbs.rs` |
-| A refusal is the verb's OWN not-found answer, per verb — never 403, and never a uniform 404. A 404 where the verb answers `null` for an unknown id is the same disclosure one step removed | `gateway/routes.rs::never_heard_of_it` |
-| A live frame carries WHO IT IS FOR, stamped or not. Per-person rosters needed per-person SEQUENCES, and that cost a map key (`counter_key`), not a replica-contract change: the `replicaKey` on the wire is unchanged and each account sees a contiguous run under it. A transcript frame takes the ENTRY's account, never the coworker's viewers — a shared coworker has one transcript per person | `gateway/live.rs`, #63 |
-| ~~A seam-A request with no identity is REFUSED (`account_identity_required`, 401), never served as `OG_GATEWAY_EMAIL`~~ — **removed 20 Sep 2026 with seam A.** The rule and its `Caller` type are gone with the door they guarded; `OG_GATEWAY_EMAIL` and `OG_GATEWAY_IDENTITY_FALLBACK` are read by nothing. Kept here because the bug it closed is worth remembering: on 5 Sep 2026 both ends failed open, each citing the other's fallback, and a headerless connection read and wrote as the admin. Every surviving door takes a signed per-account token and has no fallback to fail open into | *(deleted)* |
-| Points: a member's pool is the PAYER's — the person talking, not the hirer. Three caches key on three different things on purpose (pair, pair, payer-alone) and harmonising them reintroduces the bug | `opengrok-server/src/spend.rs` |
-| Every model call the server makes is metered, including the auto-review judge — which needs a scope AND a key AND an actor; any two of the three is a silent half-fix | `opengrok-harness/src/review.rs` |
 
-## What's left (do not relitigate "are we done")
+## What's left
 
-In the order a fresh session should take them. Detail and the tick-rule live in [`ROADMAP.md`](ROADMAP.md). There is no missing slice.
+[`ROADMAP.md`](ROADMAP.md) holds the unticked boxes: the `*.later` boxes and the Later bucket.
+The open issues on `hexuria/opengrok-server` hold the rest, many of them filed on 25 Sep 2026 by a
+demo-readiness audit. Take them from the tracker, not from a list copied here, which would go
+stale the day it was written. Three things that are easy to lose:
 
-**The queue is empty as of 6 Sep 2026.** Eight pull requests merged in order, each verified the
-same way — local clean-env gate, CI on the branch, CI on `main` after the merge, and a live
-rebuild of `:1447` — then `main` was deployed and its schema checked in the database:
+- **The NativeChat route map's client column.** Every `*unverified*` row in
+  [`research/client-nativechat.md`](research/client-nativechat.md) is waiting on somebody with
+  `hexuria/nativechat` checked out. Until then, a route with no NativeChat file behind it may be
+  used or unused, and nobody can say which.
+- **Reverse-exec findings (#147).** Four of five land in NativeChat. The one server-side stage is
+  small and needs no decision.
+- **The points meter's three gaps.** No ceiling above a member. A limit can be overshot by one
+  turn. Turns inside the 15 s freshness window share one reading. They are recorded in
+  [`plan-spend-policy.md`](plan-spend-policy.md), and the last two want a reservation design
+  agreed with the gateway session before any code.
 
-| | What it was | Merge |
-|---|---|---|
-| #57 | the points meter counted everything except the auto-review judge | `f075711` |
-| #54 | two ways the gate blamed the code for something else | `c3f3d88` |
-| #56 | six handlers asked who the deployment was, not who was asking | `a1e28aa` |
-| #52 | visibility, and a consent record that says whose yes it is | `973916a` |
-| #53 | a gateway key per person, not per coworker | `97db9ed` |
-| #55 | a conversation each — and the door that was never locked | `b54ea4e` |
-| #60 | a live frame goes to the stream it is for | `c1555b4` |
-| #63 | identity is asked for, never assumed; per-account sequences (closes #59); the mock catalogue, off by default | `132f45b` |
-
-The full account — what each was for, what broke, what was found reviewing it, and the wrong
-turns kept in rather than tidied away — is in [`archive/pr-queue-2026-09-04.md`](archive/pr-queue-2026-09-04.md).
-Read that before re-opening any of it.
-
-**Two issues are open and neither is guessed at.** Each was investigated to the point where the
-next person can act, and deliberately not started:
-
-- **#61 — chat renders in one burst.** The app's answer arrives all at once. The bubble is
-  already marked `"streaming": true` and the two calls that would grow it already exist and run
-  ONCE (`agui/resume.rs`). The journal guarantee is per-ROUND and about the server's own
-  ordering, so streaming does not weaken it — and the comment defending the buffering describes a
-  property the code does not have. **A restart mid-answer leaves an empty bubble marked
-  "typing" forever**; nothing anywhere flips that flag off. That last part is broken today,
-  independent of streaming, and is the smallest useful thing to fix first.
-- ~~**#59 — the roster stream sends the deployment's roster to everybody.**~~ Closed by #63.
-  The entry that stood here said the fix needed per-account sequences and that those were a
-  replica-contract change. Half right: they were needed, and they cost a map key in the server's
-  own counter, not a contract change. Kept so the next reader does not re-derive the wrong half.
-- **Three gaps in the points meter**, recorded in the plan file: no ceiling above a member
-  (`PointsScope` has only `Member` and `Coworker`); a limit can be overshot by one turn (the
-  meter is read before the call and never reconciled after); and turns inside the 15s freshness
-  window share one reading. The last two are one problem and want a reservation design agreed
-  with the gateway session before any code.
-
-**Operational things that each cost time this session:**
+**Operational things that each cost time:**
 
 - **Check which `gh` account is active before diagnosing a merge failure.** A permissions error
-  on merge reads like branch protection and was neither — the active account had changed to one
-  with `pull` only. Reads keep working, so it stays invisible until a write.
-- **`git merge-tree` over every pair of open branches before choosing a merge order.** It said
-  every collision between the six was `docs/ROADMAP.md` and nothing else, and that held exactly.
-- **Identical patch-ids dissolve on their own.** Two branches carried a copy of #54; merging #54
-  first made both vanish with nobody editing anything. Verified with `git cherry` before and
-  after rather than assumed.
-
-1. **Rooms** — [`plan-rooms.md`](plan-rooms.md): the sharing verbs answer in the client's
-   shapes (#35) and groups are built (a coworker with members, the client's own orchestrator
-   transcribed, `gateway/group.rs`). Left: shared rooms, parked until groups have been used.
-   Note that slice 19 shared a COWORKER, which is not a room: one coworker, several people, a
-   conversation each. Rooms are several coworkers in one conversation.
-2. **`17.later`** — SSO/SCIM onto the gateway's `oidc_subject` hook; self-service key rotation;
-   per-key admin scopes so a partner credential is not a full gateway admin.
-3. **`18.later`** — Seam B `UpdateGrokBotAgent` has no repin. Desktop create/update model field +
-   picker (console already has one). Roster `description = model` habit. `auto_review_model` is
-   a separate deployment pin. Per-coworker limits are **points** — one token at the gateway's reference price, so seats
-   and API keys count the same — monthly per member (the admin's pool) and per coworker (the
-   owner's cap, at most the pool) with an optional daily brake; decided 3 Sep 2026, design in
-   [`plan-spend-policy.md`](plan-spend-policy.md), built as 18.points with gateway #52/#53.
-   The USD windows' limits are retired. Templates carry points. As of slice 19 the pool is the
-   PAYER's, not the hirer's. Left: drop the `spend_limit` table after a month; retire
-   `/coworkers/{id}/spend` once the desktop modal no longer reads it; org-wide per-model budgets
-   and "apply a template edit to its coworkers" follow — and the three meter gaps above.
-4. **Later bucket** — `goal`/`plan`/`review` parked until the packaged app sends a `mode`
-   (`verification/plan-mode-wire/`); passkey step-up for reverse-exec; mem0; artifacts; stdio
-   MCP inside the box; graph harness; Redis after a measured hot query. Rate-limit budgets are
-   the one thing that stays per process when a second replica appears (by design — a limit that
-   costs a database write per unauthenticated request defeats itself); a shared limiter is Redis
-   work, after that measured hot query. ASCII endpoints not in the client yet wait until a
-   coworker path needs them.
-5. **P11 is not unfinished work** — teach recording and memories sit on no path a user takes;
-   upstream deleted adjacent features in 0.30. Sharing is now `plan-rooms.md` §3.
-
-The desktop app you verify against is **`/Applications/Open Grok.app`** (`bot.opengrok.app`). Do not run `just install` in the client repo — that justfile still writes `/Applications/Grok-0.27.app`. Install in place: `rsync -a --delete "dist/Open Grok.app/" "/Applications/Open Grok.app/"`. `setup/desktop-client.md`.
+  on merge reads like branch protection. Reads keep working, so it stays invisible until a write.
+- **`git merge-tree` over every pair of open branches before choosing a merge order.**
+- **The dev Postgres has no volume.** A Docker restart wipes every database on it. Keep demo data
+  on the durable container in [`setup/postgres.md`](setup/postgres.md), and back it up.
+- **A local `gate.sh --smoke` kills whatever holds its port.** Run it on `OG_PORT=1449` when a live
+  server holds `1447`, and `scripts/serve.sh` again afterwards before trusting the client.
 
 ## Blocked on the operator, not on code
 
-The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding), and gpt-5.6-luna is on an upstream spending limit (5.5 / 5.4-mini work through the same gateway). GitHub Actions CI runs `scripts/gate.sh --smoke` itself since the repo went public. Details at the bottom of [`ROADMAP.md`](ROADMAP.md).
+The rights review is **overdue** (repo public 1 Sep 2026 with it still outstanding).
+`gpt-5.6-luna` is on an upstream spending limit and makes no tool calls through the gateway. It
+is no longer the shipped default (`xai/grok-4.6` is), but coworkers already pinned to it stay
+there until repinned. Details are at the bottom of [`ROADMAP.md`](ROADMAP.md).
 
 ## The map
 
@@ -160,13 +106,15 @@ The rights review is **overdue** (repo public 1 Sep 2026 with it still outstandi
 | [`DIAGRAMS.md`](DIAGRAMS.md) №1 | the idea in five minutes of pictures |
 | [`WHY.md`](WHY.md) | what we built before and why a working app wasn't enough |
 | [`ROADMAP.md`](ROADMAP.md) | what is done (with commits) and what is left |
-| [`setup/`](setup/README.md) | standing the server up, end to end |
+| [`setup/`](setup/README.md) | standing the server up, end to end, and connecting NativeChat |
+| [`research/client-nativechat.md`](research/client-nativechat.md) | every route, what it answers, and who is on record calling it |
 | [`AUTO-REVIEW.md`](AUTO-REVIEW.md) | the consent model and the judge |
-| [`research/`](research/README.md) | the client, the gateway, the sandbox, connectors, the prior product |
+| [`research/`](research/README.md) | the gateway, the sandbox, connectors, the prior product, and the removed client's record |
 | [`box/`](box/README.md) | local copy of box.ascii.dev Public API v1 (vendor pages; live site wins) |
 | [`verification/`](verification/) | the evidence behind the ticked boxes |
 
-Neighbouring repositories, all local: `/Volumes/goldcoders/OSS/opengrok` (the client we serve),
+Neighbouring repositories: `hexuria/nativechat` (the client we serve),
 `/Volumes/goldcoders/OSS/open-ai-gateway` (the model door), and
 `/Volumes/goldcoders/projects/opensesame/opensesame` (the prior product; if a lesson doc
-contradicts that repo, the repo is newer).
+contradicts that repo, the repo is newer). `/Volumes/goldcoders/OSS/opengrok` is the removed Grok
+Bot client, kept as the source of the transcription record.

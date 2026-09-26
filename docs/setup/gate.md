@@ -26,8 +26,8 @@ OG_PORT=1449 OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate \
   with `for update skip locked`, so a second opengrok on the same database races the smoke
   servers for schedule/monitor firings. The gate refuses to start if another opengrok is
   running on its database.
-- **The fixed side databases** `opengrok_s17_gate`/`_s18_gate`/`_s19_gate` (identity, account
-  admin, web console) — creation commands in [`postgres.md`](postgres.md).
+- **The fixed side databases** `opengrok_s17_gate`/`_s18_gate`/`_s19_gate`/`_s21_gate` (identity,
+  account admin, web console, org keys) — creation commands in [`postgres.md`](postgres.md).
 - **The `oag-dev-postgres-1` container specifically**: several smokes `docker exec` into it by
   name, so a Postgres on another container or port fails with "cannot reach Postgres" even
   when the URL is right.

@@ -83,13 +83,27 @@ function TestButton({ model }: { model: string }) {
       >
         {probe.isPending ? "Testing…" : "Test"}
       </button>
-      {result ? (
-        <span className={result.ok ? "ok" : "error"}>
-          {result.ok ? `answered as ${result.served}` : result.detail}
-        </span>
-      ) : null}
+      {result ? <ProbeVerdict result={result} /> : null}
     </>
   );
+}
+
+/**
+ * A route that answers but never calls the offered tool is NOT a green result: `gpt-5.6-luna`
+ * passed the old text-only probe while a coworker on it could not use its computer, so no consent
+ * card ever fired. `toolCalls` absent (an older server) stays the plain answer.
+ */
+function ProbeVerdict({ result }: { result: ProbeResult }) {
+  if (!result.ok) return <span className="error">{result.detail}</span>;
+  if (result.toolCalls === false) {
+    return (
+      <span className="error">
+        answered as {result.served}, but did not call the offered tool — a coworker on this route
+        may not be able to use its computer
+      </span>
+    );
+  }
+  return <span className="ok">answered as {result.served}</span>;
 }
 
 /**
