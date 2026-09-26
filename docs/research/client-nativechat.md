@@ -61,6 +61,7 @@ A turn, its replay, its queue, stopping and hiding it.
 | `/ag-ui/runs/{run_id}` | GET | `agui/routes.rs:890` | the run replayed from the log: JSON with `status` (`finished`, `awaiting-approval`, …), `pending` when suspended, and its events; 404 if not yours | *unverified* |
 | `/ag-ui/runs/{run_id}/hide` | POST | `agui/routes.rs:892` | 204; 404 "no such run" | *unverified* |
 | `/ag-ui/runs/{run_id}/stop` | POST | `agui/routes.rs:891` | 404 "no such run" if not yours; otherwise see the mount | *unverified* |
+| `/ag-ui/threads` | GET | `agui/routes.rs:911` | JSON array of threads, newest first (`?coworkerId=&limit=&before=&beforeThreadId=`); 401 `{error}`; 400 `{error}` for `beforeThreadId` without `before` | not yet — NativeChat issue filed after merge |
 | `/ag-ui/threads/{thread_id}` | GET | `agui/routes.rs:893` | the thread replayed from the log (`?limit=&events=`); 404 "no such thread" | `?events=true` on a cold load — `docs/archive/findings-og139.md`. NativeChat file: *unverified* |
 | `/ag-ui/threads/{thread_id}/pending` | GET POST | `agui/pending.rs:49` | see the mount | *unverified* |
 | `/ag-ui/threads/{thread_id}/pending/{id}` | PATCH DELETE | `agui/pending.rs:50` | DELETE: the entry marked `canceled`; otherwise see the mount | *unverified* |
