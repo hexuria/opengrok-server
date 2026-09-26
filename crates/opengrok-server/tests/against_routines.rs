@@ -898,3 +898,79 @@ async fn the_hook_url_prefers_the_address_this_host_advertises() {
         "{created}"
     );
 }
+
+/// The row this routine is on in `GET /schedules`, polled until `done` says its last run is
+/// where the test needs it. `lastRun` is read from the run journal, so it moves on its own as
+/// the run does — which is exactly what a client polling this listing sees.
+async fn wait_for_last_run(h: &Harness, id: &str, done: impl Fn(&Value) -> bool) -> Value {
+    let mut row = Value::Null;
+    for _ in 0..60 {
+        let (status, rows) = h.get("/schedules").await;
+        assert_eq!(status, 200, "{rows}");
+        row = rows
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|row| row["id"] == json!(id))
+            .cloned()
+            .expect("the routine");
+        if done(&row["lastRun"]) {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("the routine's lastRun never settled: {row}");
+}
+
+/// A ROUTINE THAT RUNS AND TELLS NOBODY IS A ROUTINE NOBODY TRUSTS (#177). Its result used to be
+/// written as a seam-A transcript entry that no surviving route reads; the person saw nothing
+/// while the run spent their points. The routine's own row now says what its newest run came to.
+#[tokio::test]
+async fn a_fired_routine_reports_its_last_run_on_its_row() {
+    let database_url = database_or_skip!();
+    let email = format!("routine-last-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = advertising(&database_url, &email).await;
+    let coworker = h.hire().await;
+    let (id, created) = h.webhook_routine(&coworker).await;
+    assert_eq!(
+        created["lastRun"],
+        Value::Null,
+        "a routine that never ran has no last run, and `null` says so: {created}"
+    );
+    let key = created["webhook"]["key"].as_str().expect("key").to_string();
+    let hook = hook_id_of(created["webhook"]["url"].as_str().expect("url")).to_string();
+
+    assert_eq!(h.fire_hook(&hook, Some(&key)).await, 202);
+    let row = wait_for_last_run(&h, &id, |last| last["status"] == json!("finished")).await;
+    let last = &row["lastRun"];
+    let run_id = last["runId"].as_str().expect("a run id");
+    assert!(!run_id.is_empty(), "{row}");
+    assert!(last["finishedAtMs"].is_i64(), "{row}");
+    let summary = last["summary"].as_str().expect("a summary");
+    assert!(
+        summary.starts_with("Routine Inbox ran: "),
+        "the summary opens with the routine's name, so it says why the coworker spoke: {summary}"
+    );
+    assert!(
+        summary.contains("a webhook arrived; report in"),
+        "and carries the head of the answer (the echo door repeats its prompt): {summary}"
+    );
+
+    assert_eq!(
+        h.store
+            .run_fired_by(&id, &RunId::from_stored(run_id))
+            .await
+            .expect("origin"),
+        Some(opengrok_store::FiredBy::Webhook),
+        "the routine's own log says it fired this run, and how"
+    );
+
+    // The whole run is AG-UI history under the routine's own thread, the same frames a chat
+    // turn replays — `lastRun.runId` is the handle a client opens it by.
+    let (status, thread) = h.get(&format!("/ag-ui/threads/{id}")).await;
+    assert_eq!(status, 200, "{thread}");
+    assert!(
+        thread.to_string().contains(run_id),
+        "the routine's thread replays the run lastRun names: {thread}"
+    );
+}

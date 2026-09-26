@@ -1293,8 +1293,11 @@ pub(crate) async fn resume_settled(
 ///
 /// NAMED BY THE CARD'S CALL when it has one. The first parked run of the coworker is whichever
 /// moved least recently — often another conversation's — and answering into it left the card's
-/// own run parked behind a card that already read as answered. `None` is for a card written
-/// before cards carried their call, and takes the first, as every card once did.
+/// own run parked behind a card that already read as answered. A coworker's chat turn and one of
+/// its routines can both be parked on a form at once, since a routine mints its card like a chat
+/// turn does (#177). A stacked form's call is among its run's `parked_calls`, so it still finds
+/// that run. `None` is for a card written before cards carried their call, and takes the first,
+/// as every card once did.
 pub(crate) async fn pending_suspended(
     state: &HostState,
     account_id: &AccountId,
@@ -1314,6 +1317,7 @@ pub(crate) async fn pending_suspended(
         .awaiting_approval(account_id)
         .await
         .ok()?;
+    let want = call_id.filter(|id| !id.is_empty());
     for run_id in run_ids {
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
@@ -1327,7 +1331,7 @@ pub(crate) async fn pending_suspended(
         if pending.reason != reason {
             continue;
         }
-        if let Some(want) = call_id.filter(|id| !id.is_empty())
+        if let Some(want) = want
             && !resume::parked_calls(&run).contains(want)
         {
             continue;

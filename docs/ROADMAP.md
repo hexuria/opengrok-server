@@ -45,7 +45,11 @@ POST. This slice makes the server start runs itself.
 - [x] **6a.4** Endpoints: `POST/GET /schedules`, pause/resume, delete — ownership as 404, same as
   runs. *(this commit)*
 - [x] **6b.1** `monitor` aggregate + projection: an event-type matcher over our own `events` table,
-  cursor-driven, no new infra. *(this commit)*
+  cursor-driven, no new infra. *(this commit)* **Scoped to its owner since #179:** the log is every
+  tenant's, so an event fires a monitor only when its stream resolves to the monitor's account
+  (`PgStore::stream_owner` carries the prefix table; an org's or unowned stream matches nobody).
+  `watches` is checked against `opengrok_core::monitor::WATCHABLE` (422 otherwise), and a monitor
+  has at most `autonomy::MAX_RUNS_IN_FLIGHT` runs working at once. `tests/against_monitors.rs`.
 - [x] **6b.2** The loop guard: fired runs are stamped with their monitor, and a monitor never
   matches events from its own firings. *(this commit)*
 - [x] **6b.3** Endpoints: `/monitors`, same shape as `/schedules`. *(this commit)*
@@ -511,10 +515,19 @@ REST ignored a requested model and stored the deployment default. Investigation:
   is the pane's array with `name`, `trigger`, `schedule` (5-field on the way out),
   `triggerDescription` (a sentence), `nextRunAt`, `lastRunAt`, `runs` from `run_view` by thread.
   Non-cron triggers (slack, git, …) are refused 400 "only schedules are supported on this
-  server". A finished routine run posts into the coworker's chat as a message from the coworker
-  and refreshes the pane over `agents-automation`; the run keeps its own thread for history. The
-  schedule sweep now takes the gateway for that. The pre-pane body and keys still work.
-  `tests/against_routines.rs`. *(this commit)*
+  server". ~~A finished routine run posts into the coworker's chat as a message from the coworker
+  and refreshes the pane over `agents-automation`~~ — **no longer true since P0-E** deleted seam A's
+  transcript reader and the `agents-automation` frame: the line was written and never shown (#177).
+  **Now:** every `GET /schedules` row carries `lastRun {runId, status, startedAtMs, finishedAtMs,
+  summary}`, read from the run journal on each listing, so it follows a run that stopped on a card
+  and finished later ("Routine Inbox ran: …", "… is waiting for you: …", "… failed: …"). There is
+  no push: a client polls `GET /schedules` and compares `lastRun.runId`/`status`, and opens the run
+  at `GET /ag-ui/threads/{scheduleId}`. A routine's (or monitor's) form card is minted like a chat
+  turn's, so `POST /ag-ui/user-form/submit` answers it, and `GET /ag-ui/approvals` rows carry
+  `coworkerId` and `origin` (`schedule|webhook|monitor|chat`, read from the firing's own log, never
+  from the thread id). Rendering `lastRun` in the coworker's chat is NativeChat's half. The run
+  keeps its own thread for history. The pre-pane body and keys still work.
+  `tests/against_routines.rs`, `tests/against_user_form.rs`. *(this commit)*
 - [x] P10 — the box control surface over what the deployment has: null (the validated
   truth) with no provider, a status record with one, lifecycle verbs accepted as no-ops so a
   click is not an error banner. Real assignment stays slice 4's machinery. *(this commit)*
