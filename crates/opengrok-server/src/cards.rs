@@ -283,7 +283,7 @@ fn screen_summary(arguments: &Value) -> String {
 /// judge's own and as coarse: a secret in the middle of a sentence still shows.
 fn shown(text: &str, max: usize) -> String {
     if opengrok_tools::looks_like_a_secret(text) {
-        "«redacted»".to_string()
+        opengrok_tools::REDACTED.to_string()
     } else {
         clip(text, max)
     }

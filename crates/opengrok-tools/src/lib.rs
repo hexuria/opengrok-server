@@ -17,9 +17,9 @@
 
 pub mod review;
 pub use review::{
-    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, JudgeFailure, Outcome, REVIEW_ASK_REASON,
-    ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict, ask_first_reason, combine,
-    looks_like_a_secret, redact_arguments,
+    AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, JudgeFailure, Outcome, REDACTED,
+    REVIEW_ASK_REASON, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict,
+    ask_first_reason, combine, looks_like_a_secret, redact_arguments,
 };
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
@@ -1955,7 +1955,9 @@ impl Executor {
                     call_id,
                     format!(
                         "{}. The recipe may have played part way: look at the screen before \
-                         doing anything else, and do not run it again",
+                         doing anything else, and do not run it again. This bot's screen stays \
+                         reserved for up to a minute while the interrupted run's claim runs out, \
+                         so another recipe asked for in that time is refused",
                         describe(error)
                     ),
                 )
@@ -1963,7 +1965,8 @@ impl Executor {
             }
             // A claimed row is ended as a failed run that says why, as the page does; left to its
             // lease it would read "interrupted", which is not what happened. An interrupted play
-            // (above) is left to lapse: part way is all that is known of it.
+            // (above) is left to lapse, because part way is all that is known of it; the lapse
+            // holds the bot for up to RUN_LEASE_MS, and the model is told so.
             Err(error) => {
                 let why = describe(error);
                 if claimed.is_some() {

@@ -798,16 +798,16 @@ impl GuardedDoor {
                 *known_id == key_id && now_ms() - *at_ms <= self.still_known_ms
             })
         {
-            // Already probed and already recorded on the row: nothing new to learn or write.
+            // Already probed, and recorded on the row by this replica: the entry is only made
+            // after that write succeeded, so nothing new to learn or write.
             return Some(STILL_KNOWN_REASON.to_string());
         }
+        let mut still_known = false;
         let reason = if unauthorised {
             match self.retire_if_forgotten(coworker, payer, &key_id).await {
                 KeyFate::Retired => return None,
                 KeyFate::StillKnown => {
-                    if let Ok(mut known) = self.still_known.lock() {
-                        known.insert(pair.clone(), (key_id.clone(), now_ms()));
-                    }
+                    still_known = true;
                     STILL_KNOWN_REASON.to_string()
                 }
                 KeyFate::Unchecked => "the gateway refuses it, and whether it was lost there or \
@@ -829,6 +829,13 @@ impl GuardedDoor {
             .await
         {
             tracing::error!(%error, coworker = %coworker.as_str(), "points guard: the key's refusal could not be recorded for the console");
+        } else if still_known && let Ok(mut known) = self.still_known.lock() {
+            // Remembered only once the row says so: a failed write must be retried by the next
+            // 401, or the console keeps reading "metered" for the whole window. Stale entries go
+            // on the way in, so a pair whose key never serves again does not stay forever.
+            let now = now_ms();
+            known.retain(|_, (_, at_ms)| now - *at_ms <= self.still_known_ms);
+            known.insert(pair.clone(), (key_id.clone(), now));
         }
         if let Ok(mut cleared) = self.served_cleared.lock() {
             cleared.remove(&pair);

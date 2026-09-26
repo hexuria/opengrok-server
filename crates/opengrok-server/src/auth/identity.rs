@@ -206,7 +206,8 @@ async fn do_signup(
         tracing::error!(
             %error,
             org = %org_id.as_str(),
-            code = %req.code,
+            // Never the code: with an address on the org's domain it is a working credential, and
+            // the org stream's InviteRedeemed already ties this account to it.
             account = %account_id.as_str(),
             "signup: the invite was spent but the account could not be created"
         );
@@ -284,7 +285,8 @@ pub async fn redeem_invite(
                 })?;
             }
             Err(error) => {
-                tracing::error!(%error, org = %org_id.as_str(), code, "signup: the invite could not be redeemed");
+                // Not the code: on this path it may still be open.
+                tracing::error!(%error, org = %org_id.as_str(), "signup: the invite could not be redeemed");
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "the invite could not be redeemed, and it may have been used; ask your admin \

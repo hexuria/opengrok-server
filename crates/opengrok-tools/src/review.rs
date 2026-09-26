@@ -264,7 +264,7 @@ fn redact_value(value: &Value, key: Option<&str>) -> Value {
             .iter()
             .any(|fragment| lower.contains(fragment))
         {
-            return Value::String("«redacted»".to_string());
+            return Value::String(REDACTED.to_string());
         }
     }
     match value {
@@ -276,13 +276,17 @@ fn redact_value(value: &Value, key: Option<&str>) -> Value {
         ),
         Value::Array(items) => Value::Array(items.iter().map(|v| redact_value(v, None)).collect()),
         Value::String(text) => Value::String(if looks_like_a_secret(text) {
-            "«redacted»".to_string()
+            REDACTED.to_string()
         } else {
             clip(text, VALUE_CLIP)
         }),
         other => other.clone(),
     }
 }
+
+/// What a secret-looking value is shown as, on a judge's prompt and on a card alike: one word, so
+/// the two cannot drift into saying different things about the same hidden value.
+pub const REDACTED: &str = "«redacted»";
 
 /// A bearer token or key-shaped string: one long run of token characters with no spaces, or a
 /// known key prefix. Deliberately coarse — a false positive hides a value from the judge (it asks),
