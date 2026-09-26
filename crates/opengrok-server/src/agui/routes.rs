@@ -908,6 +908,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
+        .route("/ag-ui/threads", get(list_threads))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
         .route(
@@ -3978,6 +3979,112 @@ pub async fn replay_thread(
         }
     }
     Json(body).into_response()
+}
+
+/// The most conversations one page of `GET /ag-ui/threads` holds, and how many when unasked.
+/// A row is a handful of fields, so the cap is about a sidebar, not about bytes.
+const THREAD_LIST_MAX: i64 = 100;
+const THREAD_LIST_DEFAULT: i64 = 20;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadListQuery {
+    pub coworker_id: Option<String>,
+    pub limit: Option<i64>,
+    /// The keyset cursor: the last row's `updatedAtMs` and `threadId`. A page boundary can fall
+    /// inside one millisecond, so the time alone would skip or repeat the threads that share it.
+    pub before: Option<i64>,
+    pub before_thread_id: Option<String>,
+}
+
+/// One conversation in the list. `coworkerId` and `title` are `null`, never absent, when there
+/// is none — a client that has to branch on which fields arrived will get the branch wrong.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadListRow {
+    thread_id: String,
+    coworker_id: Option<String>,
+    origin: &'static str,
+    title: Option<String>,
+    last_run_id: String,
+    last_status: String,
+    updated_at_ms: i64,
+}
+
+/// The caller's conversations, newest first — `GET /ag-ui/threads?coworkerId=&limit=&before=&beforeThreadId=`.
+///
+/// WITHOUT THIS A CLIENT'S OWN COPY IS THE ONLY INDEX. `GET /ag-ui/threads/{id}` answers whoever
+/// holds an id, and nothing handed the ids out, so a fresh device signed in to no history (#230).
+///
+/// A `401 {error}` rather than `replay_thread`'s 404: there is no id here to protect, and a sidebar
+/// that reads "not found" for "signed out" never asks the person to sign in. A bot key is refused
+/// like any other non-session bearer; turns taken with one are the minter's and list under them.
+/// Origin comes from the caller's own routine rows, so a routine deleted since reads `chat`.
+pub async fn list_threads(
+    State(state): State<AgUiState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<ThreadListQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return unauthorized("sign in first");
+    };
+    // Answering page one would send a pager round the same page forever.
+    if query.before.is_none() && query.before_thread_id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "beforeThreadId needs before" })),
+        )
+            .into_response();
+    }
+    let limit = query
+        .limit
+        .unwrap_or(THREAD_LIST_DEFAULT)
+        .clamp(1, THREAD_LIST_MAX);
+    let coworker = query.coworker_id.map(CoworkerId::from_stored);
+    let before = query
+        .before
+        .map(|at_ms| (at_ms, query.before_thread_id.as_deref()));
+    let threads = match state
+        .auth
+        .store
+        .threads_owned_by(
+            &account_id,
+            coworker.as_ref(),
+            before,
+            crate::mcp_door::MCP_AUDIT_THREAD_PREFIX,
+            limit,
+        )
+        .await
+    {
+        Ok(threads) => threads,
+        Err(error) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        }
+    };
+    let rows: Vec<ThreadListRow> = threads
+        .into_iter()
+        .map(|thread| {
+            let named = thread
+                .routine
+                .as_ref()
+                .map(|(_, name)| name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            ThreadListRow {
+                origin: origin_word(thread.routine.as_ref().map(|(by, _)| *by)),
+                title: named.or_else(|| {
+                    super::history::title_of(thread.first_prompt.as_deref().unwrap_or_default())
+                }),
+                thread_id: thread.thread_id,
+                coworker_id: thread.coworker_id.map(|id| id.as_str().to_string()),
+                last_run_id: thread.last_run_id.as_str().to_string(),
+                last_status: thread.last_status,
+                updated_at_ms: thread.updated_at_ms,
+            }
+        })
+        .collect();
+    // An ARRAY, always: no history is an answer, and a client must be able to paint it.
+    Json(rows).into_response()
 }
 
 /// Hide a turn from every client of the account that owns it.

@@ -484,6 +484,24 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
     events
 }
 
+/// A conversation's title: the first line of the first thing the person said in it, by the same
+/// rule `with_prompt_frames` draws bubbles by — a `user` message with words — so a list never
+/// names a thread after something its transcript does not show.
+pub(crate) fn title_of(prompt: &[Value]) -> Option<String> {
+    prompt
+        .iter()
+        .filter_map(|value| serde_json::from_value::<Message>(value.clone()).ok())
+        .filter(|message| message.role == "user")
+        .find_map(|message| {
+            let line = message.content?.trim().lines().next()?.trim().to_string();
+            (!line.is_empty()).then(|| line.chars().take(TITLE_MAX_CHARS).collect())
+        })
+}
+
+/// Long enough to tell conversations apart in a sidebar, short enough that a pasted document
+/// does not become a row.
+const TITLE_MAX_CHARS: usize = 200;
+
 /// The id a routine's journaled instruction goes under: the run's own, so it is unique and says
 /// where it came from.
 pub(crate) fn routine_prompt(run_id: &RunId, instruction: &str) -> Vec<Value> {
