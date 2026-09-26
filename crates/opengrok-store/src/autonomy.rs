@@ -365,9 +365,8 @@ impl PgStore {
             .execute(&mut *tx)
             .await?;
 
-            // The loop guard's memory, written with the event that creates the fact. If the
-            // firing is recorded at all, the exclusion exists — there is no window in which a
-            // monitor could see its own run.
+            // The loop guard's memory, written with the event that creates the fact: if the firing
+            // is recorded, the exclusion exists, and a monitor can never see its own run.
             if let MonitorEvent::Fired { run_id, at_ms, .. } = event {
                 sqlx::query(
                     "insert into monitor_firing (monitor_id, run_id, fired_at_ms)
@@ -395,6 +394,7 @@ impl PgStore {
                    (id, account_id, coworker_id, watches, prompt, active, updated_at_ms)
                  values ($1, $2, $3, $4, $5, $6, $7)
                  on conflict (id) do update set
+                   coworker_id = excluded.coworker_id,
                    watches = excluded.watches,
                    prompt = excluded.prompt,
                    active = excluded.active,

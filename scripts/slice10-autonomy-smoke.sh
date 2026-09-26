@@ -190,6 +190,36 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/monitors" \
 [ "$code" = "422" ] || fail "watching monitor-fired answered $code, expected 422"
 ok "the cross-monitor cascade cannot be configured"
 
+echo "10b. edit a monitor, run it now while paused, and its history lists it"
+# Watching something this smoke never causes, so the only firing is the one pressed by hand.
+quiet=$(curl -fsS -X POST "$BASE/monitors" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' \
+  -d "{\"coworkerId\":\"$cw\",\"watches\":\"connection-disconnected\",\"prompt\":\"reconnect it\"}" | jq -r '.id')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH "$BASE/monitors/$quiet" \
+  -H "authorization: Bearer $token" -H 'content-type: application/json' -d '{"watches":"monitor-fired"}')
+[ "$code" = "422" ] || fail "an edit to watch monitor-fired answered $code, expected 422"
+edited=$(curl -fsS -X PATCH "$BASE/monitors/$quiet" -H "authorization: Bearer $token" \
+  -H 'content-type: application/json' -d '{"prompt":"say monitor-by-hand"}')
+echo "$edited" | jq -e '.prompt == "say monitor-by-hand"' >/dev/null || fail "the monitor edit did not land: $edited"
+curl -fsS -X POST "$BASE/monitors/$quiet/pause" -H "authorization: Bearer $token" -o /dev/null
+ran=$(curl -sS -w '\n%{http_code}' -X POST "$BASE/monitors/$quiet/run" -H "authorization: Bearer $token")
+[ "$(echo "$ran" | tail -1)" = "202" ] || fail "monitor run now answered: $ran"
+hand=$(echo "$ran" | sed '$d' | jq -r '.runId')
+listed=""
+for _ in $(seq 1 15); do
+  listed=$(curl -fsS "$BASE/monitors/$quiet/runs" -H "authorization: Bearer $token")
+  echo "$listed" | jq -e --arg r "$hand" 'any(.[]; .runId == $r and .cause == "manual" and .status == "ok")' \
+    >/dev/null && break
+  sleep 1
+done
+echo "$listed" | jq -e --arg r "$hand" 'any(.[]; .runId == $r and .cause == "manual" and .status == "ok")' \
+  >/dev/null || fail "the monitor's history does not list the manual run as ok: $listed"
+curl -fsS "$BASE/monitors" -H "authorization: Bearer $token" \
+  | jq -e --arg m "$quiet" 'any(.[]; .id == $m and .active == false)' >/dev/null \
+  || fail "run now resumed the monitor"
+curl -fsS -X DELETE "$BASE/monitors/$quiet" -H "authorization: Bearer $token" -o /dev/null || true
+ok "edited, ran once by hand while paused, listed as manual, and stayed paused"
+
 echo "11. an outside app wakes a routine with the key we minted for it"
 hook=$(curl -fsS -X POST "$BASE/schedules" -H "authorization: Bearer $token" \
   -H 'content-type: application/json' \

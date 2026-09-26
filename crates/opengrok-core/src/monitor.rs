@@ -104,8 +104,21 @@ pub enum MonitorEvent {
     Fired {
         run_id: RunId,
         /// The stream the matched event came from, so "why did this fire" is answerable from the
-        /// log alone.
+        /// log alone. Empty on a person's run now, which matched nothing.
         matched_stream: String,
+        /// `true` when a person pressed "run now". Absent on firings written before it existed,
+        /// which were all the log's doing.
+        #[serde(default)]
+        manual: bool,
+        at_ms: i64,
+    },
+    /// The person edited the monitor in place: same id, same thread, same firings.
+    Updated {
+        watches: String,
+        prompt: String,
+        /// `None` keeps the coworker it had.
+        #[serde(default)]
+        coworker_id: Option<CoworkerId>,
         at_ms: i64,
     },
 }
@@ -118,6 +131,7 @@ impl MonitorEvent {
             Self::Resumed { .. } => "monitor-resumed",
             Self::Deleted { .. } => "monitor-deleted",
             Self::Fired { .. } => "monitor-fired",
+            Self::Updated { .. } => "monitor-updated",
         }
     }
 }
@@ -130,6 +144,11 @@ pub struct Monitor {
     pub coworker_id: Option<CoworkerId>,
     pub watches: String,
     pub prompt: String,
+    /// Runs a person started with "run now", by id, so the history can label them `manual`.
+    pub manual_runs: std::collections::BTreeSet<String>,
+    /// Runs a matched log event started, by id. Kept rather than inferred as "not manual": the
+    /// monitor's thread can hold a person's replies too, and those are no firing at all.
+    pub event_runs: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -174,6 +193,15 @@ pub enum MonitorCommand {
     Fire {
         run_id: RunId,
         matched_stream: String,
+        /// A person's run now: the one wake a pause does not refuse.
+        manual: bool,
+        at_ms: i64,
+    },
+    Update {
+        watches: String,
+        prompt: String,
+        /// `None` keeps the coworker it has.
+        coworker_id: Option<CoworkerId>,
         at_ms: i64,
     },
 }
@@ -203,7 +231,26 @@ impl Monitor {
             MonitorEvent::Paused { .. } => self.paused = true,
             MonitorEvent::Resumed { .. } => self.paused = false,
             MonitorEvent::Deleted { .. } => self.deleted = true,
-            MonitorEvent::Fired { .. } => {}
+            MonitorEvent::Fired { run_id, manual, .. } => {
+                let runs = if *manual {
+                    &mut self.manual_runs
+                } else {
+                    &mut self.event_runs
+                };
+                runs.insert(run_id.as_str().to_string());
+            }
+            MonitorEvent::Updated {
+                watches,
+                prompt,
+                coworker_id,
+                ..
+            } => {
+                self.watches = watches.clone();
+                self.prompt = prompt.clone();
+                if let Some(coworker_id) = coworker_id {
+                    self.coworker_id = Some(coworker_id.clone());
+                }
+            }
         }
     }
 
@@ -217,6 +264,28 @@ impl Monitor {
         Ok(())
     }
 
+    /// What a monitor may watch and say, checked the same way on create and on every edit: an
+    /// edit is the easier place to type `monitor-fired`, so it must be refused there too.
+    fn checked(watches: String, prompt: &str) -> Result<String, MonitorError> {
+        let watches = watches.trim().to_string();
+        if watches.is_empty() {
+            return Err(MonitorError::NothingWatched);
+        }
+        // One monitor watching `monitor-fired` turns every other monitor's firing into its
+        // trigger — a cascade the per-monitor guard cannot see, because the runs are not its own.
+        // Refused at the root instead.
+        if watches == "monitor-fired" {
+            return Err(MonitorError::WatchingItself);
+        }
+        if !is_watchable(&watches) {
+            return Err(MonitorError::NotWatchable(watches));
+        }
+        if prompt.trim().is_empty() {
+            return Err(MonitorError::EmptyPrompt);
+        }
+        Ok(watches)
+    }
+
     pub fn decide(&self, command: MonitorCommand) -> Result<Vec<MonitorEvent>, MonitorError> {
         match command {
             MonitorCommand::Create {
@@ -225,22 +294,7 @@ impl Monitor {
                 prompt,
                 at_ms,
             } => {
-                let watches = watches.trim().to_string();
-                if watches.is_empty() {
-                    return Err(MonitorError::NothingWatched);
-                }
-                // One monitor watching `monitor-fired` turns every other monitor's firing into
-                // its trigger — a cascade the per-monitor guard cannot see, because the runs are
-                // not its own. Refused at the root instead.
-                if watches == "monitor-fired" {
-                    return Err(MonitorError::WatchingItself);
-                }
-                if !is_watchable(&watches) {
-                    return Err(MonitorError::NotWatchable(watches));
-                }
-                if prompt.trim().is_empty() {
-                    return Err(MonitorError::EmptyPrompt);
-                }
+                let watches = Self::checked(watches, &prompt)?;
                 Ok(vec![MonitorEvent::Created {
                     coworker_id,
                     watches,
@@ -273,15 +327,35 @@ impl Monitor {
             MonitorCommand::Fire {
                 run_id,
                 matched_stream,
+                manual,
                 at_ms,
             } => {
                 self.alive()?;
-                if self.paused {
+                // The pause is what keeps the log from waking it. A person pressing "run now"
+                // asked, paused or not — the same exception a schedule makes.
+                if self.paused && !manual {
                     return Err(MonitorError::Paused);
                 }
                 Ok(vec![MonitorEvent::Fired {
                     run_id,
                     matched_stream,
+                    manual,
+                    at_ms,
+                }])
+            }
+
+            MonitorCommand::Update {
+                watches,
+                prompt,
+                coworker_id,
+                at_ms,
+            } => {
+                self.alive()?;
+                let watches = Self::checked(watches, &prompt)?;
+                Ok(vec![MonitorEvent::Updated {
+                    watches,
+                    prompt,
+                    coworker_id,
                     at_ms,
                 }])
             }
@@ -388,10 +462,142 @@ mod tests {
             monitor.decide(MonitorCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
                 matched_stream: "run/run_0".to_string(),
+                manual: false,
                 at_ms: 3,
             }),
             Err(MonitorError::Paused)
         ));
+    }
+
+    fn update(watches: &str, prompt: &str, coworker: Option<&str>) -> MonitorCommand {
+        MonitorCommand::Update {
+            watches: watches.to_string(),
+            prompt: prompt.to_string(),
+            coworker_id: coworker.map(CoworkerId::from_stored),
+            at_ms: 2,
+        }
+    }
+
+    /// An edit keeps the monitor — its id, its thread, the runs it fired — and changes what it
+    /// watches, what it says and who takes it.
+    #[test]
+    fn an_update_rewrites_watches_prompt_and_coworker() {
+        let mut monitor = created();
+        let events = monitor
+            .decide(update(
+                "connection-disconnected",
+                "reconnect it",
+                Some("cw_2"),
+            ))
+            .expect("update");
+        for event in &events {
+            monitor.apply(event);
+        }
+        assert_eq!(monitor.watches, "connection-disconnected");
+        assert_eq!(monitor.prompt, "reconnect it");
+        assert_eq!(monitor.coworker_id, Some(CoworkerId::from_stored("cw_2")));
+
+        let events = monitor
+            .decide(update("connection-disconnected", "reconnect it", None))
+            .expect("update");
+        for event in &events {
+            monitor.apply(event);
+        }
+        assert_eq!(
+            monitor.coworker_id,
+            Some(CoworkerId::from_stored("cw_2")),
+            "an edit naming no coworker keeps the one it had"
+        );
+    }
+
+    /// Whatever create refuses, an edit refuses: the loop guard's root rule most of all.
+    #[test]
+    fn an_update_refuses_what_create_refuses() {
+        let monitor = created();
+        assert!(matches!(
+            monitor.decide(update("monitor-fired", "watch the watchers", None)),
+            Err(MonitorError::WatchingItself)
+        ));
+        assert!(matches!(
+            monitor.decide(update("run-faild", "hi", None)),
+            Err(MonitorError::NotWatchable(_))
+        ));
+        assert!(matches!(
+            monitor.decide(update("run-failed", "  ", None)),
+            Err(MonitorError::EmptyPrompt)
+        ));
+        assert!(matches!(
+            monitor.decide(update(" ", "hi", None)),
+            Err(MonitorError::NothingWatched)
+        ));
+        let mut deleted = created();
+        deleted.apply(&MonitorEvent::Deleted { at_ms: 2 });
+        assert!(matches!(
+            deleted.decide(update("run-failed", "hi", None)),
+            Err(MonitorError::Deleted)
+        ));
+    }
+
+    /// A PERSON'S RUN NOW IS THE ONE WAKE A PAUSE DOES NOT REFUSE, as for schedules; and the
+    /// monitor stays paused. Every firing is remembered by cause, so its history can label it.
+    #[test]
+    fn a_manual_fire_runs_while_paused_and_is_remembered_as_manual() {
+        let mut monitor = created();
+        monitor.apply(&MonitorEvent::Paused { at_ms: 2 });
+        let events = monitor
+            .decide(MonitorCommand::Fire {
+                run_id: RunId::from_stored("run_by_hand"),
+                matched_stream: String::new(),
+                manual: true,
+                at_ms: 3,
+            })
+            .expect("a person's run now fires while paused");
+        for event in &events {
+            monitor.apply(event);
+        }
+        assert!(monitor.paused, "and the monitor is still paused");
+        assert!(monitor.manual_runs.contains("run_by_hand"));
+        assert!(!monitor.event_runs.contains("run_by_hand"));
+
+        let mut live = created();
+        let events = live
+            .decide(MonitorCommand::Fire {
+                run_id: RunId::from_stored("run_by_event"),
+                matched_stream: "run/run_0".to_string(),
+                manual: false,
+                at_ms: 3,
+            })
+            .expect("fire");
+        for event in &events {
+            live.apply(event);
+        }
+        assert!(live.event_runs.contains("run_by_event"));
+    }
+
+    /// Events written before edits and manual firings existed replay as they always did.
+    #[test]
+    fn old_fired_events_replay_as_event_firings() {
+        let fired: MonitorEvent = serde_json::from_str(
+            r#"{"type":"fired","run_id":"run_old","matched_stream":"run/run_0","at_ms":5}"#,
+        )
+        .expect("an old fired event");
+        let monitor = Monitor::replay(&[
+            MonitorEvent::Created {
+                coworker_id: CoworkerId::from_stored("cw_1"),
+                watches: "run-failed".to_string(),
+                prompt: "p".to_string(),
+                at_ms: 1,
+            },
+            fired,
+        ]);
+        assert!(monitor.event_runs.contains("run_old"));
+        let updated: MonitorEvent = serde_json::from_str(
+            r#"{"type":"updated","watches":"run-failed","prompt":"q","at_ms":6}"#,
+        )
+        .expect("an updated event with no coworker");
+        let mut monitor = monitor;
+        monitor.apply(&updated);
+        assert_eq!(monitor.coworker_id, Some(CoworkerId::from_stored("cw_1")));
     }
 
     #[test]
@@ -402,6 +608,7 @@ mod tests {
             monitor.decide(MonitorCommand::Fire {
                 run_id: RunId::from_stored("run_1"),
                 matched_stream: "run/run_0".to_string(),
+                manual: false,
                 at_ms: 3,
             }),
             Err(MonitorError::Deleted)

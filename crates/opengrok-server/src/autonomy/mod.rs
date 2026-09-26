@@ -24,6 +24,7 @@
 //!   put beside the right coworker; a form's card is minted exactly as a chat turn's is, so
 //!   `POST /ag-ui/user-form/submit` answers it.
 
+pub mod monitors;
 pub mod routes;
 pub mod sweep;
 
@@ -226,20 +227,23 @@ pub(crate) async fn too_busy(
 }
 
 /// Start the run whose `Fired` the log already holds (`sweep.rs` says why the event goes first),
-/// and answer `202 {accepted, runId}` — the half of the webhook door and "run now" that is the
-/// same. `after` is the aggregate that append produced, so the coworker is the one the routine
-/// has NOW, not whichever one a client last listed.
+/// and answer `202 {accepted, runId}` — the half of the webhook door and both "run now"s that is
+/// the same. The coworker comes from the aggregate that append produced, so it is the one the
+/// routine or monitor has NOW, not whichever one a client last listed.
 pub(crate) fn start_fired(
     host: &HostState,
-    after: &opengrok_core::schedule::Schedule,
+    coworker_id: Option<CoworkerId>,
     account_id: AccountId,
     thread_id: &str,
     run_id: RunId,
     prompt: String,
     origin: String,
 ) -> Response {
-    let Some(coworker_id) = after.coworker_id.clone() else {
-        return json_reply(StatusCode::CONFLICT, "that routine has no coworker");
+    let Some(coworker_id) = coworker_id else {
+        return json_reply(
+            StatusCode::CONFLICT,
+            "nothing here names a coworker to run it",
+        );
     };
     let reply = serde_json::json!({ "accepted": true, "runId": run_id.as_str() });
     tokio::spawn(fire(

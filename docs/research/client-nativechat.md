@@ -131,17 +131,19 @@ Work that starts with no client open.
 | Route | Methods | Mounted at (`crates/opengrok-server/src/`) | Reply (the server's side) | Callers on record |
 |---|---|---|---|---|
 | `/hooks/{hook_id}` | POST | `hooks.rs:39` | `{accepted: true, runId}`; `{error}` for a bad token | a third party's webhook, with the hook's own key — not a client |
-| `/monitors` | POST GET | `autonomy/routes.rs:66` | POST: JSON; GET: JSON array | *unverified* |
-| `/monitors/{id}` | DELETE | `autonomy/routes.rs:69` | see the mount | *unverified* |
-| `/monitors/{id}/pause` | POST | `autonomy/routes.rs:67` | see the mount | *unverified* |
-| `/monitors/{id}/resume` | POST | `autonomy/routes.rs:68` | see the mount | *unverified* |
-| `/schedules` | POST GET | `autonomy/routes.rs:51` | POST: `{id, nextDueMs, …}` (422 with the reason for a bad cron); GET: JSON array, `no-store` | *unverified* |
-| `/schedules/{id}` | PATCH DELETE | `autonomy/routes.rs:57` | PATCH: the routine's row as `GET /schedules` lists it, `no-store`; 422 `{error}` for a bad cron, an empty prompt, a cron on a webhook or a change of `kind`; 404 for a coworker that is unknown, retired or off the caller's roster, 403 with the reason for one on it they may not use; 409 `{error}` for a webhook routine stored before its key (rotate first) | *unverified* |
-| `/schedules/{id}/pause` | POST | `autonomy/routes.rs:52` | see the mount | *unverified* |
-| `/schedules/{id}/resume` | POST | `autonomy/routes.rs:53` | see the mount | *unverified* |
-| `/schedules/{id}/rotate-key` | POST | `autonomy/routes.rs:54` | see the mount | *unverified* |
-| `/schedules/{id}/run` | POST | `autonomy/routes.rs:55` | 202 `{accepted: true, runId}`, paused or not (it stays paused); 409 `{error}` when its coworker was retired; 429 `{error}` with three of the owner's runs in flight | *unverified* |
-| `/schedules/{id}/runs` | GET | `autonomy/routes.rs:56` | JSON array, newest first: `{runId, cause: clock\|manual\|webhook, status: running\|waiting\|ok\|error, startedAtMs, endedAtMs\|null}`; `?limit=` 1–100, default 20 | *unverified* |
+| `/monitors` | POST GET | `autonomy/monitors.rs:35` | POST: JSON; GET: JSON array | *unverified* |
+| `/monitors/{id}` | PATCH DELETE | `autonomy/monitors.rs:41` | PATCH: the monitor's row `{id, coworkerId, watches, prompt, active}`; 422 `{error}` for an empty edit, an empty prompt, or a `watches` create would refuse (`monitor-fired` included); 404 for an unknown or retired coworker, 403 with the reason for one on the caller's roster they may not use. Pause, resume and delete refusals are `{error}` JSON | *unverified* |
+| `/monitors/{id}/pause` | POST | `autonomy/monitors.rs:36` | see the mount | *unverified* |
+| `/monitors/{id}/resume` | POST | `autonomy/monitors.rs:37` | see the mount | *unverified* |
+| `/monitors/{id}/run` | POST | `autonomy/monitors.rs:38` | 202 `{accepted: true, runId}`, paused or not (it stays paused); 409 `{error}` when its coworker was retired; 429 `{error}` with three firings in flight | *unverified* |
+| `/monitors/{id}/runs` | GET | `autonomy/monitors.rs:39` | JSON array, newest first: `{runId, cause: event\|manual, status: running\|waiting\|ok\|error, startedAtMs, endedAtMs\|null}`; `?limit=` 1–100, default 20 | *unverified* |
+| `/schedules` | POST GET | `autonomy/routes.rs:48` | POST: `{id, nextDueMs, …}` (422 with the reason for a bad cron); GET: JSON array, `no-store` | *unverified* |
+| `/schedules/{id}` | PATCH DELETE | `autonomy/routes.rs:55` | PATCH: the routine's row as `GET /schedules` lists it, `no-store`; 422 `{error}` for a bad cron, an empty prompt, a cron on a webhook or a change of `kind`; 404 for a coworker that is unknown, retired or off the caller's roster, 403 with the reason for one on it they may not use; 409 `{error}` for a webhook routine stored before its key (rotate first) | *unverified* |
+| `/schedules/{id}/pause` | POST | `autonomy/routes.rs:49` | see the mount | *unverified* |
+| `/schedules/{id}/resume` | POST | `autonomy/routes.rs:50` | see the mount | *unverified* |
+| `/schedules/{id}/rotate-key` | POST | `autonomy/routes.rs:51` | see the mount | *unverified* |
+| `/schedules/{id}/run` | POST | `autonomy/routes.rs:52` | 202 `{accepted: true, runId}`, paused or not (it stays paused); 409 `{error}` when its coworker was retired; 429 `{error}` with three of the owner's runs in flight | *unverified* |
+| `/schedules/{id}/runs` | GET | `autonomy/routes.rs:53` | JSON array, newest first: `{runId, cause: clock\|manual\|webhook, status: running\|waiting\|ok\|error, startedAtMs, endedAtMs\|null}`; `?limit=` 1–100, default 20 | *unverified* |
 | `/workflows` | POST | `workflows.rs:60` | see the mount | *unverified* |
 | `/workflows/{id}/run` | POST | `workflows.rs:62` | see the mount | *unverified* |
 | `/workflows/{id}/versions` | POST | `workflows.rs:61` | see the mount | *unverified* |
