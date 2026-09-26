@@ -2,8 +2,9 @@
 //!
 //! The lock is why several replicas can boot at once without racing each other into a half-applied
 //! schema: whoever gets it migrates, the rest wait and find the work done. Matches open-ai-gateway
-//! (`RUNBOOK.md` §2). EVERY STATEMENT RUNS ON EVERY BOOT, a data transform included: read
-//! docs/setup/postgres.md, "Data-transforming migrations", before writing one.
+//! (`RUNBOOK.md` §2). `SCHEMA` replays in full whenever it changes, so every statement in it runs
+//! again on a database that already went through it; `EVERY_BOOT` runs on every boot. Read
+//! docs/setup/postgres.md, "Data-transforming migrations", before writing either.
 
 use sqlx::PgPool;
 

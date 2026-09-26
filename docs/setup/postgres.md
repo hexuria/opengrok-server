@@ -152,11 +152,15 @@ tools, run inside the container.
 
 ## Data-transforming migrations
 
-Today's schema (`crates/opengrok-store/src/migrations.rs`) is one script of `create … if not
-exists` and `alter … add column if not exists`. It runs on **every boot, from every replica**,
-under one advisory lock (`MIGRATION_LOCK_KEY`, which must never change, or two versions
-overlapping on one deploy take different locks). No version table exists because none has been
-needed. Every statement is safe to run again.
+Today's schema (`crates/opengrok-store/src/migrations.rs`) is one script, `SCHEMA`, of `create …
+if not exists` and `alter … add column if not exists`. Every boot, from every replica, takes one
+advisory lock (`MIGRATION_LOCK_KEY`, which must never change, or two versions overlapping on one
+deploy take different locks) and replays `SCHEMA` **when its SHA-256 is not yet in
+`schema_applied`**: once per change, in full, so every statement in it runs again on a database
+that already went through it and must be safe to. An unchanged schema is not replayed, because a
+bare `alter` takes ACCESS EXCLUSIVE before finding nothing to do and held it for the whole script,
+which deadlocked live reads against every boot. `EVERY_BOOT` runs after it on every boot: the
+UPDATEs that must also catch rows an older replica writes mid-deploy, which take row locks only.
 
 A migration that **changes data** follows the same rule. It must be correct on its hundredth run
 and on a database that already went through it:
@@ -171,7 +175,9 @@ and on a database that already went through it:
    refuses to run inside a transaction, such as `create index concurrently`.
 3. **Keep the old shape readable until every replica runs the new code.** Two versions overlap
    during a deploy, so add a column and backfill it first, and drop the old column in a later
-   release.
+   release. A transform that must also catch rows the older replica keeps writing (a grant of
+   the old built-in set) goes in `EVERY_BOOT`, not `SCHEMA`, and must take row locks only: an
+   UPDATE with its own predicate, never DDL.
 4. **Rehearse it on a restored dump** (above) before it runs anywhere real.
 
 The first transform that **cannot** be made idempotent (one that must run exactly once) is the
