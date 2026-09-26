@@ -11,6 +11,10 @@
 //! refused as used, and a tampered token is refused as invalid. The forgot endpoint answers 202
 //! and says `mailer: false` because no Resend key is configured.
 //!
+//! INVITES (#237). One code admits one person. Signups racing for one code, and a signup racing
+//! any other write to the org's stream, used to lose the redemption silently: the account was
+//! created, the org append was refused as a conflict and ignored, and the code stayed open.
+//!
 //! Needs Postgres (the state carries the store), so it skips — loudly — when OG_DATABASE_URL is
 //! absent, the same bargain the other integration tests make.
 
@@ -934,4 +938,125 @@ async fn a_waiting_member_can_ask_for_a_new_verification_link_and_the_reply_neve
         .await
         .expect("text");
     assert!(card.contains("action=\"/resend-verification\""), "{card}");
+}
+
+/// Issue `code` straight into the org's stream, as the console's invite button does.
+async fn issue_in_store(store: &PgStore, org_id: &OrgId, code: &str) {
+    let (org, seq) = store.load_org(org_id).await.expect("load org");
+    let at_ms = now_ms();
+    let events = org
+        .decide(OrgCommand::IssueInvite {
+            code: code.to_string(),
+            at_ms,
+        })
+        .expect("issue");
+    let mut state = org;
+    for event in &events {
+        state.apply(event);
+    }
+    store
+        .append_org(org_id, seq, &events, &state, at_ms)
+        .await
+        .expect("append invite");
+}
+
+/// The common trigger: the org's stream moves on between the signup's read and its write (an
+/// admin issuing another code, a domain claim). The redemption must land on the org as it now
+/// is, not be dropped as a conflict.
+#[tokio::test]
+async fn an_invite_redeemed_while_the_org_moved_on_is_still_spent() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let stamp = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("stale-{stamp}.test");
+    let (org_id, _) = seed_org(&store, &domain, "adminpass1").await;
+    let code = format!("code-a-{stamp}");
+    issue_in_store(&store, &org_id, &code).await;
+
+    let read_by_the_signup = store.load_org(&org_id).await.expect("load org");
+    issue_in_store(&store, &org_id, &format!("code-b-{stamp}")).await;
+
+    let account = AccountId::new();
+    let redeemed = opengrok_server::auth::identity::redeem_invite(
+        &store,
+        &org_id,
+        read_by_the_signup,
+        &code,
+        &domain,
+        &account,
+    )
+    .await;
+    assert!(redeemed.is_ok(), "{redeemed:?}");
+    let (org, _) = store.load_org(&org_id).await.expect("load org");
+    assert_eq!(
+        org.invites.get(&code),
+        Some(&opengrok_core::org::InviteState::Redeemed(account.clone())),
+        "the redemption was dropped: {:?}",
+        org.invites
+    );
+    assert!(org.members.contains(&account));
+}
+
+/// Eight people with one code: one account, one redemption, seven refusals.
+#[tokio::test]
+async fn one_invite_admits_one_signup_however_many_race_for_it() {
+    let database_url = database_or_skip!();
+    let store = store_from(&database_url).await;
+    let stamp = uuid::Uuid::now_v7().simple().to_string();
+    let domain = format!("race-{stamp}.test");
+    let (org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let (app, _) = app_with(store.clone(), b"invite-race-secret", None);
+    let base = spawn(app).await;
+    let client = reqwest::Client::new();
+    let cookie = cookie_login(&client, &base, &admin_email, "adminpass1").await;
+    let code = issue_invite(&client, &base, &cookie).await;
+
+    let signups = (0..8).map(|n| {
+        let client = client.clone();
+        let url = format!("{base}/auth/signup");
+        let body = serde_json::json!({
+            "email": format!("racer{n}@{domain}"),
+            "password": "password1",
+            "code": code,
+        });
+        async move {
+            let res = client.post(url).json(&body).send().await.expect("signup");
+            res.status().as_u16()
+        }
+    });
+    let statuses = futures::future::join_all(signups).await;
+    assert_eq!(
+        statuses.iter().filter(|s| **s == 201).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert!(
+        statuses.iter().all(|s| *s == 201 || *s == 403),
+        "{statuses:?}"
+    );
+    let accounts = store
+        .accounts_by_org(org_id.as_str())
+        .await
+        .expect("accounts");
+    assert_eq!(
+        accounts.len(),
+        2,
+        "the admin and one member: {:?}",
+        accounts.iter().map(|a| &a.email).collect::<Vec<_>>()
+    );
+    let listed: serde_json::Value = client
+        .get(format!("{base}/admin/invites"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .expect("invites")
+        .json()
+        .await
+        .expect("json");
+    let row = listed["invites"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["code"] == code.as_str()))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(row["state"], "redeemed", "{listed}");
 }
