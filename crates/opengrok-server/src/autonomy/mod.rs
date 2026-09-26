@@ -112,7 +112,10 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
-        None,
+        Some(&crate::persona::routine_line(
+            &crate::persona::caller(&state, &account_id).await,
+            chrono::Utc::now(),
+        )),
     );
     let journal = StoreJournal {
         state: state.clone(),
@@ -122,6 +125,9 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         model: Some(coworker.model.clone()),
         system: Some(system.clone()),
         skill_id: None,
+        // The hirer's instruction is this turn's question. Journaled like a person's message, so
+        // a routine that parks on a card resumes knowing what it was told to do.
+        prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),
     };
 
     let request = ModelRequest {
@@ -134,11 +140,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         // A routine's turn is still this coworker's turn: same identity, same standing role.
         system: Some(system.clone()),
         tools: Vec::new(),
-        messages: vec![ChatMessage {
-            images: Vec::new(),
-            role: "user".to_string(),
-            content: prompt,
-        }],
+        messages: vec![ChatMessage::text("user", prompt)],
     };
 
     // Held while the run works, so the recovery sweep does not mistake a slow firing for an

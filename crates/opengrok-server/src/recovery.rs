@@ -332,6 +332,7 @@ mod tests {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms: 1,
         }];
         for (index, payload) in events.into_iter().enumerate() {

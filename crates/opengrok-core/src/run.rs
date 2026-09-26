@@ -140,6 +140,16 @@ pub enum RunEvent {
         /// written before this field (`#[serde(default)]`).
         #[serde(default)]
         skill_id: Option<String>,
+        /// The person's side of this turn: the AG-UI messages it was asked with that no earlier
+        /// turn on the thread already carried, kept exactly as the client sent them so a field we
+        /// do not model survives (CLAUDE.md #2). Without it a log is half a conversation — a new
+        /// device replays answers with no questions, and a resumed run forgets what it was asked.
+        ///
+        /// `None` on logs written before this field, and the difference from `Some(vec![])` is
+        /// load-bearing: "never journaled" makes a thread fall back to the client's copy of its
+        /// history, while "journaled, and nobody spoke" (an MCP ask) does not.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<Vec<Value>>,
         at_ms: i64,
     },
     /// One rendered protocol event, stored verbatim so a replay is byte-exact rather than
@@ -212,6 +222,8 @@ pub struct Run {
     pub system: Option<String>,
     /// Captured at start. See `RunEvent::Started::skill_id`.
     pub skill_id: Option<String>,
+    /// Captured at start. See `RunEvent::Started::prompt`.
+    pub prompt: Option<Vec<Value>>,
     pub status: RunStatus,
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
@@ -238,6 +250,7 @@ impl Default for Run {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
@@ -281,6 +294,8 @@ pub enum RunCommand {
         system: Option<String>,
         /// See `RunEvent::Started::skill_id`.
         skill_id: Option<String>,
+        /// See `RunEvent::Started::prompt`.
+        prompt: Option<Vec<Value>>,
         at_ms: i64,
     },
     Emit {
@@ -334,6 +349,7 @@ impl Run {
                 model,
                 system,
                 skill_id,
+                prompt,
                 ..
             } => {
                 self.started = true;
@@ -342,6 +358,7 @@ impl Run {
                 self.model = model.clone();
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
+                self.prompt.clone_from(prompt);
                 self.status = RunStatus::Running;
             }
             RunEvent::Emitted { payload, .. } => self.emitted.push(payload.clone()),
@@ -415,6 +432,7 @@ impl Run {
                 model,
                 system,
                 skill_id,
+                prompt,
                 at_ms,
             } => Ok(vec![RunEvent::Started {
                 thread_id,
@@ -422,6 +440,7 @@ impl Run {
                 model,
                 system,
                 skill_id,
+                prompt,
                 at_ms,
             }]),
 
@@ -552,6 +571,7 @@ mod tests {
                 model: None,
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             })
             .unwrap()
@@ -574,6 +594,7 @@ mod tests {
                 model: Some("openai/gpt-5.6-luna".to_string()),
                 system: Some("You are Ada.".to_string()),
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -590,6 +611,7 @@ mod tests {
                 model: None,
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -606,6 +628,7 @@ mod tests {
                 model: None,
                 system: Some(String::new()),
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             })
             .expect("start")
@@ -643,6 +666,7 @@ mod tests {
             model: None,
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms: 1,
         }];
         for index in 0..5 {
@@ -723,6 +747,7 @@ mod tests {
                 model: None,
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -876,6 +901,7 @@ mod tests {
                 model: None,
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             },
             RunEvent::Suspended {
@@ -1067,6 +1093,7 @@ mod tests {
                 model: None,
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -1147,6 +1174,7 @@ mod tests {
                 model: Some("openai/gpt-5.5".to_string()),
                 system: None,
                 skill_id: None,
+                prompt: None,
                 at_ms: 1,
             })
             .unwrap()
@@ -1166,5 +1194,44 @@ mod tests {
         let run = Run::replay([&event]);
         assert_eq!(run.model, None);
         assert_eq!(run.pin_for_resume("oag/auto"), "oag/auto");
+    }
+
+    /// A log written before prompts were journaled still folds, and says it was never journaled
+    /// rather than that nobody spoke: the thread's history falls back to the client's copy.
+    #[test]
+    fn a_start_written_before_prompts_still_reads() {
+        let event: RunEvent = serde_json::from_str(
+            r#"{"type":"started","thread_id":"t1","coworker_id":null,"at_ms":1}"#,
+        )
+        .unwrap();
+        assert_eq!(Run::replay([&event]).prompt, None);
+    }
+
+    /// The person's words go in as they came, with fields nobody here models, and come back out
+    /// of the log the same (CLAUDE.md #2).
+    #[test]
+    fn a_journaled_prompt_keeps_what_the_client_sent() {
+        let asked = json!({"id":"m1","role":"user","content":"hi","replyTo":{"messageId":"a0"},
+            "aFieldFromNextRelease":[1]});
+        let mut run = Run::default();
+        let events = run
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: None,
+                system: None,
+                skill_id: None,
+                prompt: Some(vec![asked.clone()]),
+                at_ms: 1,
+            })
+            .unwrap();
+        let stored: Vec<RunEvent> = events
+            .iter()
+            .map(|event| serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap())
+            .collect();
+        for event in &stored {
+            run.apply(event);
+        }
+        assert_eq!(run.prompt, Some(vec![asked]));
     }
 }

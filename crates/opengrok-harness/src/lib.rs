@@ -27,7 +27,7 @@ pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{
     ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
-    ModelRequest,
+    ModelRequest, ToolCallRef,
 };
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, judge_failure_streak, parse_verdict};
@@ -1472,14 +1472,16 @@ async fn converse_raw(
                         .filter_map(|((call, result), _)| played_recipe(call, result)),
                 );
 
+                // THE MODEL SEES WHAT IT CALLED (#189): its own message naming this round's
+                // calls, then one `tool` message per result below, each keyed by the id it gave.
+                // Without the first, a result arrived answering a call the model could not see.
                 // Before the results, where the words came: the model said them, then asked.
-                if !said.is_empty() {
-                    request.messages.push(ChatMessage {
-                        images: Vec::new(),
-                        role: "assistant".to_string(),
-                        content: std::mem::take(&mut said),
-                    });
-                }
+                // `said` holds only the words the person was shown, so withheld intent stays out
+                // (F8: a discarded preamble is not replayed).
+                request.messages.push(ChatMessage::calls(
+                    std::mem::take(&mut said),
+                    calls.iter().map(tool_call_ref).collect(),
+                ));
                 for (result, call) in results.iter().zip(calls.iter()) {
                     let produced = projection.push_tool_result(result);
                     emit_live(sink, &produced).await;
@@ -1824,14 +1826,13 @@ async fn wrap_up(
 ) -> (Vec<Event>, Ending) {
     let mut ask = request.clone();
     ask.tools.clear();
-    ask.messages.push(ChatMessage {
-        images: Vec::new(),
-        role: "user".to_string(),
-        content: format!(
+    ask.messages.push(ChatMessage::text(
+        "user",
+        format!(
             "[harness] {why}, so this is the last call and no tools are offered. In two or three \
              sentences, tell the person what was done and what is left. Do not ask for a tool."
         ),
-    });
+    ));
     keep_recent_images(&mut ask.messages, RECENT_IMAGES);
     let started = std::time::Instant::now();
     let mut round = Vec::new();
@@ -2069,15 +2070,10 @@ fn screen_hash(base64: &str) -> u64 {
     hasher.finish()
 }
 
-/// What the model is told a tool said, in its own transcript — with the picture, when there is one.
+/// What the model is told a tool said, answering the call by its id — with the picture, when
+/// there is one.
 fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
     ChatMessage {
-        role: "user".to_string(),
-        content: format!(
-            "[tool {} result] {}",
-            result.call_id,
-            intent::annotate_empty_result(&result.content)
-        ),
         images: result
             .image
             .iter()
@@ -2086,6 +2082,20 @@ fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
                 base64: image.base64.clone(),
             })
             .collect(),
+        ..ChatMessage::tool_result(
+            result.call_id.clone(),
+            intent::annotate_empty_result(&result.content),
+        )
+    }
+}
+
+/// A call as its assistant message names it. Arguments that cannot be written back as JSON text
+/// go as `{}`, the same as fragments that never assembled.
+fn tool_call_ref(call: &opengrok_tools::ToolCall) -> ToolCallRef {
+    ToolCallRef {
+        id: call.id.clone(),
+        name: call.name.clone(),
+        arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string()),
     }
 }
 

@@ -474,27 +474,123 @@ fn the_door_does_not_print_its_key() {
 
 #[test]
 fn a_message_without_images_is_a_bare_string_on_the_wire() {
-    let message = ChatMessage {
-        role: "user".into(),
-        content: "hello".into(),
-        images: Vec::new(),
-    };
+    let message = ChatMessage::text("user", "hello");
     assert_eq!(message_content(&message), serde_json::json!("hello"));
 }
 
 #[test]
 fn a_message_with_a_screenshot_is_text_then_image_url_parts() {
     let message = ChatMessage {
-        role: "user".into(),
-        content: "[tool c1 result] screenshot attached".into(),
         images: vec![crate::ImagePart {
             mime: "image/png".into(),
             base64: "AAAA".into(),
         }],
+        ..ChatMessage::text("user", "screenshot attached")
     };
     let parts = message_content(&message);
     assert_eq!(parts[0]["type"], "text");
-    assert_eq!(parts[0]["text"], "[tool c1 result] screenshot attached");
+    assert_eq!(parts[0]["text"], "screenshot attached");
     assert_eq!(parts[1]["type"], "image_url");
     assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+}
+
+fn asking(messages: Vec<ChatMessage>) -> ModelRequest {
+    ModelRequest {
+        model: "xai/grok-4.6".to_string(),
+        messages,
+        ..ModelRequest::default()
+    }
+}
+
+fn call(id: &str, command: &str) -> crate::ToolCallRef {
+    crate::ToolCallRef {
+        id: id.to_string(),
+        name: "shell".to_string(),
+        arguments: format!(r#"{{"command":"{command}"}}"#),
+    }
+}
+
+/// The OpenAI dialect the gateway speaks: the assistant's calls with their arguments as a
+/// string, then one `tool` message per call, each naming the call it answers (#189).
+#[test]
+fn a_tool_round_is_sent_in_the_openai_dialect() {
+    let body = chat_body(&asking(vec![
+        ChatMessage::text("user", "go"),
+        ChatMessage::calls("", vec![call("c1", "echo a"), call("c2", "echo b")]),
+        ChatMessage::tool_result("c1", "a"),
+        ChatMessage::tool_result("c2", "b"),
+    ]));
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[1],
+        serde_json::json!({"role": "assistant", "content": null, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{\"command\":\"echo a\"}"}},
+            {"id": "c2", "type": "function", "function": {"name": "shell", "arguments": "{\"command\":\"echo b\"}"}},
+        ]})
+    );
+    assert_eq!(
+        messages[2],
+        serde_json::json!({"role": "tool", "tool_call_id": "c1", "content": "a"})
+    );
+    assert_eq!(
+        messages[3],
+        serde_json::json!({"role": "tool", "tool_call_id": "c2", "content": "b"})
+    );
+    assert_eq!(messages.len(), 4);
+}
+
+/// A provider answers a `tool` message whose call it cannot see, or a call with no answer,
+/// with a 400 that fails the whole turn. Neither is dropped: the orphan result goes as the
+/// words the loop always wrote, and the unanswered call is told it has no result.
+#[test]
+fn a_round_the_dialect_would_refuse_is_mended_not_dropped() {
+    let body = chat_body(&asking(vec![
+        ChatMessage::tool_result("c0", "from a turn the model never saw"),
+        ChatMessage::calls("", vec![call("c1", "echo a"), call("c2", "echo b")]),
+        ChatMessage::tool_result("c2", "b"),
+        ChatMessage::text("user", "and?"),
+    ]));
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(
+        messages[0]["content"],
+        "[tool c0 result] from a turn the model never saw"
+    );
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[2]["tool_call_id"], "c2");
+    assert_eq!(messages[3]["role"], "tool");
+    assert_eq!(messages[3]["tool_call_id"], "c1");
+    assert_eq!(
+        messages[4],
+        serde_json::json!({"role": "user", "content": "and?"})
+    );
+}
+
+/// The dialect carries no picture in a tool result, so the screen follows the round as one
+/// user message — after every result, never between a call and its answer.
+#[test]
+fn a_screenshot_follows_its_round_as_a_user_message() {
+    let shot = ChatMessage {
+        images: vec![crate::ImagePart {
+            mime: "image/png".into(),
+            base64: "AAAA".into(),
+        }],
+        ..ChatMessage::tool_result("c1", "clicked")
+    };
+    let body = chat_body(&asking(vec![
+        ChatMessage::calls("", vec![call("c1", "x"), call("c2", "y")]),
+        shot,
+        ChatMessage::tool_result("c2", "typed"),
+    ]));
+    let messages = body["messages"].as_array().unwrap();
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|message| message["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["assistant", "tool", "tool", "user"]);
+    assert_eq!(messages[1]["content"], "clicked");
+    assert_eq!(
+        messages[3]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,AAAA"
+    );
 }

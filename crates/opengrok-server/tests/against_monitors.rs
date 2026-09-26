@@ -230,6 +230,7 @@ async fn seed_failed_run(store: &PgStore, account: Option<&AccountId>, thread: &
             model: Some("oag/cheap".to_string()),
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms,
         })
         .expect("start");

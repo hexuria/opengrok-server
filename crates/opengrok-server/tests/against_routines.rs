@@ -301,6 +301,7 @@ async fn seed_running_run(store: &PgStore, account: &AccountId, thread: &str) {
             model: Some("oag/cheap".to_string()),
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms,
         })
         .expect("start");

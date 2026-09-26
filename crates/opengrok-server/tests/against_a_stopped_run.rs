@@ -122,6 +122,7 @@ async fn seed_run(
             model: Some("oag/cheap".to_string()),
             system: None,
             skill_id: None,
+            prompt: None,
             at_ms,
         })
         .expect("start");
@@ -731,6 +732,7 @@ async fn a_round_journaled_while_a_stop_lands_keeps_its_frames() {
             model: Some("oag/cheap".to_string()),
             system: None,
             skill_id: None,
+            prompt: None,
         });
 
         let writes: Vec<_> = (0..3)
@@ -807,6 +809,7 @@ async fn a_park_written_after_the_run_ended_is_refused_whole() {
             model: Some("oag/cheap".to_string()),
             system: None,
             skill_id: None,
+            prompt: None,
         };
         let round = [
             Event::new(EventType::ToolCallStart, now_ms())

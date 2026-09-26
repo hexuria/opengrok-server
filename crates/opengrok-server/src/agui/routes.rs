@@ -2936,11 +2936,18 @@ async fn start_claimed_turn(
                 skill_line_for_turn(&state, account_id, &input.thread_id, &input, tools.as_ref())
                     .await;
             recorded_skill = skill_id;
+            // Who is speaking and what day it is, from the token's account: FIRST in the tail,
+            // and so never after the skill line, which must stay last.
+            let speaker = crate::persona::speaker_line(
+                &crate::persona::caller(&state, account_id).await,
+                chrono::Utc::now().date_naive(),
+                "UTC",
+            );
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{}{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -2980,7 +2987,10 @@ async fn start_claimed_turn(
         },
     };
 
-    let mut messages = to_chat_messages(&input);
+    // The thread's own log, with this turn's new messages at the end — or the client's copy, on
+    // a thread the log cannot tell whole (`history`'s module note).
+    let asked = super::history::for_turn(&state, account_id.as_ref(), &input).await;
+    let mut messages = asked.messages;
     // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
     // about the same coworker; drop it when we composed one.
     if system.is_some() {
@@ -2989,8 +2999,12 @@ async fn start_claimed_turn(
     // NativeChat steer is stop, then a new run whose body is chat bubbles. A stopped
     // turn often has tool results and no assistant text, so the next run repeats the
     // work. Splice those results in front of the new message. A finished answer is
-    // already in the bubbles. A parked card is a fresh turn, not a continuation.
-    if let Some(account) = &account_id {
+    // already in the bubbles. A parked card is a fresh turn, not a continuation. A history
+    // composed from the log already carries the stopped turn's tools, so only the client's copy
+    // is spliced.
+    if asked.from_client
+        && let Some(account) = &account_id
+    {
         continue_stopped_turn(
             &state,
             account,
@@ -3025,6 +3039,7 @@ async fn start_claimed_turn(
         model: Some(request.model.clone()),
         system,
         skill_id: recorded_skill,
+        prompt: Some(asked.prompt),
     };
 
     // THE CLAIM. Exactly one POST per run id appends the run's `Started` at the first seq, under
@@ -3109,6 +3124,9 @@ pub struct StoreJournal {
     /// The skill quoted into `system`, recorded so the next message on this thread
     /// can reuse it when the client sends no skill id.
     pub skill_id: Option<String>,
+    /// What the person asked this turn (`RunEvent::Started::prompt`). Only a turn that starts the
+    /// run writes it; a resume finds the run already started and passes `None`.
+    pub prompt: Option<Vec<serde_json::Value>>,
 }
 
 #[async_trait::async_trait]
@@ -3166,6 +3184,7 @@ impl StoreJournal {
             model: self.model.as_deref(),
             system: self.system.as_deref(),
             skill_id: self.skill_id.as_deref(),
+            prompt: self.prompt.as_deref(),
         }
     }
 
@@ -3224,6 +3243,7 @@ fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(str::to_string),
+        prompt: start.prompt.map(<[serde_json::Value]>::to_vec),
         at_ms,
     }
 }
@@ -3279,6 +3299,7 @@ struct RunStart<'a> {
     model: Option<&'a str>,
     system: Option<&'a str>,
     skill_id: Option<&'a str>,
+    prompt: Option<&'a [serde_json::Value]>,
 }
 
 /// One attempt: read the run, decide what this batch appends, write it at the seq it read.
@@ -3676,7 +3697,12 @@ pub async fn replay_run(
     }
 
     let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
-    let events = events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await;
+    // The person's words ride the replay, and only the replay: an attached stream (`attach`)
+    // sends what the live stream sent, which never carried them.
+    let events = super::history::with_prompt_frames(
+        &run,
+        events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+    );
 
     Json(serde_json::json!({
         "runId": run_id.as_str(),
@@ -3785,15 +3811,12 @@ struct ThreadRunReplay {
 /// and a local copy that is authoritative is exactly the arrangement that loses the messages a
 /// turn produced after the app stopped watching.
 ///
-/// HALF A CONVERSATION, AND SAYING SO IS THE POINT. A run's log holds the events it EMITTED, which
-/// is the coworker's side of the turn: its text, its tool calls, their results. The person's own
-/// message arrives in `RunAgentInput.messages`, is spent on the model call and is never journaled
-/// — `RunEvent::Started` captures the thread, the coworker, the pin and the system message, and
-/// nothing about what was asked. So a client rendering a transcript from this has to interleave
-/// the person's side from somewhere else: the seam-B entries (`seamb_send.rs`) for a turn that
-/// came through the gateway's send, and its own records for a turn that came through `POST /ag-ui`
-/// directly, where the server keeps no copy of the question at all. Closing that means journaling
-/// the turn's own prompt on the run, which changes the aggregate and belongs to its own change.
+/// BOTH SIDES OF THE CONVERSATION. A run's log holds the events it EMITTED — the coworker's text,
+/// its tool calls, their results — and, on `RunEvent::Started::prompt`, the messages the person
+/// sent that turn. Each run's replay carries those as `TEXT_MESSAGE_*` frames with `role: "user"`
+/// under the client's own message id, right after its `RUN_STARTED` (`history::with_prompt_frames`),
+/// so a new device draws the questions with the answers. A run journaled before prompts were
+/// kept has only the coworker's half; nothing can recover the other one.
 pub async fn replay_thread(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -3896,11 +3919,14 @@ pub async fn replay_thread(
                 }
                 None => Vec::new(),
             };
-            Some(crate::agui::user_form::hydrate_agui_events(
-                run.emitted,
-                &forms,
-                summary.started_at_ms,
-                summary.updated_at_ms,
+            Some(super::history::with_prompt_frames(
+                &run,
+                crate::agui::user_form::hydrate_agui_events(
+                    run.emitted.clone(),
+                    &forms,
+                    summary.started_at_ms,
+                    summary.updated_at_ms,
+                ),
             ))
         } else {
             None
@@ -4391,57 +4417,13 @@ fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
         .into_response()
 }
 
-/// Rebuild the conversation from what a run already emitted.
-///
-/// The log is the only record of a run that outlives the request that started it, so a resumed run
-/// has to read its own history rather than being handed one. Text the assistant said and results
-/// its tools returned are what the model needs to carry on; the framing events are not.
-pub(crate) fn conversation_from(run: &opengrok_core::run::Run) -> Vec<ChatMessage> {
-    let mut messages = Vec::new();
-    let mut assistant = String::new();
-
-    for payload in &run.emitted {
-        let Some(kind) = payload.get("type").and_then(|value| value.as_str()) else {
-            continue;
-        };
-        match kind {
-            "TEXT_MESSAGE_CONTENT" => {
-                if let Some(delta) = payload.get("delta").and_then(|value| value.as_str()) {
-                    assistant.push_str(delta);
-                }
-            }
-            // An empty message is skipped rather than pushed: a provider that rejects empty
-            // content would fail the whole resumed turn over nothing.
-            "TEXT_MESSAGE_END" if !assistant.is_empty() => {
-                messages.push(ChatMessage {
-                    images: Vec::new(),
-                    role: "assistant".to_string(),
-                    content: std::mem::take(&mut assistant),
-                });
-            }
-            "TOOL_CALL_RESULT" => {
-                if let Some(content) = payload.get("content").and_then(|value| value.as_str()) {
-                    messages.push(ChatMessage {
-                        images: Vec::new(),
-                        role: "user".to_string(),
-                        content: format!("[tool result] {content}"),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    messages
-}
-
 /// How many tool results from a stopped turn are worth showing the next one.
 /// One per model call, so a turn that hit the 8-call cap still shows every result.
-const STEER_TOOL_CAP: usize = 8;
+pub(crate) const STEER_TOOL_CAP: usize = 8;
 /// Bound one result so a shell dump cannot become the next prompt.
-const STEER_TOOL_CHARS: usize = 800;
+pub(crate) const STEER_TOOL_CHARS: usize = 800;
 
-const STEER_CONTINUATION: &str = "[harness] The previous turn on this thread stopped or failed \
+pub(crate) const STEER_CONTINUATION: &str = "[harness] The previous turn on this thread stopped or failed \
 before it answered. Those tool results are that turn. Continue from them and from the person's \
 latest message. Do not repeat a command that already returned ok.";
 
@@ -4461,7 +4443,7 @@ pub(crate) fn prior_turn_can_continue(status: RunStatus, payloads: &[serde_json:
     )
 }
 
-fn clip_chars(text: &str, max: usize) -> String {
+pub(crate) fn clip_chars(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
         return text.to_string();
@@ -4510,15 +4492,14 @@ pub(crate) fn unfinished_tool_messages(payloads: &[serde_json::Value]) -> Vec<Ch
                 }
                 let name = names.get(&id).map(String::as_str).unwrap_or("tool");
                 let args = arguments.get(&id).map(String::as_str).unwrap_or("");
-                out.push(ChatMessage {
-                    images: Vec::new(),
-                    role: "user".to_string(),
-                    content: format!(
+                out.push(ChatMessage::text(
+                    "user",
+                    format!(
                         "[earlier {name} {}] {}",
                         clip_chars(args, 400),
                         clip_chars(content, STEER_TOOL_CHARS)
                     ),
-                });
+                ));
             }
             _ => {}
         }
@@ -4539,11 +4520,7 @@ pub(crate) fn splice_unfinished_tools(messages: &mut Vec<ChatMessage>, prior: Ve
         return;
     }
     let mut block = prior;
-    block.push(ChatMessage {
-        images: Vec::new(),
-        role: "user".to_string(),
-        content: STEER_CONTINUATION.to_string(),
-    });
+    block.push(ChatMessage::text("user", STEER_CONTINUATION.to_string()));
     let at = messages
         .iter()
         .rposition(|message| message.role == "user")
@@ -4680,6 +4657,7 @@ async fn continue_run(
         model: run.model.clone(),
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
+        prompt: None,
     };
 
     let request = ModelRequest {
@@ -4693,7 +4671,7 @@ async fn continue_run(
         // with. Logs written before the pin was stored fall back to the current pin.
         model: run.pin_for_resume(&coworker.model),
         system: Some(system),
-        messages: conversation_from(&run),
+        messages: super::history::for_resume(&state, &account_id, &run_id, &run, &answered).await,
         tools: Vec::new(),
     };
 
@@ -5074,38 +5052,63 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
     input
         .messages
         .iter()
-        .filter_map(|message| match message.role.as_str() {
-            "user" | "assistant" | "system" => {
-                message.content.as_ref().map(|content| ChatMessage {
-                    images: Vec::new(),
-                    role: message.role.clone(),
-                    // Only a person replies: the field on anything else is not a quote the model
-                    // should be read to.
-                    content: match message.role.as_str() {
-                        "user" => with_reply_context(content, message, &input.messages),
-                        _ => content.clone(),
-                    },
-                })
-            }
-            // NativeChat continues a frontend tool by POSTing the result as a tool
-            // message. The door only speaks user/assistant/system, so this is the
-            // same sentence the in-process loop would have appended.
-            "tool" => {
-                let content = message.content.clone().unwrap_or_default();
-                let call_id = message
-                    .extra
-                    .get("toolCallId")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(message.id.as_str());
-                Some(ChatMessage {
-                    images: Vec::new(),
-                    role: "user".to_string(),
-                    content: format!("[tool {call_id} result] {content}"),
-                })
-            }
-            _ => None,
-        })
+        .filter_map(|message| chat_message(message, &input.messages))
         .collect()
+}
+
+/// One AG-UI message in the model's vocabulary; `sent` is what a reply's quote is looked up in.
+///
+/// Transcribed from `@ag-ui/core` 0.0.57 (dist/index.js:4-13, 97-113): an assistant message may
+/// carry `toolCalls: [{id, type: "function", function: {name, arguments}}]` and no content at all,
+/// and a `tool` message answers one by `toolCallId`. Both stay tool calls here, because the model
+/// has to see its own calls to read their results (#189); a call-only assistant message used to
+/// be dropped for having no words.
+pub(crate) fn chat_message(
+    message: &opengrok_wire::agui::Message,
+    sent: &[opengrok_wire::agui::Message],
+) -> Option<ChatMessage> {
+    let content = message.content.clone().unwrap_or_default();
+    match message.role.as_str() {
+        "assistant" => {
+            let calls: Vec<opengrok_harness::ToolCallRef> = message
+                .extra
+                .get("toolCalls")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|call| {
+                    let field = |key: &str| call.pointer(key).and_then(serde_json::Value::as_str);
+                    Some(opengrok_harness::ToolCallRef {
+                        id: field("/id")?.to_string(),
+                        name: field("/function/name")?.to_string(),
+                        arguments: field("/function/arguments").unwrap_or("{}").to_string(),
+                    })
+                })
+                .collect();
+            (message.content.is_some() || !calls.is_empty())
+                .then(|| ChatMessage::calls(content, calls))
+        }
+        // Only a person replies: the field on anything else is not a quote the model should be
+        // read to.
+        "user" => message
+            .content
+            .as_ref()
+            .map(|words| ChatMessage::text("user", with_reply_context(words, message, sent))),
+        "system" => message
+            .content
+            .as_ref()
+            .map(|words| ChatMessage::text("system", words.clone())),
+        // NativeChat continues a frontend tool by POSTing the result as a tool message.
+        "tool" => Some(ChatMessage::tool_result(
+            message
+                .extra
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(message.id.as_str()),
+            content,
+        )),
+        _ => None,
+    }
 }
 
 /// Live AG-UI frames, forwarded as they are produced. Dropping the HTTP body closes the
@@ -5285,16 +5288,8 @@ mod tests {
         );
 
         let mut messages = vec![
-            ChatMessage {
-                role: "user".to_string(),
-                content: "create Juana Jane".to_string(),
-                images: Vec::new(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: "tin number should be 00000000000001".to_string(),
-                images: Vec::new(),
-            },
+            ChatMessage::text("user", "create Juana Jane"),
+            ChatMessage::text("user", "tin number should be 00000000000001"),
         ];
         splice_unfinished_tools(&mut messages, tools);
         assert_eq!(messages.len(), 4);
@@ -5513,14 +5508,15 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_result_becomes_the_in_process_sentence() {
+    fn a_tool_result_answers_its_call_by_id() {
         let mut tool = message("tool", Some("shown in the chat"));
-        tool.id = "c1".to_string();
+        tool.id = "m9".to_string();
         tool.extra.insert("toolCallId".to_string(), json!("c1"));
         let messages = to_chat_messages(&input(vec![tool]));
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "[tool c1 result] shown in the chat");
+        assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(messages[0].content, "shown in the chat");
     }
 
     /// The desktop's reply chip has to reach the model as words, or "what am I replying to?"
