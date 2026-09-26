@@ -211,3 +211,58 @@ fn a_clients_system_message_is_never_left_out() {
     assert_eq!(request.messages[0].content, "Answer in French.");
     assert_eq!(request.messages[1].role, "user");
 }
+
+/// The server's own lines about a stopped run — its `[earlier …]` results and the "continue from
+/// them" line — are that run's, not turns of their own: left behind without the run, they tell
+/// the model to continue from work it can no longer see.
+#[test]
+fn a_stopped_runs_continuation_lines_go_with_the_run() {
+    let messages = vec![
+        words("user", 3_000),
+        words("assistant", 3_000),
+        ChatMessage::text("user", "run the build"),
+        words("assistant", 30_000),
+        ChatMessage::text("user", "[earlier shell {\"command\":\"make\"}] ok"),
+        ChatMessage::text(
+            "user",
+            "[harness] The previous turn on this thread stopped or failed before it answered. \
+             Continue from them.",
+        ),
+        ChatMessage::text("user", "now"),
+    ];
+    let mut request = asked("m", Some(12_000), messages);
+    let mut window = Window::at_entry(&request);
+    window.fit(&mut request).unwrap();
+    assert!(
+        request.messages.iter().all(|message| {
+            !message.content.starts_with("[harness]") && !message.content.starts_with("[earlier ")
+        }),
+        "{:?}",
+        request
+            .messages
+            .iter()
+            .map(|m| &m.content[..m.content.len().min(20)])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.messages[0].content, "now");
+}
+
+/// While the run fits, its continuation lines stay with it.
+#[test]
+fn a_stopped_run_that_fits_keeps_its_continuation_lines() {
+    let messages = vec![
+        words("user", 30_000),
+        words("assistant", 3_000),
+        ChatMessage::text("user", "run the build"),
+        words("assistant", 3_000),
+        ChatMessage::text("user", "[earlier shell {\"command\":\"make\"}] ok"),
+        ChatMessage::text("user", "[harness] Continue from them."),
+        ChatMessage::text("user", "now"),
+    ];
+    let mut request = asked("m", Some(12_000), messages);
+    let mut window = Window::at_entry(&request);
+    window.fit(&mut request).unwrap();
+    assert_eq!(request.messages[0].content, "run the build");
+    assert_eq!(request.messages.len(), 5);
+}

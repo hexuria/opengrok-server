@@ -36,6 +36,17 @@ fn message_tokens(message: &ChatMessage) -> u64 {
             .sum::<u64>()
 }
 
+/// Whether `message` opens a turn: something the person said. The server also writes `user`
+/// lines about the turn BEFORE them — a stopped run's `[earlier …]` results and its "continue
+/// from them" line, both `[harness]`/`[earlier ` — and those belong to that turn and go with it.
+/// Counted as turns of their own, trimming could drop the run and keep the line that tells the
+/// model to continue from it, and the model repeats work it can no longer see.
+fn starts_a_turn(message: &ChatMessage) -> bool {
+    message.role == "user"
+        && !message.content.starts_with("[harness]")
+        && !message.content.starts_with("[earlier ")
+}
+
 /// A pessimistic count of what `request` costs the model to read.
 pub fn estimate_tokens(request: &ModelRequest) -> u64 {
     request.system.as_deref().map_or(0, text_tokens)
@@ -117,10 +128,7 @@ impl Window {
             loop {
                 freed += request.messages.get(cut).map_or(0, message_tokens);
                 cut += 1;
-                let next_is_a_turn = request
-                    .messages
-                    .get(cut)
-                    .is_none_or(|next| next.role == "user");
+                let next_is_a_turn = request.messages.get(cut).is_none_or(starts_a_turn);
                 if cut >= self.head || next_is_a_turn {
                     break;
                 }
