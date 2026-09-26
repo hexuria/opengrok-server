@@ -1,7 +1,8 @@
 # Evidence: the PolicyApproval card, on the packaged app
 
 Slice 16.later Part A (PR #17). Captured 2 Sep 2026 against the packaged
-`/Applications/Open Grok.app` on the dev server (`main`), driven over CDP.
+`/Applications/Open Grok.app` on the dev server (`main`), driven over CDP. That client was removed
+on 20 Sep 2026; the card and the `xai/grok-4.6` model note below still describe the server.
 
 ## What was done
 

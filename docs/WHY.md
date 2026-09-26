@@ -75,7 +75,8 @@ locks. The durable half of "who said what, and is a run in flight" was never our
 
 ## 3. What "remote first" means, and why the client already has it
 
-The Grok Bot desktop app — the client we now build behind — was never the place the work happened.
+The Grok Bot desktop app — the client we built behind first (discontinued 20 Sep 2026; NativeChat
+is served today) — was never the place the work happened.
 Its agent works on a **box**: a computer that is not your laptop. The app is a viewport onto work
 running somewhere else. Close the lid and the box keeps going; open another device and you are
 looking at the same coworker, mid-task.

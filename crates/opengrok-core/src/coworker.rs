@@ -108,7 +108,7 @@ pub enum CoworkerEvent {
     },
     /// A GROUP was hired: a coworker whose members do the thinking. It has no computer and no
     /// model of its own — its transcript is the room, and each member's turn runs on that
-    /// member's model, key, tools and policy (`plan-rooms.md` §2).
+    /// member's model, key, tools and policy (`docs/archive/plan-rooms.md` §2).
     GroupHired {
         name: String,
         members: Vec<CoworkerId>,

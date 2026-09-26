@@ -1,5 +1,10 @@
 # open-connector — the connector catalogue
 
+> **Not adopted.** Connectors shipped natively in ROADMAP slice 5: our own OAuth 2.0 flow and
+> credential vault (`crates/opengrok-server/src/connections/`) plus MCP servers as plugins
+> (`crates/opengrok-plugins`, `crates/opengrok-tools`). No open-connector sidecar runs. This
+> report is kept for its audit of what open-connector offers, should that be revisited.
+
 **Researched:** 29 Aug 2026 against the GitHub repository, its migrations and its live catalogue
 endpoint. This report **corrects an earlier audit** that was wrong on its most consequential point.
 

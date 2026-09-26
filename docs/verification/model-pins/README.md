@@ -73,13 +73,13 @@ written to catch in the first place.
 
 **A resumed run thinks with the pin its turn started on.** Stored on `RunEvent::Started`;
 `pin_for_resume` uses that, and only falls back to the coworker's current pin for logs written
-before the field existed. Gateway `resume_gateway_run` and AG-UI `continue_run` both honour it.
+before the field existed. AG-UI `continue_run` honours it (so did seam A's `resume_gateway_run`,
+removed in P0-E).
 (`ROADMAP 18.pin`.)
 
-**Seam B has no repin path.** `UpdateGrokBotAgent` handles rename and profile only. Repinning is
-reachable from REST `PATCH /coworkers/{id}` and the gateway's `updateAgent`; a seam-B client that
-sent a model today would be silently ignored. Deliberate scope, recorded so it is not mistaken for
-an oversight.
+**Repinning is REST only.** `PATCH /coworkers/{id}` is the one path that changes a pin. (At
+capture time seam B's `UpdateGrokBotAgent` ignored a model and seam A's `updateAgent` honoured
+one; both doors were removed in P0-E, 20 Sep 2026.)
 
 ## Deliberately not changed
 

@@ -85,7 +85,7 @@ built and verified for the discontinued Grok Bot client, not what the server ser
 - [x] **7.v** The packaged app boots against us and shows a populated sidebar — via the
   client's **OpenGrok server mode** (`boxRuntime: "opengrok"` + the `openGrokGatewayUrl`
   setting), not the `SAND_HOST_GATEWAY_URL` env var, which still deadlocks the app and is a
-  dead path now (B1 re-checked 1 Sep). Evidence: `docs/verification/real-client/README.md`
+  dead path now (B1 re-checked 1 Sep). Evidence: `docs/archive/verification/real-client/README.md`
   and the 31 Aug acceptance run it cites. (`0ae194e`)
 
 ## Slice 8 — A conversation from the real app (P4) — removed in P0-E
@@ -114,7 +114,7 @@ The milestone that proves the port; everything after it is breadth, not risk.
 - [x] **8.v** A message sent from the packaged app runs on this server and the answer streams
   back — the 31 Aug acceptance flows (real-judge refusal, auto-review cards) each began with a
   prompt typed in the app and ended with its reply rendered there. Evidence:
-  `docs/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
+  `docs/archive/verification/real-client/README.md` → `docs/verification/auto-review/README.md`
   (streams `run_01a057f0-…`, `run_01a057f5-…`). (`0ae194e`)
 
 ## Slice 9 — Seam B: identity and the mint (P0 + P1) — removed in P0-E
@@ -151,7 +151,7 @@ Axum edge; a bare tonic gRPC server cannot answer the client.
 - [x] **9.v** The client mints its own connection through us: packaged Open Grok.app called
   `signInToOpenGrokServer`, PKCE login bound a throwaway account, `/auth/poll` went 404→200,
   `EnsureSandBox` returned `OG_PUBLIC_GATEWAY_URL` and the bearer, and
-  `boxRuntime`/`openGrokGatewayUrl` persisted. `docs/verification/real-client/9v-mint.md`.
+  `boxRuntime`/`openGrokGatewayUrl` persisted. `docs/archive/verification/real-client/9v-mint.md`.
   *(this commit)*
 
 ## Slice 10 — Bot ↔ coworker binding (barok-works)
@@ -230,7 +230,7 @@ Uriah's UI review turned the single-user host into a real, multi-tenant identity
   the smokes and several tests drive today. Left open deliberately, not forgotten.
 - [ ] **12.keys-mint-probe** Refuse to mint a coworker key whose org route reaches no provider
   credential (#208's first box). Waits on a principal-aware probe from open-ai-gateway — the
-  `credentials` count on `GET /admin/api/routes` is blind to the principal (`known-gaps.md` §2).
+  `credentials` count on `GET /admin/api/routes` is blind to the principal (`known-gaps.md` §1).
   Until then the refusal is found at the first turn and named in the console.
 
 ## Slice 13 — Web console
@@ -265,7 +265,9 @@ standing rule and nothing else. Design: `docs/AUTO-REVIEW.md`.
   card per call; a review approval never releases the machine's own consent.
 - [x] **14.4** `resolveAutoReviewApproval` for real: same-entry status flip, exactly-once answers,
   heal-on-press to `expired`+410 for dead runs, deny resumes the run with a refusal result the
-  bot explains. `tests/against_auto_review_gate.rs` drives it through the real router.
+  bot explains. `tests/against_auto_review_gate.rs` drove it through the real router. *(The
+  verb and its test were removed with seam A in P0-E; cards are answered at
+  `POST /ag-ui/runs/{id}/answer` now.)*
 - [x] **14.v** End-to-end on the shipped path: real judge refusing `brew install jq` with the
   rule named in the bot's reply; mock window raising exactly one card that flips in place.
   Paired evidence `docs/verification/auto-review/README.md` + the client repo's
@@ -338,20 +340,21 @@ the proof, not construction.
   reverse-exec stays excluded. *(this commit)*
 - [x] **16.policy** A policy grant's "needs a human yes" has a card. It was a stuck run: `card_for`
   returned nothing for `PolicyApproval`, the resolve verb matched only auto-review, so a
-  `needs_approval` grant behaved like a deny that left a suspended run behind. The ask now rides
-  the client's own `auto-review-approval` card (`cards::policy_approval_card`) with the grant's
-  reason (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule`
-  — so the client's "Always" is a plain approve that writes nothing
+  `needs_approval` grant behaved like a deny that left a suspended run behind. The ask now rides the
+  client's own `auto-review-approval` card (`cards::policy_approval_card`) with the grant's reason
+  (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule` — so the
+  client's "Always" is a plain approve that writes nothing
   (`transcript-card/auto-review-actions.ts:149-150`); a policy is widened in policy, never from a
-  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes
-  to the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE
-  yes for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the
-  AG-UI answer → finished run → gate yes remembered. `against_policy_card.rs` walks the DESKTOP path with a stand-in
-  computer: hire → grant → turn suspends → card in the transcript → approved runs the command
-  on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
-  runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
-  `verification/policy-card/` (the card with the grant's reason verbatim, Allow once, the run
-  continues). Plan: `plan-slice16-later.md` Part A. (`8580a54` + follow-up)
+  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes to
+  the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE yes
+  for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the AG-UI
+  answer → finished run → gate yes remembered. `against_policy_card.rs` walked the DESKTOP path
+  *(removed in P0-E)* with a stand-in computer: hire → grant → turn suspends → card in the
+  transcript → approved runs the command on the computer (and not before) → second answer
+  `alreadyAnswered`; denied finishes the run, runs nothing, and the refusal names the coworker's
+  policy. Packaged-app evidence in `verification/policy-card/` (the card with the grant's reason
+  verbatim, Allow once, the run continues). Plan: `archive/plan-slice16-later.md` Part A.
+  (`8580a54` + follow-up)
 - [x] **16.oauth** OAuth 2.1 on `/mcp` — "mint a bot key from the browser". An embedded
   authorization server (`auth/oauth_mcp.rs`) under `/oauth/mcp/*`, never `/oauth/token` (that is
   the desktop's refresh): RFC 9728 metadata at both `/.well-known/oauth-protected-resource[/mcp]`
@@ -429,7 +432,7 @@ key that opens the model door, sets the org's budget and that member's cap, and 
 
 A coworker's model was decided once, at hire, and could never change; every create path except
 REST ignored a requested model and stored the deployment default. Investigation:
-`plan-coworker-model-pins.md` (this pass corrected several of its claims — see below).
+`archive/plan-coworker-model-pins.md` (this pass corrected several of its claims — see below).
 
 - [x] **18.1** `CoworkerCommand::Repin` / `CoworkerEvent::Repinned` — a pin is a decision that can
   be revisited, with the same `alive()` guard every command but `Hire` takes. And `Hire` finally
@@ -462,12 +465,11 @@ REST ignored a requested model and stored the deployment default. Investigation:
   amplifier, now one probe per account per few seconds. *(this commit)*
 - [x] **18.pin** A resumed run thinks with the pin its turn started on. Stored on
   `RunEvent::Started` (`#[serde(default)]` so old logs replay); `pin_for_resume` falls back to
-  the current pin only when that field is absent. Gateway and AG-UI continue paths both honour
-  it. *(this commit)*
-- [ ] **18.later** Seam B's `UpdateGrokBotAgent` has no repin path. The roster's
-  `description = model` habit (a blank-agent defence in the desktop
-  client, not a statement of choice — the console shows the pin as its own field); the desktop
-  app's own create/update model field + picker; `auto_review_model` is a second deployment model
+  the current pin only when that field is absent. Gateway and AG-UI continue paths both honoured
+  it (the gateway's went with seam A in P0-E). *(this commit)*
+- [ ] **18.later** The roster's `description = model` habit (a blank-agent defence in the removed
+  desktop client, not a statement of choice — the console shows the pin as its own field); a
+  client's own create/update model field + picker; `auto_review_model` is a second deployment model
   a pin deliberately does not move; per-coworker spend caps (the gateway has no per-day cap, and
   metering a coworker natively means giving each its own gateway key).
 - [x] **18.caps** *(superseded by 18.points: the USD windows' limits are retired, the meters and keys stay)* Per-coworker spend limits. A coworker hired by an org
@@ -602,13 +604,14 @@ every record that sharing would otherwise break carry whose it is.
   widens through a NEW `roster_for`: `coworkers_for` stays owner-only, because it is the
   authorization primitive management is gated on and sharing is not a write grant.
 
-  Found on the way and fixed here: **seam A authorized nothing per coworker.** Every verb
-  resolved the CALLER and none checked the coworker was theirs, so any signed-in person who knew
-  an id could read a transcript or prompt somebody else's coworker. Survivable only while ids
-  were undiscoverable — and this slice was about to make them discoverable on purpose. One gate
-  in `gateway/routes.rs` answers 404 (never 403: a person who may not use a coworker must not
-  learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
-  are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
+  Found on the way and fixed here: **seam A authorized nothing per coworker.** Every verb resolved
+  the CALLER and none checked the coworker was theirs, so any signed-in person who knew an id could
+  read a transcript or prompt somebody else's coworker. Survivable only while ids were
+  undiscoverable — and this slice was about to make them discoverable on purpose. One gate in
+  `gateway/routes.rs` *(removed with seam A in P0-E; the AG-UI door keeps the rule)* answers 404
+  (never 403: a person who may not use a coworker must not learn it exists), fail-closed by default,
+  with a named list of verbs that answer a constant and are exempt because a 404 there would divert
+  the renderer. `tests/against_visibility.rs`.
 
   **Re-landed on the AG-UI door, 25 Sep 2026 (#175).** P0-E deleted `roster_for` and
   `tests/against_visibility.rs` with the seam-A door that called them, and the AG-UI door had
@@ -670,27 +673,29 @@ every record that sharing would otherwise break carry whose it is.
   `spend_limit` is dropped in a later cleanup. Gateway legs: open-ai-gateway #52 (reference +
   multipliers), #53 (per-model usage, the rolling day, points per window, the batch read).
   `tests/against_spend_caps.rs`, `against_templates.rs`. #49.
-- [ ] Commands: `goal`, `plan`, `review`. Parked: the packaged app's `sendPrompt` has no
-  `mode` field and no Plan-mode picker (`docs/verification/plan-mode-wire/`). Honouring
-  one here would invent a contract. A client composer control is the prerequisite.
+- [ ] Commands: `goal`, `plan`, `review`. Parked: no client sends a mode. The removed Grok Bot
+  app's `sendPrompt` had no `mode` field (`docs/archive/verification/plan-mode-wire/`), and
+  the server's `POST /ag-ui` input has no such field. Honouring one here would invent a contract. A
+  client composer control is the prerequisite.
   Auto-review (the consent judge) is a different product and already shipped.
 - [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
   `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
-- [x] **Groups** (`plan-rooms.md` §2; the rooms half of the old channels plan, as the client
-  actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
+- [x] **Groups** *(removed in P0-E, 20 Sep 2026, with seam A's orchestrator; the tests named
+  here went with it)* (`archive/plan-rooms.md` §2; the rooms half of the old channels plan, as the
+  client actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
   `SetMembers`, roster `isGroup`/`memberIds`), no computer, key or model of its own;
-  `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules
-  (same member set ⇒ the existing group, no group inside a group, at most 6). A prompt to it
-  runs the client's orchestrator transcribed (`gateway/group.rs`): three rounds, responders
-  from `@mentions` since the last user message, order rotating by round, each member's turn on
-  its own model, key, tools and policy with the room's prompts word for word, speaking only
-  through the room's `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per
-  prompt, `activeRemoteMemberId` on the row while a member speaks. `tests/against_groups.rs`.
-  A card raised inside a member's turn is the MEMBER's card in the ROOM's transcript, under its
-  name; the room pauses where the round stood (`room_pause`), and the answer — given naming the
-  group, as the desktop does — resumes that member inside the room and then the members still
-  to speak. `tests/against_group_card.rs`.
-- [ ] Cross-account shared rooms — parked (`plan-rooms.md` §3); the ten verbs answer in the
+  `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules (same
+  member set ⇒ the existing group, no group inside a group, at most 6). A prompt to it runs the
+  client's orchestrator transcribed (`gateway/group.rs`): three rounds, responders from `@mentions`
+  since the last user message, order rotating by round, each member's turn on its own model, key,
+  tools and policy with the room's prompts word for word, speaking only through the room's
+  `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per prompt,
+  `activeRemoteMemberId` on the row while a member speaks. `tests/against_groups.rs`. A card raised
+  inside a member's turn is the MEMBER's card in the ROOM's transcript, under its name; the room
+  pauses where the round stood (`room_pause`), and the answer — given naming the group, as the
+  desktop does — resumes that member inside the room and then the members still to speak.
+  `tests/against_group_card.rs`.
+- [ ] Cross-account shared rooms — parked (`archive/plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).
 - [x] **Artifacts.** One store for what a run produces and what a person attaches: `POST
@@ -705,9 +710,8 @@ every record that sharing would otherwise break carry whose it is.
 - [ ] Redis — only after a measured hot query, per the standing decision.
 - [ ] OTLP export on both sides, sharing the request id as the trace id; crash capture is a
   separate decision. The first brick shipped: request trace on by default, `X-Request-Id`
-  accepted-or-minted and echoed, `/events` open/close logged with the subscriber count
-  (`verification/request-ids/`; the desktop client stamps the same header per call and per
-  SSE connect). *(this commit)*
+  accepted-or-minted and echoed (`verification/request-ids/`). The `/events` open/close logging
+  went with seam A in P0-E. *(this commit)*
 - [ ] Remaining Box API v1 endpoints in `ascii::Client` (snapshots, environments, webhooks,
   ASCII's in-box prompt agent, secrets, repos, artifacts, events, `/me`) — add when a
   coworker path needs them, not as a completeness exercise. Vendor pages already live in

@@ -21,7 +21,7 @@ instructions, left for the operator to make.
    connects through its own OpenGrok server mode (`boxRuntime: "opengrok"` + the
    `openGrokGatewayUrl` setting); launching it with `SAND_HOST_GATEWAY_URL` deadlocks it before
    the window opens. Either way it **throws if the gateway host starts with `127.0.0.1` or
-   `localhost`** — serve on a non-loopback address. `docs/setup/desktop-client.md`.
+   `localhost`** — serve on a non-loopback address. `docs/archive/desktop-client.md`.
 
 ## Fact #3, as written
 
@@ -30,7 +30,7 @@ instructions, left for the operator to make.
    `countAgents` must be a number, `getTrays` an array, or the renderer diverts or throws.
    And if the roster silently stops updating, check the client's `inferenceProvider` setting —
    and its persisted gateway address against the machine's current LAN address — before
-   suspecting us. `docs/setup/desktop-client.md`.
+   suspecting us. `docs/archive/desktop-client.md`.
 
 ## What still holds
 

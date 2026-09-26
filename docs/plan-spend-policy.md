@@ -58,7 +58,7 @@ or two answers disagree.
    does not answer within 2 s, else held with the reason). Points `null` — no reference price
    on the gateway — ⇒ held, with the sentence that says who sets it. A gateway that says it has
    no such key ⇒ the row is retired and the turn held once ("send it again"); the next turn
-   mints a fresh key (`docs/known-gaps.md` §3).
+   mints a fresh key (fixed 25 Sep; `git show 99ec5c3:docs/known-gaps.md` §3).
 4. The pool, when one is set: the batch read over every key the owner's coworkers ever had
    (revoked rows included — a retired coworker's month still counts, so retire-and-rehire does
    not reset the month), cached **per owner** for 15 s so N active coworkers of one member share
@@ -74,7 +74,7 @@ A burst can overrun a limit by at most one reading's worth (15 s) per coworker.
 
 A capped turn whose key is then refused at dispatch is held with what would fix it — a 503
 naming a credential names the org principal's route and the seat it lacks — never run on the
-deployment's key (`docs/known-gaps.md` §2). Capped or not, the refusal is recorded on the key's
+deployment's key (`docs/known-gaps.md` §1). Capped or not, the refusal is recorded on the key's
 row until the key next serves, and the spend, limit and usage replies answer `metered: false`
 with "this coworker's key cannot serve: <reason>" rather than an empty meter.
 

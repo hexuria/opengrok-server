@@ -2,7 +2,8 @@
 
 The server the AI coworkers live on. One Rust service that owns the harness, the tools, the
 computers and the policy — shipped together with **open-ai-gateway** as a single AI infrastructure.
-Clients (the Grok Bot desktop app first, then web and CLI) are windows onto it.
+Clients (NativeChat, the native desktop app, first; the `/console` web app; Claude Code over
+`/mcp`) are windows onto it. They speak AG-UI and the REST routes beside it.
 
 **Picking this up cold? Start with [`docs/HANDOVER.md`](docs/HANDOVER.md)** — the state of play,
 what is already decided, and your first task.
@@ -16,20 +17,22 @@ what is already decided, and your first task.
 
 ## Three facts that each cost a day if you learn them the hard way
 
-1. **The client refuses a loopback gateway, and the env-var repoint is dead.** The desktop app
-   connects through its own OpenGrok server mode (`boxRuntime: "opengrok"` + the
-   `openGrokGatewayUrl` setting); launching it with `SAND_HOST_GATEWAY_URL` deadlocks it before
-   the window opens. Either way it **throws if the gateway host starts with `127.0.0.1` or
-   `localhost`** — serve on a non-loopback address. `docs/setup/desktop-client.md`.
+1. **A coworker on a route that only talks cannot act.** The hire default is `xai/grok-4.6`
+   (`OG_MODEL`) because it is the route on the record making real tool calls; the old default
+   answered shell requests with invented text and zero tool calls, so the demo showed no card and
+   no computer. Press **Test** before **Hire**: it asks for one real completion that calls a
+   tool. `docs/setup/environment.md` (`OG_MODEL`), `docs/setup/first-run.md`.
 2. **The gateway is embeddable — `oag_server::public_router()` returns a wired Axum router.** But if
    you skip `oag_server::serve()` you must spawn the catalogue refresh yourself, or a replica
    serves a **stale catalogue while reporting healthy**. `docs/research/gateway-open-ai-gateway.md` §8.
-3. **An empty success is the dangerous reply.** `listAgents` returning `[]` is *valid* — the client
-   paints an empty sidebar and the person blames the app. Reply shapes matter as much as replies:
-   `countAgents` must be a number, `getTrays` an array, or the renderer diverts or throws.
-   And if the roster silently stops updating, check the client's `inferenceProvider` setting —
-   and its persisted gateway address against the machine's current LAN address — before
-   suspecting us. `docs/setup/desktop-client.md`.
+3. **An empty success is the dangerous reply.** An empty roster or thread is *valid*, so a
+   client paints nothing and the person blames the app. Reply shapes matter as much as replies:
+   a count must be a number and a list an array, or a client diverts or throws. And
+   `OG_PUBLIC_GATEWAY_URL` must be the address clients actually reach: emailed links and the MCP
+   door's OAuth issuer are built from it. `docs/setup/nativechat.md`, `docs/setup/environment.md`.
+
+The Grok Bot desktop client, its two doors and the facts that went with them were removed on
+20 Sep 2026; they are kept in `docs/archive/seam-a-client-facts.md`.
 
 ---
 
@@ -72,8 +75,10 @@ crates/
   opengrok          the binary; wires the server, embeds the gateway, drives the scheduler tick
   opengrok-core     ids, errors, domain types, domain events. No I/O. Everything depends on it; it depends on nothing.
   opengrok-wire     the client contract: commands, transcript entries, activity, AG-UI events
-  opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — the packaged app does not send a mode on sendPrompt (`docs/verification/plan-mode-wire/`)
+  opengrok-harness  the agent loop: turns, tool calls, streaming, durability. Auto-review's model judge lives here; goal/plan/review as composer commands do not — no client sends a mode yet, and honouring one would invent a contract (ROADMAP "Commands")
   opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
+  opengrok-plugins  Agent Plugins: the bundle of skills + MCP servers a coworker is given
+  opengrok-recipes  a taught tape into the box's recipe steps; the lint that keeps them runnable
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
@@ -88,7 +93,7 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 
 | What | Where |
 |---|---|
-| The client we serve | `/Volumes/goldcoders/OSS/opengrok` — reference: `docs/research/client-grok-bot.md` |
+| The client we serve | `hexuria/nativechat` — reference: `docs/research/client-nativechat.md` (the removed Grok Bot client: `docs/research/client-grok-bot.md`) |
 | The model door | `/Volumes/goldcoders/OSS/open-ai-gateway` — reference: `docs/research/gateway-open-ai-gateway.md` |
 | The prior product's lessons | `/Volumes/goldcoders/projects/opensesame/opensesame` — reference: `docs/research/lessons-opensesame.md` |
 | The coworker's computer | `docs/research/sandbox-box-ascii-dev.md` (our notes); vendor API pages in `docs/box/` |

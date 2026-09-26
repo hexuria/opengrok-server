@@ -10,7 +10,7 @@ in the abstract; the screenshots are the record.
 | 1 | Sign in (dark Open Grok brand, same shell as the auth pages) | `01-login.jpg` |
 | 2 | Edit name → save → persists on reload | `02-account-name-saved.jpg` |
 | 3 | **Member** account: the **Admin tab is hidden** | `03-member-no-admin-tab.jpg` |
-| 4 | **Member** typing `/console/admin` is **redirected to `/account`** | `04-member-admin-redirected.jpg` |
+| 4 | **Member** typing `/console/admin` is **redirected to `/account`** | `03-member-no-admin-tab.jpg` (the redirect lands on that same page) |
 | 5 | **Admin** account: the **Admin tab appears** | `05-admin-has-admin-tab.jpg` |
 | 6 | Admin dashboard: org users listed (admin + member), enabled | `06-admin-users-list.jpg` |
 | 7 | Admin disables the member → state flips (and back) | `07-admin-disabled-member.jpg` |

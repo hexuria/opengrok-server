@@ -44,10 +44,10 @@ OG_PORT=1449 OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate \
 
 ## Shape
 
-The gate stands up a shared mock-door server for nine smokes, restarts it with the tool-asking
-door for two more, then hands over to the scripts that own their whole lifecycle (durability's
-SIGKILL mid-run, recovery's planted rows, autonomy's kill-mid-schedule, seam B, browser login,
-identity, account admin, web console — on `OG_PORT`+3…+6). Read the comments in
+The gate stands up a shared mock-door server for seven smokes, restarts it with the tool-asking
+door for three more, then hands over to the scripts that own their whole lifecycle (durability's
+SIGKILL mid-run, recovery's planted rows, autonomy's kill-mid-schedule, browser login, identity,
+account admin, web console, org gateway keys — on `OG_PORT`+3…+7). Read the comments in
 `scripts/gate.sh` itself; each guard in there is a bug that actually happened.
 
 ## Test databases

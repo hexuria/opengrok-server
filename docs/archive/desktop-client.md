@@ -19,7 +19,7 @@ Two client-side facts, one server-side:
    the account out — one account, never two (`source/electron-main/main-edge.ts:523-524`).
 2. **`SAND_HOST_GATEWAY_URL` is a dead path.** Launching the app with that env var set
    deadlocks it before the window opens (re-verified 1 Sep 2026 —
-   `../verification/real-client/README.md`). Do not debug a launch that uses it; use server
+   `verification/real-client/README.md`). Do not debug a launch that uses it; use server
    mode.
 3. **The server must be reachable on a non-loopback address** and the client must present the
    server's `OG_GATEWAY_BEARER`. The client throws when its gateway host starts with
