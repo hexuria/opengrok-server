@@ -265,7 +265,7 @@ async fn inbound(
     let prompt = wake_prompt(&after.prompt, payload.as_ref());
     crate::autonomy::start_fired(
         &state,
-        &after,
+        after.coworker_id.clone(),
         account_id,
         schedule_id.as_str(),
         run_id,

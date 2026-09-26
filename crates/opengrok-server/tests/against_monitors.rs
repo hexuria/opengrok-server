@@ -11,10 +11,9 @@
 //! stream (`Fired` events) rather than timed against a background loop.
 //!
 //! ONE GLOBAL CURSOR, SO ONE TEST AT A TIME. Tests in one binary run in parallel, and a tick in one
-//! test reads — and moves the cursor past — the events another test just seeded. `SERIAL` keeps
-//! them from draining each other's log under `cargo test`; nextest runs each test in its own
-//! process, where that lock is useless, so `.config/nextest.toml` puts this binary in a group of
-//! one.
+//! test reads — and moves the cursor past — the events another test just seeded. `serial` takes a
+//! Postgres advisory lock, which holds under `cargo test` and across nextest's per-test processes
+//! alike; `.config/nextest.toml` also puts this binary in a group of one.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -36,7 +35,21 @@ use opengrok_store::PgStore;
 use serde_json::{Value, json};
 use sqlx::Row;
 
-static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Every test here ticks the one shared log cursor, so they run one at a time. A Postgres
+/// advisory lock rather than a mutex: nextest runs each test in its own process, and the database
+/// is what they share. It lives on its own connection, released when the guard drops.
+async fn serial(database_url: &str) -> sqlx::PgConnection {
+    use sqlx::Connection;
+    let mut connection = sqlx::PgConnection::connect(database_url)
+        .await
+        .expect("connect for the serial lock");
+    sqlx::query("select pg_advisory_lock($1)")
+        .bind(0x5eed_0a11_i64)
+        .execute(&mut connection)
+        .await
+        .expect("take the serial lock");
+    connection
+}
 
 macro_rules! database_or_skip {
     () => {
@@ -192,6 +205,34 @@ impl Harness {
         self.post_as(&self.token(), path, body).await
     }
 
+    async fn send_as(&self, method: &str, token: &str, path: &str, body: Value) -> (u16, Value) {
+        let url = format!("{}{path}", self.base);
+        let request = match method {
+            "PATCH" => self.client.patch(url).json(&body),
+            "GET" => self.client.get(url),
+            _ => self.client.post(url).json(&body),
+        };
+        let res = request
+            .header("authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("request");
+        let status = res.status().as_u16();
+        let text = res.text().await.expect("body");
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        )
+    }
+
+    async fn patch(&self, path: &str, body: Value) -> (u16, Value) {
+        self.send_as("PATCH", &self.token(), path, body).await
+    }
+
+    async fn get(&self, path: &str) -> (u16, Value) {
+        self.send_as("GET", &self.token(), path, Value::Null).await
+    }
+
     async fn hire_as(&self, token: &str, name: &str) -> String {
         let (status, hired) = self
             .post_as(token, "/coworkers", json!({ "name": name }))
@@ -294,10 +335,11 @@ async fn tick_until_past(h: &Harness) {
     panic!("the cursor never reached {end}");
 }
 
-/// How many times this monitor has fired: its stream is `Created` then one `Fired` per firing.
+/// How many times this monitor has fired, by hand or by the log. Counted from the aggregate's
+/// firings, not the stream's length: an edit or a pause is on the stream too.
 async fn firings(h: &Harness, monitor: &MonitorId) -> i64 {
-    let (_, seq) = h.store.load_monitor(monitor).await.expect("load monitor");
-    seq - 1
+    let (loaded, _) = h.store.load_monitor(monitor).await.expect("load monitor");
+    i64::try_from(loaded.manual_runs.len() + loaded.event_runs.len()).expect("a count")
 }
 
 /// Leave nothing active behind: a later run of this file ticks the same database.
@@ -317,7 +359,7 @@ async fn delete_monitor(h: &Harness, monitor: &MonitorId) {
 #[tokio::test]
 async fn a_foreign_failed_run_fires_nothing_and_ones_own_fires_once() {
     let database_url = database_or_skip!();
-    let _serial = SERIAL.lock().await;
+    let _serial = serial(&database_url).await;
     let email = format!("monitor-alice-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness(&database_url, &email).await;
     let cw = h.hire_as(&h.token(), "Watcher").await;
@@ -391,7 +433,7 @@ async fn a_foreign_failed_run_fires_nothing_and_ones_own_fires_once() {
 #[tokio::test]
 async fn a_foreign_coworker_event_fires_nothing() {
     let database_url = database_or_skip!();
-    let _serial = SERIAL.lock().await;
+    let _serial = serial(&database_url).await;
     let email = format!("monitor-hire-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness(&database_url, &email).await;
     let cw = h.hire_as(&h.token(), "Watcher").await;
@@ -481,7 +523,7 @@ async fn an_unknown_watch_is_refused_with_a_422() {
 #[tokio::test]
 async fn firings_per_monitor_are_capped() {
     let database_url = database_or_skip!();
-    let _serial = SERIAL.lock().await;
+    let _serial = serial(&database_url).await;
     let email = format!("monitor-cap-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness(&database_url, &email).await;
     let cw = h.hire_as(&h.token(), "Burst").await;
@@ -496,6 +538,362 @@ async fn firings_per_monitor_are_capped() {
         firings(&h, &monitor).await,
         opengrok_server::autonomy::MAX_RUNS_IN_FLIGHT,
         "five matches in one burst, and the monitor fired only as many runs as may be in flight"
+    );
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// The run this monitor started, once its first row is journaled. A firing is spawned, so the
+/// 202 is the server accepting the wake, not the run existing yet.
+async fn journaled_run(h: &Harness, run_id: &str) -> opengrok_core::run::Run {
+    for _ in 0..60 {
+        if let Ok((run, _)) = h.store.load_run(&RunId::from_stored(run_id)).await
+            && run.started
+        {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("run {run_id} never journaled");
+}
+
+/// #235: AN EDIT IS WHAT THE NEXT RUN DOES. Edit a monitor, press "run now", and the run opens
+/// with the edited prompt; the history lists it as the person's.
+#[tokio::test]
+async fn an_edited_monitor_runs_now_with_its_new_prompt() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-edit-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+
+    let (status, runs) = h.get(&format!("/monitors/{monitor}/runs")).await;
+    assert_eq!(status, 200, "{runs}");
+    assert_eq!(
+        runs,
+        json!([]),
+        "a monitor that never fired has an empty history, as an array"
+    );
+
+    let (status, row) = h
+        .patch(
+            &format!("/monitors/{monitor}"),
+            json!({ "watches": "connection-disconnected", "prompt": "reconnect the mailbox" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["id"], json!(monitor.as_str()), "{row}");
+    assert_eq!(row["watches"], json!("connection-disconnected"), "{row}");
+    assert_eq!(row["prompt"], json!("reconnect the mailbox"), "{row}");
+    assert_eq!(row["coworkerId"], json!(cw), "{row}");
+
+    let (status, accepted) = h.post(&format!("/monitors/{monitor}/run"), json!({})).await;
+    assert_eq!(status, 202, "{accepted}");
+    assert_eq!(accepted["accepted"], json!(true), "{accepted}");
+    let run_id = accepted["runId"].as_str().expect("a run id").to_string();
+    let run = journaled_run(&h, &run_id).await;
+    assert_eq!(
+        run.thread_id,
+        monitor.as_str(),
+        "the run is in the monitor's own thread"
+    );
+    let prompt = serde_json::to_string(&run.prompt).expect("prompt");
+    assert!(
+        prompt.contains("reconnect the mailbox"),
+        "the run opened with the edit: {prompt}"
+    );
+    assert!(
+        !prompt.contains("something happened"),
+        "not the old prompt: {prompt}"
+    );
+
+    let (status, runs) = h.get(&format!("/monitors/{monitor}/runs")).await;
+    assert_eq!(status, 200, "{runs}");
+    let runs = runs.as_array().expect("an array");
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0]["runId"], json!(run_id));
+    assert_eq!(runs[0]["cause"], json!("manual"));
+    assert_eq!(
+        runs[0]["status"],
+        json!("running"),
+        "the door holds the turn open: {runs:?}"
+    );
+    assert_eq!(runs[0]["endedAtMs"], Value::Null, "{runs:?}");
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// What create refuses, an edit refuses — the loop guard's root rule most of all — and an edit
+/// that changes nothing is not a silent 200.
+#[tokio::test]
+async fn a_monitor_edit_refuses_what_create_refuses() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-rules-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+    let path = format!("/monitors/{monitor}");
+
+    for (body, why) in [
+        (
+            json!({ "watches": "monitor-fired" }),
+            "watching firings is the cascade",
+        ),
+        (json!({ "watches": "run-faild" }), "a typo is refused"),
+        (json!({ "prompt": "  " }), "an empty prompt is refused"),
+        (json!({}), "an edit that changes nothing is refused"),
+    ] {
+        let (status, refusal) = h.patch(&path, body).await;
+        assert_eq!(status, 422, "{why}: {refusal}");
+    }
+    let (status, refusal) = h.patch(&path, json!({ "coworkerId": "cw_nobody" })).await;
+    assert_eq!(status, 404, "{refusal}");
+
+    let second = h.hire_as(&h.token(), "Relief").await;
+    let (status, row) = h.patch(&path, json!({ "coworkerId": second })).await;
+    assert_eq!(status, 200, "{row}");
+    let (_, rows) = h.get("/monitors").await;
+    let listed = rows
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|row| row["id"] == json!(monitor.as_str()))
+        .cloned()
+        .expect("the monitor");
+    assert_eq!(
+        listed["coworkerId"],
+        json!(second),
+        "the listing follows the handover: {listed}"
+    );
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// A PERSON'S RUN NOW IS THE ONE WAKE A PAUSE DOES NOT REFUSE; the monitor stays paused.
+#[tokio::test]
+async fn a_paused_monitor_runs_now_and_stays_paused() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-paused-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+    let (status, body) = h
+        .post(&format!("/monitors/{monitor}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204, "{body}");
+
+    let (status, accepted) = h.post(&format!("/monitors/{monitor}/run"), json!({})).await;
+    assert_eq!(status, 202, "{accepted}");
+    journaled_run(&h, accepted["runId"].as_str().expect("run id")).await;
+    let (_, rows) = h.get("/monitors").await;
+    let listed = rows
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|row| row["id"] == json!(monitor.as_str()))
+        .cloned()
+        .expect("the monitor");
+    assert_eq!(listed["active"], json!(false), "still paused: {listed}");
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// THE LOOP GUARD HOLDS FOR A RUN A PERSON STARTED. A monitor on `run-started`, pressed by hand,
+/// starts a run whose own `run-started` must not wake it again. A second, unrelated run of the
+/// owner's proves the tick did see the log.
+#[tokio::test]
+async fn a_monitors_own_manual_run_never_wakes_it() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-loop-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-started").await;
+    drain_log(&h.store).await;
+
+    let (status, accepted) = h.post(&format!("/monitors/{monitor}/run"), json!({})).await;
+    assert_eq!(status, 202, "{accepted}");
+    journaled_run(&h, accepted["runId"].as_str().expect("run id")).await;
+    seed_failed_run(&h.store, Some(&h.account), "thr-unrelated").await;
+    tick_until_past(&h).await;
+
+    assert_eq!(
+        firings(&h, &monitor).await,
+        2,
+        "the hand-pressed run and the unrelated run's start: never its own run's start"
+    );
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// Somebody else's monitor is a 404 on every new route; and "run now" is held to the same
+/// in-flight cap the log's firings are.
+#[tokio::test]
+async fn a_strangers_monitor_is_404_and_run_now_is_capped() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!(
+        "monitor-stranger-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+    let (_, bob) = h.bob().await;
+
+    for (method, path) in [
+        ("PATCH", format!("/monitors/{monitor}")),
+        ("POST", format!("/monitors/{monitor}/run")),
+        ("GET", format!("/monitors/{monitor}/runs")),
+    ] {
+        let (status, body) = h
+            .send_as(method, &bob, &path, json!({ "prompt": "mine now" }))
+            .await;
+        assert_eq!(status, 404, "{method} {path}: {body}");
+    }
+    assert_eq!(
+        firings(&h, &monitor).await,
+        0,
+        "the stranger started nothing"
+    );
+
+    // The door holds each turn for a minute, so these stay in flight.
+    for _ in 0..opengrok_server::autonomy::MAX_RUNS_IN_FLIGHT {
+        let (status, body) = h.post(&format!("/monitors/{monitor}/run"), json!({})).await;
+        assert_eq!(status, 202, "{body}");
+    }
+    let (status, body) = h.post(&format!("/monitors/{monitor}/run"), json!({})).await;
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(
+        firings(&h, &monitor).await,
+        opengrok_server::autonomy::MAX_RUNS_IN_FLIGHT,
+        "no fourth firing was recorded"
+    );
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// An edit to what a monitor watches is what the next tick matches: the old event type no longer
+/// wakes it, the new one does.
+#[tokio::test]
+async fn after_an_edit_the_monitor_wakes_on_the_new_event_only() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-rewatch-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+    let (status, row) = h
+        .patch(
+            &format!("/monitors/{monitor}"),
+            json!({ "watches": "run-started" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+
+    drain_log(&h.store).await;
+    // One run of the owner's: it writes a `run-started` and a `run-failed`. Only the first may
+    // wake the monitor now.
+    seed_failed_run(&h.store, Some(&h.account), "thr-rewatch").await;
+    tick_until_past(&h).await;
+    assert_eq!(
+        firings(&h, &monitor).await,
+        1,
+        "woken once, by the start, not the failure"
+    );
+    // The firing is spawned, so its run is listed once it has journaled its first row.
+    let (loaded, _) = h.store.load_monitor(&monitor).await.expect("load");
+    let fired = loaded
+        .event_runs
+        .iter()
+        .next()
+        .cloned()
+        .expect("the log's firing");
+    journaled_run(&h, &fired).await;
+    let (status, runs) = h.get(&format!("/monitors/{monitor}/runs")).await;
+    assert_eq!(status, 200, "{runs}");
+    assert_eq!(runs[0]["runId"], json!(fired), "{runs}");
+    assert_eq!(
+        runs[0]["cause"],
+        json!("event"),
+        "the history calls it the log's firing: {runs}"
+    );
+
+    delete_monitor(&h, &monitor).await;
+}
+
+/// ONE MONITOR THAT CANNOT FIRE MUST NOT COST THE OTHERS THEIR MATCH. The cursor is past the span
+/// before any monitor fires, so a failure that ended the tick dropped every other monitor's
+/// matches in it for good. Here the first monitor's log holds an event this binary cannot read.
+#[tokio::test]
+async fn a_monitor_that_cannot_fire_does_not_cost_the_others_their_match() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-broken-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let broken = h.monitor(&cw, "run-failed").await;
+    let healthy = h.monitor(&cw, "run-failed").await;
+    sqlx::query(
+        "insert into events (stream_id, stream_seq, event_type, payload)
+         values ($1, 2, 'monitor-from-the-future', '{\"type\":\"from-the-future\"}')",
+    )
+    .bind(opengrok_store::monitor_stream(&broken))
+    .execute(h.store.pool())
+    .await
+    .expect("an unreadable event");
+
+    drain_log(&h.store).await;
+    seed_failed_run(&h.store, Some(&h.account), "thr-broken").await;
+    tick_until_past(&h).await;
+    assert_eq!(
+        firings(&h, &healthy).await,
+        1,
+        "the healthy monitor still fired"
+    );
+
+    sqlx::query("delete from monitor_view where id = $1")
+        .bind(broken.as_str())
+        .execute(h.store.pool())
+        .await
+        .expect("clean up the broken monitor");
+    delete_monitor(&h, &healthy).await;
+}
+
+/// THE AGGREGATE HAS THE LAST WORD ON WHAT A MONITOR WATCHES. The sweep matches on the row it
+/// read at the start of the tick; an edit landing since must not let it fire on the old type.
+/// The stale row is written straight to the projection to stand for that moment.
+#[tokio::test]
+async fn a_stale_row_does_not_fire_a_monitor_on_what_it_no_longer_watches() {
+    let database_url = database_or_skip!();
+    let _serial = serial(&database_url).await;
+    let email = format!("monitor-stale-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let cw = h.hire_as(&h.token(), "Watcher").await;
+    let monitor = h.monitor(&cw, "run-failed").await;
+    let (status, row) = h
+        .patch(
+            &format!("/monitors/{monitor}"),
+            json!({ "watches": "coworker-renamed" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    sqlx::query("update monitor_view set watches = 'run-failed' where id = $1")
+        .bind(monitor.as_str())
+        .execute(h.store.pool())
+        .await
+        .expect("stand in for a row read before the edit");
+
+    drain_log(&h.store).await;
+    seed_failed_run(&h.store, Some(&h.account), "thr-stale").await;
+    tick_until_past(&h).await;
+    assert_eq!(
+        firings(&h, &monitor).await,
+        0,
+        "it no longer watches run-failed"
     );
 
     delete_monitor(&h, &monitor).await;

@@ -1,4 +1,4 @@
-//! The HTTP surface for schedules and monitors.
+//! The HTTP surface for schedules (monitors are `monitors.rs`), and what the two share.
 //!
 //! Ownership answers 404 for both "no such" and "not yours", exactly as runs do: a wrong guess
 //! and a real id belonging to somebody else must be indistinguishable, or the id space is
@@ -22,8 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use opengrok_core::id::{AccountId, CoworkerId, MonitorId, RunId, ScheduleId};
-use opengrok_core::monitor::{Monitor, MonitorCommand};
+use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
 use opengrok_core::schedule::{
     FireCause, Schedule, ScheduleCommand, ScheduleError, Wake, WakeKind,
 };
@@ -36,16 +35,14 @@ fn now_ms() -> i64 {
 }
 
 pub fn router(state: HostState) -> Router {
-    let agui = state.agui.clone();
     Router::new()
-        .merge(schedules_router(state))
-        .merge(monitors_router(agui))
+        .merge(schedules_router(state.clone()))
+        .merge(super::monitors::router(state))
 }
 
-/// THE SCHEDULES HALF CARRIES `HostState`, the monitors half does not. Minting a webhook wake has
-/// to say which address to POST to, and that address is `HostState.public_gateway_url` — so this
-/// router is mounted with the host state the way `agui::run_router` is, and the monitors below
-/// stay on `AgUiState` because nothing about a monitor is addressable from outside.
+/// ON THE HOST STATE. Minting a webhook wake has to say which address to POST to, and that
+/// address is `HostState.public_gateway_url`; "run now" spawns a run, which mints a form's card
+/// through it. Both halves are mounted with it the way `agui::run_router` is.
 fn schedules_router(state: HostState) -> Router {
     Router::new()
         .route("/schedules", post(create_schedule).get(list_schedules))
@@ -58,15 +55,6 @@ fn schedules_router(state: HostState) -> Router {
             "/schedules/{id}",
             axum::routing::patch(edit_schedule).delete(delete_schedule),
         )
-        .with_state(state)
-}
-
-fn monitors_router(state: AgUiState) -> Router {
-    Router::new()
-        .route("/monitors", post(create_monitor).get(list_monitors))
-        .route("/monitors/{id}/pause", post(pause_monitor))
-        .route("/monitors/{id}/resume", post(resume_monitor))
-        .route("/monitors/{id}", axum::routing::delete(delete_monitor))
         .with_state(state)
 }
 
@@ -87,15 +75,6 @@ struct CreateSchedule {
     cron: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateMonitor {
-    coworker_id: String,
-    /// The event type to watch, e.g. `run-failed`.
-    watches: String,
-    prompt: String,
-}
-
 /// Can this coworker take a routine's work at all: hired, not retired, not a group? A retired
 /// coworker's key is revoked at retirement, so its turn would run on the deployment's key outside
 /// its spend cap; a group takes no model call, so every firing would fail.
@@ -110,7 +89,7 @@ pub(crate) async fn takes_work(state: &AgUiState, coworker_id: &CoworkerId) -> b
 }
 
 /// May this account point this coworker at anything? Shared by create, edit and run now.
-async fn may_use(
+pub(super) async fn may_use(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
@@ -144,7 +123,8 @@ async fn may_use(
 /// tokens it mints (`auth/oauth_mcp.rs`). It is set on the cron replies too: a header that is
 /// sometimes absent is a header a reader has to think about, and "which routines exist" is not
 /// cacheable either.
-const NO_STORE: (axum::http::HeaderName, &str) = (axum::http::header::CACHE_CONTROL, "no-store");
+pub(super) const NO_STORE: (axum::http::HeaderName, &str) =
+    (axum::http::header::CACHE_CONTROL, "no-store");
 
 /// One routine as the wire carries it — built from the aggregate on create and from the
 /// projection on list, which is why it is a shape of its own rather than a method on either.
@@ -669,7 +649,7 @@ async fn edit_schedule(
         .into_response()
 }
 
-fn unprocessable(message: &str) -> Response {
+pub(super) fn unprocessable(message: &str) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(serde_json::json!({ "error": message })),
@@ -677,7 +657,7 @@ fn unprocessable(message: &str) -> Response {
         .into_response()
 }
 
-fn json_refusal((code, body): (u16, serde_json::Value)) -> Response {
+pub(super) fn json_refusal((code, body): (u16, serde_json::Value)) -> Response {
     (
         StatusCode::from_u16(code).unwrap_or(StatusCode::CONFLICT),
         Json(body),
@@ -744,7 +724,7 @@ async fn run_schedule_now(
     let prompt = after.prompt.clone();
     crate::autonomy::start_fired(
         &state,
-        &after,
+        after.coworker_id.clone(),
         account_id,
         id.as_str(),
         run_id,
@@ -754,13 +734,13 @@ async fn run_schedule_now(
 }
 
 #[derive(Debug, Deserialize)]
-struct RunsQuery {
-    limit: Option<i64>,
+pub(super) struct RunsQuery {
+    pub(super) limit: Option<i64>,
 }
 
 /// How many runs the history reads before keeping the routine's own. The thread takes a
 /// person's replies too, so the page is filled from this many and then cut to `limit`.
-const RUNS_MAX: i64 = 100;
+pub(super) const RUNS_MAX: i64 = 100;
 
 /// `GET /schedules/{id}/runs?limit=N` — what this routine started, newest first. Always an
 /// array: a routine that never ran is `[]`, never an object a client would have to special-case.
@@ -775,13 +755,11 @@ async fn schedule_runs(
     Path(id): Path<String>,
     Query(query): Query<RunsQuery>,
 ) -> Response {
-    use opengrok_core::run::RunStatus;
     let id = ScheduleId::from_stored(id);
     let account_id = match owned_schedule(&state.agui, &headers, &id).await {
         Ok((_, _, account_id)) => account_id,
         Err(refusal) => return refusal,
     };
-    let limit = query.limit.unwrap_or(20).clamp(1, RUNS_MAX);
     let runs = match state
         .agui
         .auth
@@ -804,19 +782,39 @@ async fn schedule_runs(
             return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
         }
     };
-    let rows: Vec<serde_json::Value> = runs
-        .iter()
+    let rows = history(&runs, query.limit, |run| {
+        if loaded.manual_runs.contains(run) {
+            Some("manual")
+        } else if loaded.webhook_runs.contains(run) {
+            Some("webhook")
+        } else if loaded.clock_runs.contains(run) {
+            Some("clock")
+        } else {
+            None
+        }
+    });
+    ([NO_STORE], Json(rows)).into_response()
+}
+
+/// One page of a routine's or a monitor's history, newest first, shared so the two cannot drift:
+/// `{runId, cause, status, startedAtMs, endedAtMs}`, `limit` clamped to 1..=`RUNS_MAX` (default
+/// 20). `cause_of` names what started a run, or `None` for one the owner never fired — a person
+/// replying in its thread is no firing, and is left out.
+///
+/// The status words (`running`, `waiting`, `ok`, `error`) are the run history's own vocabulary as
+/// #82 and #235 write it, not `RunStatus::as_str`; an exhaustive match, so a new status does not
+/// compile until it is given a word.
+pub(super) fn history(
+    runs: &[opengrok_store::ThreadRun],
+    limit: Option<i64>,
+    cause_of: impl Fn(&str) -> Option<&'static str>,
+) -> Vec<serde_json::Value> {
+    use opengrok_core::run::RunStatus;
+    let limit = usize::try_from(limit.unwrap_or(20).clamp(1, RUNS_MAX)).unwrap_or(20);
+    runs.iter()
         .filter_map(|run| {
             let key = run.id.as_str();
-            let cause = if loaded.manual_runs.contains(key) {
-                "manual"
-            } else if loaded.webhook_runs.contains(key) {
-                "webhook"
-            } else if loaded.clock_runs.contains(key) {
-                "clock"
-            } else {
-                return None;
-            };
+            let cause = cause_of(key)?;
             let (status, ended) = match RunStatus::from_stored(&run.status) {
                 RunStatus::Running => ("running", false),
                 RunStatus::AwaitingApproval => ("waiting", false),
@@ -831,9 +829,8 @@ async fn schedule_runs(
                 "endedAtMs": ended.then_some(run.updated_at_ms),
             }))
         })
-        .take(usize::try_from(limit).unwrap_or(20))
-        .collect();
-    ([NO_STORE], Json(rows)).into_response()
+        .take(limit)
+        .collect()
 }
 
 async fn pause_schedule(
@@ -933,147 +930,4 @@ async fn rotate_schedule_key(
         })),
     )
         .into_response()
-}
-
-async fn create_monitor(
-    State(state): State<AgUiState>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<CreateMonitor>,
-) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(body.coworker_id);
-    if let Err(refusal) = may_use(&state, &account_id, &coworker_id).await {
-        return refusal;
-    }
-
-    let at_ms = now_ms();
-    let events = match Monitor::default().decide(MonitorCommand::Create {
-        coworker_id,
-        watches: body.watches,
-        prompt: body.prompt,
-        at_ms,
-    }) {
-        Ok(events) => events,
-        Err(reason) => {
-            return (StatusCode::UNPROCESSABLE_ENTITY, reason.to_string()).into_response();
-        }
-    };
-    let state_after = Monitor::replay(&events);
-
-    let id = MonitorId::new();
-    if let Err(error) = state
-        .auth
-        .store
-        .append_monitor(&id, &account_id, 0, &events, &state_after, at_ms)
-        .await
-    {
-        tracing::error!(%error, "could not store a monitor");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
-    }
-
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "id": id.as_str(),
-            "coworkerId": state_after.coworker_id.as_ref().map(|c| c.as_str().to_string()),
-            "watches": state_after.watches,
-            "prompt": state_after.prompt,
-            "active": true,
-        })),
-    )
-        .into_response()
-}
-
-async fn list_monitors(State(state): State<AgUiState>, headers: axum::http::HeaderMap) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    match state.auth.store.monitors_for(&account_id).await {
-        Ok(monitors) => {
-            let rows: Vec<_> = monitors
-                .into_iter()
-                .map(|view| {
-                    serde_json::json!({
-                        "id": view.id,
-                        "coworkerId": view.coworker_id.as_str(),
-                        "watches": view.watches,
-                        "prompt": view.prompt,
-                        "active": view.active,
-                    })
-                })
-                .collect();
-            Json(rows).into_response()
-        }
-        Err(error) => {
-            tracing::error!(%error, "could not list monitors");
-            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
-        }
-    }
-}
-
-async fn change_monitor(
-    state: AgUiState,
-    headers: axum::http::HeaderMap,
-    id: String,
-    command: fn(i64) -> MonitorCommand,
-) -> Response {
-    let id = MonitorId::from_stored(id);
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    match state.auth.store.monitor_owner(&id).await {
-        Ok(Some(owner)) if owner == account_id => {}
-        _ => return (StatusCode::NOT_FOUND, "no such monitor").into_response(),
-    }
-    let (monitor, seq) = match state.auth.store.load_monitor(&id).await {
-        Ok(loaded) => loaded,
-        Err(_) => return (StatusCode::NOT_FOUND, "no such monitor").into_response(),
-    };
-    let at_ms = now_ms();
-    let events = match monitor.decide(command(at_ms)) {
-        Ok(events) => events,
-        Err(reason) => return (StatusCode::CONFLICT, reason.to_string()).into_response(),
-    };
-    let mut after = monitor;
-    for event in &events {
-        after.apply(event);
-    }
-    match state
-        .auth
-        .store
-        .append_monitor(&id, &account_id, seq, &events, &after, at_ms)
-        .await
-    {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => {
-            tracing::error!(%error, "could not store a monitor change");
-            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
-        }
-    }
-}
-
-async fn pause_monitor(
-    State(state): State<AgUiState>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    change_monitor(state, headers, id, |at_ms| MonitorCommand::Pause { at_ms }).await
-}
-
-async fn resume_monitor(
-    State(state): State<AgUiState>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    change_monitor(state, headers, id, |at_ms| MonitorCommand::Resume { at_ms }).await
-}
-
-async fn delete_monitor(
-    State(state): State<AgUiState>,
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-) -> Response {
-    change_monitor(state, headers, id, |at_ms| MonitorCommand::Delete { at_ms }).await
 }

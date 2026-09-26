@@ -30,7 +30,7 @@ const MONITOR_BATCH: i64 = 200;
 /// than a turn's wake of a sleeping computer (`TURN_WAKE_PATIENCE`, 90s), which is what stands
 /// between the firing and the run's first row; short enough that a firing the policy refused, and
 /// so never journaled, stops holding a slot within minutes.
-const FIRING_PENDING_MS: i64 = 5 * 60 * 1000;
+pub(crate) const FIRING_PENDING_MS: i64 = 5 * 60 * 1000;
 
 /// How many schedules one tick may claim — the same anti-stampede cap recovery uses.
 const CLAIM_LIMIT: i64 = 20;
@@ -147,12 +147,12 @@ pub async fn monitor_tick(
     gateway: &crate::host_state::HostState,
 ) -> Result<usize, opengrok_store::StoreError> {
     let state: &AgUiState = &gateway.agui;
-    let span = state.auth.store.next_log_span(MONITOR_BATCH).await?;
-    if span.is_empty() {
-        return Ok(0);
-    }
+    // The monitors are read BEFORE the cursor moves: once `next_log_span` commits, a failure
+    // here would drop every match in the span for good. With none active the span is still taken,
+    // so the cursor keeps pace with the log.
     let monitors = state.auth.store.active_monitors().await?;
-    if monitors.is_empty() {
+    let span = state.auth.store.next_log_span(MONITOR_BATCH).await?;
+    if span.is_empty() || monitors.is_empty() {
         return Ok(0);
     }
 
@@ -161,7 +161,7 @@ pub async fn monitor_tick(
     let mut owners: HashMap<String, Option<AccountId>> = HashMap::new();
     let mut fired = 0;
     for event in &span {
-        for (monitor_id, account_id, coworker_id, watches, prompt) in &monitors {
+        for (monitor_id, account_id, _, watches, _) in &monitors {
             if watches != &event.event_type {
                 continue;
             }
@@ -196,14 +196,23 @@ pub async fn monitor_tick(
             if event.stream_id == opengrok_store::monitor_stream(monitor_id) {
                 continue;
             }
-            if let Some(run) = event.stream_id.strip_prefix("run/")
-                && state
+            if let Some(run) = event.stream_id.strip_prefix("run/") {
+                // NOT `?`. The cursor is already past this span, so aborting the tick drops every
+                // other monitor's matches in it for good; a guard that cannot be read is one that
+                // does not fire.
+                match state
                     .auth
                     .store
                     .was_fired_by(monitor_id, &RunId::from_stored(run))
-                    .await?
-            {
-                continue;
+                    .await
+                {
+                    Ok(false) => {}
+                    Ok(true) => continue,
+                    Err(error) => {
+                        tracing::warn!(%error, monitor = %monitor_id, "could not read a monitor's loop guard; not firing it");
+                        continue;
+                    }
+                }
             }
 
             // Checked before the firing is recorded, so a refused wake leaves nothing behind — no
@@ -225,37 +234,69 @@ pub async fn monitor_tick(
                 }
             }
 
+            // Through `mutate_monitor`, and one monitor's failure skips only that monitor: the
+            // cursor is past this span, so a `?` here dropped every other match in it.
+            //
+            // THE AGGREGATE HAS THE LAST WORD. The match above used the row read at the start of
+            // the tick; an edit landing since may have changed what the monitor watches, and it
+            // must not fire on the old type. Coworker and prompt come from the aggregate too.
             let run_id = RunId::new();
-            let (loaded, seq) = state.auth.store.load_monitor(monitor_id).await?;
-            let events = match loaded.decide(MonitorCommand::Fire {
-                run_id: run_id.clone(),
-                matched_stream: event.stream_id.clone(),
-                at_ms: now_ms(),
-            }) {
-                Ok(events) => events,
-                Err(reason) => {
-                    tracing::info!(monitor = %monitor_id, %reason, "a matching monitor declined to fire");
+            let after = match super::monitors::mutate_monitor(
+                state,
+                account_id,
+                monitor_id,
+                now_ms(),
+                |loaded| {
+                    // 422 for "declined" (edited, paused, deleted since the row was read), so the
+                    // log can tell it from a lost race (409) or a store failure (500).
+                    if loaded.watches != event.event_type {
+                        return Err((
+                            422,
+                            serde_json::json!({ "error": "it no longer watches this" }),
+                        ));
+                    }
+                    loaded
+                        .decide(MonitorCommand::Fire {
+                            run_id: run_id.clone(),
+                            matched_stream: event.stream_id.clone(),
+                            manual: false,
+                            at_ms: now_ms(),
+                        })
+                        .map_err(|reason| (422, serde_json::json!({ "error": reason.to_string() })))
+                },
+            )
+            .await
+            {
+                Ok(after) => after,
+                // The cursor is past this event, so a match that did not fire here is gone. A
+                // monitor that declined is ordinary; losing twice to other writers, or the store
+                // failing, loses a firing somebody expected — and says so.
+                Err((422, why)) => {
+                    tracing::info!(monitor = %monitor_id, %why, stream = %event.stream_id, "a matching monitor declined to fire");
+                    continue;
+                }
+                Err((code, why)) => {
+                    tracing::warn!(monitor = %monitor_id, %code, %why, stream = %event.stream_id, "a matching monitor's firing was lost");
                     continue;
                 }
             };
-            state
-                .auth
-                .store
-                .append_monitor(monitor_id, account_id, seq, &events, &loaded, now_ms())
-                .await?;
+            let Some(coworker_id) = after.coworker_id.clone() else {
+                tracing::warn!(monitor = %monitor_id, "a matching monitor names no coworker");
+                continue;
+            };
 
             // The coworker is told what woke it — the prompt alone would read as a question from
             // nowhere.
             let prompt = format!(
-                "{prompt}\n\n[woken by event] {} on {}",
-                event.event_type, event.stream_id
+                "{}\n\n[woken by event] {} on {}",
+                after.prompt, event.event_type, event.stream_id
             );
             tokio::spawn(crate::autonomy::fire(
                 gateway.clone(),
                 crate::autonomy::Firing {
                     origin: format!("monitor {monitor_id}"),
                     account_id: account_id.clone(),
-                    coworker_id: coworker_id.clone(),
+                    coworker_id,
                     prompt,
                     thread_id: monitor_id.as_str().to_string(),
                     run_id,
