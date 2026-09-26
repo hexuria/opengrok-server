@@ -520,20 +520,6 @@ impl PgStore {
         row.map(coworker_key_row).transpose()
     }
 
-    /// Every key ever minted for this coworker, one per member who has talked to it. Retirement
-    /// revokes all of them; the console's "is it metered" read asks about one person's.
-    pub async fn coworker_keys(&self, coworker: &CoworkerId) -> StoreResult<Vec<CoworkerKeyView>> {
-        let rows = sqlx::query(
-            "select coworker_id, account_id, key_id, key_prefix, quota_usd, created_at_ms,
-                    revoked_at_ms, secret_scoped
-             from coworker_gateway_key where coworker_id = $1 order by created_at_ms",
-        )
-        .bind(coworker.as_str())
-        .fetch_all(self.pool())
-        .await?;
-        rows.into_iter().map(coworker_key_row).collect()
-    }
-
     /// Mark EVERY key this coworker has revoked (retirement); the caller revokes each on the
     /// gateway and drops the sealed secrets. The rows STAY: each member's month still counts
     /// toward their own pool. Returns what was live so the caller knows which keys to revoke —

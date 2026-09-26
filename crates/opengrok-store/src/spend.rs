@@ -117,32 +117,6 @@ impl PgStore {
         .transpose()
     }
 
-    /// Every row at one scope, keyed by scope id — the admin card's listing.
-    pub async fn spend_limits_at(
-        &self,
-        scope: SpendScope,
-    ) -> StoreResult<Vec<(String, SpendLimit)>> {
-        let rows = sqlx::query(
-            "select scope_id, five_hour_usd, seven_day_usd, month_usd from spend_limit
-             where scope_kind = $1 order by scope_id",
-        )
-        .bind(scope.as_str())
-        .fetch_all(self.pool())
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok((
-                    row.try_get("scope_id")?,
-                    SpendLimit {
-                        five_hour_usd: row.try_get("five_hour_usd")?,
-                        seven_day_usd: row.try_get("seven_day_usd")?,
-                        month_usd: row.try_get("month_usd")?,
-                    },
-                ))
-            })
-            .collect()
-    }
-
     /// Whose coworker this is — the account that hired it, retired or not.
     pub async fn coworker_owner(
         &self,

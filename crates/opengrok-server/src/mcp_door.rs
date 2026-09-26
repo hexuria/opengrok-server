@@ -781,7 +781,7 @@ pub async fn reply_to_ask(
 
 /// The thread an MCP Ask's run lives on. DISTINCT from `gateway-{coworker}` on purpose: this
 /// run is one MCP call's audit row, not a conversation turn. The literal is written here once —
-/// every reader of it goes through `is_mcp_audit_thread`, so the door that mints these runs and
+/// every reader of it goes through `is_mcp_audit_run`, so the door that mints these runs and
 /// the door that answers their cards cannot come to disagree about which runs are which.
 const MCP_AUDIT_THREAD_PREFIX: &str = "mcp-";
 
