@@ -159,6 +159,13 @@ paused routine and leaves it paused: the clock and the hook stay off. The histor
 the routine started (`cause` is `clock`, `manual` or `webhook`), newest first, with `status`
 `running`, `waiting` (on a card), `ok` or `error`.
 
+A monitor has the same three: `PATCH /monitors/{id}` (any of `watches`, `prompt`, `coworkerId`),
+`POST /monitors/{id}/run` and `GET /monitors/{id}/runs`. An edit is checked the way create is, so
+it cannot be pointed at `monitor-fired`. Run now works on a paused monitor and leaves it paused,
+and the events of that run itself (`run/{id}`) never wake it again; another monitor, or an
+event the run causes elsewhere (a computer assigned, say), can still match. Its history's `cause`
+is `event` (the log woke it) or `manual`.
+
 ## When it does not connect
 
 - `/health` from the NativeChat machine first: `curl http(s)://<address>:1447/health` answers
