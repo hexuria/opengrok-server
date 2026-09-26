@@ -484,9 +484,9 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
     events
 }
 
-/// A conversation's title: the first line of the first thing the person said in it, by the same
-/// rule `with_prompt_frames` draws bubbles by — a `user` message with words — so a list never
-/// names a thread after something its transcript does not show.
+/// A conversation's title: the first line of the first thing the person said in it — a `user`
+/// message, as `with_prompt_frames` draws, that has words once trimmed — so a list never names a
+/// thread after something its transcript does not show.
 pub(crate) fn title_of(prompt: &[Value]) -> Option<String> {
     prompt
         .iter()

@@ -872,6 +872,17 @@ async fn only_a_signed_in_person_may_list_and_an_empty_history_is_an_empty_array
     );
     assert!(body["error"].is_string(), "{body}");
 
+    // A malformed query is still asked who is calling first, and its refusal is JSON too.
+    let (status, body) = h
+        .send_with(None, reqwest::Method::GET, "/ag-ui/threads?limit=abc", None)
+        .await;
+    assert_eq!(status, 401, "signed out outranks a bad limit: {body}");
+    let (status, body) = h
+        .send(&me, reqwest::Method::GET, "/ag-ui/threads?before=x", None)
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].is_string(), "a 400 says why, as JSON: {body}");
+
     let (status, body) = h
         .send(&me, reqwest::Method::GET, "/ag-ui/threads", None)
         .await;

@@ -4020,13 +4020,20 @@ struct ThreadListRow {
 /// that reads "not found" for "signed out" never asks the person to sign in. A bot key is refused
 /// like any other non-session bearer; turns taken with one are the minter's and list under them.
 /// Origin comes from the caller's own routine rows, so a routine deleted since reads `chat`.
+/// The order follows each thread's latest activity, which moves between pages: a client that pages
+/// while turns land de-duplicates by `threadId`.
 pub async fn list_threads(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
-    Query(query): Query<ThreadListQuery>,
+    query: Result<Query<ThreadListQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return unauthorized("sign in first");
+    };
+    // Signed out first, malformed second: a bad `?limit=` is no reason to skip the 401.
+    let Ok(Query(query)) = query else {
+        let json = serde_json::json!({ "error": "limit and before are numbers" });
+        return (StatusCode::BAD_REQUEST, Json(json)).into_response();
     };
     // Answering page one would send a pager round the same page forever.
     if query.before.is_none() && query.before_thread_id.is_some() {
@@ -4058,7 +4065,9 @@ pub async fn list_threads(
     {
         Ok(threads) => threads,
         Err(error) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            tracing::warn!(%error, "thread list: the store could not answer");
+            let json = serde_json::json!({ "error": "the thread list is unavailable" });
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json)).into_response();
         }
     };
     let rows: Vec<ThreadListRow> = threads

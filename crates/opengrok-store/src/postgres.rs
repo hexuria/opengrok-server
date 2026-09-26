@@ -633,11 +633,11 @@ impl PgStore {
                  having $2::bigint is null
                      or (max(updated_at_ms), thread_id) < ($2::bigint, coalesce($3::text, ''))
                ) t
-               cross join lateral (
-                 select id, status from run_view
-                 where thread_id = t.thread_id and account_id = $1 and hidden_at_ms is null
-                 order by coalesce(started_at_ms, updated_at_ms) desc, id desc limit 1
-               ) last
+               join (
+                 select distinct on (thread_id) thread_id, id, status from run_view
+                 where account_id = $1 and hidden_at_ms is null
+                 order by thread_id, coalesce(started_at_ms, updated_at_ms) desc, id desc
+               ) last on last.thread_id = t.thread_id
                left join lateral (select payload from events where stream_id = 'run/' || last.id
                  and stream_seq = 1 and event_type = 'run-started') started on true
                where ($4::text is null or started.payload->>'coworker_id' = $4::text)
