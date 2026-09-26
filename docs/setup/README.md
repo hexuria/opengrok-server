@@ -19,7 +19,8 @@ Prerequisites, once per machine: a Rust toolchain (edition 2024), Docker Desktop
 Postgres and local-Docker computers), `psql` and `jq`.
 
 The discontinued Grok Bot desktop client's setup page is archived as
-[`../archive/desktop-client.md`](../archive/desktop-client.md). Its replacement is step 8, [`nativechat.md`](nativechat.md), for the client served today.
+[`../archive/desktop-client.md`](../archive/desktop-client.md). Its replacement is step 8,
+[`nativechat.md`](nativechat.md), for the client served today.
 
 The web console needs no separate build step for development: build it once
 (`cd web && bun install && bun run build`) and point `OG_WEB_CONSOLE_DIR=web/dist` at the

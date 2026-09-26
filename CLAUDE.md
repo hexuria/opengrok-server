@@ -93,7 +93,7 @@ who knows one should navigate the other. Axum 0.8, sqlx 0.9, Rust 2024, matching
 
 | What | Where |
 |---|---|
-| The client we serve | `/Volumes/goldcoders/OSS/opengrok` — reference: `docs/research/client-grok-bot.md` |
+| The client we serve | `hexuria/nativechat` — reference: `docs/research/client-nativechat.md` (the removed Grok Bot client: `docs/research/client-grok-bot.md`) |
 | The model door | `/Volumes/goldcoders/OSS/open-ai-gateway` — reference: `docs/research/gateway-open-ai-gateway.md` |
 | The prior product's lessons | `/Volumes/goldcoders/projects/opensesame/opensesame` — reference: `docs/research/lessons-opensesame.md` |
 | The coworker's computer | `docs/research/sandbox-box-ascii-dev.md` (our notes); vendor API pages in `docs/box/` |

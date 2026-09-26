@@ -8,10 +8,14 @@ judge at the tool seam (§4) in `crates/opengrok-tools/src/review.rs` (`combine`
 
 > **Since 20 Sep 2026 (P0-E):** the answer verb `resolveAutoReviewApproval` lived on seam A, the
 > Grok Bot client's `POST /api/{method}` door, and was deleted with it. A card is now answered at
-> `POST /ag-ui/runs/{run_id}/answer` with `{callId, approved}` (`answer_run`,
-> `crates/opengrok-server/src/agui/routes.rs`): the same exactly-once aggregate, the same flip of
-> the card on its entry id. §1 and §5's verb are the record of how it was built; the card's
-> shape, the tiers, the gate and the management API stand.
+> `POST /ag-ui/runs/{run_id}/answer` with `{"call_id": …, "approved": …}` (`AnswerRequest`,
+> `crates/opengrok-server/src/agui/routes.rs`; the reply echoes `callId`), through the same
+> exactly-once aggregate. What the old verb did and this route does not (P0-E's own commit,
+> `0cc3487`, says so): the card entry is flipped in place only for an MCP-raised ask
+> (`set_gateway_approval_status`, `mcp_door.rs`), and a dead request no longer heals to
+> `expired` with a 410; a call id the run is not waiting on answers 409. §1 and §5's verb and its
+> 410 are the record of how it was built; the card's shape, the tiers, the gate and the
+> management API stand.
 Tests: unit (ladder, redaction, judge parsing, cards) and Postgres-backed (tiers, resolve verb).
 `OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask`
 cans the judge under a mock door. The audit of what existed before is §1; the consent model this
@@ -43,7 +47,9 @@ Rules that follow from it:
 - **At most one card per tool call.** When the remote-control gate already suspended for consent,
   auto-review does not raise a second ask for the same call.
 
-## 1. What existed before (audited, with evidence; the `gateway/` files named here were deleted in P0-E)
+## 1. What existed before (audited, with evidence)
+
+The `gateway/` files named here were deleted in P0-E.
 
 - `gateway/mod.rs:141` — `"autoReviewInstructions": null` in the `getHostSettings` default
   record; present only because the client's resync chain reads the record whole.

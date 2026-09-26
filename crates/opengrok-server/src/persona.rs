@@ -1,7 +1,7 @@
 //! Who a coworker is, as one system message.
 //!
 //! A coworker carries a `title` (what it is) and a `role` (what it is for, in the person's own
-//! words). They live in different places, on purpose. The TITLE is in the seam-B profile blob
+//! words). They live in different places, on purpose. The TITLE is in the coworker's profile blob
 //! beside the description, because that is where the client already puts its decoration and a
 //! second home for it would be a second answer. The ROLE is a column on the aggregate, because
 //! it is behavioural rather than cosmetic: the run path reads it on every single turn, the
@@ -97,8 +97,8 @@ pub struct Persona {
 }
 
 impl Persona {
-    /// Compose from the two homes: the title out of the seam-B profile blob, the role out of the
-    /// aggregate's column.
+    /// Compose from the two homes: the title out of the coworker's profile blob, the role out of
+    /// the aggregate's column.
     ///
     /// A `role` key in the blob is IGNORED, structurally — this function cannot read one. An
     /// older client or an earlier shape may have written one, and merging it would give a
@@ -685,7 +685,7 @@ pub fn with_standing_role(transcribed: &str, persona: &Persona) -> String {
     }
 }
 
-/// The persona of a coworker as the run path needs it: the title from the seam-B profile, where
+/// The persona of a coworker as the run path needs it: the title from the coworker's profile, where
 /// the client's decoration lives, and the role from the aggregate, where a field the model reads
 /// every turn belongs. A failed read is not a failed turn — a coworker with no persona is still
 /// a coworker, and holding a turn because a profile row would not load would be the wrong trade.

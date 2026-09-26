@@ -81,9 +81,10 @@ pass on one rung and fail on another.
 
 ## 2. The account API answers refusals as plain text, not JSON
 
-**Where:** `crates/opengrok-server/src/agui/routes.rs` and `account_api.rs` — about 99 refusals
-of the form `(StatusCode::X, "some sentence")` (counted 26 Sep 2026), against a minority that use
-`json!({"error": …})`.
+**Where:** `crates/opengrok-server/src/agui/routes.rs` and `account_api.rs`. Counted 26 Sep
+2026 with `grep -cE '\(StatusCode::[A-Z_]+, "'` over the two files: 99 one-line plain-text
+refusals (79 + 20), more once multi-line and `format!` refusals are counted, against about 15
+`"error":` sites.
 
 The removed `/api/{method}` door guaranteed `{"error": …}` for every refusal, transcribed from the
 Grok Bot client's contract. The account API never adopted the same rule, so most of what it

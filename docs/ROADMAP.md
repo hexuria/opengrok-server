@@ -340,20 +340,21 @@ the proof, not construction.
   reverse-exec stays excluded. *(this commit)*
 - [x] **16.policy** A policy grant's "needs a human yes" has a card. It was a stuck run: `card_for`
   returned nothing for `PolicyApproval`, the resolve verb matched only auto-review, so a
-  `needs_approval` grant behaved like a deny that left a suspended run behind. The ask now rides
-  the client's own `auto-review-approval` card (`cards::policy_approval_card`) with the grant's
-  reason (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule`
-  — so the client's "Always" is a plain approve that writes nothing
+  `needs_approval` grant behaved like a deny that left a suspended run behind. The ask now rides the
+  client's own `auto-review-approval` card (`cards::policy_approval_card`) with the grant's reason
+  (the harness carries the gate's `why` on `run-awaiting-approval`) and no `proposedRule` — so the
+  client's "Always" is a plain approve that writes nothing
   (`transcript-card/auto-review-actions.ts:149-150`); a policy is widened in policy, never from a
-  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes
-  to the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE
-  yes for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the
-  AG-UI answer → finished run → gate yes remembered. `against_policy_card.rs` walked the DESKTOP path *(removed in P0-E)* with a stand-in
-  computer: hire → grant → turn suspends → card in the transcript → approved runs the command
-  on the computer (and not before) → second answer `alreadyAnswered`; denied finishes the run,
-  runs nothing, and the refusal names the coworker's policy. Packaged-app evidence in
-  `verification/policy-card/` (the card with the grant's reason verbatim, Allow once, the run
-  continues). Plan: `archive/plan-slice16-later.md` Part A. (`8580a54` + follow-up)
+  card. `POST /ag-ui/runs/{id}/answer` settles both reasons and the resume routes a policy yes to
+  the gate. The MCP door raises the same card for a policy ask and remembers its yes as a GATE yes
+  for the retry. `against_the_mcp_door.rs` walks it: ask → card with reason, no rule → the AG-UI
+  answer → finished run → gate yes remembered. `against_policy_card.rs` walked the DESKTOP path
+  *(removed in P0-E)* with a stand-in computer: hire → grant → turn suspends → card in the
+  transcript → approved runs the command on the computer (and not before) → second answer
+  `alreadyAnswered`; denied finishes the run, runs nothing, and the refusal names the coworker's
+  policy. Packaged-app evidence in `verification/policy-card/` (the card with the grant's reason
+  verbatim, Allow once, the run continues). Plan: `archive/plan-slice16-later.md` Part A.
+  (`8580a54` + follow-up)
 - [x] **16.oauth** OAuth 2.1 on `/mcp` — "mint a bot key from the browser". An embedded
   authorization server (`auth/oauth_mcp.rs`) under `/oauth/mcp/*`, never `/oauth/token` (that is
   the desktop's refresh): RFC 9728 metadata at both `/.well-known/oauth-protected-resource[/mcp]`
@@ -603,13 +604,14 @@ every record that sharing would otherwise break carry whose it is.
   widens through a NEW `roster_for`: `coworkers_for` stays owner-only, because it is the
   authorization primitive management is gated on and sharing is not a write grant.
 
-  Found on the way and fixed here: **seam A authorized nothing per coworker.** Every verb
-  resolved the CALLER and none checked the coworker was theirs, so any signed-in person who knew
-  an id could read a transcript or prompt somebody else's coworker. Survivable only while ids
-  were undiscoverable — and this slice was about to make them discoverable on purpose. One gate
-  in `gateway/routes.rs` *(removed with seam A in P0-E; the AG-UI door keeps the rule)* answers 404 (never 403: a person who may not use a coworker must not
-  learn it exists), fail-closed by default, with a named list of verbs that answer a constant and
-  are exempt because a 404 there would divert the renderer. `tests/against_visibility.rs`.
+  Found on the way and fixed here: **seam A authorized nothing per coworker.** Every verb resolved
+  the CALLER and none checked the coworker was theirs, so any signed-in person who knew an id could
+  read a transcript or prompt somebody else's coworker. Survivable only while ids were
+  undiscoverable — and this slice was about to make them discoverable on purpose. One gate in
+  `gateway/routes.rs` *(removed with seam A in P0-E; the AG-UI door keeps the rule)* answers 404
+  (never 403: a person who may not use a coworker must not learn it exists), fail-closed by default,
+  with a named list of verbs that answer a constant and are exempt because a 404 there would divert
+  the renderer. `tests/against_visibility.rs`.
 
   **Re-landed on the AG-UI door, 25 Sep 2026 (#175).** P0-E deleted `roster_for` and
   `tests/against_visibility.rs` with the seam-A door that called them, and the AG-UI door had
@@ -679,20 +681,20 @@ every record that sharing would otherwise break carry whose it is.
 - [ ] Passkey step-up for reverse-exec (scope 3 of the original design, now in
   `archive/reverse-exec-design.md`) — parked on the peer's macOS WebAuthn ceremony.
 - [x] **Groups** *(removed in P0-E, 20 Sep 2026, with seam A's orchestrator; the tests named
-  here went with it)* (`archive/plan-rooms.md` §2; the rooms half of the old channels plan, as the client
-  actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
+  here went with it)* (`archive/plan-rooms.md` §2; the rooms half of the old channels plan, as the
+  client actually models it): a group is a coworker with members (`CoworkerCommand::HireGroup` /
   `SetMembers`, roster `isGroup`/`memberIds`), no computer, key or model of its own;
-  `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules
-  (same member set ⇒ the existing group, no group inside a group, at most 6). A prompt to it
-  runs the client's orchestrator transcribed (`gateway/group.rs`): three rounds, responders
-  from `@mentions` since the last user message, order rotating by round, each member's turn on
-  its own model, key, tools and policy with the room's prompts word for word, speaking only
-  through the room's `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per
-  prompt, `activeRemoteMemberId` on the row while a member speaks. `tests/against_groups.rs`.
-  A card raised inside a member's turn is the MEMBER's card in the ROOM's transcript, under its
-  name; the room pauses where the round stood (`room_pause`), and the answer — given naming the
-  group, as the desktop does — resumes that member inside the room and then the members still
-  to speak. `tests/against_group_card.rs`.
+  `createGroup`/`setGroupMembers` answer in the createAgent shapes with the client's own rules (same
+  member set ⇒ the existing group, no group inside a group, at most 6). A prompt to it runs the
+  client's orchestrator transcribed (`gateway/group.rs`): three rounds, responders from `@mentions`
+  since the last user message, order rotating by round, each member's turn on its own model, key,
+  tools and policy with the room's prompts word for word, speaking only through the room's
+  `SendMessage` tool, "(pass)" is silence, caps of 2 per turn and 10 per prompt,
+  `activeRemoteMemberId` on the row while a member speaks. `tests/against_groups.rs`. A card raised
+  inside a member's turn is the MEMBER's card in the ROOM's transcript, under its name; the room
+  pauses where the round stood (`room_pause`), and the answer — given naming the group, as the
+  desktop does — resumes that member inside the room and then the members still to speak.
+  `tests/against_group_card.rs`.
 - [ ] Cross-account shared rooms — parked (`archive/plan-rooms.md` §3); the ten verbs answer in the
   client's disabled shapes (#35).
 - [ ] mem0 (exists only as a catalogue entry today).

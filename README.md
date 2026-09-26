@@ -20,7 +20,7 @@ A coworker keeps working when you close the tab, because the work was never in t
 The server is real and serving NativeChat: auth, the AG-UI endpoint, the durable harness,
 computers, connectors, the scheduler/monitor autonomy pair, the MCP door with OAuth, orgs and
 invites, the web console, the consent model with model-judged auto-review, org gateway keys and
-per-coworker model pins (slices 1–19; 17 and 18 each keep one open box).
+per-coworker model pins (slices 1–19; a few boxes in them are still open).
 **[`docs/ROADMAP.md`](docs/ROADMAP.md) is the tracker** — a box is ticked only in the commit that
 makes it true, and its unticked boxes are the remaining work.
 

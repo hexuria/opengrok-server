@@ -287,8 +287,8 @@ pub(crate) fn card_for(suspension: &Suspension) -> Option<Value> {
             now_ms(),
         )),
         // A policy grant's "needs a human yes": the same auto-review card, carrying the grant's
-        // reason and no proposed rule. Answered by `resolveAutoReviewApproval`, which routes the
-        // yes to the GATE (not the judge) by this reason.
+        // reason and no proposed rule. Answered at `POST /ag-ui/runs/{id}/answer`, whose resume
+        // routes the yes to the GATE (not the judge) by this reason.
         SuspendReason::PolicyApproval => Some(crate::cards::policy_approval_card(
             &entry_id(),
             &suspension.call_id,

@@ -103,9 +103,9 @@ OG_PUBLIC_GATEWAY_URL=https://uriahs-MacBook-Pro.local:1447   # the Mac's name; 
 ```
 
 `OG_BIND` moves to loopback so Caddy can take the LAN address on the same port. The public URL is
-the base of every emailed link and of the browser-login redirect, and the MCP door's OAuth
-issuer and the `resource` a token is issued for; it must be the HTTPS address the clients
-actually reach. Restart with `scripts/serve.sh`.
+the base of every emailed link (verify, reset, invite), the MCP door's OAuth issuer and the
+`resource` a token is issued for, and the origin of a computer's proxied screen URL; it must be
+the HTTPS address the clients actually reach. Restart with `scripts/serve.sh`.
 
 The smokes and the gate need nothing: they run their own server on their own port and set their
 own `OG_PUBLIC_GATEWAY_URL`, so an HTTPS LAN address here changes nothing for them. Keep running
@@ -137,7 +137,8 @@ Claude Code (16.oauth is on main):
 # Claude Code is a Node process, and Node does NOT read the macOS keychain — its metadata fetch
 # of https://192.168.100.24:1447/.well-known/... fails UNABLE_TO_GET_ISSUER_CERT_LOCALLY unless
 # Caddy's root is handed to it. Caddy's data dir varies by install (on the Mac this was verified
-# on it is ~/.local/share/caddy, not ~/Library/Application Support/Caddy), so ask Caddy for it:
+# on it is ~/.local/share/caddy, not ~/Library/Application Support/Caddy:
+# docs/verification/door1-oauth/README.md), so ask Caddy for it:
 curl -s localhost:2019/pki/ca/local | jq -r .root_certificate > ~/opengrok/caddy-root.crt
 export NODE_EXTRA_CA_CERTS=~/opengrok/caddy-root.crt
 claude mcp add --transport http opengrok https://192.168.100.24:1447/mcp

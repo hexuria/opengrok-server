@@ -95,6 +95,9 @@ to off/empty and the coworker row deleted.
   ladder are unit-tested (`opengrok-harness/src/review.rs`, `opengrok-tools/src/review.rs`); a
   real "ask" is the same code path with a different one-word input.
 - A card pressed after a server restart. Covered at capture time by
-  `tests/against_auto_review_gate.rs`'s "answered exactly once" test (removed with seam A in
-  P0-E; exactly-once answering is now `run.rs`'s `a_call_can_only_be_answered_once`), which resolves a run that exists only in Postgres, never in
-  process memory — the same situation a restart leaves.
+  `tests/against_auto_review_gate.rs`'s "answered exactly once" test, which resolved a run that
+  existed only in Postgres, never in process memory, the same situation a restart leaves. That
+  test went with seam A in P0-E. Today exactly-once is the aggregate's rule
+  (`a_call_can_only_be_answered_once`, `crates/opengrok-core/src/run.rs`, an in-memory unit
+  test), and `POST /ag-ui/runs/{run_id}/answer` replays the run from Postgres before deciding; no
+  route test presses the same card twice after a restart.

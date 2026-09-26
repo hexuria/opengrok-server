@@ -2,8 +2,9 @@
 //!
 //! WHY ORGS EXIST: signup is not open. A person may create an account only with an invite code
 //! issued by an org's admin AND an email under one of that org's registered domains
-//! (`docs/archive/identity-model.md`). Both gates, not either — a code alone would let a stranger's gmail
-//! in, a domain alone would let anyone at the company in unbidden. The org is where both live.
+//! (`docs/archive/identity-model.md`). Both gates, not either — a code alone would let a stranger's
+//! gmail in, a domain alone would let anyone at the company in unbidden. The org is where both
+//! live.
 //!
 //! TWO WAYS A DOMAIN GETS IN, ONE MEANING ONCE IT IS. `domains` is the list that admits signups.
 //! The operator's shell puts a domain there directly (`Created`, `DomainAdded`): whoever can run

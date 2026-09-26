@@ -1,8 +1,9 @@
 # Connecting NativeChat — and the demo runbook
 
 NativeChat is the client served today: a native desktop app in Rust + GPUI, in its own repository
-(`hexuria/nativechat`, per #147). It replaced the Grok Bot desktop client, whose doors were
-deleted on 20 Sep 2026 ([`../archive/desktop-client.md`](../archive/desktop-client.md) is that client's record).
+(`hexuria/nativechat`, per #147). It replaced the Grok Bot desktop client, whose doors were deleted
+on 20 Sep 2026 ([`../archive/desktop-client.md`](../archive/desktop-client.md) is that client's
+record).
 
 > **What this page can and cannot vouch for.** NativeChat's source is not in this checkout.
 > Every statement about **the server** below names the file or smoke that proves it. Statements

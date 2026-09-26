@@ -1080,7 +1080,7 @@ pub struct RepinRequest {
 ///
 /// The fields land in two different homes, as `persona.rs` explains: the name, model, role and
 /// visibility are the aggregate's, and the title, avatar shape and colour are the client's
-/// decoration in the seam-B profile blob. `notifyOnUpdates` has no home at all — see below.
+/// decoration in the coworker's profile blob. `notifyOnUpdates` has no home at all — see below.
 ///
 /// A coworker not on your roster answers 404, like every other per-coworker route here: an id
 /// you cannot use must not be distinguishable from one that does not exist. One an org-mate
@@ -1326,8 +1326,8 @@ pub async fn repin_coworker(
     }
     if !decoration.is_empty() {
         crate::persona::merge_profile_text(&mut profile, &serde_json::Value::Object(decoration));
-        // A 500 rather than the seam-B path's silent `let _`: this door exists because an edit
-        // that is accepted and not stored is the bug being fixed, and a reply saying the title
+        // A 500 rather than the removed seam-B path's silent `let _`: this door exists because an
+        // edit that is accepted and not stored is the bug being fixed, and a reply saying the title
         // changed when the write failed would be that bug again.
         if state
             .auth
@@ -1615,8 +1615,8 @@ pub async fn hire(
         coworker.apply(event);
     }
 
-    // A computer, if asked for — via the shared helper so REST, gateway and seam-B create paths
-    // behave identically. A failure leaves a boxless-but-hired coworker; the reason is in the reply.
+    // A computer, if asked for — via the shared helper (every create path's, before P0-E left only
+    // this one). A failure leaves a boxless-but-hired coworker; the reason is in the reply.
     // 1 account = 1 computer: the account's first agent creates it, later agents share it.
     let provisioned =
         provision::ensure_computer_for(&state, &account_id, &coworker_id, &mut coworker, at_ms)
@@ -2800,8 +2800,9 @@ pub async fn run(
 }
 
 /// The 401 every refusal of an unnamed or unrecognised caller answers with: `{"error": …}`, the
-/// shape the removed `/api/{method}` seam guaranteed and a client's error helper reads first
-/// (`docs/known-gaps.md` §2), so the sentence reaches the person rather than "failed (401)".
+/// shape the removed `/api/{method}` seam guaranteed and the removed desktop client's error helper
+/// read first (`docs/known-gaps.md` §2), so the sentence reaches the person rather than "failed
+/// (401)".
 fn unauthorized(sentence: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -3771,10 +3772,10 @@ async fn events_for_client(
 /// How many runs a thread answers with when the caller does not ask for a number.
 ///
 /// Twenty, which is what seam A's routine run list (removed in P0-E) asked `runs_for_thread` for,
-/// and what the server-side history window uses. Two readers of the same history disagreeing about how much of it is
-/// "recent" gets reported as "the app shows fewer turns than the pane does", and the cheapest way
-/// not to have that conversation is to pick the number once. Twenty turns is also more than a
-/// screenful, which is what a client reopening a conversation actually has to draw.
+/// and what the server-side history window uses. Two readers of the same history disagreeing about
+/// how much of it is "recent" gets reported as "the app shows fewer turns than the pane does", and
+/// the cheapest way not to have that conversation is to pick the number once. Twenty turns is also
+/// more than a screenful, which is what a client reopening a conversation actually has to draw.
 const THREAD_RUNS_DEFAULT: i64 = 20;
 
 /// The most runs one request may ask for.

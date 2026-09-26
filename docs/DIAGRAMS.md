@@ -2,7 +2,8 @@
 
 Visual explanations of why OpenGrok exists and what it is. Each is a published Claude artifact
 (private to the owner's account unless shared from the page's share menu). **Sources for the ones
-authored here are vendored in `docs/artifacts/`** (№2's, retired, in `docs/archive/artifacts/`), so they survive independently of the hosting.
+authored here are vendored in `docs/artifacts/`** (№2's, retired, in `docs/archive/artifacts/`), so
+they survive independently of the hosting.
 
 Read them in this order for the fastest possible orientation.
 
