@@ -653,6 +653,34 @@ impl PgStore {
             .collect()
     }
 
+    /// Parked runs whose last write falls in `(after_ms, before_ms]`, with whose they are. The
+    /// form-hold deadline sweep reads one such window per tick across every account, so a run a
+    /// person is slow to answer is looked at once, not on every tick for as long as it waits.
+    pub async fn parked_between(
+        &self,
+        after_ms: i64,
+        before_ms: i64,
+    ) -> StoreResult<Vec<(RunId, AccountId)>> {
+        let rows = sqlx::query(
+            "select id, account_id from run_view
+             where status = 'awaiting-approval' and account_id is not null
+               and updated_at_ms > $1 and updated_at_ms <= $2
+             order by updated_at_ms",
+        )
+        .bind(after_ms)
+        .bind(before_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    RunId::from_stored(row.try_get::<String, _>("id")?),
+                    AccountId::from_stored(row.try_get::<String, _>("account_id")?),
+                ))
+            })
+            .collect()
+    }
+
     /// Hold the lease on a run while a process is working on it.
     ///
     /// Renewed as the run progresses. The lease is what tells a *restart* apart from a run that is

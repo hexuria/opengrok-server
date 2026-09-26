@@ -54,12 +54,19 @@ pub struct ToolContext {
     /// A room's shared computer, when this turn is spoken in a group that has one. Reached by
     /// passing `machine: "group"`; without it every call goes to the coworker's own box.
     pub group_box: Option<GroupBox>,
-    /// An unresolved `user-form` **or** a live box handoff is open on this conversation. Screen
-    /// tools must not run: typing or clicking would race the person (and `computer` type would
-    /// PNG a secret). Escalate settles the form but must **keep** this hold until hand-back or
-    /// decline. `request_user_form` itself is not a screen action and is not held — except a
+    /// An unresolved `user-form` **or** a live box handoff is open on this coworker's computer.
+    /// Screen tools must not run: typing or clicking would race the person (and `computer` type
+    /// would PNG a secret). Escalate settles the form but must **keep** this hold until hand-back
+    /// or decline. `request_user_form` itself is not a screen action and is not held — except a
     /// second raise while this is still true, which would stack cards.
+    ///
+    /// PER COMPUTER, NOT PER CONVERSATION, on purpose: a coworker has one box, and a turn in
+    /// another conversation clicking on the page a person is signing in on is the race this
+    /// exists to stop. Do not narrow it to the conversation that raised the form.
     pub screen_hold: bool,
+    /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
+    /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
+    pub screen_held_in: Option<String>,
 }
 
 /// The shared computer of the group a turn is spoken in.
@@ -80,6 +87,15 @@ impl ToolContext {
             box_id: coworker.computer().cloned(),
             group_box: None,
             screen_hold: false,
+            screen_held_in: None,
+        }
+    }
+
+    /// Where the hold is, in words the model can pass on.
+    fn held_where(&self) -> String {
+        match &self.screen_held_in {
+            Some(thread) => format!("in conversation {thread}"),
+            None => "on this coworker's computer".to_string(),
         }
     }
 }
@@ -1640,7 +1656,11 @@ impl Executor {
             if context.screen_hold {
                 return ToolResult::refused(
                     &call.id,
-                    "a form or computer handoff is already open on this conversation; wait for the person to finish it",
+                    format!(
+                        "a form or computer handoff is already open {}; wait for the person to \
+                         finish it",
+                        context.held_where()
+                    ),
                 );
             }
             if let Err(why) = user_form::validate_field_ids(&call.arguments) {
@@ -1653,8 +1673,11 @@ impl Executor {
         {
             return ToolResult::refused(
                 &call.id,
-                "a form or computer handoff is open on this conversation; do not type, click, or \
-                 open pages until the person has finished. Secrets must not be typed with `computer`",
+                format!(
+                    "a form or computer handoff is open {}; do not type, click, or open pages \
+                     until the person has finished. Secrets must not be typed with `computer`",
+                    context.held_where()
+                ),
             );
         }
 
@@ -2990,6 +3013,7 @@ mod tests {
             box_id: None,
             group_box: None,
             screen_hold: false,
+            screen_held_in: None,
         };
         let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
         assert!(
@@ -3007,6 +3031,7 @@ mod tests {
             box_id: None,
             group_box: None,
             screen_hold: false,
+            screen_held_in: None,
         };
         let result = executor
             .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -3518,6 +3543,7 @@ mod tests {
             box_id: None,
             group_box: None,
             screen_hold: false,
+            screen_held_in: None,
         }
     }
 
@@ -5256,6 +5282,23 @@ mod tests {
         assert!(result.content.contains("is open"), "{result:?}");
         assert!(result.image.is_none(), "must not PNG a secret: {result:?}");
         assert!(!result.content.contains("s3cret"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
+    }
+
+    /// #188. The hold is the coworker's one computer, not one conversation's, so a turn in
+    /// another conversation is refused too — and told which conversation holds it.
+    #[tokio::test]
+    async fn a_held_screen_names_the_conversation_holding_it() {
+        let spy = Arc::new(SpyComputer::default());
+        let executor = allowing(spy.clone()).with_screen(true);
+        let mut context = context_with_box("box_mine");
+        context.screen_hold = true;
+        context.screen_held_in = Some("thr-sign-in".to_string());
+        for name in ["computer", REQUEST_USER_FORM] {
+            let args = json!({"action": "screenshot", "fields": [{"id": "x"}]});
+            let result = executor.execute(&context, &call(name, args)).await;
+            assert!(result.content.contains("thr-sign-in"), "{result:?}");
+        }
         assert_eq!(spy.last_box(), None);
     }
 }

@@ -82,6 +82,23 @@ for those two tools entirely (NativeChat paints those cards from the CUSTOM + ca
 
 ## [SEVERITY: high] [CONFIDENCE: high] `POST /ag-ui/runs/{id}/stop` on a parked form leaves the card unresolved forever, and the self-heal path is guarded off — every screen tool for that coworker is then refused permanently
 
+> **Fixed (#186).** `stop_run` now lives on the host router and, once the Stop is in the log,
+> settles every card no parked run waits on any more (`settle_dead_holds`: the stopped run's forms
+> dismissed, a live handoff declined) before it answers; the note says the card is closed only when
+> it was. `interrupt_parked_hitl` runs the same settle on every new turn, with or without a stop of
+> its own, so a card an older stop or a dead process left open is closed before the turn builds its
+> tools. There is no separate credential card left on main (the gateway's went with seam A). Tests:
+> `stopping_a_run_parked_on_a_form_closes_its_card_and_frees_the_screen`,
+> `stopping_a_run_whose_form_was_escalated_declines_its_handoff`,
+> `a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart`.
+>
+> *Verifier round.* "Dead" is only sound if every card the pass sees had its park committed before
+> the runs are read, so `settle_dead_holds` reads the transcript first and the runs second, and a
+> card judged dead is judged again against the runs just before it is closed
+> (`a_form_parked_after_the_waiting_set_was_read_stays_open`). A stop of a run parked on an
+> approval card (auto-review, policy, local-tool-permission) no longer claims that card is closed —
+> a stop settles only forms.
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2995` (`stop_run`), and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/conversation.rs:355-370` (`interrupt_parked_hitl`'s `if stopped > 0` guard)
 
 **What's wrong:** `stop_run` stops the run aggregate only. Unlike `interrupt_agent_run` /
@@ -144,6 +161,19 @@ asserts holds only for the first attempt. The same `None` is passed by `abandon_
 
 ## [SEVERITY: medium] [CONFIDENCE: high] `pending_suspended` returns the first parked run, not the one whose `pending.call_id` matches — a submit in a room with two parked forms settles the card and never resumes its run
 
+> **Fixed (#188).** `pending_suspended` takes the card's `callId` and returns the run whose parked
+> calls (every unanswered `run-awaiting-approval` it raised, not only `pending`) include it; `None`
+> is left only for cards written before cards carried a call. `resume_settled`,
+> `journal_agui_custom` (so a settled frame and the save-login offer land on the card's own run)
+> and the hand-back resume (a handoff card has no call; its escalated form's is used) all name it.
+> Test: `submit_resumes_the_run_parked_on_its_own_call_not_the_oldest`.
+>
+> *Verifier round.* A run's parked calls are counted from its last answered park, not its whole
+> log, so a twin left behind by an earlier completion is not waited on again when the run parks a
+> second time (`a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer`). An old
+> escalated form with no `callId` no longer makes every later handoff look waited on
+> (`an_old_escalated_form_with_no_call_does_not_keep_every_handoff_alive`).
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:951-985`
 
 **What's wrong:** `pending_suspended` walks `awaiting_approval(account_id)` (ordered by
@@ -165,6 +195,13 @@ the 10-minute timeout. The card looks answered and the turn silently hangs.
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: high] The interrupt is coworker-scoped, not thread-scoped: a new message in one thread stops the parked run and dismisses the card of a different thread
+
+> **Fixed (#188).** `interrupt_parked_hitl` takes the incoming `threadId` and stops only that
+> thread's parked runs. The coworker-wide dismissal is gone: `settle_dead_holds` settles only
+> cards whose `callId` no parked run waits on any more. **The screen hold stays per computer**
+> (a coworker has one box; another conversation clicking on the page a person is signing in on is
+> the race the hold exists for), and the refusal now names the conversation holding it
+> (`ToolContext::screen_held_in`). Test: `a_message_in_another_thread_leaves_this_threads_form_open`.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/conversation.rs:346-371`, called from `crates/opengrok-server/src/agui/routes.rs:2107-2113`
 
@@ -286,6 +323,22 @@ when the heuristic overrides the model.
 
 ## [SEVERITY: medium] [CONFIDENCE: high] Form / handoff / credential hold timeouts are bare `tokio::spawn` sleeps that do not survive a restart, and the recovery sweep deliberately skips parked runs
 
+> **Fixed (#186).** The sleeping tasks are gone. The deadline is the card's own `timestampMs`:
+> `settle_dead_holds` times out a form or live handoff older than `FORM_HOLD_TIMEOUT` (form settled
+> dismissed + timedOut, its run resumed on its own call; handoff timed_out, its escalated form's run
+> resumed) on every new turn and on every stop, and `hold_deadlines_forever` (spawned by the binary)
+> walks the runs parked past the deadline across all accounts (`PgStore::parked_between`, one
+> window per tick) so a run nobody writes to still times out after a restart. The recovery sweep
+> still leaves parked runs alone. Tests: `a_form_past_its_deadline_times_out_on_the_next_turn_after_a_restart`,
+> `the_deadline_sweep_times_out_a_parked_form_after_a_restart`,
+> `a_live_handoff_past_its_deadline_times_out_and_resumes_its_run`.
+>
+> *Verifier round.* A run parked on a form whose card never landed (the process died between park
+> and card, or the append failed) is timed out from its own park frame
+> (`a_form_run_whose_card_never_landed_times_out_from_its_park`). The sweep looks again, until one
+> more deadline has passed, at every run it did not finish with — a failed write, or a handoff
+> minted after the run's last write (`the_sweep_looks_again_at_a_run_whose_handoff_is_not_yet_due`).
+
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:365-387`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/credential.rs:194-204`, `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/recovery.rs:99-102`
 
 **What's wrong:** The 10-minute hold timeout is `tokio::spawn(async { sleep(FORM_HOLD_TIMEOUT); ... })`.
@@ -330,6 +383,14 @@ credential, so it is worth fixing both together.)
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: medium] `hydrate_agui_events` can inject the same form card into several runs of a thread, and its time window degenerates to "everything" when a run has no timestamps
+
+> **Fixed (#188).** `run_time_window` falls back to an empty window, and the unplaced-card fallback
+> appends a card only to the run whose own frames carry its `callId`, so a card paints once. A
+> card with no `callId` (older rows) keeps the time-window rule. Tests:
+> `hydrate_does_not_inject_another_runs_form`, `a_run_with_no_timestamps_gets_no_transcript_cards`.
+>
+> *Verifier round.* The empty window is for hydration only: `GET /ag-ui/runs/{id}` reports
+> `startedAtMs: 0` for a run with no timestamp yet, as before, not the window's `i64::MAX` bound.
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:1325-1341` and `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/agui/routes.rs:2561-2571` (`run_time_window`)
 
@@ -380,6 +441,15 @@ suspension.
 ---
 
 ## [SEVERITY: medium] [CONFIDENCE: medium] Submit types into the live page with no check that the turn that raised the form is still the current one
+
+> **Fixed (#188).** Before anything touches the box (passkey, saved login or typed fill),
+> `submit_user_form` requires a parked run that still waits on the card's `callId`; otherwise the
+> card settles `fill_failed` with nothing typed. The remaining window is a stop landing between the
+> check and the typing. Tests: `a_submit_for_a_card_whose_run_is_no_longer_parked_types_nothing`,
+> `a_twin_answered_after_its_run_moved_on_types_nothing`.
+>
+> *Verifier round.* A run log the check cannot read is not "nothing waits": the submit answers 503
+> and leaves the card open for a retry (`a_submit_that_cannot_read_the_run_log_leaves_the_card_open`).
 
 **Where:** `/Volumes/goldcoders/OSS/opengrok-server/crates/opengrok-server/src/gateway/user_form.rs:175` (`fill_on_box` runs before any resume check)
 

@@ -163,14 +163,8 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     // Form cards only, as `continue_run` mints them: any other pause is answered from
     // `GET /ag-ui/approvals` over `/ag-ui/runs/{id}/answer` and needs no transcript card, and a
     // card nobody settles would sit pending for good.
-    crate::agui::resume::emit_user_form_suspensions(
-        &host,
-        &coworker_id,
-        &account_id,
-        coworker_id.as_str(),
-        &events,
-    )
-    .await;
+    crate::agui::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &events)
+        .await;
 }
 
 /// A routine's newest run, as its row on `GET /schedules` carries it: `null` for a routine that

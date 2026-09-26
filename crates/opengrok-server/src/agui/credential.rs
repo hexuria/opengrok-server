@@ -19,7 +19,7 @@ pub async fn offer_save_after_submit(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    _agent_id: &str,
+    form_call_id: Option<&str>,
     form_entry_id: &str,
     form: &FormRequest,
     shared: &BTreeMap<String, String>,
@@ -34,6 +34,7 @@ pub async fn offer_save_after_submit(
         account_id,
         coworker_id,
         opengrok_core::run::SuspendReason::UserForm,
+        form_call_id,
         frame,
     )
     .await;

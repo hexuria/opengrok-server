@@ -22,12 +22,18 @@ fn entry_id() -> String {
     format!("e_{}", uuid::Uuid::now_v7())
 }
 
-/// Stop every parked HITL run for this coworker and settle unresolved user-form / live
-/// handoff chrome without resuming the model. New user text then starts a fresh turn.
+/// Stop this conversation's parked HITL runs for this coworker and settle the user-form / live
+/// handoff chrome they leave behind, without resuming the model. New user text then starts a
+/// fresh turn.
+///
+/// ONE CONVERSATION, NOT THE COWORKER. A message is steer for the conversation it was typed in.
+/// Stopping every parked run of the coworker ended a sign-in waiting in another conversation the
+/// moment the person typed anywhere else, and dismissed its card with nothing filled.
 pub(crate) async fn interrupt_parked_hitl(
     state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    thread_id: &str,
     by: &str,
 ) -> usize {
     let Ok(run_ids) = state.agui.auth.store.awaiting_approval(account_id).await else {
@@ -35,13 +41,14 @@ pub(crate) async fn interrupt_parked_hitl(
     };
     let mut stopped = 0usize;
     for run_id in run_ids {
-        if stop_parked_run(state, account_id, coworker_id, &run_id, by).await {
+        if stop_parked_run(state, account_id, coworker_id, thread_id, &run_id, by).await {
             stopped += 1;
         }
     }
-    if stopped > 0 {
-        super::user_form::dismiss_unresolved_on_interrupt(state, account_id, coworker_id).await;
-    }
+    // NOT ONLY AFTER A STOP OF ITS OWN. A card whose run ended elsewhere — a stop, a failure, a
+    // process that died before closing it — is settled here too, and so is a hold past its
+    // deadline: this turn is about to ask for the screen, which is exactly when a dead hold bites.
+    super::user_form::settle_dead_holds(state, account_id, coworker_id, now_ms()).await;
     stopped
 }
 
@@ -49,6 +56,7 @@ async fn stop_parked_run(
     state: &HostState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
+    thread_id: &str,
     run_id: &opengrok_core::id::RunId,
     by: &str,
 ) -> bool {
@@ -56,7 +64,7 @@ async fn stop_parked_run(
         let Ok((mut run, seq)) = state.agui.auth.store.load_run(run_id).await else {
             return false;
         };
-        if !run_belongs_to(&run, coworker_id) {
+        if !run_belongs_to(&run, coworker_id) || run.thread_id != thread_id {
             return false;
         }
         if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
@@ -311,7 +319,6 @@ pub(crate) async fn emit_suspension(
     state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
-    agent_id: &str,
     suspension: &Suspension,
 ) -> bool {
     let card = card_for(suspension);
@@ -333,14 +340,6 @@ pub(crate) async fn emit_suspension(
     {
         tracing::error!(%error, "could not append the suspension card entry");
     }
-    if suspension.reason == opengrok_core::run::SuspendReason::UserForm {
-        super::user_form::spawn_form_hold_timeout(
-            state.clone(),
-            account.clone(),
-            coworker_id.clone(),
-            agent_id.to_string(),
-        );
-    }
     true
 }
 
@@ -353,7 +352,6 @@ pub(crate) async fn emit_user_form_suspensions(
     state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
-    agent_id: &str,
     events: &[opengrok_wire::agui::Event],
 ) -> bool {
     let mut held = false;
@@ -361,7 +359,7 @@ pub(crate) async fn emit_user_form_suspensions(
         .into_iter()
         .filter(|s| s.reason == opengrok_core::run::SuspendReason::UserForm)
     {
-        if emit_suspension(state, coworker_id, account, agent_id, &suspension).await {
+        if emit_suspension(state, coworker_id, account, &suspension).await {
             held = true;
         }
     }
@@ -372,12 +370,11 @@ pub(crate) async fn emit_suspensions(
     state: &HostState,
     coworker_id: &CoworkerId,
     account: &opengrok_core::id::AccountId,
-    agent_id: &str,
     events: &[opengrok_wire::agui::Event],
 ) -> bool {
     let mut held = false;
     for suspension in find_suspensions(events) {
-        if emit_suspension(state, coworker_id, account, agent_id, &suspension).await {
+        if emit_suspension(state, coworker_id, account, &suspension).await {
             held = true;
         }
     }
@@ -429,12 +426,6 @@ pub(crate) async fn stamp_user_form_entry_id(
         );
         return None;
     }
-    super::user_form::spawn_form_hold_timeout(
-        state.clone(),
-        account.clone(),
-        coworker_id.clone(),
-        coworker_id.as_str().to_string(),
-    );
     apply_user_form_stamp(&mut event.extra, entry_id, true)
 }
 
@@ -511,6 +502,54 @@ pub(crate) fn run_belongs_to(run: &opengrok_core::run::Run, agent: &CoworkerId) 
         || run.thread_id == format!("gateway-{}", agent.as_str())
 }
 
+/// The call a `run-awaiting-approval` frame parked on.
+pub(crate) fn park_call(frame: &Value) -> Option<&str> {
+    (frame.get("type").and_then(Value::as_str) == Some("CUSTOM")
+        && frame.get("name").and_then(Value::as_str) == Some("run-awaiting-approval"))
+    .then(|| frame.get("callId").and_then(Value::as_str))
+    .flatten()
+    .filter(|call| !call.is_empty())
+}
+
+/// The calls a parked run is waiting on: every `run-awaiting-approval` it raised and has not had
+/// answered, not only `pending`. Forms raised in one completion park together and `pending` is
+/// the last of them, so a card for an earlier one is still this run's to answer. Empty for a run
+/// that is not parked — a card's run that has moved on no longer waits on anything.
+///
+/// ONLY SINCE ITS LAST ANSWER. An answer is always to the call the run is parked on, the last of
+/// its completion's parks, so an unanswered sibling raised before it belongs to a completion the
+/// run has moved past. Counted from the whole log, that sibling's card looked waited on again the
+/// moment the run parked a second time, and held the screen for as long as it did.
+pub(crate) fn parked_calls(run: &opengrok_core::run::Run) -> std::collections::BTreeSet<String> {
+    let mut calls = std::collections::BTreeSet::new();
+    if run.status != opengrok_core::run::RunStatus::AwaitingApproval {
+        return calls;
+    }
+    let since = run
+        .emitted
+        .iter()
+        .rposition(|frame| park_call(frame).is_some_and(|call| run.answered.contains(call)))
+        .map_or(0, |at| at + 1);
+    calls.extend(
+        run.emitted[since..]
+            .iter()
+            .filter_map(park_call)
+            .map(str::to_string),
+    );
+    calls.extend(run.pending.iter().map(|pending| pending.call_id.clone()));
+    calls.retain(|call| !run.answered.contains(call));
+    calls
+}
+
+/// Whose run this is: its coworker, or the agent whose own thread it is on.
+pub(crate) fn coworker_of(run: &opengrok_core::run::Run) -> Option<CoworkerId> {
+    run.coworker_id.clone().or_else(|| {
+        run.thread_id
+            .strip_prefix("gateway-")
+            .map(CoworkerId::from_stored)
+    })
+}
+
 /// A run answered under an agent that is not its owner is a member's run inside that room.
 pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bool {
     run.coworker_id
@@ -532,7 +571,6 @@ pub(crate) async fn resume_where_it_lives(
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,
-    agent_id: String,
     pending: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
@@ -550,7 +588,6 @@ pub(crate) async fn resume_where_it_lives(
         account_id,
         run_id,
         coworker_id,
-        agent_id,
         pending,
         resumed_seq,
         outcome,
@@ -567,7 +604,6 @@ async fn resume_suspended_run(
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
     coworker_id: CoworkerId,
-    agent_id: String,
     pending: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
@@ -707,7 +743,7 @@ async fn resume_suspended_run(
     }
     // A resumed run may suspend AGAIN — a second command, or the next reviewed tool. It gets its
     // card exactly like the first turn did; without this the run paused with nothing to press.
-    emit_suspensions(&state, &coworker_id, &account_id, &agent_id, &events).await;
+    emit_suspensions(&state, &coworker_id, &account_id, &events).await;
 }
 
 #[cfg(test)]

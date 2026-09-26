@@ -676,6 +676,11 @@ async fn stopping_a_run_that_was_waiting_closes_its_card_at_once() {
         json!("immediately"),
         "waiting on a person is not working, so there is no step to finish first: {answer}"
     );
+    // #186. A stop settles a form's card, not an approval card, so the note must not say the
+    // card is closed — only what is true of the run.
+    let note = answer["note"].as_str().expect("a note");
+    assert!(!note.contains("is closed"), "{answer}");
+    assert!(note.contains("nothing it asked for will run"), "{answer}");
 
     let replayed = h.replay(&access, run_id.as_str()).await;
     assert_eq!(replayed["status"], json!("stopped"), "{replayed}");

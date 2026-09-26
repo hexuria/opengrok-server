@@ -24,7 +24,7 @@
 //! twins live on a router that has `HostState` (live emit + resume) but authenticates
 //! like AG-UI (`account_from_bearer`), never through `refuse()`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use axum::Router;
@@ -46,10 +46,27 @@ use serde_json::{Value, json};
 use super::resume;
 use crate::host_state::HostState;
 
-/// How long an unanswered form or live handoff may block the turn. Tests call the settlers
-/// directly rather than waiting this out. Facebook hang: password fill reported submitted and
-/// the OTP wait never ended.
+/// How long an unanswered form or live handoff may block the turn, counted from the card's own
+/// `timestampMs`. Tests pass a later `now` to the settlers rather than waiting this out. Facebook
+/// hang: password fill reported submitted and the OTP wait never ended.
 pub const FORM_HOLD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How far the deadline sweep's window trails the deadline. A run's park is written a moment
+/// before its card, so by the time the park is this far past the deadline its cards are too.
+const MINT_LAG_MS: i64 = 60_000;
+
+fn hold_ms() -> i64 {
+    i64::try_from(FORM_HOLD_TIMEOUT.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// When a card was put up. A card with no stamp never reaches its deadline; if it is dead, its
+/// run says so.
+fn minted_at(entry: &Value) -> i64 {
+    entry
+        .get("timestampMs")
+        .and_then(Value::as_i64)
+        .unwrap_or(i64::MAX)
+}
 
 pub fn agui_router(state: HostState) -> Router {
     Router::new()
@@ -115,7 +132,7 @@ pub async fn submit_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
@@ -126,11 +143,48 @@ pub async fn submit_user_form(
         return (400, json!({ "error": "that entry is not a user-form" }));
     }
     if !is_unresolved(&entry) {
-        return heal_or_already(state, account_id, &coworker_id, &agent_id, &entry).await;
+        return heal_or_already(state, account_id, &coworker_id, &entry).await;
     }
 
     let form = form_request_from(&entry);
     let collect = opengrok_tools::user_form::is_chat_collection(&entry);
+    // TYPED ONLY WHILE ITS RUN WAITS ON IT. A card outlives its run on screen — the run was
+    // stopped, or a twin from the same completion was answered and the run moved on — and typing
+    // then put an email into whatever field the page had focused. A card that names no call
+    // cannot be tied to a run and types nothing either. A collect card types nothing anyway. A
+    // stop landing between this check and the typing still types: the window is that interval,
+    // no longer the card's whole life. A log that cannot be read says nothing either way, and the
+    // card stays open for a retry: settled on it, a run still parked would sit behind a closed
+    // card that no settle or sweep looks at again.
+    let waited = if collect {
+        Some(true)
+    } else {
+        waits_on(state, account_id, &coworker_id, call_id_of(&entry)).await
+    };
+    let Some(waited) = waited else {
+        return (503, json!({ "error": "run log unavailable; try again" }));
+    };
+    if !waited {
+        let settled = settle_entry(
+            entry,
+            FormResolution::FillFailed,
+            &BTreeMap::new(),
+            false,
+            &nothing_filled(&form),
+            false,
+        );
+        if let Err(error) = state
+            .agui
+            .auth
+            .store
+            .update_gateway_entry(&coworker_id, account_id, seq, &settled)
+            .await
+        {
+            tracing::error!(%error, "could not settle a user-form nothing waits on");
+            return (500, json!({ "error": "transcript unavailable" }));
+        }
+        return (200, settled);
+    }
     let values = submitted_values(&form, args.get("values").unwrap_or(&Value::Null));
     audit_lengths(&form, &values);
     let saved_login = is_saved_login(args);
@@ -224,7 +278,7 @@ pub async fn submit_user_form(
             state,
             account_id,
             &coworker_id,
-            &agent_id,
+            call_id_of(&settled),
             &entry_id,
             &form,
             &shared,
@@ -236,7 +290,6 @@ pub async fn submit_user_form(
         state,
         account_id,
         &coworker_id,
-        &agent_id,
         content,
         call_id_of(&settled),
     )
@@ -251,7 +304,7 @@ pub async fn dismiss_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let mode = args.get("mode").and_then(Value::as_str).unwrap_or_default();
@@ -277,9 +330,9 @@ pub async fn dismiss_user_form(
         // live sand://box sibling still holds the screen. heal_or_already would
         // no-op because the form is already escalated.
         if resolution == FormResolution::Dismissed && is_escalated_form(&entry) {
-            return abandon_escalated_form(state, account_id, &coworker_id, &agent_id, entry).await;
+            return abandon_escalated_form(state, account_id, &coworker_id, entry).await;
         }
-        return heal_or_already(state, account_id, &coworker_id, &agent_id, &entry).await;
+        return heal_or_already(state, account_id, &coworker_id, &entry).await;
     }
 
     let form = form_request_from(&entry);
@@ -297,7 +350,7 @@ pub async fn dismiss_user_form(
     journal_settled_form(state, account_id, &coworker_id, &settled).await;
 
     if resolution == FormResolution::Escalated {
-        let handoff = start_box_handoff(state, account_id, &coworker_id, &agent_id, &form).await;
+        let handoff = start_box_handoff(state, account_id, &coworker_id, &form).await;
         let mut response = settled;
         if let Some(id) = handoff
             .as_ref()
@@ -316,7 +369,6 @@ pub async fn dismiss_user_form(
         state,
         account_id,
         &coworker_id,
-        &agent_id,
         content,
         call_id_of(&settled),
     )
@@ -334,7 +386,7 @@ pub async fn resolve_box_handoff(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, agent_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let word = args
@@ -366,20 +418,29 @@ pub async fn resolve_box_handoff(
         );
     }
 
-    let settled_siblings =
-        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
     // Name the call this resume answers. Passing `None` lets it land on whichever
     // call happens to be parked, which for stacked forms is the sibling's -- the
-    // twin then gets this form's tool result.
-    resume_user_form(
-        state,
-        account_id,
-        &coworker_id,
-        &agent_id,
-        content,
-        call_id_of(&entry),
-    )
-    .await;
+    // twin then gets this form's tool result. A posted handoff carries no call, so its
+    // escalated form's is used; without one a hand-back resumed another conversation's run.
+    let answers = match call_id_of(&entry) {
+        Some(call) => Some(Some(call.to_string())),
+        None => match waiting_calls(state, account_id, &coworker_id).await {
+            Some(waiting) => state
+                .agui
+                .auth
+                .store
+                .gateway_transcript(&coworker_id, account_id)
+                .await
+                .ok()
+                .and_then(|entries| handoff_call(&entries, &waiting)),
+            None => None,
+        },
+    };
+    let settled_siblings =
+        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
+    if let Some(call_id) = answers {
+        resume_user_form(state, account_id, &coworker_id, content, call_id.as_deref()).await;
+    }
 
     if posted_live {
         if let Some(card) = settled_siblings
@@ -399,151 +460,113 @@ pub async fn resolve_box_handoff(
     (200, json!({ "alreadyAnswered": true }))
 }
 
-/// Spawned when a user-form card is minted. No-ops if the form already settled (including
-/// escalate — that wait is the handoff timer).
-pub fn spawn_form_hold_timeout(
-    state: HostState,
-    account_id: AccountId,
-    coworker_id: CoworkerId,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(FORM_HOLD_TIMEOUT).await;
-        timeout_unresolved_form(&state, &account_id, &coworker_id, &agent_id).await;
-    });
-}
-
-pub fn spawn_handoff_hold_timeout(
-    state: HostState,
-    account_id: AccountId,
-    coworker_id: CoworkerId,
-    agent_id: String,
-) {
-    tokio::spawn(async move {
-        tokio::time::sleep(FORM_HOLD_TIMEOUT).await;
-        timeout_live_handoff(&state, &account_id, &coworker_id, &agent_id).await;
-    });
-}
-
-/// Settle every still-unresolved user-form as `dismissed` + `timedOut` and resume. Idempotent.
-pub async fn timeout_unresolved_form(
-    state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    agent_id: &str,
-) -> bool {
-    let Ok(entries) = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker_id, account_id)
-        .await
-    else {
-        return false;
-    };
-    let mut settled_any = false;
-    let mut settled_for_result: Option<Value> = None;
-    for entry in entries {
-        if !is_unresolved(&entry) {
-            continue;
-        }
-        let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(Some((seq, current))) = state
+/// The durable half of the hold deadline: every `SWEEP_INTERVAL`, time out the forms and
+/// handoffs of runs parked past `FORM_HOLD_TIMEOUT`, across every account.
+///
+/// IT USED TO BE A SLEEPING TASK PER CARD, and a deploy inside those ten minutes left the run
+/// parked and the screen held with nothing left to wake either. The deadline is the card's own
+/// `timestampMs`; the log only says which coworkers to look at. Each tick reads the runs whose
+/// last write crossed the deadline since the last tick — the first tick after a start reads them
+/// all, which is the restart's backlog — so a run a person is slow to answer is not read on every
+/// tick for as long as it waits.
+///
+/// ONCE WAS NOT ENOUGH for a run the pass did not finish with: a write that failed, or a hold
+/// minted after the run's last write (a handoff whose escalation could not be journaled onto the
+/// run), whose deadline comes after the run has left the window. Such a run is looked at again
+/// on every tick until the last of its holds could have reached its deadline.
+pub async fn hold_deadlines_forever(state: HostState) {
+    let mut after_ms = i64::MIN;
+    let mut again: BTreeMap<opengrok_core::id::RunId, (AccountId, i64)> = BTreeMap::new();
+    loop {
+        let now = now_ms();
+        let before_ms = now - hold_ms() - MINT_LAG_MS;
+        again.retain(|_, (_, until)| *until >= now);
+        match state
             .agui
             .auth
             .store
-            .find_gateway_entry(coworker_id, account_id, entry_id)
-            .await
-        else {
-            continue;
-        };
-        if !is_unresolved(&current) {
-            continue;
-        }
-        let settled = settle_entry(
-            current,
-            FormResolution::Dismissed,
-            &BTreeMap::new(),
-            true,
-            &[],
-            true,
-        );
-        if let Err(error) = state
-            .agui
-            .auth
-            .store
-            .update_gateway_entry(coworker_id, account_id, seq, &settled)
+            .parked_between(after_ms, before_ms)
             .await
         {
-            tracing::error!(%error, "could not time out a user-form");
-            continue;
-        }
-        journal_settled_form(state, account_id, coworker_id, &settled).await;
-        settled_for_result = Some(settled);
-        settled_any = true;
-    }
-    if settled_any {
-        let content = match settled_for_result {
-            Some(entry) => {
-                let form = form_request_from(&entry);
-                model_facing_result(
-                    &entry,
-                    &form,
-                    FormResolution::Dismissed,
-                    &BTreeMap::new(),
-                    true,
-                )
+            Ok(fresh) => {
+                let mut runs: Vec<_> = again
+                    .iter()
+                    .map(|(run, (account, _))| (run.clone(), account.clone()))
+                    .collect();
+                runs.extend(
+                    fresh
+                        .into_iter()
+                        .filter(|(run, _)| !again.contains_key(run)),
+                );
+                let unfinished = expire_parked_forms(&state, &runs, now).await;
+                // A handoff is minted at most one deadline after its form, and its run crossed the
+                // window at least one deadline after that form: one more deadline covers it.
+                let until = now + hold_ms() + MINT_LAG_MS;
+                again = unfinished
+                    .into_iter()
+                    .map(|(run, account)| {
+                        let until = again.get(&run).map_or(until, |(_, first)| *first);
+                        (run, (account, until))
+                    })
+                    .collect();
+                after_ms = before_ms;
             }
-            None => HOLD_TIMED_OUT_TOOL_RESULT.to_string(),
-        };
-        // `None` on purpose: every unresolved form just timed out, so the parked
-        // call is one of them, and the run should resume with a timed-out result.
-        // Naming the last-settled entry here would make `resume_settled` refuse
-        // whenever that entry is not the pending one, and the run would stay
-        // parked with nothing left to wake it.
-        resume_user_form(state, account_id, coworker_id, agent_id, content, None).await;
+            Err(error) => tracing::warn!(%error, "the form-hold sweep could not read the log"),
+        }
+        tokio::time::sleep(crate::recovery::SWEEP_INTERVAL).await;
     }
-    settled_any
 }
 
-/// Stamp `boxResolution: timed_out` on a live handoff and resume. Idempotent.
-pub async fn timeout_live_handoff(
+/// Time out what the coworkers of these parked runs have held past its deadline at `now_ms`, and
+/// answer the runs the pass did not finish with: its settle could not read or write, or the run is
+/// still parked on a form after it. The runs only say whom to look at; each card's own stamp
+/// decides.
+pub async fn expire_parked_forms(
     state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    agent_id: &str,
-) -> bool {
-    let Ok(entries) = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker_id, account_id)
-        .await
-    else {
-        return false;
+    runs: &[(opengrok_core::id::RunId, AccountId)],
+    now_ms: i64,
+) -> Vec<(opengrok_core::id::RunId, AccountId)> {
+    let store = &state.agui.auth.store;
+    let on_a_form = |run: &opengrok_core::run::Run| {
+        matches!(
+            run.pending.as_ref().map(|pending| pending.reason),
+            Some(opengrok_core::run::SuspendReason::UserForm)
+        )
     };
-    let Some(entry) = entries.into_iter().find(is_live_handoff) else {
-        return false;
-    };
-    let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
-        return false;
-    };
-    let args = json!({
-        "entryId": entry_id,
-        "agentId": agent_id,
-        "resolution": "timed_out",
-    });
-    let (code, _) = resolve_box_handoff(state, &args, account_id).await;
-    code == 200
+    let mut settled: BTreeMap<(String, String), bool> = BTreeMap::new();
+    let mut unfinished = Vec::new();
+    for (run_id, account_id) in runs {
+        let Ok((run, _)) = store.load_run(run_id).await else {
+            unfinished.push((run_id.clone(), account_id.clone()));
+            continue;
+        };
+        let Some(coworker_id) = resume::coworker_of(&run).filter(|_| on_a_form(&run)) else {
+            continue;
+        };
+        let key = (account_id.to_string(), coworker_id.to_string());
+        let written = match settled.get(&key) {
+            Some(written) => *written,
+            None => {
+                let written = settle_dead_holds(state, account_id, &coworker_id, now_ms).await;
+                settled.insert(key, written);
+                written
+            }
+        };
+        let still = store
+            .load_run(run_id)
+            .await
+            .map_or(true, |(run, _)| on_a_form(&run));
+        if !written || still {
+            unfinished.push((run_id.clone(), account_id.clone()));
+        }
+    }
+    unfinished
 }
 
 async fn start_box_handoff(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     form: &FormRequest,
 ) -> Option<Value> {
     let card = crate::cards::computer_handoff_card(
@@ -562,24 +585,40 @@ async fn start_box_handoff(
         tracing::error!(%error, "could not append the box handoff entry");
         return None;
     }
-    spawn_handoff_hold_timeout(
-        state.clone(),
-        account_id.clone(),
-        coworker_id.clone(),
-        agent_id.to_string(),
-    );
     Some(card)
 }
 
-/// A new user message interrupted the parked HITL run. Settle leftover form / live
-/// handoff chrome without resuming — the new text is steer, not a card answer.
-/// Escalate itself never calls this.
-pub(crate) async fn dismiss_unresolved_on_interrupt(
+/// Settle what holds this coworker's screen that no run will ever answer, and time out what has
+/// held it past its deadline at `now_ms`. `false` when it could not tell or could not write, so a
+/// caller that promises a card is closed can say it is not.
+///
+/// DEAD IS DECIDED BY THE RUN, NOT THE CARD. A card is minted only once its run's suspension is in
+/// the log, so an unresolved card whose `callId` no parked run waits on belongs to a run that was
+/// stopped, failed, or answered past it (a twin from the same completion): nothing will answer it,
+/// and it held the screen for good. A card another conversation's parked run waits on is that
+/// conversation's and is left alone — settling every card of the coworker is how typing in one
+/// conversation dismissed a sign-in waiting in another. A card with no `callId` (written before
+/// cards carried one) cannot be tied to a run and is left alone too.
+///
+/// THE TRANSCRIPT IS READ FIRST, THE RUNS SECOND, and the order is what makes the rule above true.
+/// Every card the transcript read sees had its park committed before the runs are read, so a
+/// `callId` missing from them means that run really moved on. Read the other way round, a sign-in
+/// another conversation parked between the two reads looked dead and was dismissed as it appeared,
+/// with nothing resumed — its run then sat parked behind a closed card that no settle or sweep
+/// looks at again.
+///
+/// A handoff card carries no `callId` — the transcribed shape has none — so it lives as long as an
+/// escalated form's run still waits.
+///
+/// A dead card is settled dismissed and nothing resumes: there is no run to resume. A card past
+/// its deadline is settled dismissed and timed out, and its run resumes with that answer; a
+/// handoff past its deadline is timed out and its escalated form's run resumes.
+pub async fn settle_dead_holds(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-) {
-    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
+    now_ms: i64,
+) -> bool {
     let Ok(entries) = state
         .agui
         .auth
@@ -587,47 +626,241 @@ pub(crate) async fn dismiss_unresolved_on_interrupt(
         .gateway_transcript(coworker_id, account_id)
         .await
     else {
-        return;
+        return false;
     };
+    let Some(waiting) = waiting_calls(state, account_id, coworker_id).await else {
+        return false;
+    };
+    settle_holds_seen(state, account_id, coworker_id, &entries, &waiting, now_ms).await
+}
+
+/// `settle_dead_holds` on a transcript and a waiting set already read. Public so a test can hand
+/// it a waiting set read before a park — the stale pair the read order exists to prevent, and the
+/// one a dead card's re-check in `settle_open_form` still has to survive.
+pub async fn settle_holds_seen(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    entries: &[Value],
+    waiting: &WaitingCalls,
+    now_ms: i64,
+) -> bool {
+    let calls = &waiting.on;
+    let expired = |entry: &Value| minted_at(entry) <= now_ms.saturating_sub(hold_ms());
+    // Still to be answered when this pass began: an open sibling either times out below and
+    // answers its own call or is the person's, and an escalated one is answered by its handoff.
+    let open: BTreeSet<&str> = entries
+        .iter()
+        .filter(|entry| is_unresolved(entry) || is_escalated_form(entry))
+        .filter_map(call_id_of)
+        .collect();
+    let mut written = true;
     for entry in entries {
-        if !is_unresolved(&entry) {
+        let dead = call_id_of(entry).is_some_and(|call| !calls.contains_key(call));
+        if !is_unresolved(entry) || !(dead || expired(entry)) {
             continue;
         }
-        let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        let Ok(Some((seq, current))) = state
-            .agui
-            .auth
-            .store
-            .find_gateway_entry(coworker_id, account_id, entry_id)
-            .await
-        else {
-            continue;
-        };
-        if !is_unresolved(&current) {
-            continue;
+        match settle_open_form(state, account_id, coworker_id, entry, !dead).await {
+            Ok(Some(settled)) if !dead => {
+                let form = form_request_from(&settled);
+                let none = BTreeMap::new();
+                let content =
+                    model_facing_result(&settled, &form, FormResolution::Dismissed, &none, true);
+                // Its own call; or, when its run is parked on a sibling from the same completion
+                // whose card is no longer open (so nothing else will answer it), the sibling's —
+                // a timed-out form must not leave its run parked with nothing left to wake it.
+                let call_id = call_id_of(&settled).map(|call| match calls.get(call) {
+                    Some(pending) if !open.contains(pending.as_str()) => pending.as_str(),
+                    _ => call,
+                });
+                resume_user_form(state, account_id, coworker_id, content, call_id).await;
+            }
+            Ok(_) => {}
+            Err(()) => written = false,
         }
-        let settled = settle_entry(
-            current,
-            FormResolution::Dismissed,
-            &BTreeMap::new(),
-            true,
-            &[],
-            false,
-        );
-        if let Err(error) = state
-            .agui
-            .auth
-            .store
-            .update_gateway_entry(coworker_id, account_id, seq, &settled)
-            .await
-        {
-            tracing::error!(%error, "could not dismiss a form on interrupt");
-            continue;
-        }
-        journal_settled_form(state, account_id, coworker_id, &settled).await;
     }
+    // A FORM RUN WITH NO CARD holds the screen as surely as one with a card — form_hold_thread
+    // reads the park, not the card — and nothing above reaches it: its card was never appended,
+    // because the process died between the park and the card or the append failed. Past the
+    // deadline counted from its park it is answered as its card would have been, timed out.
+    for park in &waiting.forms {
+        let carded = entries
+            .iter()
+            .filter_map(call_id_of)
+            .any(|call| park.calls.contains(call));
+        if carded || park.parked_at_ms > now_ms.saturating_sub(hold_ms()) {
+            continue;
+        }
+        let arguments = &park.pending.arguments;
+        let form = form_request_from(arguments);
+        let none = BTreeMap::new();
+        let content = model_facing_result(arguments, &form, FormResolution::Dismissed, &none, true);
+        let call_id = Some(park.pending.call_id.as_str());
+        resume_user_form(state, account_id, coworker_id, content, call_id).await;
+    }
+    let live: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| is_live_handoff(entry))
+        .collect();
+    if let Some(first) = live.first() {
+        if handoff_call(entries, waiting).is_none() {
+            let settled =
+                settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
+            written &= settled.len() >= live.len();
+        } else if live.iter().any(|handoff| expired(handoff)) {
+            let args = json!({
+                "entryId": first.get("id"),
+                "agentId": coworker_id.as_str(),
+                "resolution": "timed_out",
+            });
+            written &= resolve_box_handoff(state, &args, account_id).await.0 == 200;
+        }
+    }
+    written
+}
+
+/// The call a live handoff answers, which is its escalated form's: `Some(Some(call))` for the
+/// form whose run still waits, `Some(None)` for a form written before cards carried a call (the
+/// first parked form run is all there is to go on), `None` when no escalated form's run waits.
+///
+/// AN OLD FORM WITH NO CALL COUNTS ONLY WHILE A FORM RUN WITH NO CARD OF ITS OWN WAITS. Counted
+/// whenever it was anywhere in the transcript, it made every later handoff look waited on, so a
+/// stopped run's handoff was never declined — only timed out, ten minutes on.
+fn handoff_call(entries: &[Value], waiting: &WaitingCalls) -> Option<Option<String>> {
+    let mut escalated = entries
+        .iter()
+        .rev()
+        .filter(|entry| is_escalated_form(entry));
+    if let Some(call) = escalated
+        .clone()
+        .filter_map(call_id_of)
+        .find(|call| waiting.on.contains_key(*call))
+    {
+        return Some(Some(call.to_string()));
+    }
+    (escalated.any(|form| call_id_of(form).is_none()) && waiting.a_form_without_its_card(entries))
+        .then_some(None)
+}
+
+/// What the parked runs of one coworker wait on, as one read of the log saw them.
+#[derive(Debug, Clone, Default)]
+pub struct WaitingCalls {
+    /// Every call a parked run waits on, with the call that run is parked on.
+    on: BTreeMap<String, String>,
+    /// The runs parked on a form.
+    forms: Vec<FormPark>,
+}
+
+/// A run parked on a form: every call it waits on, the one it is parked on, and when it parked.
+#[derive(Debug, Clone)]
+struct FormPark {
+    calls: BTreeSet<String>,
+    pending: opengrok_core::run::PendingApproval,
+    parked_at_ms: i64,
+}
+
+impl WaitingCalls {
+    /// Whether some run parked on a form has no card in `entries` that names one of its calls —
+    /// its card was written before cards carried a call.
+    fn a_form_without_its_card(&self, entries: &[Value]) -> bool {
+        self.forms.iter().any(|park| {
+            !entries
+                .iter()
+                .filter_map(call_id_of)
+                .any(|call| park.calls.contains(call))
+        })
+    }
+}
+
+/// Every call a parked run of this coworker waits on. `None` when the log cannot be read: a
+/// caller deciding which cards are dead must then decide nothing.
+pub async fn waiting_calls(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<WaitingCalls> {
+    let store = &state.agui.auth.store;
+    let mut waiting = WaitingCalls::default();
+    for run_id in store.awaiting_approval(account_id).await.ok()? {
+        let (run, _) = store.load_run(&run_id).await.ok()?;
+        if let Some(pending) = run.pending.as_ref()
+            && resume::run_belongs_to(&run, coworker_id)
+        {
+            let calls = resume::parked_calls(&run);
+            for call in &calls {
+                waiting.on.insert(call.clone(), pending.call_id.clone());
+            }
+            if pending.reason == opengrok_core::run::SuspendReason::UserForm {
+                // A park with no frame of its own (a row older than the frames) never reaches a
+                // deadline here; its card's, if it has one, still does.
+                let parked_at_ms = run
+                    .emitted
+                    .iter()
+                    .rev()
+                    .find(|frame| resume::park_call(frame) == Some(pending.call_id.as_str()))
+                    .and_then(|frame| frame.get("timestamp").and_then(Value::as_i64))
+                    .unwrap_or(i64::MAX);
+                waiting.forms.push(FormPark {
+                    calls,
+                    pending: pending.clone(),
+                    parked_at_ms,
+                });
+            }
+        }
+    }
+    Some(waiting)
+}
+
+/// Settle one open form as dismissed, re-read first so an answer that landed meanwhile wins.
+/// `Ok(None)` when it did; `Err` when the write failed.
+async fn settle_open_form(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    entry: &Value,
+    timed_out: bool,
+) -> Result<Option<Value>, ()> {
+    let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let store = &state.agui.auth.store;
+    let Ok(found) = store
+        .find_gateway_entry(coworker_id, account_id, entry_id)
+        .await
+    else {
+        return Err(());
+    };
+    let Some((seq, current)) = found.filter(|(_, current)| is_unresolved(current)) else {
+        return Ok(None);
+    };
+    // A CARD JUDGED DEAD IS JUDGED AGAIN, against the runs as they are now. The pass decided on a
+    // waiting set that may predate this card's park, and a dead card is closed with nothing
+    // resumed: a live one closed here leaves its run parked behind a card nobody answers.
+    if !timed_out {
+        let Some(now) = waiting_calls(state, account_id, coworker_id).await else {
+            return Err(());
+        };
+        if call_id_of(&current).is_some_and(|call| now.on.contains_key(call)) {
+            return Ok(None);
+        }
+    }
+    let settled = settle_entry(
+        current,
+        FormResolution::Dismissed,
+        &BTreeMap::new(),
+        true,
+        &[],
+        timed_out,
+    );
+    if let Err(error) = store
+        .update_gateway_entry(coworker_id, account_id, seq, &settled)
+        .await
+    {
+        tracing::error!(%error, "could not settle a user-form nothing will answer");
+        return Err(());
+    }
+    journal_settled_form(state, account_id, coworker_id, &settled).await;
+    Ok(Some(settled))
 }
 
 fn call_id_of(entry: &Value) -> Option<&str> {
@@ -673,7 +906,7 @@ async fn fills_a_dedicated_box(
         .unwrap_or(false)
 }
 
-fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
+fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
     let entry_id = args.get("entryId").and_then(Value::as_str)?;
     let agent_id = args
         .get("agentId")
@@ -682,11 +915,7 @@ fn named_entry(args: &Value) -> Option<(String, String, CoworkerId)> {
     if entry_id.is_empty() || agent_id.is_empty() {
         return None;
     }
-    Some((
-        entry_id.to_string(),
-        agent_id.to_string(),
-        CoworkerId::from_stored(agent_id),
-    ))
+    Some((entry_id.to_string(), CoworkerId::from_stored(agent_id)))
 }
 
 async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
@@ -842,7 +1071,6 @@ async fn abandon_escalated_form(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     entry: Value,
 ) -> (u16, Value) {
     settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
@@ -852,7 +1080,6 @@ async fn abandon_escalated_form(
         state,
         account_id,
         coworker_id,
-        agent_id,
         HANDOFF_DECLINED_TOOL_RESULT.to_string(),
         call_id_of(&entry),
     )
@@ -867,16 +1094,7 @@ async fn fill_on_box(
     form: &FormRequest,
     values: &BTreeMap<String, String>,
 ) -> Vec<FieldOutcome> {
-    let failed = || {
-        form.fields
-            .iter()
-            .map(|field| FieldOutcome {
-                id: field.id.clone(),
-                filled: false,
-                fill_failed: true,
-            })
-            .collect()
-    };
+    let failed = || nothing_filled(form);
     let Some(runner) = crate::agui::routes::tools_for_coworker(
         &state.agui,
         account_id,
@@ -910,11 +1128,41 @@ async fn fill_on_box(
     fill_into_focus(computer.as_ref(), &box_id, form, values).await
 }
 
+/// Every field of the form, not typed.
+fn nothing_filled(form: &FormRequest) -> Vec<FieldOutcome> {
+    form.fields
+        .iter()
+        .map(|field| FieldOutcome {
+            id: field.id.clone(),
+            filled: false,
+            fill_failed: true,
+        })
+        .collect()
+}
+
+/// Whether a run parked on a form still waits on this call; `None` when the log cannot be read.
+async fn waits_on(
+    state: &HostState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    call_id: Option<&str>,
+) -> Option<bool> {
+    let Some(call_id) = call_id else {
+        return Some(false);
+    };
+    let waiting = waiting_calls(state, account_id, coworker_id).await?;
+    Some(
+        waiting
+            .forms
+            .iter()
+            .any(|park| park.calls.contains(call_id)),
+    )
+}
+
 async fn heal_or_already(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     entry: &Value,
 ) -> (u16, Value) {
     let form = form_request_from(entry);
@@ -942,16 +1190,7 @@ async fn heal_or_already(
     }
     let timed_out = entry.get("timedOut").and_then(Value::as_bool) == Some(true);
     let content = model_facing_result(entry, &form, resolution, &shared, timed_out);
-    if resume_user_form(
-        state,
-        account_id,
-        coworker_id,
-        agent_id,
-        content,
-        call_id_of(entry),
-    )
-    .await
-    {
+    if resume_user_form(state, account_id, coworker_id, content, call_id_of(entry)).await {
         return (200, entry.clone());
     }
     (200, json!({ "alreadyAnswered": true }))
@@ -964,7 +1203,6 @@ async fn resume_user_form(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     content: String,
     call_id: Option<&str>,
 ) -> bool {
@@ -972,7 +1210,6 @@ async fn resume_user_form(
         state,
         account_id,
         coworker_id,
-        agent_id,
         opengrok_core::run::SuspendReason::UserForm,
         content,
         call_id,
@@ -984,7 +1221,6 @@ pub(crate) async fn resume_settled(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-    agent_id: &str,
     reason: opengrok_core::run::SuspendReason,
     content: String,
     call_id: Option<&str>,
@@ -997,7 +1233,8 @@ pub(crate) async fn resume_settled(
     if let Some(want) = call_id.filter(|id| !id.is_empty())
         && pending.call_id != want
     {
-        // Another stacked same-completion form: settle the card, leave the parked call.
+        // The run waits on this card among others from the same completion, and is parked on a
+        // sibling's call: settle this card, leave the parked call for its own card.
         return false;
     }
     let resumed_seq = run.emitted.len() as u32;
@@ -1039,14 +1276,12 @@ pub(crate) async fn resume_settled(
     let state = state.clone();
     let account_id = account_id.clone();
     let coworker_id = coworker_id.clone();
-    let agent_id = agent_id.to_string();
     tokio::spawn(resume::resume_where_it_lives(
         in_room,
         state,
         account_id,
         run_id,
         coworker_id,
-        agent_id,
         pending,
         resumed_seq,
         opengrok_harness::ResumeOutcome::Settled(content),
@@ -1054,14 +1289,15 @@ pub(crate) async fn resume_settled(
     true
 }
 
-/// The run this coworker has parked on a card of this kind: the one whose pending call is
-/// `call_id` when one is, else the first.
+/// The parked run a card answers.
 ///
-/// MATCHED BY CALL WHEN IT CAN BE. A coworker's chat turn and one of its routines can both be
-/// parked on a form at once — a routine mints its card like a chat turn does (#177) — and taking
-/// the first would answer the chat's run with the routine's card, and leave the routine parked.
-/// The first is still the fallback: a stacked form whose call is not the parked one settles its
-/// card and journals onto that run, as it always has.
+/// NAMED BY THE CARD'S CALL when it has one. The first parked run of the coworker is whichever
+/// moved least recently — often another conversation's — and answering into it left the card's
+/// own run parked behind a card that already read as answered. A coworker's chat turn and one of
+/// its routines can both be parked on a form at once, since a routine mints its card like a chat
+/// turn does (#177). A stacked form's call is among its run's `parked_calls`, so it still finds
+/// that run. `None` is for a card written before cards carried their call, and takes the first,
+/// as every card once did.
 pub(crate) async fn pending_suspended(
     state: &HostState,
     account_id: &AccountId,
@@ -1082,7 +1318,6 @@ pub(crate) async fn pending_suspended(
         .await
         .ok()?;
     let want = call_id.filter(|id| !id.is_empty());
-    let mut first = None;
     for run_id in run_ids {
         let Ok((run, seq)) = state.agui.auth.store.load_run(&run_id).await else {
             continue;
@@ -1096,14 +1331,14 @@ pub(crate) async fn pending_suspended(
         if pending.reason != reason {
             continue;
         }
-        if want.is_none_or(|want| pending.call_id == want) {
-            return Some((run_id, run, seq, pending));
+        if let Some(want) = want
+            && !resume::parked_calls(&run).contains(want)
+        {
+            continue;
         }
-        if first.is_none() {
-            first = Some((run_id, run, seq, pending));
-        }
+        return Some((run_id, run, seq, pending));
     }
-    first
+    None
 }
 
 fn now_ms() -> i64 {
@@ -1129,26 +1364,26 @@ async fn journal_settled_form(
         account_id,
         coworker_id,
         opengrok_core::run::SuspendReason::UserForm,
+        call_id_of(settled),
         agui_user_form_frame(settled),
     )
     .await;
 }
 
-/// Append a CUSTOM onto a still-pending run (NativeChat replays this). Scrubs
-/// accidental password keys before the payload is stored.
+/// Append a CUSTOM onto the still-pending run waiting on `call_id` (NativeChat replays this).
+/// Scrubs accidental password keys before the payload is stored. A run that no longer waits
+/// takes no frame: a stopped run's log is closed, and journaling onto whichever run was parked
+/// instead wrote one conversation's card into another's replay.
 pub(crate) async fn journal_agui_custom(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     reason: opengrok_core::run::SuspendReason,
+    call_id: Option<&str>,
     frame: Value,
 ) {
-    let call_id = frame
-        .get("callId")
-        .and_then(Value::as_str)
-        .map(str::to_string);
     let Some((run_id, mut run, seq, pending)) =
-        pending_suspended(state, account_id, coworker_id, reason, call_id.as_deref()).await
+        pending_suspended(state, account_id, coworker_id, reason, call_id).await
     else {
         return;
     };
@@ -1472,12 +1707,26 @@ pub(crate) fn hydrate_agui_events(
             }
         }
     }
+    // A card is appended only to the run that made its call. Two runs a few seconds apart in one
+    // thread both have it in their window and each hydrates against the coworker's whole
+    // transcript, so the window alone painted it once per run. A card that names no call (written
+    // before cards carried one) has only the window to go on.
+    let calls: HashSet<String> = events
+        .iter()
+        .flat_map(|event| [event.get("callId"), event.get("toolCallId")])
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
     const SLACK_MS: i64 = 5_000;
     for form in forms {
         let Some(id) = form.get("id").and_then(Value::as_str) else {
             continue;
         };
         if used.contains(id) {
+            continue;
+        }
+        if call_id_of(form).is_some_and(|call| !calls.contains(call)) {
             continue;
         }
         let at = form.get("timestampMs").and_then(Value::as_i64).unwrap_or(0);

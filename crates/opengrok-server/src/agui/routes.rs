@@ -588,8 +588,11 @@ pub(crate) async fn tools_for_coworker(
         // submit path still refuses to log secrets.
         Err(_) => false,
     };
-    context.screen_hold =
-        transcript_hold || pending_form_hold(state, account_id, &coworker_id).await;
+    // The coworker's one computer is held whichever conversation raised the form; the refusal
+    // names that conversation when a parked run ties the hold to one.
+    let held_in = form_hold_thread(state, account_id, &coworker_id).await;
+    context.screen_hold = transcript_hold || held_in.is_some();
+    context.screen_held_in = held_in;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -653,15 +656,15 @@ pub(crate) async fn tools_for_coworker(
     Some(ToolRunner::new(executor, context))
 }
 
-/// A run suspended on a user-form holds the screen whether or not the transcript has a card
-/// for it: the pending row is the truth, the card is chrome.
-async fn pending_form_hold(
+/// The conversation of a run suspended on a user-form: it holds the screen whether or not the
+/// transcript has a card for it — the pending row is the truth, the card is chrome.
+async fn form_hold_thread(
     state: &AgUiState,
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
-) -> bool {
+) -> Option<String> {
     let Ok(run_ids) = state.auth.store.awaiting_approval(account_id).await else {
-        return false;
+        return None;
     };
     for run_id in run_ids {
         let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
@@ -674,10 +677,10 @@ async fn pending_form_hold(
             run.pending.as_ref().map(|pending| pending.reason),
             Some(opengrok_core::run::SuspendReason::UserForm)
         ) {
-            return true;
+            return Some(run.thread_id);
         }
     }
-    false
+    None
 }
 
 /// The access token for a connection, refreshed first if it is about to expire.
@@ -891,17 +894,19 @@ async fn connect_plugins(
 /// `entryId` for NativeChat to submit to — its Log in button stayed grey (21 Sep 2026).
 /// Other AG-UI routes stay on `AgUiState`. The SSE still forwards CUSTOM
 /// `run-awaiting-approval`; the card is additive.
+/// The stop lives here too: a run parked on a form leaves a card that holds the coworker's
+/// screen, and the stop closes it before answering.
 pub fn run_router(state: crate::host_state::HostState) -> Router {
     Router::new()
         .route("/ag-ui", post(run))
         .route("/ag-ui/runs/{run_id}/answer", post(answer_run))
+        .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .with_state(state)
 }
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
-        .route("/ag-ui/runs/{run_id}/stop", post(stop_run))
         .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
@@ -2845,6 +2850,7 @@ async fn start_claimed_turn(
             &gateway,
             account_id,
             coworker_id,
+            &input.thread_id,
             account_id.as_str(),
         )
         .await;
@@ -3565,9 +3571,9 @@ fn attach(state: AgUiState, account_id: AccountId, run_id: RunId) -> Response {
                 let _ = tx.send(unreadable(""));
                 return;
             };
-            let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+            let window = run_time_window(&run.emitted);
             let frames = log_frames(
-                events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+                events_for_client(&state, &account_id, &run, window).await,
                 run.emitted.len(),
             );
             for frame in frames.into_iter().skip(sent) {
@@ -3696,12 +3702,12 @@ pub async fn replay_run(
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     }
 
-    let (started_at_ms, updated_at_ms) = run_time_window(&run.emitted);
+    let window = run_time_window(&run.emitted);
     // The person's words ride the replay, and only the replay: an attached stream (`attach`)
     // sends what the live stream sent, which never carried them.
     let events = super::history::with_prompt_frames(
         &run,
-        events_for_client(&state, &account_id, &run, started_at_ms, updated_at_ms).await,
+        events_for_client(&state, &account_id, &run, window).await,
     );
 
     Json(serde_json::json!({
@@ -3711,7 +3717,7 @@ pub async fn replay_run(
         // When the turn began. A client that picks a run up after a restart has no bubble for
         // it and has to make one; without this it would stamp that bubble with the moment it
         // noticed, and the turn would sort to the wrong place in the thread for good.
-        "startedAtMs": started_at_ms,
+        "startedAtMs": started_at_ms(window),
         "failure": run.failure,
         "pending": run.pending,
         "events": events,
@@ -3719,24 +3725,32 @@ pub async fn replay_run(
     .into_response()
 }
 
-fn run_time_window(emitted: &[serde_json::Value]) -> (i64, i64) {
-    let times: Vec<i64> = emitted
+/// The first and last timestamps a run has logged; `None` before it has logged any.
+fn run_time_window(emitted: &[serde_json::Value]) -> Option<(i64, i64)> {
+    let mut times = emitted
         .iter()
-        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64))
-        .collect();
-    match (times.first(), times.last()) {
-        (Some(&first), Some(&last)) => (first, last),
-        _ => (0, i64::MAX),
-    }
+        .filter_map(|event| event.get("timestamp").and_then(serde_json::Value::as_i64));
+    let first = times.next()?;
+    Some((first, times.next_back().unwrap_or(first)))
+}
+
+/// The window a run with no timestamps hydrates against: one no card falls inside. "Everything"
+/// folded every card the coworker ever raised into a run that had not logged a timestamp yet.
+const EMPTY_WINDOW: (i64, i64) = (i64::MAX, i64::MIN);
+
+/// `startedAtMs` for a run: 0 until it has logged a timestamp, as it always said. The empty
+/// window's bound is not a time — past JavaScript's safe integers, and an Invalid Date.
+fn started_at_ms(window: Option<(i64, i64)>) -> i64 {
+    window.map_or(0, |(started, _)| started)
 }
 
 async fn events_for_client(
     state: &AgUiState,
     account_id: &AccountId,
     run: &opengrok_core::run::Run,
-    started_at_ms: i64,
-    updated_at_ms: i64,
+    window: Option<(i64, i64)>,
 ) -> Vec<serde_json::Value> {
+    let (started_at_ms, updated_at_ms) = window.unwrap_or(EMPTY_WINDOW);
     let forms = match run.coworker_id.as_ref() {
         Some(coworker_id) => state
             .auth
@@ -4269,6 +4283,12 @@ const STOP_ATTEMPTS: usize = 5;
 /// WHAT IT DOES NOT DO, AND THE ANSWER SAYS SO: it does not take back a step already under way. See
 /// `stopped_answer`.
 ///
+/// A RUN PARKED ON A FORM LEAVES A CARD, and the card holds the coworker's screen: every later turn
+/// was refused `computer`, `open_url`, `run_recipe` and `request_user_form` while the answer said
+/// the card was closed. So the cards no run waits on any more are settled before the answer is
+/// written, and the answer says whether they were. A stop of a run that had already ended does
+/// the same, which is how a card an older stop left open gets closed.
+///
 /// WHAT IT COSTS. A turn that is stopped keeps whatever it has already spent, and that is the
 /// correct outcome rather than an oversight: the model calls really happened and the gateway
 /// metered each one against the coworker's own key as it completed. Nothing here aborts a task or
@@ -4277,10 +4297,11 @@ const STOP_ATTEMPTS: usize = 5;
 /// actually lose money. The frames that spend bought are journaled too, including the round the
 /// turn was in the middle of, so `replay_run` still shows what was paid for.
 pub async fn stop_run(
-    State(state): State<AgUiState>,
+    State(host): State<crate::host_state::HostState>,
     headers: axum::http::HeaderMap,
     Path(run_id): Path<String>,
 ) -> Response {
+    let state = &host.agui;
     let run_id = RunId::from_stored(run_id);
 
     // `replay_run`'s check, byte for byte, and for the same reason: a run holds a whole
@@ -4288,7 +4309,7 @@ pub async fn stop_run(
     // logs. `NOT_FOUND` rather than `FORBIDDEN` for "no such run", "not yours" and "not signed in"
     // alike, so probing ids reveals nothing about which runs exist. The two answers have to be
     // indistinguishable down to the bytes, which is why this says the same words.
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
+    let Some(account_id) = account_from_bearer(state, &headers) else {
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     };
     match state.auth.store.run_owned_by(&run_id, &account_id).await {
@@ -4313,8 +4334,13 @@ pub async fn stop_run(
         }
 
         // Read BEFORE the stop is applied: what the run was doing is what decides how honest the
-        // answer can be about when the stop takes hold.
+        // answer can be about when the stop takes hold, and what it was waiting on decides whether
+        // it can say the card is closed.
         let was = run.status;
+        let on_a_form = run
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.reason == opengrok_core::run::SuspendReason::UserForm);
 
         let at_ms = now_ms();
         let events = match run.decide(RunCommand::Stop {
@@ -4326,7 +4352,10 @@ pub async fn stop_run(
             // pressed a button asking for this run not to be running; whether they won the race
             // with the model is not their problem, and an error here would make a retry — a second
             // press, a client resending — look like a fault.
-            Err(_) => return stopped_answer(&run_id, was),
+            Err(_) => {
+                let closed = close_cards(&host, &account_id, &run).await;
+                return stopped_answer(&run_id, was, on_a_form, closed);
+            }
         };
 
         for event in &events {
@@ -4347,7 +4376,8 @@ pub async fn stop_run(
         {
             Ok(_) => {
                 tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
-                return stopped_answer(&run_id, was);
+                let closed = close_cards(&host, &account_id, &run).await;
+                return stopped_answer(&run_id, was, on_a_form, closed);
             }
             // Somebody wrote to this run between the read and the write. Re-read and decide again
             // against what is actually there: either the run is now ended, and the next pass
@@ -4366,6 +4396,21 @@ pub async fn stop_run(
         .into_response()
 }
 
+/// Settle the cards a stop leaves with nothing waiting on them. Once, after the stop is in the
+/// log, however many attempts writing it took: before it, the run still waits on them.
+async fn close_cards(
+    host: &crate::host_state::HostState,
+    account_id: &AccountId,
+    run: &opengrok_core::run::Run,
+) -> bool {
+    match crate::agui::resume::coworker_of(run) {
+        Some(coworker) => {
+            crate::agui::user_form::settle_dead_holds(host, account_id, &coworker, now_ms()).await
+        }
+        None => true,
+    }
+}
+
 /// The answer to a stop, and how honest it can be about when the stop takes hold.
 ///
 /// `202`, NOT `200`, AND THE DIFFERENCE IS THE POINT. The stop is durable by the time this is
@@ -4378,7 +4423,7 @@ pub async fn stop_run(
 /// outcome of the REQUEST and not the run's own status — the run's status is unchanged and
 /// `GET /ag-ui/runs/{id}` still reports it. `takesEffect: already-ended` is what distinguishes the
 /// two for a client that cares.
-fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
+fn stopped_answer(run_id: &RunId, was: RunStatus, on_a_form: bool, cards_closed: bool) -> Response {
     let (takes_effect, note) = match was {
         // Nothing was running, and saying "stopped" is still the right answer: the person asked
         // for this run not to be running, and it is not.
@@ -4388,9 +4433,25 @@ fn stopped_answer(run_id: &RunId, was: RunStatus) -> Response {
         ),
         // Waiting on a person is not working. No model call is in flight and no tool is running,
         // so the run is over the moment the log says so.
-        RunStatus::AwaitingApproval => (
+        //
+        // Only a form's card is settled by a stop. An approval card (auto-review, policy,
+        // local-tool-permission) is left as it was painted, so the answer does not say it is
+        // closed — only what is true: the run has left the approvals queue and its card can no
+        // longer make anything run.
+        RunStatus::AwaitingApproval if !on_a_form => (
+            "immediately",
+            "That run was waiting on an approval and is stopped: nothing it asked for will run.",
+        ),
+        RunStatus::AwaitingApproval if cards_closed => (
             "immediately",
             "That run was waiting on an approval, and the card it was waiting on is closed.",
+        ),
+        // Said rather than implied: the card still shows, and the coworker's next turn is what
+        // closes it.
+        RunStatus::AwaitingApproval => (
+            "immediately",
+            "That run is stopped, but the card it was waiting on could not be closed yet; the \
+             coworker's next turn closes it.",
         ),
         // THE HONEST ONE. The turn asks the log whether it has been stopped between steps: before
         // each model call, and again after the model has answered and before its tools are run. A
@@ -4699,9 +4760,7 @@ async fn continue_run(
     // The continued run may pause again — on a user form, a saved-login request — and that
     // pause needs its card in the transcript exactly as a fresh turn's does: without the
     // card there is no `entryId`, and NativeChat cannot submit what the person typed.
-    let agent_id = coworker_id.as_str().to_string();
-    super::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &agent_id, &events)
-        .await;
+    super::resume::emit_user_form_suspensions(&host, &coworker_id, &account_id, &events).await;
 }
 
 /// Runs waiting on this person.
@@ -5798,9 +5857,9 @@ mod tests {
     }
 
     /// A RUN WITH NO FRAMES YET GETS NO CARDS. Hydration appends the transcript cards it cannot
-    /// place, and with nothing logged the run's window is everything, so every card this
-    /// coworker ever showed would reach an attached stream — and the next look would skip as
-    /// many real frames. Only the log's own frames go out.
+    /// place, and a run with no timestamps has no window to place them in — it used to be
+    /// "everything", so every card this coworker ever showed reached an attached stream, and the
+    /// next look skipped as many real frames. Only the log's own frames go out.
     #[test]
     fn an_attached_stream_sends_only_the_logs_own_frames() {
         let card = json!({
@@ -5812,21 +5871,49 @@ mod tests {
                 "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
             }
         });
-        let (from, to) = run_time_window(&[]);
+        let (from, to) = run_time_window(&[]).unwrap_or(EMPTY_WINDOW);
         let hydrated = crate::agui::user_form::hydrate_agui_events(
             Vec::new(),
             std::slice::from_ref(&card),
             from,
             to,
         );
-        assert_eq!(
-            hydrated.len(),
-            1,
-            "hydration invents a card for an empty run"
+        assert!(
+            hydrated.is_empty(),
+            "no card for an empty run: {hydrated:?}"
         );
         assert!(
             log_frames(hydrated, 0).is_empty(),
             "the attached stream sends none"
         );
+    }
+
+    /// #188. A run whose frames carry no timestamps is not a window onto the whole transcript.
+    #[test]
+    fn a_run_with_no_timestamps_gets_no_transcript_cards() {
+        let card = json!({
+            "kind": "send-message",
+            "id": "e_old",
+            "timestampMs": 5,
+            "message": {
+                "type": "user-form",
+                "formRequest": {"title": "Sign in", "fields": [{"id": "email", "label": "Email"}]}
+            }
+        });
+        let emitted = vec![json!({"type": "RUN_STARTED"})];
+        let window = run_time_window(&emitted);
+        assert_eq!(
+            started_at_ms(window),
+            0,
+            "a run with no timestamp yet reports no start, not the empty window's bound"
+        );
+        let (from, to) = window.unwrap_or(EMPTY_WINDOW);
+        let out = crate::agui::user_form::hydrate_agui_events(
+            emitted,
+            std::slice::from_ref(&card),
+            from,
+            to,
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
     }
 }
