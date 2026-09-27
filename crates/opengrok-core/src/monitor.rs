@@ -28,6 +28,7 @@ use crate::id::{CoworkerId, RunId};
 /// - `run-emitted`: written once per streamed frame, so a monitor on it would fire a run per token.
 /// - `run-tool-started`: written before every tool round — the journal's own bookkeeping, not a
 ///   fact about the run a coworker should be woken for.
+/// - `run-recipes-played`: the loop's own bookkeeping between rounds (#256), as `run-tool-started`.
 /// - `run-resumed`: the sweep carrying a run on after a restart (#91). The run still ends in one
 ///   of the endings above, which is what a monitor wants; waking on the resume too would fire
 ///   twice for one run, and once more for every restart it lives through.

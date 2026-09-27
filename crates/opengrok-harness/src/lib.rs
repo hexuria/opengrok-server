@@ -587,6 +587,36 @@ pub enum ResumeOutcome {
     Settled(String),
 }
 
+/// What a run already spent before this segment (#256), read back from its log: the recipes
+/// it played (`RunEvent::RecipesPlayed`) and the rounds it used (`Run::rounds_spent`). A resumed
+/// segment starts from these, not afresh: a recipe plays at most once per REQUEST (#120), and
+/// the budget is the run's, however many segments it takes. The wall clock is the one guard
+/// that starts again: it measures a person waiting, and a restart's downtime is not the run's.
+#[derive(Debug, Clone, Default)]
+pub struct Spent {
+    pub recipes: HashSet<String>,
+    pub spoken_rounds: usize,
+    pub computer_rounds: usize,
+    /// The run already asked for a tool, so a long answer after the resume is work, not a
+    /// plan-only flood.
+    pub started_a_tool: bool,
+}
+
+impl Spent {
+    /// What `run` has on record.
+    pub fn of(run: &opengrok_core::run::Run) -> Self {
+        let (spoken_rounds, computer_rounds) = run.rounds_spent();
+        Self {
+            recipes: run.played_recipes.iter().cloned().collect(),
+            spoken_rounds,
+            computer_rounds,
+            started_a_tool: run.emitted.iter().any(|frame| {
+                frame.get("type").and_then(serde_json::Value::as_str) == Some("TOOL_CALL_START")
+            }),
+        }
+    }
+}
+
 /// What a resumed run already knows: the call that was answered, how, and where the first half
 /// left off.
 #[derive(Debug, Clone)]
@@ -596,14 +626,24 @@ pub struct Resumption {
     /// So the second half cannot collide with the first on a message id.
     pub message_seq: u32,
     pub outcome: ResumeOutcome,
+    /// What the run spent before the card (#256).
+    pub spent: Spent,
 }
 
 impl Resumption {
+    /// The same resumption, starting from what the run already spent (#256).
+    #[must_use]
+    pub fn having_spent(mut self, spent: Spent) -> Self {
+        self.spent = spent;
+        self
+    }
+
     pub fn approved(call: opengrok_tools::ToolCall, message_seq: u32) -> Self {
         Self {
             approved: call,
             message_seq,
             outcome: ResumeOutcome::Approved,
+            spent: Spent::default(),
         }
     }
 
@@ -616,6 +656,7 @@ impl Resumption {
             approved: call,
             message_seq,
             outcome: ResumeOutcome::Refused(why.into()),
+            spent: Spent::default(),
         }
     }
 
@@ -628,6 +669,7 @@ impl Resumption {
             approved: call,
             message_seq,
             outcome: ResumeOutcome::Settled(content.into()),
+            spent: Spent::default(),
         }
     }
 }
@@ -650,6 +692,7 @@ pub async fn resume_conversation(
         approved,
         message_seq,
         outcome,
+        spent,
     } = resumption;
     let run_id = context.run_id.clone();
     // Already started: a resumed run must not draw itself twice.
@@ -776,13 +819,22 @@ pub async fn resume_conversation(
     // The first half already recorded ToolCallStart (that is why this run is
     // resuming). converse_raw would otherwise start with started_a_tool = false
     // and treat a long post-HITL summary as a plan-only flood.
+    let approved_played: Vec<String> = results
+        .iter()
+        .filter(|result| approved_ran && result.call_id == approved.id)
+        .filter_map(|result| played_recipe(&approved, result))
+        .collect();
+    if !approved_played.is_empty()
+        && let Err(error) = journal.recipes_played(&run_id, &approved_played).await
+    {
+        tracing::warn!(run_id, %error, "could not record the recipe the approved call played");
+    }
+    let mut played = spent.recipes;
+    played.extend(approved_played);
     let carried = Carried {
         started_a_tool: true,
-        played: results
-            .iter()
-            .filter(|result| approved_ran && result.call_id == approved.id)
-            .filter_map(|result| played_recipe(&approved, result))
-            .collect(),
+        played,
+        spent_rounds: (spent.spoken_rounds, spent.computer_rounds),
         ..Carried::default()
     };
     let mut rest = converse(
@@ -805,8 +857,7 @@ pub async fn resume_conversation(
 ///
 /// Drawn as a continuation of the run it resumes (`Projection::resumed`), not a new one, and
 /// asked `stopped` at the top of its first round like every round. `request.messages` is the
-/// conversation rebuilt from the log. `started_a_tool` is whether the interrupted half had
-/// already asked for a tool, so a long answer after the resume is not taken for a plan-only flood.
+/// conversation rebuilt from the log, and `spent` what the run already did (#256).
 pub async fn continue_interrupted(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -814,7 +865,7 @@ pub async fn continue_interrupted(
     request: ModelRequest,
     context: RunContext,
     message_seq: u32,
-    started_a_tool: bool,
+    spent: Spent,
 ) -> Vec<Event> {
     let run_id = context.run_id.clone();
     let projection = Projection::resumed(
@@ -824,7 +875,9 @@ pub async fn continue_interrupted(
         message_seq,
     );
     let carried = Carried {
-        started_a_tool,
+        started_a_tool: spent.started_a_tool,
+        played: spent.recipes,
+        spent_rounds: (spent.spoken_rounds, spent.computer_rounds),
         ..Carried::default()
     };
     converse(
@@ -1057,6 +1110,8 @@ struct Carried {
     played: HashSet<String>,
     /// What the segment may spend.
     budget: RunBudget,
+    /// Rounds the run spent before this segment, `(spoken, computer)` (#256).
+    spent_rounds: (usize, usize),
 }
 
 /// The loop both entry points share.
@@ -1098,6 +1153,7 @@ async fn converse_raw(
         started_a_tool: already_started_a_tool,
         mut played,
         budget,
+        spent_rounds,
     } = carried;
     let mut all = Vec::new();
 
@@ -1127,8 +1183,7 @@ async fn converse_raw(
     let mut started_a_tool = already_started_a_tool;
     let mut plan_only_chars = 0usize;
     // Rounds that ended in words or box tools, and rounds spent on the screen: two budgets.
-    let mut spoken_rounds = 0usize;
-    let mut computer_rounds = 0usize;
+    let (mut spoken_rounds, mut computer_rounds) = spent_rounds;
     // The last screenshot the model was shown, and how many times in a row it was the same.
     let mut last_screen: Option<u64> = None;
     let mut same_screen = 0usize;
@@ -1574,14 +1629,28 @@ async fn converse_raw(
                 // too, so taking it counted the recipe as played when the earlier call in the
                 // same completion was refused before the box: the corrected call next round
                 // became a "replay" and the search never ran (#120 again, from one reply).
-                played.extend(
-                    calls
-                        .iter()
-                        .zip(results.iter())
-                        .zip(loop_answered.iter())
-                        .filter(|(_, answered)| !**answered)
-                        .filter_map(|((call, result), _)| played_recipe(call, result)),
-                );
+                let now_played: Vec<String> = calls
+                    .iter()
+                    .zip(results.iter())
+                    .zip(loop_answered.iter())
+                    .filter(|(_, answered)| !**answered)
+                    .filter_map(|((call, result), _)| played_recipe(call, result))
+                    .collect();
+                // ON RECORD AS SOON AS IT IS KNOWN (#256), so a segment carried on after a restart
+                // reads it back. A fence or an ended run ends this loop as a start refused would;
+                // any other failure leaves this segment guarded by memory alone, and is logged.
+                if !now_played.is_empty() {
+                    match journal.recipes_played(run_id, &now_played).await {
+                        Ok(()) => {}
+                        Err(error @ (JournalError::Fenced(_) | JournalError::Ended(_))) => {
+                            end_run!(round_events, start_refused(error));
+                        }
+                        Err(error) => {
+                            tracing::warn!(run_id, %error, "could not record the recipes a round played");
+                        }
+                    }
+                }
+                played.extend(now_played);
 
                 // THE MODEL SEES WHAT IT CALLED (#189): its own message naming this round's
                 // calls, then one `tool` message per result below, each keyed by the id it gave.

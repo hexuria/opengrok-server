@@ -1023,6 +1023,15 @@ async fn a_loop_from_before_a_resume_can_write_nothing() {
         ),
         "and so is a tool's start"
     );
+    assert!(
+        matches!(
+            stale
+                .recipes_played(run_id.as_str(), &["search-youtube".to_string()])
+                .await,
+            Err(JournalError::Fenced(_))
+        ),
+        "and so is a recipe it played (#256)"
+    );
     let (after, after_seq) = h.store.load_run(&run_id).await.expect("load");
     assert_eq!(
         after_seq, seq,
@@ -1034,4 +1043,17 @@ async fn a_loop_from_before_a_resume_can_write_nothing() {
         .record(run_id.as_str(), &round)
         .await
         .expect("the resumed generation writes as usual");
+    journal(1)
+        .recipes_played(run_id.as_str(), &["search-youtube".to_string()])
+        .await
+        .expect("and records what it played");
+    let (after, _) = h.store.load_run(&run_id).await.expect("load");
+    assert!(
+        after.played_recipes.contains("search-youtube"),
+        "a played recipe is on the log for the next resume to read (#256)"
+    );
+    assert_eq!(
+        opengrok_harness::Spent::of(&after).recipes,
+        ["search-youtube".to_string()].into_iter().collect(),
+    );
 }

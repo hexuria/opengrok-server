@@ -75,12 +75,22 @@ pub trait RunJournal: Send + Sync {
     ) -> Result<(), JournalError> {
         Ok(())
     }
+
+    /// Record that these recipes played on the box this request (#256), as soon as the round
+    /// that played them learns it, so a segment carried on after a restart does not play them
+    /// again. `Fenced` and `Ended` mean what they mean for `tools_starting`.
+    ///
+    /// The default records nothing: a journal that keeps no log has no resume to protect.
+    async fn recipes_played(&self, _run_id: &str, _recipes: &[String]) -> Result<(), JournalError> {
+        Ok(())
+    }
 }
 
 /// Keeps events in memory. For tests, and for a caller that has chosen not to persist.
 #[derive(Debug, Default)]
 pub struct MemoryJournal {
     recorded: std::sync::Mutex<Vec<(String, Vec<Event>)>>,
+    played: std::sync::Mutex<Vec<String>>,
 }
 
 impl MemoryJournal {
@@ -104,6 +114,14 @@ impl MemoryJournal {
     pub fn event_count(&self) -> usize {
         self.batches().iter().map(Vec::len).sum()
     }
+
+    /// Every recipe `recipes_played` recorded, in order.
+    pub fn recipes_played(&self) -> Vec<String> {
+        self.played
+            .lock()
+            .map(|played| played.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait::async_trait]
@@ -113,6 +131,14 @@ impl RunJournal for MemoryJournal {
             .lock()
             .map_err(|_| JournalError::Unwritable("the journal's lock was poisoned".to_string()))?
             .push((run_id.to_string(), events.to_vec()));
+        Ok(())
+    }
+
+    async fn recipes_played(&self, _run_id: &str, recipes: &[String]) -> Result<(), JournalError> {
+        self.played
+            .lock()
+            .map_err(|_| JournalError::Unwritable("the journal's lock was poisoned".to_string()))?
+            .extend(recipes.iter().cloned());
         Ok(())
     }
 }

@@ -3214,6 +3214,39 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         tools: &[opengrok_core::run::StartedTool],
     ) -> Result<(), opengrok_harness::JournalError> {
+        self.bookkeep(run_id, "its tool could start", |at_ms| {
+            RunCommand::StartTools {
+                tools: tools.to_vec(),
+                at_ms,
+            }
+        })
+        .await
+    }
+
+    async fn recipes_played(
+        &self,
+        run_id: &str,
+        recipes: &[String],
+    ) -> Result<(), opengrok_harness::JournalError> {
+        self.bookkeep(run_id, "its recipe could be recorded", |at_ms| {
+            RunCommand::RecordPlayed {
+                recipes: recipes.to_vec(),
+                at_ms,
+            }
+        })
+        .await
+    }
+}
+
+impl StoreJournal {
+    /// One log-only write the loop makes between its rounds (#91, #256): fenced by generation
+    /// like every journal write, refused on an ended run, and tried `APPEND_ATTEMPTS` times.
+    async fn bookkeep(
+        &self,
+        run_id: &str,
+        before: &str,
+        command: impl Fn(i64) -> RunCommand,
+    ) -> Result<(), opengrok_harness::JournalError> {
         let id = RunId::from_stored(run_id.to_string());
         let mut last_error = String::new();
         for _ in 0..APPEND_ATTEMPTS {
@@ -3230,14 +3263,11 @@ impl opengrok_harness::RunJournal for StoreJournal {
                 )));
             }
             let at_ms = now_ms();
-            let events = match run.decide(RunCommand::StartTools {
-                tools: tools.to_vec(),
-                at_ms,
-            }) {
+            let events = match run.decide(command(at_ms)) {
                 Ok(events) => events,
                 Err(opengrok_core::run::RunError::AlreadyEnded) => {
                     return Err(opengrok_harness::JournalError::Ended(format!(
-                        "run {run_id} ended before its tool could start"
+                        "run {run_id} ended before {before}"
                     )));
                 }
                 Err(error) => {
@@ -4986,6 +5016,8 @@ async fn continue_run(
             },
             message_seq: resumed_seq,
             outcome,
+            // What the run spent before the card (#256): its recipes, its rounds.
+            spent: opengrok_harness::Spent::of(&run),
         },
     )
     .await;

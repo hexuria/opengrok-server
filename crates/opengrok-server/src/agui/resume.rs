@@ -743,6 +743,8 @@ async fn resume_suspended_run(
             },
             message_seq: resumed_seq,
             outcome,
+            // What the run spent before the card (#256): its recipes, its rounds.
+            spent: opengrok_harness::Spent::of(&run),
         },
     )
     .await;
@@ -842,10 +844,6 @@ pub(crate) async fn resume_interrupted_run(
         generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
-    let started_a_tool = run
-        .emitted
-        .iter()
-        .any(|frame| frame.get("type").and_then(Value::as_str) == Some("TOOL_CALL_START"));
     let request = ModelRequest {
         gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,
         spend_scope: Some(coworker_id.as_str().to_string()),
@@ -864,7 +862,7 @@ pub(crate) async fn resume_interrupted_run(
         request,
         opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
         run.emitted.len() as u32,
-        started_a_tool,
+        opengrok_harness::Spent::of(&run),
     )
     .await;
     // It may park on a card, as any turn may. ONLY A FORM GETS A TRANSCRIPT CARD, as on the live
