@@ -64,6 +64,8 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | A resume never drives a run on while a tool's outcome is unknown (#91) | safety | `NothingReExecutes` |
 | A run that keeps crashing is resumed at most twice (#91) | safety | `ResumesAtMostTwice` |
 | Never two tools of one run at once, across a resume (#91) | safety | `OneActing` |
+| A loop the resume replaced never ends or parks the resumed run (#91) | safety | `OnlyCurrentGenerationWrites` |
+| Every tool that started is on record until its result is (#91) | safety | `ToolStartIsOnRecord` |
 | Every recipe start answers, won or refused | liveness | `RecipeLease` `EveryStartAnswers` |
 
 ## TLA+ findings
@@ -195,21 +197,30 @@ Each trace is TLC's shortest.
     already missed the winner's row. A unique index cannot do it, since an expired lease stays
     non-null. The lease still lapses unfenced, the limit `RunLifecycle_lapse` states.
 15. **A resume beside a live loop** (#91; `RunLifecycle_resume_unfenced`, `_blind`,
-    `_uncapped`). #91 asks the sweep to resume a run interrupted between rounds instead of
-    failing it. The first model of that failed three ways, each kept as a configuration:
+    `_uncapped`, `_fence_tool_only`). #91 asks the sweep to resume a run interrupted between
+    rounds instead of failing it. The first model of that failed three ways, each kept as a
+    configuration:
     without `ToolStarted` in the log, a crash mid-tool is resumed and the tool's outcome is lost
     (`NothingReExecutes`); with no cap, a run that keeps crashing keeps being resumed
     (`ResumesAtMostTwice`); and — the one the issue does not name — a lease is only
     `leased_until_ms`, with no holder, so a renewal that fails on a live process looks exactly
     like a crash. The sweep then resumes the run beside a loop still alive at an await, and when
-    that loop reaches its act, two tools run at once (`OneActing`). The design that holds
-    (`RunLifecycle_resume`, 187,914 states, `NoOrphan` included): `ToolStarted` before every
-    tool; the sweep resumes only a run whose log shows no tool open, at most twice; and every
-    resume moves the run's generation on, so an older loop is told to stop at its next boundary
-    and its next `ToolStarted` write is refused — the fence. `OneDriver` no longer holds under
-    lapse (an older loop may still be at an await); `OneActing` is the claim instead. The first
-    PR ships only `ToolStarted` (`RunLifecycle.cfg` has `JournalsToolStart`); the resume, the
-    fence and the cap follow, and flip the main configuration.
+    that loop reaches its act, two tools run at once (`OneActing`). The peer review then found
+    what that first design still let through, and it is the fourth configuration: fencing only
+    `ToolStarted` is not enough (`_fence_tool_only`, `OnlyCurrentGenerationWrites`). A loop told
+    to stop by the fence closes with the stop's own ending (`run-stopped`, `RUN_FINISHED`), which
+    on the resumed, still-running run finishes it; and a model call is the longest quiet stretch
+    there is (`ModelCallIsQuiet`), so the sweep can resume while the old loop waits on a reply
+    whose stream then breaks, and its `RUN_ERROR` fails the resumed run. The design that holds
+    (`RunLifecycle_resume`, 539,135 states, `NoOrphan` included; `MaxSuspends = 1` to keep it near
+    a minute single-worker): `ToolStarted` before every tool; the sweep resumes only a run whose
+    log shows no tool open, at most twice; every resume moves the run's generation on; and the
+    log refuses EVERY write from an older generation — its ending, its park and its
+    `ToolStarted` — so the replaced loop exits having written nothing. `OneDriver` no longer holds
+    under lapse (an older loop may still be at an await); `OneActing` is the claim instead. The
+    first PR ships only `ToolStarted` (`RunLifecycle.cfg` has `JournalsToolStart` and checks
+    `ToolStartIsOnRecord`); the resume, the fence on every journal write, and the cap follow, and
+    flip the main configuration.
 
 ## Lean findings
 
@@ -350,5 +361,14 @@ The state graph was the object being minimised. The results:
 - **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
   caused by a concurrent Stop.
 - **A tool's start is recorded, and nothing reads it yet** (#91). Until the resume lands, an
-  interrupted run is still failed by the sweep whatever its log shows; `open_tools` is there for
-  the classifier that decides between resuming and failing.
+  interrupted run is still failed by the sweep whatever its log shows; `open_tools` (call id →
+  tool name) is there for the classifier that decides between resuming and failing, and for the
+  failure's sentence to name the tool.
+- **What the resume design still owes, for PR b** (#91). An answered approval whose call never
+  started (a crash after the answer, before the call) looks resumable, and a resume as a fresh
+  round would never run it — the model would ask again and the person get a second card; it
+  needs a resume through `resume_conversation`, and the model does not exercise it yet. And
+  each tool round now costs one more read of the whole log (`tools_starting`'s `load_run`); one
+  statement returning the projection's status and seq together would not.
+- **`run-tool-started` is not roll-back safe.** An older binary reads the event type as corrupt,
+  so any run that has one — every run parked since — would fail to load after a rollback.

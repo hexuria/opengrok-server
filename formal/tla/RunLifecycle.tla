@@ -26,7 +26,11 @@ CONSTANTS
     Resume,            \* the sweep resumes a run it would fail, unless the log shows a tool open
     Fenced,            \* a resume moves the run's generation on; an older loop is told to stop,
                        \* and its next ToolStarted write is refused, so it runs nothing more
-    ResumeCap          \* resumes a run may take before an interruption fails it
+    ResumeCap,         \* resumes a run may take before an interruption fails it
+    ModelCallIsQuiet,  \* a model call is its own step: a long await that writes nothing, so the
+                       \* sweep can find a run quiet while a loop is still waiting on a reply
+    FenceAllWrites     \* with Fenced: EVERY write from an older generation is refused — its
+                       \* ending and its park too, not only its ToolStarted
 
 \* A lease is `run_view.leased_until_ms` and nothing else: no holder, no fencing token. The sweep
 \* cannot tell a dead process from a live one whose renewal failed (Lapse), so a resume can land
@@ -36,7 +40,7 @@ CONSTANTS
 \* with the same run id starts (`DrainResult::AlreadyThisRun` → a new turn, routes.rs:2495).
 Loops    == 0..(MaxSuspends + 1 + ResumeCap)
 Terminal == {"finished", "failed", "stopped"}
-Active   == {"approve", "approveArmed", "live", "armed", "tool"}
+Active   == {"approve", "approveArmed", "live", "calling", "armed", "tool"}
 
 VARIABLES
     status,         \* the aggregate: "running" | "awaiting" | "finished" | "failed" | "stopped"
@@ -60,9 +64,10 @@ VARIABLES
     loopGen,        \* per loop: the generation it started under
     openTool,       \* the log shows a ToolStarted with no result after it
     unfinishedTool, \* truth: a tool started and its result is not journaled (it may have acted)
-    reExecuted      \* a resume drove the run on while a tool's outcome was unknown
+    reExecuted,     \* a resume drove the run on while a tool's outcome was unknown
+    staleWrote      \* a loop from before the latest resume ended or parked the resumed run
 
-resumeVars == <<resumes, runGen, loopGen, openTool, unfinishedTool, reExecuted>>
+resumeVars == <<resumes, runGen, loopGen, openTool, unfinishedTool, reExecuted, staleWrote>>
 vars == <<status, phase, lease, rounds, suspends, reading, answers, approvedRuns,
           approvedAfterStop, staleTools, falseFailure, retried, retryRefused, resumeVars>>
 
@@ -75,45 +80,81 @@ Init ==
     /\ approvedRuns = 0 /\ approvedAfterStop = FALSE /\ staleTools = [l \in Loops |-> 0] /\ falseFailure = FALSE
     /\ retried = FALSE /\ retryRefused = FALSE
     /\ resumes = 0 /\ runGen = 0 /\ loopGen = [l \in Loops |-> 0]
-    /\ openTool = FALSE /\ unfinishedTool = FALSE /\ reExecuted = FALSE
+    /\ openTool = FALSE /\ unfinishedTool = FALSE /\ reExecuted = FALSE /\ staleWrote = FALSE
 
-\* The journal's answer to "should this loop stop" (routes.rs:2811). Fenced: also yes for a loop
+\* The journal's answer to "should this loop stop" (StoreJournal::stopped, routes.rs:3185). Fenced: also yes for a loop
 \* from before the latest resume.
 Told(l) == \/ IF EndedMeansStop THEN status \in Terminal ELSE status = "stopped"
            \/ (Fenced /\ loopGen[l] < runGen)
 \* A fenced loop's ToolStarted write is refused, so its act does not happen.
 FencedOff(l) == JournalsToolStart /\ Fenced /\ loopGen[l] < runGen
+\* A loop from before the latest resume, and whether the log refuses what it writes.
+Stale(l)   == loopGen[l] < runGen
+Refused(l) == Fenced /\ FenceAllWrites /\ Stale(l)
 
 Kill(l) == /\ phase' = [phase EXCEPT ![l] = "dead"] /\ lease' = [lease EXCEPT ![l] = FALSE]
 
-\* A live loop at a step boundary.
+\* The loop writes an ending: taken only while the run is running (the log refuses it after an
+\* ending), and not at all from a loop the fence refuses. One a stale loop gets through is the
+\* resumed run being ended by the loop it replaced.
+EndAs(l, s) ==
+    /\ status' = IF status = "running" /\ ~Refused(l) THEN s ELSE status
+    /\ staleWrote' = (staleWrote \/ (Stale(l) /\ status = "running" /\ ~Refused(l)))
+
+\* What a model call comes back with. From a `calling` loop when ModelCallIsQuiet, else straight
+\* from the step boundary as before.
+Outcome(l) ==
+    \/ \* the model answers in words: RUN_FINISHED.
+       /\ EndAs(l, "finished")
+       /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools, retryRefused>>
+    \/ \* a tool is asked for and parks: Suspended, then the loop ends. A refused park writes nothing.
+       /\ suspends < MaxSuspends /\ status = "running"
+       /\ IF Refused(l)
+            THEN UNCHANGED <<status, suspends, staleWrote>>
+            ELSE /\ status' = "awaiting" /\ suspends' = suspends + 1
+                 /\ staleWrote' = (staleWrote \/ Stale(l))
+       /\ Kill(l) /\ UNCHANGED <<rounds, staleTools, retryRefused>>
+    \/ \* a tool is asked for and the loop goes to run it.
+       /\ rounds[l] < MaxToolRounds
+       /\ rounds' = [rounds EXCEPT ![l] = @ + 1]
+       /\ phase' = [phase EXCEPT ![l] = "armed"]
+       /\ UNCHANGED <<status, lease, suspends, staleTools, retryRefused, staleWrote>>
+    \/ \* budget spent: RUN_ERROR.
+       /\ rounds[l] = MaxToolRounds
+       /\ EndAs(l, "failed")
+       /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools, retryRefused>>
+
+\* A live loop at a step boundary. Told to stop, it closes with the stop's ending
+\* (`run-stopped`, `RUN_FINISHED`, lib.rs `close`): a no-op on a run that has ended, but on a
+\* resumed run that is still running — the fence's own "stop" — it ends the new generation's run
+\* unless the fence refuses the write.
 LoopStep(l) ==
     /\ phase[l] = "live"
     /\ IF Told(l)
-         THEN /\ Kill(l) /\ UNCHANGED <<status, rounds, suspends, staleTools>>
+         THEN /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools>>
+              /\ EndAs(l, "finished")
               /\ retryRefused' = (retryRefused \/ (l = 0 /\ status \in {"finished", "failed"}))
-         ELSE \/ \* the model answers in words: RUN_FINISHED. The log refuses it once terminal.
-                 /\ status' = IF status = "running" THEN "finished" ELSE status
-                 /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools, retryRefused>>
-              \/ \* a tool is asked for and parks: Suspended, then the loop ends.
-                 /\ suspends < MaxSuspends /\ status = "running"
-                 /\ status' = "awaiting" /\ suspends' = suspends + 1
-                 /\ Kill(l) /\ UNCHANGED <<rounds, staleTools, retryRefused>>
-              \/ \* a tool is asked for and the loop goes to run it.
-                 /\ rounds[l] < MaxToolRounds
-                 /\ rounds' = [rounds EXCEPT ![l] = @ + 1]
-                 /\ phase' = [phase EXCEPT ![l] = "armed"]
-                 /\ UNCHANGED <<status, lease, suspends, staleTools, retryRefused>>
-              \/ \* budget spent: RUN_ERROR.
-                 /\ rounds[l] = MaxToolRounds
-                 /\ status' = IF status = "running" THEN "failed" ELSE status
-                 /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools, retryRefused>>
+         ELSE IF ModelCallIsQuiet
+                THEN /\ phase' = [phase EXCEPT ![l] = "calling"]
+                     /\ UNCHANGED <<status, lease, rounds, suspends, staleTools, retryRefused, staleWrote>>
+                ELSE Outcome(l)
     /\ UNCHANGED <<reading, answers, approvedRuns, approvedAfterStop, falseFailure, retried>>
-    /\ UNCHANGED resumeVars
+    /\ UNCHANGED <<resumes, runGen, loopGen, openTool, unfinishedTool, reExecuted>>
 
-\* The tool starts (a long await: no journal write while it runs). Whatever the log says now.
-\* With JournalsToolStart the start is written first; a fenced loop's write is refused and the
-\* loop ends there, having run nothing.
+\* The model's reply arrives — or its stream breaks, which ends the run as a RUN_ERROR without
+\* asking `stopped` first (lib.rs door and stream errors go straight to `close`).
+Reply(l) ==
+    /\ phase[l] = "calling"
+    /\ \/ Outcome(l)
+       \/ /\ EndAs(l, "failed")
+          /\ Kill(l) /\ UNCHANGED <<rounds, suspends, staleTools, retryRefused>>
+    /\ UNCHANGED <<reading, answers, approvedRuns, approvedAfterStop, falseFailure, retried>>
+    /\ UNCHANGED <<resumes, runGen, loopGen, openTool, unfinishedTool, reExecuted>>
+
+\* The tool starts (a long await: no journal write while it runs). With JournalsToolStart the
+\* start is written first; a fenced loop's write is refused and the loop ends there, having run
+\* nothing. (The code also refuses the start on an ended run; the model lets it through, which
+\* only makes AtMostOneStaleTool harder to satisfy.)
 Act(l) ==
     /\ phase[l] = "armed"
     /\ IF FencedOff(l)
@@ -125,7 +166,7 @@ Act(l) ==
               /\ UNCHANGED lease
     /\ UNCHANGED <<status, rounds, suspends, reading, answers, approvedRuns,
                    approvedAfterStop, falseFailure, retried, retryRefused,
-                   resumes, runGen, loopGen, reExecuted>>
+                   resumes, runGen, loopGen, reExecuted, staleWrote>>
 
 \* The approved call starts: `box_wake_frame` then `run_all` (lib.rs, resume_conversation).
 ApproveAct(l) ==
@@ -139,7 +180,7 @@ ApproveAct(l) ==
               /\ UNCHANGED lease
     /\ UNCHANGED <<status, rounds, suspends, reading, answers, approvedAfterStop,
                    staleTools, falseFailure, retried, retryRefused,
-                   resumes, runGen, loopGen, reExecuted>>
+                   resumes, runGen, loopGen, reExecuted, staleWrote>>
 
 \* The tool's result is journaled: the log no longer shows it open.
 ToolDone(l) ==
@@ -147,7 +188,7 @@ ToolDone(l) ==
     /\ openTool' = FALSE /\ unfinishedTool' = FALSE
     /\ UNCHANGED <<status, lease, rounds, suspends, reading, answers, approvedRuns,
                    approvedAfterStop, staleTools, falseFailure, retried, retryRefused,
-                   resumes, runGen, loopGen, reExecuted>>
+                   resumes, runGen, loopGen, reExecuted, staleWrote>>
 
 \* resume_conversation's first act: run the call the person approved (lib.rs:511-518).
 \* A Stop the check SAW that is not honoured is the bug; a Stop landing in the gap after the
@@ -183,7 +224,7 @@ AnswerCommit ==
               /\ loopGen' = [loopGen EXCEPT ![l] = runGen]
          ELSE UNCHANGED <<status, answers, phase, lease, loopGen>>    \* Conflict → alreadyAnswered
     /\ UNCHANGED <<rounds, suspends, approvedRuns, approvedAfterStop, staleTools, falseFailure, retried, retryRefused>>
-    /\ UNCHANGED <<resumes, runGen, openTool, unfinishedTool, reExecuted>>
+    /\ UNCHANGED <<resumes, runGen, openTool, unfinishedTool, reExecuted, staleWrote>>
 
 \* Stop: `stop_run` on a running or parked run (routes.rs:3599).
 Stop ==
@@ -193,15 +234,15 @@ Stop ==
     /\ UNCHANGED resumeVars
 
 \* The sweep: a `running` run whose lease lapsed and whose log has been quiet for LEASE_MS
-\* (postgres.rs:666-695). Quiet is possible exactly when no loop holds a lease and none is
-\* between journal writes at a step boundary — a loop awaiting a long tool or an approved call
-\* writes nothing. Today it fails the run as "interrupted by a restart" (recovery.rs:86-140).
+\* (claim_abandoned_runs, postgres.rs:814-843). Quiet is possible exactly when no loop holds a
+\* lease and none is at a step boundary — a loop awaiting a long tool, an approved call or (with
+\* ModelCallIsQuiet) a model's reply writes nothing. Today it fails the run as "interrupted by a restart" (recovery.rs:86-140).
 \* With Resume it starts a new loop instead — unless the log shows a tool open (its outcome is
 \* unknown, and resuming could repeat it), or the run has used its resumes: then it fails.
 Recover ==
     /\ status = "running"
     /\ \A l \in Loops : ~lease[l]
-    /\ \A l \in Loops : phase[l] \in {"unborn", "dead", "tool", "approve", "approveArmed", "armed"}
+    /\ \A l \in Loops : phase[l] \in {"unborn", "dead", "calling", "tool", "approve", "approveArmed", "armed"}
     /\ IF Resume /\ ~openTool /\ resumes < ResumeCap
          THEN LET l == MaxSuspends + 2 + resumes IN
               /\ phase' = [phase EXCEPT ![l] = "live"]
@@ -211,9 +252,9 @@ Recover ==
               /\ loopGen' = [loopGen EXCEPT ![l] = runGen + 1]
               /\ reExecuted' = (reExecuted \/ unfinishedTool)
               /\ unfinishedTool' = FALSE
-              /\ UNCHANGED <<status, falseFailure, openTool>>
+              /\ UNCHANGED <<status, falseFailure, openTool, staleWrote>>
          ELSE /\ status' = "failed"
-              /\ falseFailure' = (falseFailure \/ \E l \in Loops : phase[l] \in {"tool", "approve", "approveArmed", "armed"})
+              /\ falseFailure' = (falseFailure \/ \E l \in Loops : phase[l] \in {"calling", "tool", "approve", "approveArmed", "armed"})
               /\ UNCHANGED <<phase, lease, resumeVars>>
     /\ UNCHANGED <<rounds, suspends, reading, answers, approvedRuns,
                    approvedAfterStop, staleTools, retried, retryRefused>>
@@ -239,11 +280,11 @@ Retry ==
     /\ loopGen' = [loopGen EXCEPT ![0] = runGen]
     /\ UNCHANGED <<status, rounds, suspends, reading, answers, approvedRuns, approvedAfterStop,
                    staleTools, falseFailure, retryRefused>>
-    /\ UNCHANGED <<resumes, runGen, openTool, unfinishedTool, reExecuted>>
+    /\ UNCHANGED <<resumes, runGen, openTool, unfinishedTool, reExecuted, staleWrote>>
 
 \* The process dies: every loop and every lease with it. The log stays.
 Crash ==
-    /\ \E l \in Loops : phase[l] \in {"approve", "approveArmed", "live", "armed", "tool"}
+    /\ \E l \in Loops : phase[l] \in {"approve", "approveArmed", "live", "calling", "armed", "tool"}
     /\ phase' = [l \in Loops |-> IF phase[l] = "unborn" THEN "unborn" ELSE "dead"]
     /\ lease' = [l \in Loops |-> FALSE]
     /\ UNCHANGED <<status, rounds, suspends, reading, answers, approvedRuns,
@@ -251,12 +292,12 @@ Crash ==
     /\ UNCHANGED resumeVars
 
 Next ==
-    \/ \E l \in Loops : LoopStep(l) \/ Act(l) \/ ToolDone(l) \/ Approve(l) \/ ApproveAct(l)
+    \/ \E l \in Loops : LoopStep(l) \/ Reply(l) \/ Act(l) \/ ToolDone(l) \/ Approve(l) \/ ApproveAct(l)
     \/ AnswerRead \/ AnswerCommit \/ Stop \/ Recover \/ Crash \/ Lapse \/ Retry
     \/ (status \in Terminal \cup {"awaiting"} /\ reading = 0 /\ UNCHANGED vars)
 
 Spec == Init /\ [][Next]_vars
-        /\ \A l \in Loops : WF_vars(LoopStep(l)) /\ WF_vars(Act(l)) /\ WF_vars(ToolDone(l))
+        /\ \A l \in Loops : WF_vars(LoopStep(l)) /\ WF_vars(Reply(l)) /\ WF_vars(Act(l)) /\ WF_vars(ToolDone(l))
                           /\ WF_vars(Approve(l)) /\ WF_vars(ApproveAct(l))
         /\ WF_vars(AnswerCommit) /\ WF_vars(Recover)
 
@@ -291,4 +332,9 @@ ResumesAtMostTwice == resumes <= 2
 \* Never two tools of one run at once. Weaker than OneDriver on purpose: after a resume, a loop
 \* whose renewal lapsed may still be alive at an await, but it cannot act again.
 OneActing == \A l, m \in Loops : (l # m) => ~(phase[l] = "tool" /\ phase[m] = "tool")
+\* Only the current generation writes the run's ending or parks it: a loop the resume replaced
+\* must not finish, fail or park the resumed run — its fence's own "stop" included.
+OnlyCurrentGenerationWrites == ~staleWrote
+\* PR a's claim, with JournalsToolStart: every tool that started is on record until its result.
+ToolStartIsOnRecord == unfinishedTool => openTool
 =============================================================================
