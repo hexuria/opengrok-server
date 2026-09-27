@@ -195,6 +195,14 @@ pub enum RunEvent {
         by: String,
         at_ms: i64,
     },
+    /// These calls are about to run, written BEFORE they do (#91). A tool's result is journaled
+    /// only when its round ends, so without this a log interrupted mid-tool looks exactly like
+    /// one interrupted between rounds — and only the second is safe to resume: a started tool may
+    /// already have acted, and the model, not knowing, could run it again.
+    ToolStarted {
+        call_ids: Vec<String>,
+        at_ms: i64,
+    },
 }
 
 impl RunEvent {
@@ -207,6 +215,7 @@ impl RunEvent {
             Self::Finished { .. } => "run-finished",
             Self::Failed { .. } => "run-failed",
             Self::Stopped { .. } => "run-stopped",
+            Self::ToolStarted { .. } => "run-tool-started",
         }
     }
 }
@@ -239,6 +248,9 @@ pub struct Run {
     /// aggregate, so a retried request, a double-clicked button and two devices answering together
     /// all converge on one answer instead of running the tool twice.
     pub answered: BTreeSet<String>,
+    /// Calls whose start is journaled and whose result is not (#91). Non-empty on a run that was
+    /// interrupted while a tool may have been acting: its outcome is unknown.
+    pub open_tools: BTreeSet<String>,
 }
 
 impl Default for Run {
@@ -257,6 +269,7 @@ impl Default for Run {
             stopped_by: None,
             pending: None,
             answered: BTreeSet::new(),
+            open_tools: BTreeSet::new(),
         }
     }
 }
@@ -311,6 +324,12 @@ pub enum RunCommand {
         reason: String,
         at_ms: i64,
     },
+    /// These calls are about to run. Refused on a run that has ended, so the write that records
+    /// the start is also the question "may they".
+    StartTools {
+        call_ids: Vec<String>,
+        at_ms: i64,
+    },
     /// Stop and wait for a person.
     Suspend {
         call_id: String,
@@ -363,7 +382,18 @@ impl Run {
                 self.prompt.clone_from(prompt);
                 self.status = RunStatus::Running;
             }
-            RunEvent::Emitted { payload, .. } => self.emitted.push(payload.clone()),
+            RunEvent::Emitted { payload, .. } => {
+                // A journaled result closes its call: whatever the tool did is on record now.
+                if payload.get("type").and_then(Value::as_str) == Some("TOOL_CALL_RESULT")
+                    && let Some(call) = payload.get("toolCallId").and_then(Value::as_str)
+                {
+                    self.open_tools.remove(call);
+                }
+                self.emitted.push(payload.clone());
+            }
+            RunEvent::ToolStarted { call_ids, .. } => {
+                self.open_tools.extend(call_ids.iter().cloned());
+            }
             RunEvent::Suspended {
                 call_id,
                 tool,
@@ -496,6 +526,16 @@ impl Run {
                 Ok(vec![RunEvent::Failed { reason, at_ms }])
             }
 
+            RunCommand::StartTools { call_ids, at_ms } => {
+                if !self.started {
+                    return Err(RunError::NotStarted);
+                }
+                if self.status.is_terminal() {
+                    return Err(RunError::AlreadyEnded);
+                }
+                Ok(vec![RunEvent::ToolStarted { call_ids, at_ms }])
+            }
+
             // THE PERSON PRESSED THE BUTTON; WHETHER THEY WON THE RACE WITH THE MODEL IS NOT THEIR
             // PROBLEM. `AlreadyEnded` on a run that has already ended is what the caller turns into
             // a success, so stopping twice, stopping a run that finished a moment ago, and stopping
@@ -599,6 +639,90 @@ mod tests {
             run.apply(&event);
         }
         run
+    }
+
+    /// #91: THE LOG CAN TELL A CRASH MID-TOOL FROM ONE BETWEEN ROUNDS. A tool's start is
+    /// journaled before it runs, and its result clears it: a run with an open tool was
+    /// interrupted while something may have acted, and must not be resumed blind.
+    #[test]
+    fn a_started_tool_stays_open_until_its_result_is_journaled() {
+        let mut run = started();
+        for event in run
+            .decide(RunCommand::StartTools {
+                call_ids: vec!["call_a".to_string(), "call_b".to_string()],
+                at_ms: 2,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert_eq!(
+            run.open_tools
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["call_a", "call_b"]
+        );
+        for event in run
+            .decide(RunCommand::Emit {
+                payload: json!({ "type": "TOOL_CALL_RESULT", "toolCallId": "call_a", "content": "ok" }),
+                at_ms: 3,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert_eq!(
+            run.open_tools
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["call_b"],
+            "a result closes its own call and no other"
+        );
+    }
+
+    /// Starting a tool on a run that has ended is refused: the write that says "a tool is
+    /// starting" is also the question "may it", and an ended run's answer is no.
+    #[test]
+    fn a_tool_cannot_start_on_an_ended_run() {
+        let mut run = started();
+        for event in run
+            .decide(RunCommand::Fail {
+                reason: "swept".to_string(),
+                at_ms: 2,
+            })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+        assert!(matches!(
+            run.decide(RunCommand::StartTools {
+                call_ids: vec!["call_a".to_string()],
+                at_ms: 3,
+            }),
+            Err(RunError::AlreadyEnded)
+        ));
+        assert!(matches!(
+            Run::default().decide(RunCommand::StartTools {
+                call_ids: vec!["call_a".to_string()],
+                at_ms: 3,
+            }),
+            Err(RunError::NotStarted)
+        ));
+    }
+
+    /// The event is its own type, so a log written before it existed replays unchanged and a new
+    /// one reads back.
+    #[test]
+    fn a_tool_started_event_round_trips() {
+        let event = RunEvent::ToolStarted {
+            call_ids: vec!["call_a".to_string()],
+            at_ms: 2,
+        };
+        assert_eq!(event.event_type(), "run-tool-started");
+        let text = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<RunEvent>(&text).unwrap(), event);
     }
 
     /// The turn's identity survives the wait. A role edited while a person answered an
