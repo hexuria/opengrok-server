@@ -800,6 +800,39 @@ pub async fn resume_conversation(
     all
 }
 
+/// Carry on a run the recovery sweep found interrupted between two steps (#91): not parked, no
+/// tool open, so what it had done is all in the log and the model can simply be asked again.
+///
+/// Drawn as a continuation of the run it resumes (`Projection::resumed`), not a new one, and
+/// asked `stopped` at the top of its first round like every round. `request.messages` is the
+/// conversation rebuilt from the log. `started_a_tool` is whether the interrupted half had
+/// already asked for a tool, so a long answer after the resume is not taken for a plan-only flood.
+pub async fn continue_interrupted(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    context: RunContext,
+    message_seq: u32,
+    started_a_tool: bool,
+) -> Vec<Event> {
+    let run_id = context.run_id.clone();
+    let projection = Projection::resumed(
+        &context.thread_id,
+        &context.run_id,
+        context.at_ms,
+        message_seq,
+    );
+    let carried = Carried {
+        started_a_tool,
+        ..Carried::default()
+    };
+    converse(
+        door, tools, journal, request, projection, &run_id, None, carried,
+    )
+    .await
+}
+
 /// Paint what a round that never finished its answer withheld (a chart round, a broken stream,
 /// a plan past its bound): the text past its opening intent, or the last failure fact. `blank`
 /// is what to show when that leaves nothing — `None` where the run already said something or

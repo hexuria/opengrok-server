@@ -294,10 +294,6 @@ async fn main() -> anyhow::Result<()> {
         host_settings: None,
     };
 
-    // Pick up whatever the last process abandoned. Started before the listener, because the most
-    // likely moment to find an abandoned run is immediately after the restart that abandoned it.
-    tokio::spawn(opengrok_server::recovery::sweep_forever(state.clone()));
-
     tokio::spawn({
         let state = state.clone();
         async move {
@@ -321,6 +317,10 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .filter(|url| !url.is_empty()),
     );
+    // Pick up whatever the last process abandoned. Started before the listener, because the most
+    // likely moment to find an abandoned run is immediately after the restart that abandoned it;
+    // after the host state, because a run it carries on may park on a card minted through it.
+    tokio::spawn(opengrok_server::recovery::sweep_forever(gateway.clone()));
     // The autonomy loops: due schedules fire runs, and monitors react to the event log. These are
     // the half of the mission that does not wait for a request. Both start after the host state
     // exists, because a fired run that stops on a form mints its card through it.

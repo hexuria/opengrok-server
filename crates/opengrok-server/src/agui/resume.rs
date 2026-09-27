@@ -749,6 +749,91 @@ async fn resume_suspended_run(
     emit_suspensions(&state, &coworker_id, &account_id, &events).await;
 }
 
+/// Carry on a run the recovery sweep resumed (#91) because it was interrupted between steps: no
+/// card waiting, no tool open, so the model is simply asked again with the conversation the log
+/// holds. The run is already in its new generation (`RunEvent::Resumed`); this loop journals
+/// under it, and the one it replaced — if its process is in fact still alive — is fenced off.
+///
+/// Anything that stops it from carrying on fails the run with the reason, rather than leaving
+/// it `running` for the next sweep to resume again and again.
+pub(crate) async fn resume_interrupted_run(
+    state: HostState,
+    account_id: opengrok_core::id::AccountId,
+    run_id: RunId,
+    coworker_id: CoworkerId,
+) {
+    // Held from the start, as every continuation holds one: the sweep's claim lapses in LEASE_MS.
+    let _lease =
+        crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
+    let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        return;
+    };
+    let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
+        crate::recovery::fail_interrupted(&state.agui, &run_id, "its coworker could not be loaded")
+            .await;
+        return;
+    };
+    // None is a coworker with no tools to offer (no computer, no plugin): it carries on talking,
+    // exactly as a routine's run of it does.
+    let runner = crate::agui::routes::tools_for_coworker(
+        &state.agui,
+        &account_id,
+        &coworker_id,
+        &[],
+        &[],
+        crate::agui::routes::TURN_WAKE_PATIENCE,
+    )
+    .await
+    .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)));
+    let system = match run.system_for_resume() {
+        Some(captured) => captured,
+        None => crate::persona::system_message(
+            &coworker.name,
+            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
+            None,
+        ),
+    };
+    let journal = crate::agui::routes::StoreJournal {
+        state: state.agui.clone(),
+        thread_id: run.thread_id.clone(),
+        account_id: Some(account_id.clone()),
+        coworker_id: Some(coworker_id.clone()),
+        model: run.model.clone(),
+        system: Some(system.clone()),
+        skill_id: run.skill_id.clone(),
+        prompt: None,
+        generation: run.generation,
+    };
+    let pin = run.pin_for_resume(&coworker.model);
+    let started_a_tool = run
+        .emitted
+        .iter()
+        .any(|frame| frame.get("type").and_then(Value::as_str) == Some("TOOL_CALL_START"));
+    let request = ModelRequest {
+        gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,
+        spend_scope: Some(coworker_id.as_str().to_string()),
+        spend_actor: Some(account_id.as_str().to_string()),
+        context_tokens: state.agui.context_for(&pin).await,
+        model: pin,
+        system: Some(system),
+        messages: crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run)
+            .await,
+        tools: Vec::new(),
+    };
+    let events = opengrok_harness::continue_interrupted(
+        state.agui.door.as_ref(),
+        runner.as_ref(),
+        &journal,
+        request,
+        opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
+        run.emitted.len() as u32,
+        started_a_tool,
+    )
+    .await;
+    // It may park on a card, as any turn may; the card is minted as the first half's would be.
+    emit_suspensions(&state, &coworker_id, &account_id, &events).await;
+}
+
 #[cfg(test)]
 mod stamp_tests {
     use super::apply_user_form_stamp;

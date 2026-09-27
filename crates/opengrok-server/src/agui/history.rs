@@ -388,6 +388,30 @@ pub(crate) async fn for_resume(
     messages
 }
 
+/// The conversation an interrupted run carries on with (#91): the thread's earlier turns, when the
+/// log can tell them whole, then what this run was asked and everything it said and did — the
+/// same rebuild `for_resume` does, with no answered call at the end.
+pub(crate) async fn for_interrupted(
+    state: &AgUiState,
+    account: &AccountId,
+    run_id: &RunId,
+    run: &Run,
+) -> Vec<ChatMessage> {
+    let mut messages = match thread_runs(state, account, &run.thread_id, run_id.as_str()).await {
+        Some(runs) if runs.iter().all(|run| run.prompt.is_some()) => {
+            runs.iter().flat_map(earlier_run).collect()
+        }
+        _ => Vec::new(),
+    };
+    let sent = prompt_of(run);
+    messages.extend(
+        sent.iter()
+            .filter_map(|message| chat_message(message, &sent)),
+    );
+    messages.extend(conversation_of(&said_in(&run.emitted), false));
+    messages
+}
+
 /// A run rebuilt from its own log for a resume: what the person asked, then everything the
 /// coworker said and did, ending on the answered call — named, with its arguments, and still
 /// without a result, because the result is what the resume adds next (#187).
