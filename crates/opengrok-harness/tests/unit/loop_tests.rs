@@ -5221,10 +5221,20 @@ impl RunJournal for StartWatchingJournal {
         Ok(())
     }
 
-    async fn tools_starting(&self, _run_id: &str, call_ids: &[String]) -> Result<(), JournalError> {
+    async fn tools_starting(
+        &self,
+        _run_id: &str,
+        tools: &[opengrok_core::run::StartedTool],
+    ) -> Result<(), JournalError> {
         let already_ran = self.computer.last_box().is_some();
         if let Ok(mut starts) = self.starts.lock() {
-            starts.push((call_ids.to_vec(), already_ran));
+            starts.push((
+                tools
+                    .iter()
+                    .map(|started| format!("{}:{}", started.call_id, started.tool))
+                    .collect(),
+                already_ran,
+            ));
         }
         if self.refuse {
             return Err(JournalError::Unwritable("the database is down".to_string()));
@@ -5248,8 +5258,8 @@ async fn a_tools_start_is_journaled_before_it_runs() {
     assert!(!starts.is_empty(), "the start was journaled");
     assert_eq!(
         starts[0].0,
-        vec!["c1".to_string()],
-        "naming the call that ran"
+        vec!["c1:shell".to_string()],
+        "naming the call and its tool"
     );
     assert!(!starts[0].1, "and before the computer was touched");
     assert!(computer.last_box().is_some(), "the tool then ran");
@@ -5308,7 +5318,7 @@ async fn an_approved_call_whose_start_cannot_be_journaled_never_runs() {
 
     assert_eq!(
         journal.starts().first().map(|s| s.0.clone()),
-        Some(vec!["c1".to_string()])
+        Some(vec!["c1:shell".to_string()])
     );
     assert_eq!(computer.last_box(), None, "the approved call did not run");
 }

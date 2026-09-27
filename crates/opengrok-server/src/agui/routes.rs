@@ -3195,27 +3195,29 @@ impl opengrok_harness::RunJournal for StoreJournal {
 
     /// `ToolStarted` in the run's log, before the tool runs (#91). The aggregate refuses it on a
     /// run that has ended, which answers `Ended`: the loop stops, as `stopped` would have told it
-    /// at its next boundary. Retried on a Conflict and only on one, as `append_events` is.
+    /// at its next boundary.
+    ///
+    /// RETRIED ON ANY STORE ERROR, unlike a round: this only adds calls to a set, so a second
+    /// copy after a lost reply changes nothing, and a blip would otherwise fail the run at every
+    /// tool round. It costs a replay (`load_run`) the projection could answer in one statement.
     async fn tools_starting(
         &self,
         run_id: &str,
-        call_ids: &[String],
+        tools: &[opengrok_core::run::StartedTool],
     ) -> Result<(), opengrok_harness::JournalError> {
         let id = RunId::from_stored(run_id.to_string());
-        let unwritable = |error: opengrok_store::StoreError| {
-            opengrok_harness::JournalError::Unwritable(error.to_string())
-        };
-        for attempt in 1..=APPEND_ATTEMPTS {
-            let (mut run, seq) = self
-                .state
-                .auth
-                .store
-                .load_run(&id)
-                .await
-                .map_err(unwritable)?;
+        let mut last_error = String::new();
+        for _ in 0..APPEND_ATTEMPTS {
+            let (mut run, seq) = match self.state.auth.store.load_run(&id).await {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    last_error = error.to_string();
+                    continue;
+                }
+            };
             let at_ms = now_ms();
             let events = match run.decide(RunCommand::StartTools {
-                call_ids: call_ids.to_vec(),
+                tools: tools.to_vec(),
                 at_ms,
             }) {
                 Ok(events) => events,
@@ -3248,13 +3250,10 @@ impl opengrok_harness::RunJournal for StoreJournal {
                 .await
             {
                 Ok(_) => return Ok(()),
-                Err(opengrok_store::StoreError::Conflict) if attempt < APPEND_ATTEMPTS => continue,
-                Err(error) => return Err(unwritable(error)),
+                Err(error) => last_error = error.to_string(),
             }
         }
-        Err(opengrok_harness::JournalError::Unwritable(
-            "every attempt lost the race to another writer".to_string(),
-        ))
+        Err(opengrok_harness::JournalError::Unwritable(last_error))
     }
 }
 

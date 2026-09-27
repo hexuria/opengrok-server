@@ -879,13 +879,20 @@ async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_ha
     .await;
     let running = journal(&thread);
     running
-        .tools_starting(run_id.as_str(), &["call-1".to_string()])
+        .tools_starting(
+            run_id.as_str(),
+            &[opengrok_core::run::StartedTool {
+                call_id: "call-1".to_string(),
+                tool: "shell".to_string(),
+            }],
+        )
         .await
         .expect("the start is written");
     let (run, _) = h.store.load_run(&run_id).await.expect("load");
-    assert!(
-        run.open_tools.contains("call-1"),
-        "the log shows the tool open"
+    assert_eq!(
+        run.open_tools.get("call-1").map(String::as_str),
+        Some("shell"),
+        "the log shows the tool open, by name"
     );
 
     running
@@ -915,7 +922,13 @@ async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_ha
     )
     .await;
     let refused = journal(&stopped_thread)
-        .tools_starting(stopped.as_str(), &["call-2".to_string()])
+        .tools_starting(
+            stopped.as_str(),
+            &[opengrok_core::run::StartedTool {
+                call_id: "call-2".to_string(),
+                tool: "shell".to_string(),
+            }],
+        )
         .await;
     assert!(
         matches!(refused, Err(JournalError::Ended(_))),

@@ -200,9 +200,18 @@ pub enum RunEvent {
     /// one interrupted between rounds — and only the second is safe to resume: a started tool may
     /// already have acted, and the model, not knowing, could run it again.
     ToolStarted {
-        call_ids: Vec<String>,
+        tools: Vec<StartedTool>,
         at_ms: i64,
     },
+}
+
+/// One call about to run, as `ToolStarted` records it. The tool's name rides with its id because
+/// the round's `TOOL_CALL_START` frames — the only other place the name is — are journaled only
+/// when the round ends; a run interrupted mid-tool must still be able to say which tool it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartedTool {
+    pub call_id: String,
+    pub tool: String,
 }
 
 impl RunEvent {
@@ -248,9 +257,10 @@ pub struct Run {
     /// aggregate, so a retried request, a double-clicked button and two devices answering together
     /// all converge on one answer instead of running the tool twice.
     pub answered: BTreeSet<String>,
-    /// Calls whose start is journaled and whose result is not (#91). Non-empty on a run that was
-    /// interrupted while a tool may have been acting: its outcome is unknown.
-    pub open_tools: BTreeSet<String>,
+    /// Calls whose start is journaled and whose result is not (#91), call id → tool name.
+    /// Non-empty on a run that was interrupted while a tool may have been acting: its outcome is
+    /// unknown.
+    pub open_tools: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Run {
@@ -269,7 +279,7 @@ impl Default for Run {
             stopped_by: None,
             pending: None,
             answered: BTreeSet::new(),
-            open_tools: BTreeSet::new(),
+            open_tools: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -327,7 +337,7 @@ pub enum RunCommand {
     /// These calls are about to run. Refused on a run that has ended, so the write that records
     /// the start is also the question "may they".
     StartTools {
-        call_ids: Vec<String>,
+        tools: Vec<StartedTool>,
         at_ms: i64,
     },
     /// Stop and wait for a person.
@@ -391,8 +401,12 @@ impl Run {
                 }
                 self.emitted.push(payload.clone());
             }
-            RunEvent::ToolStarted { call_ids, .. } => {
-                self.open_tools.extend(call_ids.iter().cloned());
+            RunEvent::ToolStarted { tools, .. } => {
+                self.open_tools.extend(
+                    tools
+                        .iter()
+                        .map(|started| (started.call_id.clone(), started.tool.clone())),
+                );
             }
             RunEvent::Suspended {
                 call_id,
@@ -526,14 +540,14 @@ impl Run {
                 Ok(vec![RunEvent::Failed { reason, at_ms }])
             }
 
-            RunCommand::StartTools { call_ids, at_ms } => {
+            RunCommand::StartTools { tools, at_ms } => {
                 if !self.started {
                     return Err(RunError::NotStarted);
                 }
                 if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
-                Ok(vec![RunEvent::ToolStarted { call_ids, at_ms }])
+                Ok(vec![RunEvent::ToolStarted { tools, at_ms }])
             }
 
             // THE PERSON PRESSED THE BUTTON; WHETHER THEY WON THE RACE WITH THE MODEL IS NOT THEIR
@@ -646,10 +660,17 @@ mod tests {
     /// interrupted while something may have acted, and must not be resumed blind.
     #[test]
     fn a_started_tool_stays_open_until_its_result_is_journaled() {
+        let started_tool = |call_id: &str, tool: &str| StartedTool {
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+        };
         let mut run = started();
         for event in run
             .decide(RunCommand::StartTools {
-                call_ids: vec!["call_a".to_string(), "call_b".to_string()],
+                tools: vec![
+                    started_tool("call_a", "shell"),
+                    started_tool("call_b", "computer"),
+                ],
                 at_ms: 2,
             })
             .unwrap()
@@ -657,11 +678,13 @@ mod tests {
             run.apply(&event);
         }
         assert_eq!(
-            run.open_tools
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["call_a", "call_b"]
+            run.open_tools.get("call_a").map(String::as_str),
+            Some("shell")
+        );
+        assert_eq!(
+            run.open_tools.get("call_b").map(String::as_str),
+            Some("computer"),
+            "the log can name the tool an interruption caught, not only its id"
         );
         for event in run
             .decide(RunCommand::Emit {
@@ -674,7 +697,7 @@ mod tests {
         }
         assert_eq!(
             run.open_tools
-                .iter()
+                .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             vec!["call_b"],
@@ -686,6 +709,12 @@ mod tests {
     /// starting" is also the question "may it", and an ended run's answer is no.
     #[test]
     fn a_tool_cannot_start_on_an_ended_run() {
+        let one = || {
+            vec![StartedTool {
+                call_id: "call_a".to_string(),
+                tool: "shell".to_string(),
+            }]
+        };
         let mut run = started();
         for event in run
             .decide(RunCommand::Fail {
@@ -698,15 +727,15 @@ mod tests {
         }
         assert!(matches!(
             run.decide(RunCommand::StartTools {
-                call_ids: vec!["call_a".to_string()],
-                at_ms: 3,
+                tools: one(),
+                at_ms: 3
             }),
             Err(RunError::AlreadyEnded)
         ));
         assert!(matches!(
             Run::default().decide(RunCommand::StartTools {
-                call_ids: vec!["call_a".to_string()],
-                at_ms: 3,
+                tools: one(),
+                at_ms: 3
             }),
             Err(RunError::NotStarted)
         ));
@@ -717,7 +746,10 @@ mod tests {
     #[test]
     fn a_tool_started_event_round_trips() {
         let event = RunEvent::ToolStarted {
-            call_ids: vec!["call_a".to_string()],
+            tools: vec![StartedTool {
+                call_id: "call_a".to_string(),
+                tool: "shell".to_string(),
+            }],
             at_ms: 2,
         };
         assert_eq!(event.event_type(), "run-tool-started");
